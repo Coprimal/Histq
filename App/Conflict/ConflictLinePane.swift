@@ -1,7 +1,6 @@
 // Pane A or B of the conflict editor: that side's whole file in an NSTableView with fixed 18 pt rows that never wrap.
-// Lines inside a conflict are tinted (A blue, B gold; stronger once ticked) and get a checkbox in the gutter; the
-// first line of each conflict also gets the hunk's checkbox (all of that side's lines of the conflict). ⌘C copies the
-// selected lines whole.
+// Lines inside a conflict are tinted (A blue, B gold; stronger once ticked) and get one checkbox in the gutter (the
+// pane's header checkbox takes the whole side). ⌘C copies the selected lines whole.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -9,7 +8,7 @@ import SwiftUI
 /// Sizes shared by the three panes: one line height everywhere, so a scroll offset maps to a line in each pane.
 enum ConflictLayout {
     static let lineHeight: CGFloat = DiffLayout.lineHeight
-    /// The hunk checkbox's column, then the line checkbox's.
+    /// The line checkbox's column.
     static let checkboxWidth: CGFloat = 20
     static let barWidth: CGFloat = 3
 }
@@ -25,7 +24,6 @@ struct ConflictLinePane: NSViewRepresentable {
     let loadID: Int
     let sync: ScrollSync
     var onTickLines: @MainActor (Bool, [Int]) -> Void = { _, _ in }
-    var onTickConflict: @MainActor (Bool, Int) -> Void = { _, _ in }
 
     func makeCoordinator() -> ConflictPaneController { ConflictPaneController() }
 
@@ -86,15 +84,11 @@ final class ConflictTableView: NSTableView {
     }
 }
 
-/// What a row shows about the conflicts: nothing outside them; inside one, its index and the checkbox states.
+/// What a row shows about the conflicts: nothing outside them; inside one, its index and the checkbox state.
 struct ConflictLineState: Equatable {
     /// The conflict (0-based) the line belongs to, nil outside any.
     var conflict: Int?
     var isTicked = false
-    /// The first line of its conflict on this side: it carries the hunk checkbox.
-    var isFirst = false
-    /// The hunk checkbox: every line of the conflict on this side ticked, or some of them.
-    var hunk: NSControl.StateValue = .off
 }
 
 /// The table's data source and delegate. Reloads for a new load; a tick only reconfigures the rows on screen.
@@ -140,9 +134,9 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
         }
     }
 
-    private var textX: CGFloat { 2 * ConflictLayout.checkboxWidth + 4 + numberWidth + 10 }
+    private var textX: CGFloat { ConflictLayout.checkboxWidth + 4 + numberWidth + 10 }
 
-    /// Where `row` sits among the conflicts of this side, with its checkbox states.
+    /// Where `row` sits among the conflicts of this side, with its checkbox state.
     private func state(of row: Int) -> ConflictLineState {
         guard let view else { return ConflictLineState() }
         let merge = view.merge
@@ -152,10 +146,7 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
         }
         let lines = view.side == .a ? merge.regions[index].a : merge.regions[index].b
         guard lines.contains(row) else { return ConflictLineState() }
-        let ticked = lines.count { merge.isTicked(view.side, line: $0) }
-        return ConflictLineState(
-            conflict: k, isTicked: merge.isTicked(view.side, line: row), isFirst: row == lines.lowerBound,
-            hunk: ticked == 0 ? .off : ticked == lines.count ? .on : .mixed)
+        return ConflictLineState(conflict: k, isTicked: merge.isTicked(view.side, line: row))
     }
 
     // MARK: Data
@@ -181,23 +172,18 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
         cell.configure(
             number: row + 1, text: view.lines[row], side: view.side, state: state, numberWidth: numberWidth,
             textX: textX
-        ) { [weak self] isHunk in
-            self?.toggle(row: row, hunk: isHunk)
+        ) { [weak self] in
+            self?.toggle(row: row)
         }
         return cell
     }
 
-    /// A checkbox click: the line's tick flips; the hunk's ticks every line of its side, or unticks them when all
-    /// were ticked.
-    private func toggle(row: Int, hunk: Bool) {
+    /// A checkbox click: the line's tick flips.
+    private func toggle(row: Int) {
         guard let view else { return }
         let state = state(of: row)
-        guard let k = state.conflict else { return }
-        if hunk {
-            view.onTickConflict(state.hunk != .on, k)
-        } else {
-            view.onTickLines(!state.isTicked, [row])
-        }
+        guard state.conflict != nil else { return }
+        view.onTickLines(!state.isTicked, [row])
     }
 
     /// The selected lines, whole, one per line.
@@ -210,9 +196,8 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
     }
 }
 
-/// A line of pane A or B: its band and edge bar inside a conflict, the hunk and line checkboxes, the number, the text.
+/// A line of pane A or B: its band and edge bar inside a conflict, the line checkbox, the number, the text.
 final class ConflictLineCellView: NSView {
-    private let hunkBox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let lineBox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private var number = 0
     private var text = ""
@@ -220,21 +205,18 @@ final class ConflictLineCellView: NSView {
     private var state = ConflictLineState()
     private var numberWidth: CGFloat = 40
     private var textX: CGFloat = 80
-    private var onToggle: ((Bool) -> Void)?
+    private var onToggle: (() -> Void)?
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        for (box, isHunk) in [(hunkBox, true), (lineBox, false)] {
-            box.controlSize = .small
-            box.target = self
-            box.action = isHunk ? #selector(hunkPressed) : #selector(linePressed)
-            box.allowsMixedState = isHunk
-            box.setAccessibilityLabel(isHunk ? "Take this conflict's lines" : "Take this line")
-            addSubview(box)
-        }
+        lineBox.controlSize = .small
+        lineBox.target = self
+        lineBox.action = #selector(linePressed)
+        lineBox.setAccessibilityLabel("Take this line")
+        addSubview(lineBox)
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
     }
@@ -243,7 +225,7 @@ final class ConflictLineCellView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     func configure(number: Int, text: String, side: ThreeWayMerge.Side, state: ConflictLineState, numberWidth: CGFloat,
-                   textX: CGFloat, onToggle: @escaping (Bool) -> Void)
+                   textX: CGFloat, onToggle: @escaping () -> Void)
     {
         self.number = number
         self.text = text
@@ -252,11 +234,8 @@ final class ConflictLineCellView: NSView {
         self.numberWidth = numberWidth
         self.textX = textX
         self.onToggle = onToggle
-        let inConflict = state.conflict != nil
-        lineBox.isHidden = !inConflict
+        lineBox.isHidden = state.conflict == nil
         lineBox.state = state.isTicked ? .on : .off
-        hunkBox.isHidden = !(inConflict && state.isFirst)
-        hunkBox.state = state.hunk
         setAccessibilityLabel("\(number): \(text)")
         needsLayout = true
         needsDisplay = true
@@ -264,15 +243,12 @@ final class ConflictLineCellView: NSView {
 
     override func layout() {
         super.layout()
-        let size = hunkBox.intrinsicContentSize
-        let y = (bounds.height - size.height) / 2
-        hunkBox.frame = NSRect(x: ConflictLayout.barWidth + 3, y: y, width: size.width, height: size.height)
-        lineBox.frame = NSRect(x: ConflictLayout.barWidth + 3 + ConflictLayout.checkboxWidth, y: y, width: size.width,
+        let size = lineBox.intrinsicContentSize
+        lineBox.frame = NSRect(x: ConflictLayout.barWidth + 3, y: (bounds.height - size.height) / 2, width: size.width,
                                height: size.height)
     }
 
-    @objc private func hunkPressed() { onToggle?(true) }
-    @objc private func linePressed() { onToggle?(false) }
+    @objc private func linePressed() { onToggle?() }
 
     @MainActor
     private enum Style {
@@ -305,7 +281,7 @@ final class ConflictLineCellView: NSView {
             (isA ? Palette.conflictA : Palette.conflictB).setFill()
             NSRect(x: 0, y: 0, width: ConflictLayout.barWidth, height: height).fill()
         }
-        let numberX = 2 * ConflictLayout.checkboxWidth + 4
+        let numberX = ConflictLayout.checkboxWidth + 4
         let numberY = (height - DiffLayout.numberFont.boundingRectForFont.height) / 2
         NSString(string: "\(number)").draw(
             in: NSRect(x: numberX, y: numberY, width: numberWidth - 6, height: height), withAttributes: Style.number)

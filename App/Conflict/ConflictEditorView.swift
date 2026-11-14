@@ -243,8 +243,7 @@ private struct ConflictContent: View {
             ConflictLinePane(
                 side: side, lines: isA ? document.aLines : document.bLines, merge: merge,
                 revision: document.revision, loadID: document.loadID, sync: sync,
-                onTickLines: { [session] ticked, lines in session.setConflictTicked(ticked, side: side, lines: lines) },
-                onTickConflict: { [session] ticked, k in session.setConflictTicked(ticked, side: side, conflict: k) })
+                onTickLines: { [session] ticked, lines in session.setConflictTicked(ticked, side: side, lines: lines) })
                 .frame(maxHeight: .infinity)
         }
         // Both panes get half the card, whatever their titles' widths.
