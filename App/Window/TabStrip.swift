@@ -1,5 +1,5 @@
-// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab, the command palette
-// and the tab list, all inside the tab row's `PanelContainer` (MainView).
+// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab
+// and the tab list (the command palette is the toolbar's Search), all inside the tab row's `PanelContainer` (MainView).
 import AppKit
 import SwiftUI
 
@@ -34,8 +34,8 @@ struct TabStrip: View {
     }
 }
 
-/// New Tab, the command palette and the tab list's chevron: secondary filled circles, as tall as the tabs, so they
-/// read as buttons inside the tab row's container. The vertical tabs show the same three at their bottom.
+/// New Tab and the tab list's chevron: secondary filled circles, as tall as the tabs, so they
+/// read as buttons inside the tab row's container. The vertical tabs show the same two at their bottom.
 struct TabStripButtons: View {
     let model: WindowModel
     /// Where the tab list's popover opens from the chevron.
@@ -48,10 +48,6 @@ struct TabStripButtons: View {
                 Label("New Tab", systemImage: "plus")
             }
             .help("New Tab")
-            Button { model.openPalette() } label: {
-                Label("Command Palette", systemImage: "magnifyingglass")
-            }
-            .help("Command Palette (⌘K)")
             Button { showingTabList.toggle() } label: {
                 Label("All Tabs", systemImage: "chevron.down")
             }

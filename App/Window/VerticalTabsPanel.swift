@@ -1,5 +1,5 @@
 // Panel 0, the vertical tabs (General › Tab position: Left): the window's tabs as rows in their own
-// `PanelContainer`, left of every page, with New tab, the command palette and the tab list at the bottom. The tab
+// `PanelContainer`, left of every page, with New tab and the tab list at the bottom. The tab
 // strip under the toolbar does not show then.
 import SwiftUI
 
@@ -27,7 +27,7 @@ enum VerticalTabsMetrics {
     static let width: CGFloat = 150
 }
 
-/// The window's tabs top to bottom, the selected tab's running operation, then New tab, the command palette and the
+/// The window's tabs top to bottom, the selected tab's running operation, then New tab and the
 /// tab list.
 struct VerticalTabsPanel: View {
     @Environment(WindowModel.self) private var model
