@@ -3,8 +3,8 @@
 ## Setup
 
 You need Xcode 27 (the version `project.yml` names; the app compiles macOS 26 APIs behind availability checks), git
-2.36 or later, and XcodeGen. The Xcode project is generated
-from `project.yml` and is not in the repository.
+2.36 or later, and XcodeGen. `project.yml` is the source of truth: `Histq.xcodeproj` is generated from it and
+git-ignored. Run `xcodegen generate` again after you change `project.yml` or add, move or delete a source file.
 
 ```sh
 brew install xcodegen
@@ -12,20 +12,13 @@ xcodegen generate
 open Histq.xcodeproj
 ```
 
-Run `xcodegen generate` again after you change `project.yml` or add, move or delete a source file.
-
 ## Build and test
 
-Core tests (the `HistqCore` package, Swift Testing), from the repository root:
-
-```sh
-cd Packages/HistqCore && swift test
-```
-
-App build (Debug), from the repository root:
+From the repository root:
 
 ```sh
 xcodegen generate && xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation build
+cd Packages/HistqCore && swift test   # core tests (Swift Testing)
 ```
 
 `-skipPackagePluginValidation` is needed because the terminal uses SwiftTerm, whose package has a build-tool plugin.
@@ -35,53 +28,28 @@ validation. Pass it to every `xcodebuild` call on this project, including `-show
 Never pass `-derivedDataPath` to a local `xcodebuild`: the default DerivedData folder is the one Xcode uses, so a
 command-line build and Cmd-R in Xcode share one cache instead of building twice.
 
-**Signing**: Debug is signed with Developer ID like Release (team in `project.yml`), so Keychain items (the GitHub
-token, AI keys) and macOS grants survive rebuilds and are shared with the installed app. Without that certificate, add
-these overrides to every `xcodebuild` build:
+## Signing
+
+Debug is signed with Developer ID like Release (team in `project.yml`), so Keychain items (the GitHub token, AI keys)
+and macOS grants survive rebuilds. Without that certificate, add these overrides to every `xcodebuild` build; macOS
+then asks again for Keychain access and grants after each rebuild:
 
 ```sh
 CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=
 ```
 
-An ad hoc build is signed differently on every rebuild, so macOS asks again for access to Keychain items and for its
-grants.
-
-To check that Debug and Release still sign alike (identity, team, hardened runtime, entitlements without the Debug-only
-keys, designated requirements both ways, and the Info.plist keys), build both and run
-`scripts/check-build-parity.sh`, which prints `PARITY OK` or each mismatch:
-
-```sh
-xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation build
-xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation build
-D="$(xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation -showBuildSettings 2>/dev/null | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1)/Histq.app"
-R="$(xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation -showBuildSettings 2>/dev/null | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1)/Histq.app"
-scripts/check-build-parity.sh "$D" "$R"
-```
-
-A local Release build is not the notarized export that ships; the release flow checks the export itself.
-
 ## Fixtures
 
-`scripts/make-fixtures.sh` builds deterministic git repositories for tests and QA, isolated from your own git config:
-
-```sh
-scripts/make-fixtures.sh build/qa/fx
-```
-
-It creates `graph` (branches, merges, tags, stashes, a remote, a worktree, uncommitted changes), `graph-origin.git`
-(its bare remote), `graph-wt` (a linked worktree), `conflict` (a merge stopped on 3 conflicted files),
-`conflict-rebase` (a rebase stopped on the same conflicts) and `expected/`.
-
-- `--big N` also creates `big`, a repository with N commits (linear history plus merges).
-- `--portable` skips `graph-wt`, for git older than 2.48.
-
-The script refuses `/`, your home folder and any non-empty folder it did not create. Everything under `build/` is
-git-ignored.
+`scripts/make-fixtures.sh build/qa/fx` builds deterministic git repositories for tests and QA, isolated from your git
+config: `graph` (branches, merges, tags, stashes, a remote, a worktree, uncommitted changes), `graph-origin.git`,
+`graph-wt`, `conflict` (a merge stopped on 3 conflicted files), `conflict-rebase` and `expected/`. `--big N` adds
+`big` (N commits); `--portable` skips `graph-wt`, for git older than 2.48. The script refuses `/`, your home folder
+and any non-empty folder it did not create. Everything under `build/` is git-ignored.
 
 ## Benchmark
 
-The graph benchmark parses and lays out 50,000 commits and must finish in under 2 seconds. It only runs when
-`HISTQ_BIG_FIXTURE` points at a big fixture (an absolute path). From the repository root:
+The graph benchmark parses and lays out 50,000 commits and must finish in under 2 seconds. It runs only when
+`HISTQ_BIG_FIXTURE` points at a big fixture (an absolute path):
 
 ```sh
 scripts/make-fixtures.sh build/qa/fx --big 50000
@@ -89,46 +57,36 @@ export HISTQ_BIG_FIXTURE="$PWD/build/qa/fx/big"
 cd Packages/HistqCore && swift test -c release --filter GraphLayoutTests
 ```
 
-The test prints `GraphLayout benchmark: <count> commits parsed and laid out in <time>`.
+## Screenshots
 
-## Screenshots: `scripts/shot.sh`
-
-`scripts/shot.sh` launches the Debug app (build it first) and captures its window to a PNG:
+`scripts/shot.sh <out.png> [--keep-state] [--wait <s>] [repo paths...] [-- app args...]` launches the Debug app (build
+it first) and captures its window. Set `HISTQ_APP` to use a built `Histq.app` from elsewhere (a QA VM has no project).
 
 ```sh
 scripts/shot.sh build/qa/shots/graph.png build/qa/fx/graph
 scripts/shot.sh build/qa/shots/terminal.png build/qa/fx/graph -- -HistqOpenTerminal YES
-scripts/shot.sh build/qa/shots/settings.png -- -HistqSelect settings:terminal
 ```
 
-Usage: `scripts/shot.sh <out.png> [--keep-state] [--wait <s>] [repo paths...] [-- app args...]`.
-
-- **Background only.** The app is opened with `open -g` and `-HistqBackground YES`: it never activates, its window
-  stays behind your other windows and is never made key, so a run never takes your focus. Shots therefore show an
-  inactive window (grey traffic lights).
-- **Isolated state.** Every run passes `-HistqStateDir build/qa/state`. The folder and the QA preferences suite
+- **Background only**: `open -g` and `-HistqBackground YES`, so the app never activates and its window is never key.
+  Shots show an inactive window (grey traffic lights).
+- **Isolated state**: every run passes `-HistqStateDir build/qa/state`; the folder and the QA preferences suite
   (`com.math2it.histq.qa`) are wiped first unless you pass `--keep-state`.
-- **Window capture.** It waits for the window, then `--wait` seconds (default 1.5), then captures only that window
-  with `screencapture -l`. The Terminal you run it from needs the Screen Recording permission.
-- It quits only the instance it started, never an installed Histq.
+- It waits for the window, then `--wait` seconds (default 1.5), and captures it with `screencapture -l` (the Terminal
+  needs the Screen Recording permission). It quits only the instance it started.
 
 ## Timing logs
 
 The click-first rule (a click selects at once, the detail shows a placeholder, then its content) is checked with
-timings, not by feel. In a state-dir run, Debug builds append one line per event to `build/qa/state/timing.log`:
+timings. In a state-dir run, Debug builds append `<ms since launch> <event> <detail>` lines to
+`build/qa/state/timing.log` (watcher refreshes go to `refresh.log`). Events:
 
-```text
-<ms since launch> <event> <detail>
-```
-
-Events: `open` (a repository opened in a tab), `select` (the selection changed), `placeholder` (the detail's
-placeholder is on screen), `spinner` (the delayed spinner faded in, only when a load takes over about 150 ms),
-`content` (the content is on screen, logged for every select, also between two loaded commits; for a commit, once its
-files are; `content log-complete <n>` when the whole history is laid out), `content-info` (a commit's info card is on
-screen) and `layout <detail> <state> filesTop=<y> filesBottom=<y> panelBottom=<y>` (the commit detail's Files card edges
-and the panel's height in the detail panel; `placeholder`, `pending` (the header from the log, files loading) or
-`loaded`; for each select, each state and whenever they move). Watcher refreshes go to `build/qa/state/refresh.log`
-instead.
+- `open`, `select`, `placeholder`, `spinner` (only when a load takes over about 150 ms) and `content` (for every
+  select; `content log-complete <n>` when the whole history is laid out; `content branch-map <commits> <ms>` when the
+  faded branch labels are computed).
+- `content-info` (a commit's info card is on screen; its files may still load) and `layout <detail> <state>
+  filesTop=<y> filesBottom=<y> panelBottom=<y>` (the Files card edges, for `placeholder`, `pending` or `loaded`).
+- `find <query> matches=<m> current=<n> commit=<sha>` (Cmd-F search), `graph-col` (the graph column fitted to its
+  lanes), `columns`, `toolbar`, `click`, `dblclick`, `zoom` and `walk` (from the DEBUG arguments below).
 
 Read the file right after a `scripts/shot.sh` run (which wipes the state dir first): each `select` line must have a
 `placeholder` line, or for a commit of the log a `content-info` line, then a `content` line. Over a
@@ -136,61 +94,65 @@ Read the file right after a `scripts/shot.sh` run (which wipes the state dir fir
 a commit selected again (or prefetched) shows its `content` with a p95 of at most 33 ms, and a commit of the log never
 logs `placeholder` or `spinner`. A commit with many files can take two frames in Debug; Release is faster.
 
-```sh
-cat build/qa/state/timing.log
-```
-
 ## DEBUG launch arguments
 
-Debug builds read these arguments; Release builds ignore all of them. With `scripts/shot.sh`, put them after `--`.
-Use `-HistqStateDir` for every automated launch: Debug and Release share the bundle id `com.math2it.histq`, so
-without it a test run would read and write the state of your installed Histq.
+Debug builds read these; Release ignores them. With `scripts/shot.sh`, put them after `--`. Always pass
+`-HistqStateDir`: Debug and Release share the bundle id `com.math2it.histq`, so a run would otherwise use your real
+state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact behavior: `grep -rn '"-Histq' App`.
 
 | Argument | What it does |
 | --- | --- |
-| `-HistqStateDir <dir>` | Keeps all files, logs and session state in `<dir>`, and uses the QA preferences suite and Keychain service (`com.math2it.histq.qa`). |
+| `-HistqStateDir <dir>` | Keeps files, logs and session state in `<dir>`; uses the QA preferences suite and Keychain service. |
 | `-HistqBackground YES` | Never activates the app; windows stay behind others and are never key. |
-| `-HistqSelect <kind>[:<value>]` | Selects something at launch through the click path. Kinds: `tab:<n>`, `wip`, `commit:<sha>`, `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>` (`general`, `appearance`, `profiles`, `ssh`, `integrations`, `ai`, `terminal`), `sidebar:<tab>` (`branches`, `tags`, `prs`), `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
-| `-HistqSelectWalk <n>[,<ms>]` | Once the log is laid out, selects the first n commit rows through the click path, `ms` apart (default 250), then walks back up (revisits) and logs `walk done`. |
-| `-HistqWindowSize <w>x<h>` | Size of new windows, e.g. `912x520`. |
-| `-HistqTabbedWindows <n>` | Spreads the launch's repositories over n native-tab windows. |
-| `-HistqTabPosition left\|top` | Vertical tab list or native tabs, overriding the preference. |
-| `-HistqAvatarMode real\|generated\|initials` | Avatar mode, overriding the preference. |
-| `-HistqOpenPalette "<query>"` | Opens the command palette with that query. Add `-HistqPaletteRun` to run the first row. |
-| `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell, as the toolbar button does. (The "Open terminal with each new tab" setting only shows the drawer; its shell waits for a click.) |
-| `-HistqHTMLProbe YES` | In a state-dir run, snapshots every GitHub HTML view half a second after it shows (`html-<n>.png` in the state dir) and logs its size and ink pixels to `timing.log`. |
-| `-HistqKeychain memory` | Uses an in-memory Keychain, so a run never touches a real keychain. |
-| `-HistqRun "<menu>\|<item>[;;<next>...]"` | Runs context-menu items by title, accepting confirmations; outcomes go to `operations.txt` in the state dir. Fixture copies only. |
-| `-HistqShow "<menu>\|<item>"` | Opens one menu item's confirmation or form and leaves it on screen. `-HistqFormName "<name>"` then fills and submits a form. |
+| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
+| `-HistqSelectWalk <n>[,<ms>]` | Selects the first n commits `ms` apart (default 250), walks back up, then logs `walk done`. |
+| `-HistqSelectAfter <path>` | Then selects that WIP file (with or without `-HistqResolve`), to drive the conflict editor's leave prompt. |
+| `-HistqWindowSize <w>x<h>` / `-HistqTabbedWindows <n>` | Size of new windows; spreads the repositories over n native-tab windows. |
+| `-HistqTabPosition left\|top` / `-HistqAvatarMode real\|generated\|initials` | Overrides the preference. |
+| `-HistqGraphWidth <pt>` / `-HistqRefColumnWidth <pt>` | Graph column width as a border drag would set it (logs `graph-col`); Branch / Tag column width. |
+| `-HistqColumnDrag <column>:<dx>` | Drags the border right of `message` or `author` by dx points; logs `columns`. |
+| `-HistqFind "<query>[;next\|prev...]"` / `-HistqFindEarly YES` | Opens the Cmd-F search, types the query, runs each step; `FindEarly` starts on the log's first page. |
+| `-HistqDoubleClick toolbar\|toolbargap\|tabrow` | Double-clicks that window row; logs `click`, `dblclick` and `zoom`. |
+| `-HistqToolbarFrames YES` | Logs the repo and branch dropdowns' frames (`toolbar`). |
+| `-HistqOpenPalette "<query>"` / `-HistqPaletteRun` | Opens the command palette with that query; runs its first row. |
+| `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell. |
+| `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
+| `-HistqHTMLProbe YES` | Snapshots every GitHub HTML view (`html-<n>.png`) and logs its size. |
+| `-HistqKeychain memory` / `-HistqKeychainSelfTest memory\|login` | In-memory Keychain; a Keychain round trip to `keychain-selftest.txt`. |
+| `-HistqRun "<menu>\|<item>[;;<next>...]"` | Runs context-menu items by title, accepting confirmations. Fixture copies only. |
+| `-HistqShow "<menu>\|<item>"` / `-HistqFormName "<name>"` | Opens one item's confirmation or form; fills and submits the form. |
+| `-HistqWorktreeFolder "<parent>"` | With `-HistqFormName`, fills and submits the Add Worktree form. |
+| `-HistqCommit "<message>"` | Commits the staged changes through the WIP panel. |
 | `-HistqStageLines <n>,<m>` | Selects those changed lines in the first stageable diff. |
-| `-HistqResolve A1,B2,AB3[,save]` | In the conflict editor, ticks side A, B or both of conflict 1, 2, 3..., then presses Save when `save` is listed. |
-| `-HistqOpenRebase <rev>` / `-HistqOpenSquash "<rev>,<rev>"` | Opens the interactive rebase or squash sheet. Add `-HistqStartRebase` to start it. |
-| `-HistqUndo <n>` / `-HistqRedo <n>` | Runs n undos, then n redos, through the toolbar's path. |
-| `-HistqGitHubStub YES` | Serves the pull request and issue features from canned data, without GitHub. |
+| `-HistqResolve A1,B2,AB3[,<step>]` | Ticks sides of conflicts 1, 2, 3...; steps: `save`, `save-output`, `save-chunks`, `reset`, `keep`, `delete`, `leave-save`, `leave-save-output`, `dontsave`, `cancel`. |
+| `-HistqOperation continue\|abort\|skip` | Presses the operation banner's button. |
+| `-HistqOpenRebase <rev>` / `-HistqOpenSquash "<rev>,<rev>"` / `-HistqStartRebase` | Opens the interactive rebase or squash sheet; starts it. |
+| `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
+| `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |
-| `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without its confirmation. Only with `-HistqGitHubStub YES`. |
-| `-HistqOpenCreatePR <branch>` | Opens the Create Pull Request form for that branch. |
-| `-HistqAIStub YES\|error` | Answers AI requests locally with canned replies (or HTTP 401), never reaching the network. State-dir runs only; with `-HistqKeychain memory` every provider gets a fake key. |
-| `-HistqAI <hook>[,apply\|,cancel]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve` or `test`. Only with `-HistqAIStub`. |
-
-The full list, with each argument's exact behavior, is in the doc comments where each one is read:
-`grep -rn '"-Histq' App`.
+| `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. Stub only. |
+| `-HistqOpenCreatePR <branch>` / `-HistqCreatePRSubmit YES` | Opens the Create Pull Request form; fills and submits it. Stub only. |
+| `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |
+| `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network. |
+| `-HistqAI <hook>[,apply\|,cancel]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `test` or `load-models`. Stub only. |
 
 ## Project layout
 
-- `App/`: the macOS app (SwiftUI and AppKit, UI only). `App/GlassStyle.swift` holds the `Palette` and `Motion`
-  design tokens.
-- `Packages/HistqCore/`: a Foundation-only Swift package with everything that is not UI: running git, parsing its
-  output, graph layout, diffs, three-way merge, profiles, the GitHub client and the AI clients. Tests are in
-  `Packages/HistqCore/Tests/HistqCoreTests`.
+- `App/`: the macOS app (SwiftUI and AppKit, UI only). `App/GlassStyle.swift` holds the design tokens.
+- `Packages/HistqCore/`: a Foundation-only package with everything that is not UI (git, parsing, graph layout, diffs,
+  three-way merge, profiles, the GitHub and AI clients), tested in `Packages/HistqCore/Tests/HistqCoreTests`.
 - `scripts/`: `make-fixtures.sh`, `shot.sh`, `check-build-parity.sh` and the release scripts.
-- `project.yml`: the XcodeGen project (source of truth for `Histq.xcodeproj`, which is generated and git-ignored).
-- `assets/`: the original logo artwork.
-- `build/` and `docs/` are git-ignored (QA output, local plans and notes).
+- `assets/`: the logo artwork. `build/` and `docs/` are git-ignored.
+
+## Commit style
+
+One-line conventional commits: `<type>(<scope>): <summary>`, for example `fix(graph): keep the selection on refresh`.
+Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`. No body.
 
 ## Releasing
 
-Releases are maintainer-only. Run `/cf-ship`, which follows the project guide in
-`.coding-friend/skills/cf-ship-custom/SKILL.md` and calls `scripts/ship.sh`. The one-time setup (certificate,
-notarization profile, Sparkle key), the release steps and the rollback are in `docs/RELEASING.md`, a local file kept
-out of git.
+Releases are maintainer-only: built, signed, notarized and published from the maintainer's Mac with `scripts/`.
+
+## License
+
+By contributing, you agree that your contributions are licensed under the [GNU GPL v3.0](LICENSE).

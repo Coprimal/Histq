@@ -1,33 +1,36 @@
+<div align="center">
+
+<img src="assets/logo_512.png" width="128" alt="Histq icon">
+
 # Histq
 
-Histq is a native macOS git client. It is written in SwiftUI and AppKit and drives the `git` command line tool you
-already have, so it works with your existing repositories, config, SSH keys and hooks.
+**A native macOS git client that drives the git you already have.**
 
-## Screenshots
+[![Latest release](https://img.shields.io/github/v/release/dinhanhthi/Histq)](https://github.com/dinhanhthi/Histq/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
 
-Screenshots are not in the repository yet. Planned:
+[Download](https://github.com/dinhanhthi/Histq/releases/latest) · [Changelog](CHANGELOG.md)
 
-- Commit graph with branches, tags and the commit details panel
-- Staging: the working-tree diff with line staging
-- Conflict editor (A, B and Output panes)
-- Interactive rebase sheet
-- Pull request detail (Conversation, Commits, Files, Checks)
-- AI commit message preview
-- Terminal drawer
-- Settings: profiles and SSH
+</div>
 
-## Requirements
-
-- macOS 15 or later, on Apple silicon.
-- git 2.36 or later. The git from the Command Line Tools works (`xcode-select --install`); so does a git from
-  Homebrew. You can pick the git binary in Settings.
+Histq is written in SwiftUI and AppKit. It runs the `git` command line tool on your Mac, so it works with your
+existing repositories, config, SSH keys and hooks.
 
 ## Features
 
-- **Commit graph**: a fast graph of the whole history (tens of thousands of commits), with branches, tags, stashes,
-  remotes and search.
+- **Commit graph**: a fast graph of the whole history (tens of thousands of commits), with branches, tags, stashes and
+  remotes. A selected commit with no branch label shows a faded label of the branch it is on. When the graph column
+  narrows, lanes fold into each other, and branch and tag labels shrink to "…", then to an icon. Settings, Appearance,
+  Graph columns hides the message, author or date column.
+- **Commit search** (Cmd-F): find commits by subject or hash prefix from a bar at the top of the graph; Enter and
+  Shift-Enter move between matches and the other rows are dimmed.
+- **Commit details**: a click shows the commit's message and author at once, then its changed files.
 - **Staging and diffs**: stage files, hunks or single lines; unified and full-file diffs with syntax colors.
-- **Conflict editor**: pick lines from side A and side B into the Output, or edit the Output by hand.
+- **Conflict editor**: tick single lines (or a whole side) from side A and side B into the Output, or edit the Output
+  by hand. With conflicts left, Save asks whether to save the Output as it is (and stage it) or to write git's conflict
+  markers for the rest, leaving the file conflicted. Reset clears your choices, and leaving the editor with unsaved
+  choices asks first.
 - **Interactive rebase and squash**: reorder commits and pick, reword, edit, squash, fixup or drop them from a sheet,
   with no editor.
 - **Undo and redo** for local operations: commit, amend, checkout, reset, merge, rebase, cherry-pick, revert, branch
@@ -42,8 +45,21 @@ Screenshots are not in the repository yet. Planned:
   search field.
 - **GitHub pull requests and issues**: lists, details, reviews, merge, comments, and a Create Pull Request form.
 - **AI assistance**: commit messages, commit and change explanations, and conflict resolution suggestions from a cloud
-  provider you choose.
+  provider you choose. Load models lists the provider's models to pick from, and explanations and commit messages each
+  have their own response language.
 - **Terminal**: a terminal drawer per tab (Ctrl-`), started in the repository folder with the tab's profile.
+
+## Install
+
+Download the `.dmg` from [Releases](https://github.com/dinhanhthi/Histq/releases/latest), drag Histq to
+`/Applications` and launch it. Histq updates itself through [Sparkle](https://sparkle-project.org) (see Updates
+below).
+
+## Requirements
+
+- macOS 15 or later, on Apple silicon.
+- git 2.36 or later. The git from the Command Line Tools works (`xcode-select --install`); so does a git from
+  Homebrew. You can pick the git binary in Settings.
 
 ## Privacy
 
@@ -81,7 +97,7 @@ Histq makes no GitHub API request until you connect a GitHub account to a profil
 ### AI providers (only on a click)
 
 Histq never calls an AI provider on its own. A request is sent only when you click an AI button (or Test Connection
-in Settings), to the provider you chose:
+or Load models in Settings), to the provider you chose:
 
 | Action | What is sent |
 | --- | --- |
@@ -89,6 +105,7 @@ in Settings), to the provider you chose:
 | Explain commit | the commit's message and diff |
 | Explain changes | the uncommitted diff |
 | Suggest resolution | the file path and one conflict region: side A, side B and their common base |
+| Load models (Settings) | no repository content; only the API key, to list the provider's models |
 
 Diffs are cut to about 24 KB per request. The request goes to the provider's own host: `api.openai.com`,
 `api.anthropic.com`, `generativelanguage.googleapis.com` or `api.x.ai`, or the URL you enter for a custom
@@ -116,10 +133,16 @@ archive is downloaded from the project's GitHub releases. A build without Histq'
 Apart from the cases above, nothing leaves your Mac. The terminal drawer runs your own shell locally; what you run in
 it is up to you.
 
-## Contributing
+## Development
+
+```sh
+brew install xcodegen
+xcodegen generate
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation build
+```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+© 2026 Anh-Thi Dinh. Licensed under the GNU General Public License v3.0 (GPL-3.0), see [LICENSE](LICENSE).
