@@ -51,10 +51,15 @@ open_args+=(--args -HistqStateDir "$STATE_DIR" -HistqBackground YES -ApplePersis
 [ $# -gt 0 ] && open_args+=("$@")
 
 # -skipPackagePluginValidation: SwiftTerm's build-tool plugin (task 13.1) is not validated from the command line.
-APP="$(cd "$ROOT" && xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation -showBuildSettings 2>/dev/null \
-  | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1 || true)"
-[ -n "$APP" ] || die "BUILT_PRODUCTS_DIR not found (xcodebuild -showBuildSettings failed in $ROOT)"
-APP="$APP/Histq.app"
+# HISTQ_APP points at a built Histq.app instead (a QA VM gets a copy of the app, and has no Xcode project).
+if [ -n "${HISTQ_APP:-}" ]; then
+  APP="$HISTQ_APP"
+else
+  APP="$(cd "$ROOT" && xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation -showBuildSettings 2>/dev/null \
+    | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1 || true)"
+  [ -n "$APP" ] || die "BUILT_PRODUCTS_DIR not found (xcodebuild -showBuildSettings failed in $ROOT)"
+  APP="$APP/Histq.app"
+fi
 BIN="$APP/Contents/MacOS/Histq"
 [ -x "$BIN" ] || die "Debug app not built: $BIN missing (run the APP chain first)"
 
