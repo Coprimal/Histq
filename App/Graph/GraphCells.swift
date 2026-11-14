@@ -488,6 +488,13 @@ final class GraphRowView: NSTableRowView {
 final class GraphHeaderView: NSTableHeaderView {
     override var isOpaque: Bool { true }
 
+    /// The borders right of the message and author columns are dragged by the table (`trackBorderDrag`); the others
+    /// keep AppKit's resizing.
+    override func mouseDown(with event: NSEvent) {
+        if let table = tableView as? GraphTableView, table.trackBorderDrag(event, in: self) { return }
+        super.mouseDown(with: event)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         Palette.graphSurface.setFill()
         dirtyRect.fill()

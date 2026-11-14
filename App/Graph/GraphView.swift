@@ -192,6 +192,67 @@ final class GraphTableView: NSTableView {
         let width = max(message.minWidth, clip.bounds.width - others)
         if abs(message.width - width) > 0.5 { message.width = width }
     }
+
+    // MARK: Column borders
+
+    /// How far from a border (in points) a mouse down still grabs it.
+    private static let borderSlop: CGFloat = 5
+
+    /// Drags the border right of the message column (it resizes the author column, the message column fills) or right
+    /// of the author column (author against date, the message column keeps its width), until the mouse goes up, then
+    /// saves the widths. False when `event` is not on one of those borders: AppKit resizes the other borders (the
+    /// message column absorbs them), but it cannot resize these two since no column right of them follows the width.
+    func trackBorderDrag(_ event: NSEvent, in header: NSTableHeaderView) -> Bool {
+        guard let window else { return false }
+        let start = header.convert(event.locationInWindow, from: nil)
+        guard let border = [GraphColumn.message, .author].first(where: { column in
+            let index = self.column(withIdentifier: column.identifier)
+            return index >= 0 && abs(header.headerRect(ofColumn: index).maxX - start.x) <= Self.borderSlop
+        }) else { return false }
+        let widths = columnWidths()
+        NSCursor.resizeLeftRight.push()
+        defer { NSCursor.pop() }
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            applyBorderDrag(border, dx: header.convert(next.locationInWindow, from: nil).x - start.x, from: widths)
+            if next.type == .leftMouseUp { break }
+        }
+        (delegate as? GraphTableController)?.saveColumnWidths()
+        return true
+    }
+
+    /// The columns' widths now.
+    func columnWidths() -> [GraphColumn: CGFloat] {
+        var widths: [GraphColumn: CGFloat] = [:]
+        for tableColumn in tableColumns {
+            if let column = GraphColumn(rawValue: tableColumn.identifier.rawValue) { widths[column] = tableColumn.width }
+        }
+        return widths
+    }
+
+    /// Moves the border right of `border` (message or author) by `dx` from where it was at `start` (the widths at the
+    /// mouse down), within the columns' minimum widths: past them the border stops.
+    func applyBorderDrag(_ border: GraphColumn, dx: CGFloat, from start: [GraphColumn: CGFloat]) {
+        guard let message = tableColumn(withIdentifier: GraphColumn.message.identifier),
+              let author = tableColumn(withIdentifier: GraphColumn.author.identifier),
+              let date = tableColumn(withIdentifier: GraphColumn.date.identifier),
+              let messageStart = start[.message], let authorStart = start[.author], let dateStart = start[.date]
+        else { return }
+        switch border {
+        case .message:
+            // Left makes the author column wider; the message column takes the rest (`tile`).
+            let most = authorStart + messageStart - message.minWidth
+            author.width = min(max(authorStart - dx, author.minWidth), most)
+        case .author:
+            let most = authorStart + dateStart - date.minWidth
+            let width = min(max(authorStart + dx, author.minWidth), most)
+            date.width = dateStart - (width - authorStart)
+            author.width = width
+        default:
+            return
+        }
+        tile()
+        headerView?.needsDisplay = true
+    }
 }
 
 /// The table's data source and delegate. It keeps the snapshot it shows and compares only generations and counts, so
@@ -236,7 +297,47 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         table.setDraggingSourceOperationMask(.generic, forLocal: true)
         NotificationCenter.default.addObserver(
             self, selector: #selector(avatarsChanged(_:)), name: AvatarStore.didChange, object: nil)
+        #if DEBUG
+        if let request = AppState.launchFlag("-HistqColumnDrag") { debugColumnDrag(request) }
+        #endif
     }
+
+    #if DEBUG
+    private static var didColumnDrag = false
+
+    /// DEBUG `-HistqColumnDrag <column>:<dx>`: once the table shows rows, moves the border right of `<column>`
+    /// (message or author) by dx points through `applyBorderDrag`, the drag's own code, and logs the widths before and
+    /// after (`columns refs=<w> graph=<w> message=<w> author=<w> date=<w> clip=<w>`). Once per launch.
+    private func debugColumnDrag(_ request: String) {
+        let parts = request.split(separator: ":")
+        guard !Self.didColumnDrag, parts.count == 2, let border = GraphColumn(rawValue: String(parts[0])),
+              let dx = Double(parts[1])
+        else { return }
+        Self.didColumnDrag = true
+        Task { @MainActor [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, let table = self.table as? GraphTableView else { return }
+                guard let clip = table.enclosingScrollView?.contentView, clip.bounds.width > 0, table.window != nil,
+                      self.rowCount > 0
+                else { continue }
+                try? await Task.sleep(for: .milliseconds(500))
+                Self.logColumns(table)
+                table.applyBorderDrag(border, dx: CGFloat(dx), from: table.columnWidths())
+                self.saveColumnWidths()
+                Self.logColumns(table)
+                return
+            }
+        }
+    }
+
+    private static func logColumns(_ table: GraphTableView) {
+        let widths = table.columnWidths()
+        let columns = GraphColumn.allCases.map { "\($0.rawValue)=\(Int((widths[$0] ?? 0).rounded()))" }
+        let clip = table.enclosingScrollView?.contentView.bounds.width ?? 0
+        UITiming.probe("columns", columns.joined(separator: " ") + " clip=\(Int(clip.rounded()))")
+    }
+    #endif
 
     func update(_ view: GraphView) {
         self.view = view
@@ -682,6 +783,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// Saves the widths after the user drags a column edge (not when the table's own width changes).
     func tableViewColumnDidResize(_ notification: Notification) {
         guard let table, let header = table.headerView, header.resizedColumn >= 0 else { return }
+        saveColumnWidths()
+    }
+
+    /// Saves the widths in `PrefKey.graphColumnWidths` (the message column's is ignored on restore: it fills).
+    func saveColumnWidths() {
+        guard let table else { return }
         let encoded = table.tableColumns
             .map { "\($0.identifier.rawValue):\(Int($0.width.rounded()))" }
             .joined(separator: ",")
