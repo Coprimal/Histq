@@ -207,48 +207,81 @@ private struct CommitListPanel: View {
     let session: RepoSession
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
+    @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
+    @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
+    @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
 
     var body: some View {
         SectionCard(nil, contentPadding: 0) {
-            Group {
-                switch session.log {
-                case .idle, .loading:
-                    SkeletonCommitRows()
-                        .allowsHitTesting(false)
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("Loading")
-                case .loaded(let log):
-                    // A click selects through the session (the detail switches in the same frame); a double-click
-                    // checks out; a right-click opens the row's or the badge's menu; a badge dropped on another opens
-                    // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
-                    // pull request in the same frame.
-                    GraphView(log: log, refs: session.refs.value, status: session.status.value,
-                              dateFormat: dateFormat, rowDensity: rowDensity, selection: session.graphSelection,
-                              onSelect: { [session] items in session.selectGraph(items) },
-                              onActivate: { [session] item in RepoMenus.activate(item, session: session) },
-                              menuEntries: { [session] item, badge in
-                                  if let ref = badge?.sidebarItem { return RepoMenus.ref(ref, session) }
-                                  return RepoMenus.entries(for: item, session: session)
-                              },
-                              dropEntries: { [session] source, target in
-                                  guard let source = source.sidebarItem, let target = target.sidebarItem else { return [] }
-                                  return RepoMenus.drop(source, onto: target, session)
-                              },
-                              canUndo: { [session] redo in session.historyAvailability(redo: redo).isEnabled },
-                              onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
-                              onOpenWorktree: { [session] path in session.openWorktree(path) },
-                              pullRequests: session.github.branchPullRequests,
-                              onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },
-                              branchMap: session.branchMap)
-                        .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
-                case .failed(let message):
-                    Label(message, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.secondary)
-                        .padding(12)
+            VStack(spacing: 0) {
+                // ⌘F (Edit › Find…): the search bar over the column titles; the graph below keeps its identity.
+                if session.graphSearch.isOpen {
+                    GraphSearchBar(search: session.graphSearch)
+                    Divider()
                 }
+                graph
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+
+    private var graph: some View {
+        Group {
+            switch session.log {
+            case .idle, .loading:
+                SkeletonCommitRows()
+                    .allowsHitTesting(false)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Loading")
+            case .loaded(let log):
+                // A click selects through the session (the detail switches in the same frame); a double-click
+                // checks out; a right-click opens the row's or the badge's menu; a badge dropped on another opens
+                // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
+                // pull request in the same frame.
+                GraphView(log: log, refs: session.refs.value, status: session.status.value,
+                          dateFormat: dateFormat, rowDensity: rowDensity, selection: session.graphSelection,
+                          onSelect: { [session] items in session.selectGraph(items) },
+                          onActivate: { [session] item in RepoMenus.activate(item, session: session) },
+                          menuEntries: { [session] item, badge in
+                              if let ref = badge?.sidebarItem { return RepoMenus.ref(ref, session) }
+                              return RepoMenus.entries(for: item, session: session)
+                          },
+                          dropEntries: { [session] source, target in
+                              guard let source = source.sidebarItem, let target = target.sidebarItem else { return [] }
+                              return RepoMenus.drop(source, onto: target, session)
+                          },
+                          canUndo: { [session] redo in session.historyAvailability(redo: redo).isEnabled },
+                          onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
+                          onOpenWorktree: { [session] path in session.openWorktree(path) },
+                          pullRequests: session.github.branchPullRequests,
+                          onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },
+                          branchMap: session.branchMap,
+                          dimming: session.graphSearch.dimming,
+                          revealToken: session.graphSearch.revealToken,
+                          onTable: { [search = session.graphSearch] table in search.table = table },
+                          hiddenColumns: hiddenColumns,
+                          onEscape: { [search = session.graphSearch] in
+                              guard search.isOpen else { return false }
+                              search.close()
+                              return true
+                          })
+                    .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .padding(12)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The text columns Settings › Appearance hides.
+    private var hiddenColumns: Set<GraphColumn> {
+        var hidden: Set<GraphColumn> = []
+        if !showMessage { hidden.insert(.message) }
+        if !showAuthor { hidden.insert(.author) }
+        if !showDate { hidden.insert(.date) }
+        return hidden
     }
 }
 

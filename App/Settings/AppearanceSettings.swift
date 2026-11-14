@@ -1,11 +1,14 @@
-// Settings › Appearance: the commit graph's avatars, date format and row height. No theme choice: Histq is dark
-// only. The graph and `AvatarStore` read these keys and update open tabs at once.
+// Settings › Appearance: the commit graph's avatars, date format, row height and text columns. No theme choice:
+// Histq is dark only. The graph and `AvatarStore` read these keys and update open tabs at once.
 import SwiftUI
 
 struct AppearanceSettings: View {
     @AppStorage(PrefKey.avatarMode.rawValue, store: Preferences.defaults) private var avatarMode = "generated"
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
+    @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
+    @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
+    @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
 
     /// The date formats offered, the shortest (the default, 24 h) first; a format set by hand (`defaults write`) is
     /// listed too.
@@ -57,6 +60,13 @@ struct AppearanceSettings: View {
                     Text("Row height")
                     SettingsHint("Compact fits more commits on screen.")
                 }
+            }
+            SettingsGroup("Graph columns", description: "Branch / Tag and Graph always show.") {
+                SettingsSwitchRow(title: "Commit message", isOn: $showMessage)
+                SettingsDivider()
+                SettingsSwitchRow(title: "Author", isOn: $showAuthor)
+                SettingsDivider()
+                SettingsSwitchRow(title: "Commit date", isOn: $showDate)
             }
         } skeleton: {
             EmptyView()

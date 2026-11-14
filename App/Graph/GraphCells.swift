@@ -501,6 +501,8 @@ final class GraphTextCellView: NSView {
     var detail: String?
     var tone = Tone.primary
     var isItalic = false
+    /// A row the graph search does not match while it has matches: the text draws at `Style.dimmedAlpha`.
+    var isDimmed = false
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -532,10 +534,17 @@ final class GraphTextCellView: NSView {
         static let primaryItalic = attributes(.primary, italic: true)
         static let secondaryItalic = attributes(.secondary, italic: true)
         static let padding: CGFloat = 8
+        static let dimmedAlpha: CGFloat = 0.35
     }
 
     override func draw(_ dirtyRect: NSRect) {
         guard !text.isEmpty else { return }
+        let context = NSGraphicsContext.current?.cgContext
+        if isDimmed {
+            context?.saveGState()
+            context?.setAlpha(Style.dimmedAlpha)
+        }
+        defer { if isDimmed { context?.restoreGState() } }
         let attributes = switch (tone, isItalic) {
         case (.primary, false): Style.primary
         case (.secondary, false): Style.secondary
@@ -594,7 +603,8 @@ final class GraphHeaderView: NSTableHeaderView {
         Palette.graphSurface.setFill()
         dirtyRect.fill()
         guard let tableView else { return }
-        for index in tableView.tableColumns.indices {
+        for index in tableView.tableColumns.indices where !tableView.tableColumns[index].isHidden {
+            // A hidden column's rect is not empty: it would draw its title over the first column's.
             let rect = headerRect(ofColumn: index)
             guard rect.intersects(dirtyRect) else { continue }
             tableView.tableColumns[index].headerCell.draw(withFrame: rect, in: self)

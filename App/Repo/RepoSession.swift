@@ -459,7 +459,11 @@ final class RepoSession: Identifiable {
     var commitDraft = CommitDraft()
     private(set) var status: Loadable<WorkingStatus> = .idle
     private(set) var refs: Loadable<Refs> = .idle
-    private(set) var log: Loadable<LogSnapshot> = .idle
+    private(set) var log: Loadable<LogSnapshot> = .idle {
+        didSet { graphSearch.logDidChange() }
+    }
+    /// The graph's ⌘F search (`GraphSearch`): searched again with every new log snapshot.
+    let graphSearch = GraphSearch()
     /// The branch each commit of `log` is on, computed off the main actor for each log snapshot and refs change.
     private(set) var branchMap = BranchMap()
     /// The merge, rebase, cherry-pick or revert in progress (the operation banner), read with every status read; nil
@@ -633,6 +637,7 @@ final class RepoSession: Identifiable {
 
     init(url: URL) {
         self.url = url
+        graphSearch.session = self
         resolveProfile()
         scheduleAutoFetch()
         // Posted for every key, possibly off the main thread; only a change of the interval restarts the timer.

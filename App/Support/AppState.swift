@@ -44,6 +44,14 @@ enum AppState {
 
     /// DEBUG `-HistqToolbarFrames YES`: the toolbar logs its repo and branch dropdowns' frames (`HeaderToolbar`).
     static let launchToolbarFrames: Bool = launchFlag("-HistqToolbarFrames") == "YES"
+
+    /// DEBUG `-HistqFind "<query>[;next|prev…]"`: once the log is read, the front repo tab's graph search opens as ⌘F
+    /// opens it, the query is typed a character at a time, then each step runs (`AppDelegate.debugFind`).
+    static let launchFind: String? = launchFlag("-HistqFind")
+
+    /// DEBUG `-HistqFindEarly YES`: `-HistqFind` starts once the log's first page shows, not its whole log, and types
+    /// the query at once (QA of a query typed while the log is still read).
+    static let launchFindEarly: Bool = launchFlag("-HistqFindEarly") == "YES"
 }
 
 /// Where the app keeps its files: `~/Library/Application Support/Histq`, or the DEBUG state dir.
@@ -110,6 +118,10 @@ enum PrefKey: String, CaseIterable {
     case panelWidths
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
+    /// The graph's Commit message, Author and Commit date / time columns show (Branch / Tag and Graph always do).
+    case graphShowMessage
+    case graphShowAuthor
+    case graphShowDate
     /// Terminal font family; empty = the system monospaced font.
     case terminalFontName
     /// Terminal font size in points.
@@ -153,6 +165,7 @@ enum PrefKey: String, CaseIterable {
         case .nativeTabsOnTop: false
         case .panelWidths: ""
         case .graphColumnWidths: ""
+        case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
         case .terminalFontName: ""
         case .terminalFontSize: 12.0
         case .terminalShell: ""
@@ -228,6 +241,9 @@ enum UITiming {
     static func walk(_ detail: String) { record("walk", detail) }
     /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
     static func toolbar(_ detail: String) { record("toolbar", detail) }
+    /// The graph search (⌘F) landed on a result or moved to a match: `find <query> matches=<m> current=<n>
+    /// commit=<sha>` (`GraphSearch`).
+    static func find(_ detail: String) { record("find", detail) }
 
     #if DEBUG
     /// The launch origin, in uptime nanoseconds; set by `markLaunch()` at the top of `main()`.

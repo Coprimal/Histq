@@ -107,6 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if ProcessInfo.processInfo.arguments.contains("-HistqOpenPalette") {
             Task { @MainActor in await self.debugOpenPalette() }
         }
+        if let spec = AppState.launchFind {
+            Task { @MainActor in await self.debugFind(spec) }
+        }
         if let row = AppState.launchDoubleClick, AppState.isStateDirMode {
             // The click monitor only with the seam, so other QA runs' timing.log keeps only its own lines.
             DoubleClickProbe.install()
@@ -155,6 +158,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         while session?.running.isEmpty == false { try? await Task.sleep(for: .milliseconds(50)) }
         RepoMenus.debugLog(session?.failure.map { "fail palette \(item.title): \($0.message)" }
             ?? "ok palette \(item.title)")
+    }
+    #endif
+
+    #if DEBUG
+    /// DEBUG `-HistqFind "<query>[;next|prev…]"` (QA of the graph search): once the front repo tab's whole log is read,
+    /// opens its search through `findCommits` (the menu's path), types the query a character at a time (120 ms apart,
+    /// a fast typist), waits for its result, then runs each step 300 ms apart. `GraphSearch` logs a `find-key` line
+    /// per keystroke and a `find …` line per result and step.
+    private func debugFind(_ spec: String) async {
+        let parts = spec.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+        let early = AppState.launchFindEarly
+        for _ in 0..<1200 {
+            if let log = target()?.model.actionSession?.log.value, early || log.isComplete { break }
+            try? await Task.sleep(for: .milliseconds(early ? 5 : 50))
+        }
+        // The graph's first layout.
+        if !early { try? await Task.sleep(for: .milliseconds(500)) }
+        findCommits(nil)
+        guard let search = target()?.model.actionSession?.graphSearch, search.isOpen else {
+            return UITiming.find("\(spec) cannot open")
+        }
+        var typed = ""
+        if early { search.query = parts.first ?? "" }
+        for character in early ? "" : parts.first ?? "" {
+            typed.append(character)
+            search.query = typed
+            try? await Task.sleep(for: .milliseconds(120))
+        }
+        for _ in 0..<100 {
+            if search.isFresh { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        for step in parts.dropFirst() {
+            try? await Task.sleep(for: .milliseconds(300))
+            switch step {
+            case "next": search.next()
+            case "prev": search.previous()
+            default: UITiming.find("\(step) unknown step")
+            }
+        }
     }
     #endif
 
@@ -516,12 +559,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updater.checkForUpdates()
     }
 
+    // MARK: Find
+
+    /// `performFindPanelAction(_:)` with `showFindPanel`, as the focused view gets it: the Find item's stand-in when it
+    /// asks the responder chain.
+    private let findPanelItem: NSMenuItem = {
+        let item = NSMenuItem(title: "Find…", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "")
+        item.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        return item
+    }()
+
+    /// Edit › Find… (⌘F). A focused view with its own find bar (the terminal, the conflict editor's output) shows it;
+    /// anywhere else in a repo tab the graph search opens, or takes the focus again. Not nil-targeted: a text field or
+    /// a text view without a find bar answers `performFindPanelAction(_:)` with a disabled item, which would end the
+    /// responder chain there, so this asks the chain itself and only hands the action to a view that takes it.
+    @objc func findCommits(_ sender: Any?) {
+        // Off under a modal, Settings or the palette, also for a find bar behind it.
+        guard target()?.model.isShowingModal != true else { return }
+        if let responder = findPanelResponder() {
+            NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: responder, from: findPanelItem)
+            return
+        }
+        guard let session = searchableSession() else { return }
+        session.graphSearch.open()
+    }
+
+    /// The first responder of the key window's chain that answers `performFindPanelAction(_:)` with `showFindPanel`
+    /// enabled; nil when none does.
+    private func findPanelResponder() -> AnyObject? {
+        guard let responder = NSApp.target(
+            forAction: #selector(NSTextView.performFindPanelAction(_:)), to: nil, from: findPanelItem) as AnyObject?,
+            responder !== self
+        else { return nil }
+        if let validator = responder as? NSMenuItemValidation {
+            return validator.validateMenuItem(findPanelItem) ? responder : nil
+        }
+        if let validator = responder as? NSUserInterfaceValidations {
+            return validator.validateUserInterfaceItem(findPanelItem) ? responder : nil
+        }
+        return responder
+    }
+
+    /// The selected repo tab whose graph shows, when nothing covers it: no modal, Settings or palette, no open file,
+    /// pull request or issue over the graph.
+    private func searchableSession() -> RepoSession? {
+        guard let model = target()?.model, !model.isShowingModal, let session = model.actionSession,
+              session.openFile == nil, session.openHosted == nil
+        else { return nil }
+        return session
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
         if menuItem.action == #selector(checkForUpdates(_:)) {
             // Disabled while the updater is off (no update signing key in this build yet).
             menuItem.toolTip = updater.canCheckForUpdates ? nil : "Updates are off: this build has no update signing key."
             return updater.canCheckForUpdates
+        }
+        if menuItem.action == #selector(findCommits(_:)) {
+            guard target()?.model.isShowingModal != true else { return false }
+            return findPanelResponder() != nil || searchableSession() != nil
         }
         if menuItem.action == #selector(toggleTerminal(_:)) {
             let session = target()?.model.actionSession
@@ -568,6 +665,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        // Targeted, not nil: `findCommits` hands ⌘F to a focused view with a find bar itself (see there).
+        let findItem = editMenu.addItem(withTitle: "Find…", action: #selector(findCommits(_:)), keyEquivalent: "f")
+        findItem.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        findItem.target = self
         let viewMenu = NSMenu(title: "View")
         let terminalItem = viewMenu.addItem(withTitle: "Show Terminal", action: #selector(toggleTerminal(_:)),
                                             keyEquivalent: "`")

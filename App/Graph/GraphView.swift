@@ -20,7 +20,7 @@ enum GraphItem: Hashable, Sendable {
 }
 
 /// The graph's columns, in gk's order. Widths are resizable and saved in `PrefKey.graphColumnWidths`; the message
-/// column takes what the others leave.
+/// column takes what the others leave. Settings › Appearance can hide the message, author and date columns.
 enum GraphColumn: String, CaseIterable {
     case refs, graph, message, author, date
 
@@ -101,6 +101,17 @@ struct GraphView: NSViewRepresentable {
     /// The branch each commit is on (`RepoSession.branchMap`): a lone selected commit without a branch badge of its own
     /// shows its branch's badge faded.
     var branchMap = BranchMap()
+    /// The rows the graph search dims (`GraphSearch.dimming`).
+    var dimming = GraphDimming()
+    /// New with each move to a search match: the selected row is centred when it is off screen.
+    var revealToken = 0
+    /// The table, once made (the search gives it the focus back when it closes).
+    var onTable: @MainActor (NSTableView) -> Void = { _ in }
+    /// The text columns hidden (`PrefKey.graphShowMessage`, `graphShowAuthor`, `graphShowDate`); a change applies at
+    /// once, without a reload.
+    var hiddenColumns: Set<GraphColumn> = []
+    /// Esc while the table has the focus; true when it was used (the open search bar closed).
+    var onEscape: @MainActor () -> Bool = { false }
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
@@ -147,6 +158,7 @@ struct GraphView: NSViewRepresentable {
         scroll.autohidesScrollers = true
 
         context.coordinator.attach(table)
+        onTable(table)
         return scroll
     }
 
@@ -155,8 +167,9 @@ struct GraphView: NSViewRepresentable {
     }
 }
 
-/// The graph's table: the message column takes the width the other columns leave (at least its minimum), so the
-/// columns always fill the card and the date column stays on screen. A right-click asks the controller for the row's
+/// The graph's table: the fill column (the message column, or the last visible one when the message is hidden) takes
+/// the width the other visible columns leave (at least its minimum), so the columns always fill the card and the last
+/// one stays on screen. A right-click asks the controller for the row's
 /// (or the badge's) menu; the mouse-down point tells a badge drag from a row drag.
 final class GraphTableView: NSTableView {
     /// Where the last mouse down was, in the table: the drag source checks it is on a branch badge.
@@ -173,6 +186,16 @@ final class GraphTableView: NSTableView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         (delegate as? GraphTableController)?.menu(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Escape: closes the graph search bar when it is open.
+        if event.keyCode == 53, event.modifierFlags.isDisjoint(with: [.command, .control, .option, .shift]),
+           (delegate as? GraphTableController)?.escape() == true
+        {
+            return
+        }
+        super.keyDown(with: event)
     }
 
     // Edit › Undo / Redo (⌘Z / ⇧⌘Z) reach the table only while it is the first responder.
@@ -193,14 +216,53 @@ final class GraphTableView: NSTableView {
         }
     }
 
+    /// The width the fill column has as its own when it is not the message column (the last visible one, stretched
+    /// to the right edge): restored when it stops filling, and the one saved.
+    private(set) var fillOwnWidth: CGFloat?
+
+    /// The column that takes the width the others leave: the message column, else the last visible one.
+    var fillColumn: NSTableColumn? {
+        let visible = tableColumns.filter { !$0.isHidden }
+        return visible.first { $0.identifier == GraphColumn.message.identifier } ?? visible.last
+    }
+
+    /// Shows the text columns not in `hidden` and hides the others (Branch / Tag and Graph always show). The columns
+    /// keep their own widths: a column that stops filling gets its own width back. True when one changed.
+    func setHiddenColumns(_ hidden: Set<GraphColumn>) -> Bool {
+        let changes = tableColumns.filter { column in
+            guard let id = GraphColumn(rawValue: column.identifier.rawValue), [.message, .author, .date].contains(id)
+            else { return false }
+            return column.isHidden != hidden.contains(id)
+        }
+        guard !changes.isEmpty else { return false }
+        // The widths before: a width or visibility change may tile at once, stretching the fill column of the moment.
+        let oldFill = fillColumn
+        let before = tableColumns.map { ($0, $0.width) }
+        for column in changes { column.isHidden.toggle() }
+        let newFill = fillColumn
+        if newFill !== oldFill {
+            // The old fill column no longer fills: its own width back. The new one keeps its own width to restore.
+            if let oldFill, let own = fillOwnWidth { oldFill.width = max(oldFill.minWidth, own) }
+            fillOwnWidth = newFill.flatMap { fill in
+                fill.identifier == GraphColumn.message.identifier ? nil : before.first { $0.0 === fill }?.1
+            }
+        }
+        // AppKit's own autoresizing (the table's width changes) goes to the fill column too.
+        for column in tableColumns {
+            let fills = column === fillColumn
+            column.resizingMask = fills ? [.autoresizingMask, .userResizingMask] : .userResizingMask
+        }
+        return true
+    }
+
     override func tile() {
         super.tile()
-        guard let clip = enclosingScrollView?.contentView,
-              let message = tableColumn(withIdentifier: GraphColumn.message.identifier)
-        else { return }
-        let others = tableColumns.reduce(0) { $0 + ($1 === message ? 0 : $1.width) }
-        let width = max(message.minWidth, clip.bounds.width - others)
-        if abs(message.width - width) > 0.5 { message.width = width }
+        guard let clip = enclosingScrollView?.contentView, let fill = fillColumn else { return }
+        let others = tableColumns.reduce(0) { $0 + ($1 === fill || $1.isHidden ? 0 : $1.width) }
+        let width = max(fill.minWidth, clip.bounds.width - others)
+        // The graph column fills only when every text column is hidden: past its lanes it is empty space.
+        if fill.identifier == GraphColumn.graph.identifier, fill.maxWidth < width { fill.maxWidth = width }
+        if abs(fill.width - width) > 0.5 { fill.width = width }
     }
 
     // MARK: Column borders
@@ -208,17 +270,20 @@ final class GraphTableView: NSTableView {
     /// How far from a border (in points) a mouse down still grabs it.
     private static let borderSlop: CGFloat = 5
 
-    /// Drags the border right of the message column (it resizes the author column, the message column fills) or right
-    /// of the author column (author against date, the message column keeps its width), until the mouse goes up, then
-    /// saves the widths. False when `event` is not on one of those borders: AppKit resizes the other borders (the
-    /// message column absorbs them), but it cannot resize these two since no column right of them follows the width.
+    /// Drags the border right of the message column (it resizes the next visible column, author or date, the message
+    /// column fills) or right of the author column (author against date, the message column keeps its width), until
+    /// the mouse goes up, then saves the widths. Only the borders between visible columns right of a visible message
+    /// column: false otherwise, and AppKit resizes the border (the fill column, left or right of it, absorbs it in
+    /// `tile`). AppKit cannot resize those two since no column right of them follows the width.
     func trackBorderDrag(_ event: NSEvent, in header: NSTableHeaderView) -> Bool {
         guard let window else { return false }
         let start = header.convert(event.locationInWindow, from: nil)
+        let last = tableColumns.last { !$0.isHidden }
         guard let border = [GraphColumn.message, .author].first(where: { column in
             let index = self.column(withIdentifier: column.identifier)
-            return index >= 0 && abs(header.headerRect(ofColumn: index).maxX - start.x) <= Self.borderSlop
-        }) else { return false }
+            guard index >= 0, !tableColumns[index].isHidden, tableColumns[index] !== last else { return false }
+            return abs(header.headerRect(ofColumn: index).maxX - start.x) <= Self.borderSlop
+        }), fillColumn?.identifier == GraphColumn.message.identifier else { return false }
         let widths = columnWidths()
         NSCursor.resizeLeftRight.push()
         defer { NSCursor.pop() }
@@ -241,18 +306,25 @@ final class GraphTableView: NSTableView {
 
     /// Moves the border right of `border` (message or author) by `dx` from where it was at `start` (the widths at the
     /// mouse down), within the columns' minimum widths: past them the border stops.
+    /// Nothing when the border's columns are hidden.
     func applyBorderDrag(_ border: GraphColumn, dx: CGFloat, from start: [GraphColumn: CGFloat]) {
-        guard let message = tableColumn(withIdentifier: GraphColumn.message.identifier),
-              let author = tableColumn(withIdentifier: GraphColumn.author.identifier),
-              let date = tableColumn(withIdentifier: GraphColumn.date.identifier),
-              let messageStart = start[.message], let authorStart = start[.author], let dateStart = start[.date]
-        else { return }
+        func visible(_ column: GraphColumn) -> NSTableColumn? {
+            tableColumn(withIdentifier: column.identifier).flatMap { $0.isHidden ? nil : $0 }
+        }
+        guard let message = visible(.message), let messageStart = start[.message] else { return }
         switch border {
         case .message:
-            // Left makes the author column wider; the message column takes the rest (`tile`).
-            let most = authorStart + messageStart - message.minWidth
-            author.width = min(max(authorStart - dx, author.minWidth), most)
+            // Left makes the next column (author, or date when the author is hidden) wider; the message column takes
+            // the rest (`tile`).
+            guard let next = [GraphColumn.author, .date].first(where: { visible($0) != nil }),
+                  let right = visible(next), let rightStart = start[next]
+            else { return }
+            let most = rightStart + messageStart - message.minWidth
+            right.width = min(max(rightStart - dx, right.minWidth), most)
         case .author:
+            guard let author = visible(.author), let date = visible(.date), let authorStart = start[.author],
+                  let dateStart = start[.date]
+            else { return }
             let most = authorStart + dateStart - date.minWidth
             let width = min(max(authorStart + dx, author.minWidth), most)
             date.width = dateStart - (width - authorStart)
@@ -306,6 +378,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The last `GraphView.selection`; a new one is scrolled to once its rows exist.
     private var wanted: [GraphItem] = []
     private var needsScroll = false
+    /// The search's dimmed rows, and its last reveal request.
+    private var dimming = GraphDimming()
+    private var revealToken = 0
 
     private static let rowViewID = NSUserInterfaceItemIdentifier("graphRow")
     /// The pasteboard type of a dragged branch badge (its `SidebarItem`, as `local:<name>` / `remote:<name>`).
@@ -393,7 +468,21 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         self.view = view
         isUpdating = true
         updateRows(view)
+        if let table = table as? GraphTableView, table.setHiddenColumns(view.hiddenColumns) {
+            // The graph column may have stopped filling (or started): it fits its lanes again.
+            fittedLanes = -1
+            table.headerView?.needsDisplay = true
+        }
         fitGraphColumn()
+        if view.dimming.token != dimming.token {
+            dimming = view.dimming
+            refreshDimming()
+        }
+        // Before `syncSelection`, whose `scrollRowToVisible` would leave the row at the edge.
+        if view.revealToken != revealToken {
+            revealToken = view.revealToken
+            if let item = view.selection.first, let row = row(of: item) { centerIfHidden(row) }
+        }
         syncSelection(view.selection)
         isUpdating = false
         // The map may arrive after the selection (a launch selection, a new log): the selected row follows it here.
@@ -520,6 +609,44 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         table.enumerateAvailableRowViews { rowView, _ in
             if let cell = rowView.view(atColumn: column) as? GraphCellView { body(cell) }
         }
+    }
+
+    // MARK: Search
+
+    /// Esc in the table: the view's `onEscape` (closes the open search bar). False when it did nothing.
+    func escape() -> Bool {
+        view?.onEscape() ?? false
+    }
+
+    /// Redraws the text cells the table has made whose dimming changed (on screen and just around it).
+    private func refreshDimming() {
+        guard let table else { return }
+        let columns = [GraphColumn.message, .author, .date].map { table.column(withIdentifier: $0.identifier) }
+            .filter { $0 >= 0 }
+        table.enumerateAvailableRowViews { rowView, row in
+            let dimmed = self.dimming.isDimmed(row: row, in: self.log)
+            for column in columns {
+                guard let cell = rowView.view(atColumn: column) as? GraphTextCellView, cell.isDimmed != dimmed
+                else { continue }
+                cell.isDimmed = dimmed
+                cell.needsDisplay = true
+            }
+        }
+    }
+
+    /// Scrolls `row` to the middle of the rows' area when it is not wholly in it (under the column titles counts as
+    /// hidden).
+    private func centerIfHidden(_ row: Int) {
+        guard let table, let scroll = table.enclosingScrollView, row >= 0, row < table.numberOfRows else { return }
+        let clip = scroll.contentView
+        let top = clip.contentInsets.top
+        let rect = table.rect(ofRow: row)
+        let bounds = clip.bounds
+        guard rect.minY < bounds.minY + top || rect.maxY > bounds.maxY else { return }
+        var origin = bounds.origin
+        origin.y = rect.midY - (bounds.height + top) / 2
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: bounds.size)).origin)
+        scroll.reflectScrolledClipView(clip)
     }
 
     /// The rows on screen before a reload, top first, with their items; `atTop` when the list is scrolled to its top.
@@ -655,6 +782,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         case .message:
             let cell = reuse(tableView, column) { GraphTextCellView() }
             cell.detail = nil
+            cell.isDimmed = dimming.isDimmed(row: row, in: log)
             if let commit {
                 cell.text = commit.subject
                 cell.tone = .primary
@@ -680,6 +808,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             let cell = reuse(tableView, column) { GraphTextCellView() }
             cell.text = commit?.authorName ?? ""
             cell.detail = nil
+            cell.isDimmed = dimming.isDimmed(row: row, in: log)
             cell.tone = .secondary
             cell.isItalic = false
             cell.needsDisplay = true
@@ -690,6 +819,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             let date = commit?.authorDate ?? (synthetic?.kind == .stash ? stash(synthetic?.id)?.date : nil)
             cell.text = date.map(formatter.string(from:)) ?? ""
             cell.detail = nil
+            cell.isDimmed = dimming.isDimmed(row: row, in: log)
             cell.tone = .secondary
             cell.isItalic = false
             cell.needsDisplay = true
@@ -833,7 +963,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         case .stash(let hash):
             return log.synthetic.firstIndex { $0.kind == .stash && $0.id == hash }
         case .commit(let hash):
-            return log.commits.firstIndex { $0.hash == hash }.map { $0 + log.syntheticRows.count }
+            // The log's index first: a search move to a commit far down a 50,000-commit log stays instant.
+            let index = log.commitIndex[hash].flatMap {
+                log.commits.indices.contains($0) && log.commits[$0].hash == hash ? $0 : nil
+            }
+                ?? log.commits.firstIndex { $0.hash == hash }
+            return index.map { $0 + log.syntheticRows.count }
         case .worktree(let path):
             return log.synthetic.firstIndex { $0.kind == .worktreeWIP && $0.id == path }
         }
@@ -975,21 +1110,27 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let resized = notification.userInfo?["NSTableColumn"] as? NSTableColumn
         if resized?.identifier == GraphColumn.graph.identifier { forEachGraphCell { $0.needsDisplay = true } }
         guard let table, let header = table.headerView, header.resizedColumn >= 0 else { return }
-        // The user dragged the graph column's border: that is the width they want (within the lanes' bounds).
-        if table.tableColumns[header.resizedColumn].identifier == GraphColumn.graph.identifier {
+        // The user dragged the graph column's border: that is the width they want (within the lanes' bounds). Not
+        // while it fills (every text column hidden): `tile` sets that width.
+        if table.tableColumns[header.resizedColumn].identifier == GraphColumn.graph.identifier,
+           (table as? GraphTableView)?.fillColumn !== table.tableColumns[header.resizedColumn]
+        {
             wantedGraphWidth = table.tableColumns[header.resizedColumn].width
         }
         saveColumnWidths()
     }
 
     /// Saves the widths in `PrefKey.graphColumnWidths` (the message column's is ignored on restore: it fills). The
-    /// graph column saves its wanted width, not the one a repo with few lanes fits it to.
+    /// graph column saves its wanted width, not the one a repo with few lanes fits it to; another column that fills
+    /// (the message column hidden) its own width, not the stretched one. Hidden columns keep theirs.
     func saveColumnWidths() {
         guard let table else { return }
+        let graphTable = table as? GraphTableView
         let encoded = table.tableColumns
             .map { column in
                 let width = column.identifier == GraphColumn.graph.identifier
-                    ? wantedGraphWidth ?? column.width : column.width
+                    ? wantedGraphWidth ?? column.width
+                    : column === graphTable?.fillColumn ? graphTable?.fillOwnWidth ?? column.width : column.width
                 return "\(column.identifier.rawValue):\(Int(width.rounded()))"
             }
             .joined(separator: ",")
