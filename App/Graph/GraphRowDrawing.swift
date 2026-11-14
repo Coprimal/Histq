@@ -19,23 +19,55 @@ struct GraphMetrics: Equatable {
         }
     }
 
-    /// A commit's node (its avatar's circle): the same size as before the rows grew (18 pt at regular), so the lane
-    /// pitch, the graph column's default width and any saved widths still fit the lanes.
-    var nodeDiameter: CGFloat { (rowHeight * 0.56).rounded() }
+    /// A commit's node (its avatar's circle): as tall as the row less a 1 pt gap above and below, as in GitKraken, so
+    /// the lane line still shows between two stacked avatars (30 pt at regular).
+    var nodeDiameter: CGFloat { rowHeight - 2 }
     /// From one lane's center to the next: a node and a small gap.
     var laneWidth: CGFloat { nodeDiameter + 4 }
     /// Before lane 0.
     var leading: CGFloat { 6 }
-    /// A merge commit's dot.
-    var mergeDotDiameter: CGFloat { 8 }
+    /// After the last lane, clear of the band's 2 pt bar at the column's right edge.
+    var trailing: CGFloat { 6 }
+    /// A merge commit's dot: scales with the node, kept even so it centers on whole pixels.
+    var mergeDotDiameter: CGFloat { 2 * (nodeDiameter * 0.2).rounded() }
     var lineWidth: CGFloat { 2 }
-    /// The radius of a line's bend into or out of a node.
-    var bendRadius: CGFloat { 6 }
+    /// The radius of a line's bend into or out of a node: a third of the node.
+    var bendRadius: CGFloat { (nodeDiameter / 3).rounded() }
     /// The band's and the badges' inset from the row's top and bottom.
     var bandInset: CGFloat { 3 }
+    /// A stash node's box side: about 0.7 of the node, kept even so the box's edges sit on whole points.
+    var stashSide: CGFloat { 2 * (nodeDiameter * 0.35).rounded() }
 
     /// The center of `lane`, from the graph column's left edge.
     func x(lane: Int) -> CGFloat { leading + CGFloat(lane) * laneWidth + laneWidth / 2 }
+
+    /// The graph column's width that shows `lanes` lanes.
+    func width(lanes: Int) -> CGFloat { leading + CGFloat(lanes) * laneWidth + trailing }
+
+    /// How many lanes a graph column `width` wide shows, at least one (the inverse of `width(lanes:)`).
+    func visibleLanes(width: CGFloat) -> Int {
+        max(1, Int(((width - leading - trailing) / laneWidth + 0.001).rounded(.down)))
+    }
+
+    /// Where `lane` is drawn when only `visible` lanes show: a lane past them folds onto the last visible one, as in
+    /// GitKraken (the rightmost lanes fold first as the column narrows, down to lane 0).
+    func foldedLane(_ lane: Int, visible: Int) -> Int { min(lane, visible - 1) }
+
+    /// Half the drawn width of `node`'s shape with its stroke (`GraphRowDrawing.drawNode`), rounded out to a whole
+    /// point so an edge drawn there stays crisp.
+    func nodeRadius(_ node: GraphNodeStyle) -> CGFloat {
+        switch node {
+        case .commit: nodeDiameter / 2
+        case .merge: mergeDotDiameter / 2
+        // The dashed circle is inset by 1 pt and stroked 1.5 pt: it reaches 0.25 pt short of the node.
+        case .wip: nodeDiameter / 2
+        // The box is stroked 1.5 pt on its edge: 0.25 pt short of this.
+        case .stash: (stashSide / 2 + 0.75).rounded(.up)
+        }
+    }
+
+    /// The left edge of `node` on `lane`, from the graph column's left edge: where a selected row's highlight starts.
+    func nodeMinX(lane: Int, node: GraphNodeStyle) -> CGFloat { x(lane: lane) - nodeRadius(node) }
 }
 
 /// What a row's node stands for.
@@ -52,15 +84,28 @@ enum GraphNodeStyle: Equatable {
 
 @MainActor
 enum GraphRowDrawing {
-    /// Draws `row` in `bounds` (a flipped view's bounds, the graph column's cell). `hasRefs` draws the line from the
-    /// column's left edge (where the ref badges' line ends) to the node. `avatar`, when given, fills the node.
+    /// Draws `row` in `bounds` (a flipped view's bounds, the graph column's cell), clipped to it. `hasRefs` draws the
+    /// line from the column's left edge (where the ref badges' line ends) to the node, at `refsAlpha` (a ghost badge's
+    /// is faded). `avatar`, when given, fills the node.
+    ///
+    /// When `bounds` is narrower than the log's `logLanes`, the lanes past the visible ones fold onto the last visible
+    /// lane (`GraphMetrics.foldedLane`): their nodes are drawn there, over its line, and their own lines are not. A
+    /// line between a visible lane and a folded one is drawn only when its folded end is this row's node (it then ends
+    /// under the node); one that would run on down or up a folded lane is left out, so no line dangles. With a single
+    /// visible lane in a log of several, no lane line is drawn at all (GitKraken's collapsed column): the nodes' ring
+    /// colors and the band's edge bar tell the branches apart.
     static func draw(
-        _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, avatar: NSImage?, metrics: GraphMetrics,
-        in bounds: CGRect, context: CGContext
+        _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, avatar: NSImage?,
+        metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
     ) {
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.clip(to: bounds)
+
         let lanes = Palette.graphLanes
         let colorCount = lanes.count
-        let nodeX = bounds.minX + metrics.x(lane: row.lane)
+        let visible = metrics.visibleLanes(width: bounds.width)
+        let nodeX = bounds.minX + metrics.x(lane: metrics.foldedLane(row.lane, visible: visible))
         let midY = bounds.midY
         let laneColor = lanes[row.color % colorCount]
 
@@ -79,7 +124,7 @@ enum GraphRowDrawing {
         context.setLineJoin(.round)
 
         if hasRefs {
-            laneColor.setStroke()
+            (refsAlpha < 1 ? laneColor.withAlphaComponent(refsAlpha) : laneColor).setStroke()
             context.setLineWidth(1.5)
             context.move(to: CGPoint(x: bounds.minX, y: midY))
             context.addLine(to: CGPoint(x: nodeX, y: midY))
@@ -87,11 +132,15 @@ enum GraphRowDrawing {
             context.setLineWidth(metrics.lineWidth)
         }
 
-        for segment in row.top {
-            stroke(segment, top: true, metrics: metrics, bounds: bounds, context: context)
-        }
-        for segment in row.bottom {
-            stroke(segment, top: false, metrics: metrics, bounds: bounds, context: context)
+        if visible > 1 || logLanes <= 1 {
+            // A segment's edge end (top or bottom) must be on a visible lane; its center end may also be the node.
+            func shows(_ lane: Int, atCenter: Bool) -> Bool { lane < visible || (atCenter && lane == row.lane) }
+            for segment in row.top where shows(segment.from, atCenter: false) && shows(segment.to, atCenter: true) {
+                stroke(segment, top: true, visible: visible, metrics: metrics, bounds: bounds, context: context)
+            }
+            for segment in row.bottom where shows(segment.from, atCenter: true) && shows(segment.to, atCenter: false) {
+                stroke(segment, top: false, visible: visible, metrics: metrics, bounds: bounds, context: context)
+            }
         }
 
         drawNode(node, color: laneColor, band: Palette.graphLaneBands[row.color % colorCount], avatar: avatar,
@@ -99,12 +148,13 @@ enum GraphRowDrawing {
     }
 
     /// One line piece. Top half: from the row's top edge at lane `from` to the center at lane `to`. Bottom half: from
-    /// the center at `from` to the bottom edge at `to`. Bends turn with `bendRadius` (less when the lanes are closer).
+    /// the center at `from` to the bottom edge at `to`. Bends turn with `bendRadius` (less when the lanes are closer;
+    /// none when a folded node sits on the other lane: the bend is then a straight line). Lanes fold to `visible`.
     private static func stroke(
-        _ segment: GraphSegment, top: Bool, metrics: GraphMetrics, bounds: CGRect, context: CGContext
+        _ segment: GraphSegment, top: Bool, visible: Int, metrics: GraphMetrics, bounds: CGRect, context: CGContext
     ) {
-        let fromX = bounds.minX + metrics.x(lane: segment.from)
-        let toX = bounds.minX + metrics.x(lane: segment.to)
+        let fromX = bounds.minX + metrics.x(lane: metrics.foldedLane(segment.from, visible: visible))
+        let toX = bounds.minX + metrics.x(lane: metrics.foldedLane(segment.to, visible: visible))
         let midY = bounds.midY
         let radius = min(metrics.bendRadius, abs(toX - fromX), bounds.height / 2)
         Palette.graphLanes[segment.color % Palette.graphLanes.count].setStroke()
@@ -157,7 +207,7 @@ enum GraphRowDrawing {
             context.setLineDash(phase: 0, lengths: [])
             context.setLineWidth(metrics.lineWidth)
         case .stash:
-            let side = (diameter * 0.7).rounded()
+            let side = metrics.stashSide
             let rect = CGRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side)
             let path = CGPath(roundedRect: rect, cornerWidth: 3, cornerHeight: 3, transform: nil)
             Palette.graphSurface.setFill()
@@ -222,16 +272,21 @@ final class GraphCellView: NSView {
     var row: GraphRow?
     var node: GraphNodeStyle = .merge
     var hasRefs = false
+    /// The row shows only a ghost badge (`RefBadge.isGhost`): its line to the node is faded.
+    var hasGhostRef = false
     /// 5.2's avatar for the node; initials while nil.
     var avatar: NSImage?
     var metrics = GraphMetrics(density: "regular")
+    /// The most lanes a row of the loaded log draws in: with one visible lane, a log of more draws no lines.
+    var logLanes = 1
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let row, let context = NSGraphicsContext.current?.cgContext else { return }
-        GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs, avatar: avatar, metrics: metrics, in: bounds,
-                             context: context)
+        GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef,
+                             refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha, avatar: avatar, metrics: metrics,
+                             logLanes: logLanes, in: bounds, context: context)
     }
 }

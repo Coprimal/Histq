@@ -216,6 +216,10 @@ enum UITiming {
     static func layout(_ detail: String) { record("layout", detail) }
     /// A repo's whole log has been parsed and laid out: `content log-complete <commit count>`.
     static func logComplete(commitCount: Int) { record("content", "log-complete \(commitCount)") }
+    /// The graph's branch attribution (`BranchAttribution`) is computed: `content branch-map <commits> <ms>`.
+    static func branchMap(count: Int, ms: Double) {
+        record("content", "branch-map \(count) " + String(format: "%.1f", ms))
+    }
     /// The repo watcher triggered a refresh (`status`, `refs`, `log`, `status+refs`); goes to `refresh.log`.
     static func refresh(_ scope: String) { record("refresh", scope, file: "refresh.log") }
     /// DEBUG double-click probe (`DoubleClickProbe`): `click …` for a mouse-down, `dblclick …` for a seam run.

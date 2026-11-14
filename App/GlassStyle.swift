@@ -107,11 +107,15 @@ enum Palette {
     /// #238636 / #6E7681
     static let graphPullOpenFill = srgb(0x238636)
     static let graphPullDraftFill = srgb(0x6E7681)
+    /// The faded ("ghost") badge of the branch a selected commit is on, and its line to the node: drawn whole at this
+    /// opacity.
+    static let graphGhostAlpha: CGFloat = 0.4
     /// Initials on a node, dark on the bright lanes. #1C1C1E
     static let graphNodeText = srgb(0x1C1C1E)
     /// The inside of a hollow node (WIP, stash), so the lines under it do not show: the card's `surface`. #2C2C2E
     static let graphSurface = srgb(0x2C2C2E)
-    /// The selected graph rows: a neutral fill and its 1 pt edge, like `selectedFill` / `selectedBorder`.
+    /// The selected rows: a neutral fill (graph and diff rows) and its 1 pt edge (diff rows), like `selectedFill` /
+    /// `selectedBorder`.
     /// White 0.11 / white 0.10
     static let graphSelection = NSColor.white.withAlphaComponent(0.11)
     static let graphSelectionBorder = NSColor.white.withAlphaComponent(0.10)

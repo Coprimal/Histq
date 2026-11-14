@@ -37,7 +37,8 @@ enum GraphColumn: String, CaseIterable {
     var defaultWidth: CGFloat {
         switch self {
         case .refs: 116
-        case .graph: 108
+        // Four lanes at the regular row density.
+        case .graph: GraphMetrics(density: "regular").width(lanes: 4)
         case .message: 240
         case .author: 76
         // Fits "12/31/25 @ 23:00", the default format since 7.5.
@@ -97,6 +98,9 @@ struct GraphView: NSViewRepresentable {
     var pullRequests: [String: RefBadge.PullRequest] = [:]
     /// A click on a pull request chip, with its number.
     var onOpenPullRequest: @MainActor (Int) -> Void = { _ in }
+    /// The branch each commit is on (`RepoSession.branchMap`): a lone selected commit without a branch badge of its own
+    /// shows its branch's badge faded.
+    var branchMap = BranchMap()
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
@@ -123,6 +127,12 @@ struct GraphView: NSViewRepresentable {
             tableColumn.headerCell = GraphHeaderCell(textCell: column.title)
             tableColumn.minWidth = column.minWidth
             tableColumn.width = stored[column] ?? column.defaultWidth
+            #if DEBUG
+            // DEBUG `-HistqRefColumnWidth <pt>`: the Branch / Tag column's width at launch (not saved).
+            if column == .refs, let width = AppState.launchFlag("-HistqRefColumnWidth").flatMap(Double.init) {
+                tableColumn.width = max(column.minWidth, CGFloat(width))
+            }
+            #endif
             // Only the message column follows the table's width; the others keep theirs.
             tableColumn.resizingMask = column == .message ? [.autoresizingMask, .userResizingMask] : .userResizingMask
             table.addTableColumn(tableColumn)
@@ -266,10 +276,28 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var refs: Refs?
     private var pullRequests: [String: RefBadge.PullRequest] = [:]
     private var badges: [String: [RefBadge]] = [:]
+    private var branchMap = BranchMap()
+    /// The faded badge on the selected row (`RefBadge.isGhost`), with the row and commit it was made for.
+    private struct Ghost: Equatable {
+        let row: Int
+        let hash: String
+        let badge: RefBadge
+    }
+
+    private var ghost: Ghost?
     private var wipDetail: String?
     private var dateFormat: String?
     private let formatter = DateFormatter()
     private var metrics = GraphMetrics(density: "regular")
+    /// The most lanes a row of the loaded log draws in (`GraphRow.width`): the graph column is never wider than these
+    /// need (`fitGraphColumn`).
+    private var logLanes = 0
+    /// The graph column's width the user chose (saved, dragged, DEBUG `-HistqGraphWidth`): it shows as far as the log's
+    /// lanes allow, so a short first page or a log with fewer lanes never loses it.
+    private var wantedGraphWidth: CGFloat?
+    /// The lane count and metrics the graph column was last fitted to.
+    private var fittedLanes = -1
+    private var fittedMetrics: GraphMetrics?
     /// The last selection sent to `onSelect`: a click reports at mouse down (selection change) and again at mouse up
     /// (`action`), only the first goes out.
     private var reported: [GraphItem] = []
@@ -299,10 +327,32 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             self, selector: #selector(avatarsChanged(_:)), name: AvatarStore.didChange, object: nil)
         #if DEBUG
         if let request = AppState.launchFlag("-HistqColumnDrag") { debugColumnDrag(request) }
+        if let request = AppState.launchFlag("-HistqGraphWidth") { debugGraphWidth(request) }
         #endif
     }
 
     #if DEBUG
+    private static var didGraphWidth = false
+
+    /// DEBUG `-HistqGraphWidth <pt>`: once the table shows rows, asks for that graph column width, as a drag of its
+    /// border would, then fits it to the log's lanes (`fitGraphColumn` logs `graph-col …`). Once per launch.
+    private func debugGraphWidth(_ request: String) {
+        guard !Self.didGraphWidth, let width = Double(request) else { return }
+        Self.didGraphWidth = true
+        Task { @MainActor [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, let table = self.table else { return }
+                guard table.window != nil, self.rowCount > 0 else { continue }
+                try? await Task.sleep(for: .milliseconds(500))
+                self.wantedGraphWidth = CGFloat(width)
+                self.fittedLanes = -1
+                self.fitGraphColumn()
+                return
+            }
+        }
+    }
+
     private static var didColumnDrag = false
 
     /// DEBUG `-HistqColumnDrag <column>:<dx>`: once the table shows rows, moves the border right of `<column>`
@@ -343,8 +393,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         self.view = view
         isUpdating = true
         updateRows(view)
+        fitGraphColumn()
         syncSelection(view.selection)
         isUpdating = false
+        // The map may arrive after the selection (a launch selection, a new log): the selected row follows it here.
+        refreshGhost()
     }
 
     private func updateRows(_ view: GraphView) {
@@ -356,6 +409,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             metrics = newMetrics
             table.rowHeight = metrics.rowHeight
             reloadVisible = true
+            // Cells reload below; the row views stay, so their highlight follows the new node size here.
+            refreshHighlights()
         }
         if view.dateFormat != dateFormat {
             dateFormat = view.dateFormat
@@ -371,6 +426,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             badges = view.refs.map { RefBadge.badges(for: $0, pullRequests: pullRequests) } ?? [:]
             reloadVisible = true
         }
+        if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
         let wip = view.status.map(Self.wipDetail)
         if wip != wipDetail {
             wipDetail = wip
@@ -386,6 +442,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // top visible row where it was (rows above it may have come or gone) and does not scroll to the selection.
             let anchor = old.syntheticRows.count + old.commits.count > 0 ? scrollAnchor(table) : nil
             log = new
+            // A load's first pages may need fewer lanes than the whole log: the column keeps the last log's until the
+            // load completes, so it does not narrow and widen again on every refresh.
+            let lanes = Self.lanes(in: new)
+            logLanes = new.isComplete ? lanes : max(lanes, logLanes)
             table.reloadData()
             if let anchor {
                 restoreScroll(anchor, in: table)
@@ -394,6 +454,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return
         }
         log = new
+        if new.isComplete, !old.isComplete {
+            logLanes = Self.lanes(in: new)
+        } else if new.rows.count > old.rows.count {
+            logLanes = max(logLanes, Self.lanes(of: new.rows[old.rows.count...]))
+        }
         if new.commits.count > old.commits.count {
             // Later pages of the same load: the rows above are unchanged.
             let first = old.syntheticRows.count + old.commits.count
@@ -408,6 +473,54 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private var rowCount: Int { log.syntheticRows.count + log.commits.count }
+
+    /// The most lanes one of `rows` draws in.
+    private static func lanes(of rows: ArraySlice<GraphRow>) -> Int {
+        rows.reduce(0) { max($0, $1.width) }
+    }
+
+    /// The most lanes a row of `log` draws in.
+    private static func lanes(in log: LogSnapshot) -> Int {
+        max(lanes(of: log.syntheticRows[...]), lanes(of: log.rows[...]))
+    }
+
+    // MARK: Graph column width
+
+    /// Fits the graph column to the log's lanes when their count or the row density changed: at least one lane, at
+    /// most all of them (`GraphMetrics.width(lanes:)`, as in GitKraken: no empty space right of the last lane), and
+    /// the wanted width within that. AppKit's border drag stops at these bounds; the message column fills (`tile`).
+    /// The cells on screen take the new lane count. Logs `graph-col max=<w> lanes=<n> visible=<v> width=<w>`.
+    private func fitGraphColumn() {
+        guard let table, let column = table.tableColumn(withIdentifier: GraphColumn.graph.identifier),
+              logLanes != fittedLanes || metrics != fittedMetrics
+        else { return }
+        let lanesChanged = logLanes != fittedLanes
+        fittedLanes = logLanes
+        fittedMetrics = metrics
+        if wantedGraphWidth == nil { wantedGraphWidth = column.width }
+        let minWidth = metrics.width(lanes: 1)
+        // No rows yet (a load in progress): no max, the column keeps its width until the lanes are known.
+        let maxWidth = logLanes > 0 ? max(minWidth, metrics.width(lanes: logLanes)) : 10_000
+        if lanesChanged { forEachGraphCell { $0.logLanes = self.logLanes; $0.needsDisplay = true } }
+        column.maxWidth = maxWidth
+        column.minWidth = minWidth
+        let width = min(max(wantedGraphWidth ?? column.width, minWidth), maxWidth)
+        if abs(column.width - width) > 0.25 { column.width = width }
+        table.tile()
+        guard logLanes > 0 else { return }
+        UITiming.probe("graph-col", "max=\(Int(maxWidth.rounded())) lanes=\(logLanes) "
+            + "visible=\(metrics.visibleLanes(width: column.width)) width=\(Int(column.width.rounded()))")
+    }
+
+    /// Runs `body` on the graph cells the table has made (on screen and just around it).
+    private func forEachGraphCell(_ body: (GraphCellView) -> Void) {
+        guard let table else { return }
+        let column = table.column(withIdentifier: GraphColumn.graph.identifier)
+        guard column >= 0 else { return }
+        table.enumerateAvailableRowViews { rowView, _ in
+            if let cell = rowView.view(atColumn: column) as? GraphCellView { body(cell) }
+        }
+    }
 
     /// The rows on screen before a reload, top first, with their items; `atTop` when the list is scrolled to its top.
     private struct ScrollAnchor {
@@ -463,10 +576,38 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     func numberOfRows(in tableView: NSTableView) -> Int { rowCount }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        if let view = tableView.makeView(withIdentifier: Self.rowViewID, owner: nil) as? GraphRowView { return view }
-        let view = GraphRowView()
-        view.identifier = Self.rowViewID
+        let view = tableView.makeView(withIdentifier: Self.rowViewID, owner: nil) as? GraphRowView ?? {
+            let view = GraphRowView()
+            view.identifier = Self.rowViewID
+            return view
+        }()
+        view.highlightStartX = highlightStartX(forRow: row, in: tableView)
         return view
+    }
+
+    /// The left edge of `row`'s node in the table (a row view spans the table's width): the graph column's left edge
+    /// plus the node's, within the graph column.
+    private func highlightStartX(forRow row: Int, in table: NSTableView) -> CGFloat {
+        let column = table.column(withIdentifier: GraphColumn.graph.identifier)
+        guard column >= 0, row >= 0, row < rowCount else { return 0 }
+        let rect = table.rect(ofColumn: column)
+        let isSynthetic = row < log.syntheticRows.count
+        let graphRow = isSynthetic ? log.syntheticRows[row] : log.rows[row - log.syntheticRows.count]
+        let node: GraphNodeStyle = if isSynthetic {
+            log.synthetic[row].kind == .stash ? .stash : .wip
+        } else {
+            log.commits[row - log.syntheticRows.count].isMerge ? .merge : .commit(initials: "")
+        }
+        let lane = metrics.foldedLane(graphRow.lane, visible: metrics.visibleLanes(width: rect.width))
+        return min(max(rect.minX + metrics.nodeMinX(lane: lane, node: node), rect.minX), rect.maxX)
+    }
+
+    /// Moves the highlight of the rows on screen (a column resize moved the graph column, or the node size changed).
+    private func refreshHighlights() {
+        guard let table else { return }
+        table.enumerateAvailableRowViews { rowView, row in
+            (rowView as? GraphRowView)?.highlightStartX = self.highlightStartX(forRow: row, in: table)
+        }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -486,6 +627,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             } else {
                 cell.badges = commit.flatMap { badges[$0.hash] } ?? []
             }
+            let ghostBadge = ghost(at: row, commit: commit)
+            // After the row's own badges (a detached HEAD, tags): when the column is short, the hint gives way first.
+            if let ghostBadge { cell.badges.append(ghostBadge) }
+            // Every name in full, also those cut, shown as an icon or behind "+N".
+            cell.toolTip = cell.badges.isEmpty ? nil : cell.badges.map(\.name).joined(separator: "\n")
             cell.color = graphRow.color
             cell.metrics = metrics
             cell.needsDisplay = true
@@ -494,8 +640,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             let cell = reuse(tableView, column) { GraphCellView() }
             cell.row = graphRow
             cell.metrics = metrics
+            cell.logLanes = logLanes
             cell.avatar = commit.flatMap { $0.isMerge ? nil : avatar(for: $0, in: tableView) }
             cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? false
+            cell.hasGhostRef = ghost(at: row, commit: commit) != nil
             if let commit {
                 cell.node = commit.isMerge
                     ? .merge : .commit(initials: GraphRowDrawing.initials(of: commit.authorName))
@@ -599,6 +747,45 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         reportSelection()
+        // `update` refreshes it once its reload is done.
+        if !isUpdating { refreshGhost() }
+    }
+
+    // MARK: Ghost badge
+
+    /// `row`'s ghost badge, if it is the one made for this row's commit.
+    private func ghost(at row: Int, commit: Commit?) -> RefBadge? {
+        guard let ghost, ghost.row == row, ghost.hash == commit?.hash else { return nil }
+        return ghost.badge
+    }
+
+    /// The ghost the selection calls for: exactly one commit row selected, without a branch badge of its own (a tag or
+    /// a detached HEAD may be there), on a branch of the map. Its icon is the branch's kind: the laptop for a local
+    /// branch, the cloud for a remote one.
+    private func wantedGhost() -> Ghost? {
+        guard let table, table.selectedRowIndexes.count == 1, let row = table.selectedRowIndexes.first else { return nil }
+        let index = row - log.syntheticRows.count
+        guard index >= 0, index < log.commits.count else { return nil }
+        let hash = log.commits[index].hash
+        let hasBranch = badges[hash]?.contains { if case .branch = $0.kind { true } else { false } } ?? false
+        guard !hasBranch, let name = branchMap.branch(at: index, in: log) else { return nil }
+        let isLocal = refs?.localBranches.contains { $0.name == name } ?? false
+        return Ghost(row: row, hash: hash, badge: RefBadge(
+            kind: .branch(isLocal: isLocal, isRemote: !isLocal, isHead: false), name: name, isGhost: true))
+    }
+
+    /// Moves the ghost to the selection's: reloads only the refs and graph cells of the row it leaves and the row it
+    /// goes to.
+    private func refreshGhost() {
+        guard let table else { return }
+        let new = wantedGhost()
+        guard new != ghost else { return }
+        let rows = IndexSet([ghost?.row, new?.row].compactMap { $0 }.filter { $0 < table.numberOfRows })
+        ghost = new
+        let columns = IndexSet([GraphColumn.refs, .graph].map { table.column(withIdentifier: $0.identifier) }
+            .filter { $0 >= 0 })
+        guard !rows.isEmpty, !columns.isEmpty else { return }
+        table.reloadData(forRowIndexes: rows, columnIndexes: columns)
     }
 
     /// A click: the selection already changed at mouse down; a click that did not change it reports nothing new. A
@@ -781,16 +968,30 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     // MARK: Columns
 
     /// Saves the widths after the user drags a column edge (not when the table's own width changes).
+    /// Any width change (AppKit's resize, the border drags, `tile`) also moves the selected rows' highlight.
+    /// A graph column resize also redraws its cells on screen: the lanes it shows (folding) follow its width live.
     func tableViewColumnDidResize(_ notification: Notification) {
+        refreshHighlights()
+        let resized = notification.userInfo?["NSTableColumn"] as? NSTableColumn
+        if resized?.identifier == GraphColumn.graph.identifier { forEachGraphCell { $0.needsDisplay = true } }
         guard let table, let header = table.headerView, header.resizedColumn >= 0 else { return }
+        // The user dragged the graph column's border: that is the width they want (within the lanes' bounds).
+        if table.tableColumns[header.resizedColumn].identifier == GraphColumn.graph.identifier {
+            wantedGraphWidth = table.tableColumns[header.resizedColumn].width
+        }
         saveColumnWidths()
     }
 
-    /// Saves the widths in `PrefKey.graphColumnWidths` (the message column's is ignored on restore: it fills).
+    /// Saves the widths in `PrefKey.graphColumnWidths` (the message column's is ignored on restore: it fills). The
+    /// graph column saves its wanted width, not the one a repo with few lanes fits it to.
     func saveColumnWidths() {
         guard let table else { return }
         let encoded = table.tableColumns
-            .map { "\($0.identifier.rawValue):\(Int($0.width.rounded()))" }
+            .map { column in
+                let width = column.identifier == GraphColumn.graph.identifier
+                    ? wantedGraphWidth ?? column.width : column.width
+                return "\(column.identifier.rawValue):\(Int(width.rounded()))"
+            }
             .joined(separator: ",")
         Preferences.defaults.set(encoded, forKey: PrefKey.graphColumnWidths.rawValue)
     }

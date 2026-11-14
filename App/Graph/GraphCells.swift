@@ -32,6 +32,9 @@ struct RefBadge: Hashable {
     var ahead = 0
     var behind = 0
     var pullRequest: PullRequest?
+    /// The faded badge of the branch a selected commit is on (`BranchAttribution`), drawn with its line at
+    /// `Palette.graphGhostAlpha`; not a menu, drag or drop target.
+    var isGhost = false
 
     /// The badges of every labeled commit, in row order: HEAD's branch (or a detached HEAD) first, then local
     /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read (and per
@@ -66,8 +69,10 @@ struct RefBadge: Hashable {
     }
 }
 
-/// The BRANCH / TAG column's cell: the row's badges from the left, as many as fit, then "+N" for the rest; the first
-/// badge's name is truncated with "…" when even it does not fit. A line in the lane color runs from the last badge to
+/// The BRANCH / TAG column's cell: the row's badges from the left, as many as fit whole, then "+N" for the rest. When
+/// even the first does not fit whole it steps down (`Level`): its name without ↑↓ and the pull request chip, cut with
+/// "…" (at least 3 characters), with only its main icon, then that icon alone in a square; "+N" gives way before the
+/// name does. Nothing is drawn outside a badge, or past the cell. A line in the lane color runs from the last badge to
 /// the column's right edge, where the graph cell continues it to the node.
 final class RefBadgeCellView: NSView {
     var badges: [RefBadge] = []
@@ -176,6 +181,57 @@ final class RefBadgeCellView: NSView {
             + ceil((pull.text as NSString).size(withAttributes: Style.count).width)
     }
 
+    /// The one icon of a badge drawn without the others: the check (HEAD's branch, a detached HEAD), else the laptop
+    /// (local branch), the cloud (remote only), the tag or the folder (worktree).
+    private static func mainIcon(_ badge: RefBadge) -> String {
+        let (leading, trailing) = icons(badge)
+        return leading.first ?? trailing.first ?? "tag"
+    }
+
+    /// The icons drawn at `level`, on the side each has in the full badge.
+    private static func icons(_ badge: RefBadge, at level: Level) -> (leading: [String], trailing: [String]) {
+        let all = icons(badge)
+        switch level {
+        case .full, .name(allIcons: true): return all
+        case .name(allIcons: false), .icon:
+            let main = mainIcon(badge)
+            return all.leading.contains(main) ? ([main], []) : ([], [main])
+        }
+    }
+
+    /// How much of a badge is drawn.
+    fileprivate enum Level: Equatable {
+        /// Icons, name, ↑↓ and the pull request chip.
+        case full
+        /// The name (cut with "…" when short) without ↑↓ and the pull request chip; with only the main icon when
+        /// even 3 characters do not fit beside all of them.
+        case name(allIcons: Bool)
+        /// The main icon alone, in a square.
+        case icon
+    }
+
+    /// The badge's level and width in `room` points of a row whose badges are `height` high; nil when not even the
+    /// square fits.
+    private static func fit(_ badge: RefBadge, room: CGFloat, height: CGFloat) -> (level: Level, width: CGFloat)? {
+        let size = widths(badge)
+        if size.chrome + size.name <= room { return (.full, size.chrome + size.name) }
+        for allIcons in [true, false] {
+            let (leading, trailing) = icons(badge, at: .name(allIcons: allIcons))
+            let chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
+            if chrome + minimumName(badge) <= room { return (.name(allIcons: allIcons), min(room, chrome + size.name)) }
+        }
+        return height <= room ? (.icon, height) : nil
+    }
+
+    /// The least of a name shown: its first 3 characters and "…" (with a point to spare, so AppKit keeps 3), or all
+    /// of a shorter name.
+    private static func minimumName(_ badge: RefBadge) -> CGFloat {
+        let name = ceil((badge.name as NSString).size(withAttributes: Style.text).width)
+        guard badge.name.count > 3 else { return name }
+        let cut = ceil((String(badge.name.prefix(3)) + "…" as NSString).size(withAttributes: Style.text).width) + 1
+        return min(name, cut)
+    }
+
     /// The badge's width without its name, and its name's width. A pull request chip takes the place of the badge's
     /// right padding, `chipInset` from its edge.
     private static func widths(_ badge: RefBadge) -> (chrome: CGFloat, name: CGFloat) {
@@ -193,21 +249,23 @@ final class RefBadgeCellView: NSView {
 
     /// Where the badges are drawn: each shown badge's frame, the "+N" chip, and where the line to the node starts.
     private struct Layout {
-        var badges: [(index: Int, rect: CGRect)] = []
+        var badges: [(index: Int, rect: CGRect, level: Level)] = []
         var chip: (text: String, rect: CGRect)?
         var lineStart: CGFloat = 0
     }
 
-    /// The badge drawn at `point` (in this view), for its menu and its drag.
+    /// The badge drawn at `point` (in this view), for its menu and its drag; never a ghost.
     func badge(at point: CGPoint) -> RefBadge? {
         guard let layout = layout() else { return nil }
-        return layout.badges.first { $0.rect.contains(point) }.map { badges[$0.index] }
+        return layout.badges.first { $0.rect.contains(point) && bounds.contains(point) }.map { badges[$0.index] }
+            .flatMap { $0.isGhost ? nil : $0 }
     }
 
     /// The pull request whose chip is drawn at `point` (in this view): a click there opens it.
     func pullRequest(at point: CGPoint) -> RefBadge.PullRequest? {
         guard let layout = layout() else { return nil }
-        for (index, rect) in layout.badges {
+        // Only a chip that is drawn: a square or a cut name has none.
+        for (index, rect, level) in layout.badges where level == .full {
             guard let pull = badges[index].pullRequest, Self.chipRect(PullRequestChip(pull), in: rect).contains(point)
             else { continue }
             return pull
@@ -224,15 +282,31 @@ final class RefBadgeCellView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let layout = layout(), let context = NSGraphicsContext.current?.cgContext else { return }
-        for (index, rect) in layout.badges {
-            drawBadge(badges[index], in: rect, context: context)
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.clip(to: bounds)
+        for (index, rect, level) in layout.badges {
+            let badge = badges[index]
+            // A ghost is faded as a whole (one transparency layer), so its fill and text do not show through each other.
+            if badge.isGhost {
+                context.saveGState()
+                context.setAlpha(Palette.graphGhostAlpha)
+                context.beginTransparencyLayer(auxiliaryInfo: nil)
+            }
+            drawBadge(badge, in: rect, level: level, context: context)
+            if badge.isGhost {
+                context.endTransparencyLayer()
+                context.restoreGState()
+            }
         }
         if let chip = layout.chip {
             drawChip(chip.text, in: chip.rect, context: context)
         }
 
-        // The line to the node.
-        Palette.graphLanes[color % Palette.graphLanes.count].setStroke()
+        // The line to the node: faded too when only a ghost is shown.
+        let lane = Palette.graphLanes[color % Palette.graphLanes.count]
+        let onlyGhosts = layout.badges.allSatisfy { badges[$0.index].isGhost }
+        (onlyGhosts ? lane.withAlphaComponent(Palette.graphGhostAlpha) : lane).setStroke()
         context.setLineWidth(1.5)
         context.move(to: CGPoint(x: layout.lineStart, y: bounds.midY))
         context.addLine(to: CGPoint(x: bounds.maxX, y: bounds.midY))
@@ -247,26 +321,34 @@ final class RefBadgeCellView: NSView {
         let available = bounds.width - Style.leading - Style.trailing
         let sizes = badges.map(Self.widths)
 
-        // How many badges fit, keeping room for "+N" when some are left out.
+        // How many badges fit whole, keeping room for "+N" when some are left out.
         var shown = badges.count
         var total = sizes.reduce(0) { $0 + $1.chrome + $1.name } + CGFloat(badges.count - 1) * Style.gap
         while shown > 1, total + (shown < badges.count ? chipWidth(badges.count - shown) + Style.gap : 0) > available {
             total -= sizes[shown - 1].chrome + sizes[shown - 1].name + Style.gap
             shown -= 1
         }
-        // A lone first badge keeps at least `minimumName` of its name: then "+N" gives way.
-        let minimumName: CGFloat = 40
-        let showsChip = shown < badges.count
-            && (shown > 1 || available - chipWidth(badges.count - shown) - Style.gap - sizes[0].chrome >= minimumName)
-        let chip = showsChip ? chipWidth(badges.count - shown) + Style.gap : 0
-
         var x = Style.leading
-        for index in 0..<shown {
-            let room = available - (x - Style.leading) - chip
-            let width = min(sizes[index].chrome + sizes[index].name, room)
-            guard width > sizes[index].chrome + 12 || index == 0 else { break }
-            layout.badges.append((index, CGRect(x: x, y: y, width: max(width, sizes[index].chrome), height: height)))
+        func place(_ index: Int, _ level: Level, _ width: CGFloat) {
+            layout.badges.append((index, CGRect(x: x, y: y, width: width, height: height), level))
             x += width + Style.gap
+        }
+        var showsChip = shown < badges.count
+        if shown > 1 || shown == badges.count && sizes[0].chrome + sizes[0].name <= available {
+            for index in 0..<shown { place(index, .full, sizes[index].chrome + sizes[index].name) }
+        } else {
+            // Only the first badge is shown, and not with "+N" whole: "+N" stays only if the badge keeps the level it
+            // has alone (a shorter cut of its name, or its square), else it gives way.
+            let chip = showsChip ? chipWidth(badges.count - 1) + Style.gap : 0
+            let alone = Self.fit(badges[0], room: available, height: height)
+            let beside = showsChip ? Self.fit(badges[0], room: available - chip, height: height) : nil
+            showsChip = beside != nil && beside?.level == alone?.level
+            guard let fit = showsChip ? beside : alone else {
+                layout.lineStart = Style.leading
+                return layout
+            }
+            place(0, fit.level, fit.width)
+            shown = 1
         }
         if showsChip {
             let width = chipWidth(badges.count - shown)
@@ -296,7 +378,7 @@ final class RefBadgeCellView: NSView {
         context.scaleBy(x: 1, y: -1)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-        drawBadge(badge, in: rect, context: context)
+        drawBadge(badge, in: rect, level: .full, context: context)
         NSGraphicsContext.restoreGraphicsState()
         image.addRepresentation(bitmap)
         return image
@@ -315,7 +397,8 @@ final class RefBadgeCellView: NSView {
                                 withAttributes: Style.count)
     }
 
-    private func drawBadge(_ badge: RefBadge, in rect: CGRect, context: CGContext) {
+    /// Draws `badge` at `level` in `rect`, clipped to it; the name is clipped to the room between its icons.
+    private func drawBadge(_ badge: RefBadge, in rect: CGRect, level: Level, context: CGContext) {
         let path = CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil)
         if case .tag = badge.kind {
             Palette.graphTagFill.setFill()
@@ -325,15 +408,23 @@ final class RefBadgeCellView: NSView {
         // No border, not even on HEAD's branch: its check icon marks it (user, 2026-11-13).
         context.addPath(path)
         context.fillPath()
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.clip(to: rect)
 
-        let (leading, trailing) = Self.icons(badge)
+        if level == .icon {
+            let name = Self.mainIcon(badge)
+            drawIcon(name, x: rect.midX - Self.iconWidth(name) / 2, midY: rect.midY)
+            return
+        }
+        let (leading, trailing) = Self.icons(badge, at: level)
         var x = rect.minX + Style.padding
         for name in leading {
             drawIcon(name, x: x, midY: rect.midY)
             x += Self.iconWidth(name) + Style.iconGap
         }
         var trailingX = rect.maxX - Style.padding
-        if let pull = badge.pullRequest.map(PullRequestChip.init) {
+        if level == .full, let pull = badge.pullRequest.map(PullRequestChip.init) {
             let chip = Self.chipRect(pull, in: rect)
             drawPullRequestChip(pull, in: chip, context: context)
             trailingX = chip.minX - Style.iconGap
@@ -343,7 +434,7 @@ final class RefBadgeCellView: NSView {
             drawIcon(name, x: trailingX, midY: rect.midY)
             trailingX -= Style.iconGap
         }
-        if let counts = Self.aheadBehind(badge) {
+        if level == .full, let counts = Self.aheadBehind(badge) {
             let size = (counts as NSString).size(withAttributes: Style.count)
             trailingX -= ceil(size.width)
             (counts as NSString).draw(at: CGPoint(x: trailingX, y: rect.midY - size.height / 2),
@@ -352,6 +443,8 @@ final class RefBadgeCellView: NSView {
         }
         let lineHeight = ceil(Style.font.ascender - Style.font.descender + Style.font.leading)
         let textRect = CGRect(x: x, y: rect.midY - lineHeight / 2, width: max(0, trailingX - x), height: lineHeight)
+        guard textRect.width > 0 else { return }
+        context.clip(to: textRect)
         (badge.name as NSString).draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
                                       attributes: Style.text)
     }
@@ -466,20 +559,22 @@ final class GraphTextCellView: NSView {
 
 // MARK: - Row and header
 
-/// A graph row: the selection is a neutral rounded fill with a 1 pt edge (no accent, no white text), drawn under the
-/// cells so the lanes stay on top.
+/// A graph row: the selection is a neutral square fill (no accent, no white text, no edge) from the row's node to the
+/// table's right edge, full row height, as in GitKraken; drawn under the cells so the lanes stay on top.
 final class GraphRowView: NSTableRowView {
+    /// Where the selection starts, in the row's coordinates: the node's left edge (set by the table's controller on
+    /// every reuse and column resize).
+    var highlightStartX: CGFloat = 0 {
+        didSet { if highlightStartX != oldValue { needsDisplay = true } }
+    }
+
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 
     override func drawSelection(in dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 2, dy: 1)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+        let start = min(max(highlightStartX, bounds.minX), bounds.maxX)
         Palette.graphSelection.setFill()
-        path.fill()
-        Palette.graphSelectionBorder.setStroke()
-        let edge = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 5.5, yRadius: 5.5)
-        edge.lineWidth = 1
-        edge.stroke()
+        NSRect(x: start, y: bounds.minY, width: bounds.maxX - start, height: bounds.height)
+            .fill(using: .sourceOver)
     }
 }
 

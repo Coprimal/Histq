@@ -84,6 +84,24 @@ struct LogSnapshot: Sendable {
     var generation = 0
 }
 
+/// Which branch each commit of a log snapshot is on (`BranchAttribution.claims`), for the graph's faded badge:
+/// `claims[i]` is `commits[i]`'s branch, an index into `names` (-1 for none). `logGeneration` and `claims.count` tell
+/// the snapshot it was computed for; `generation` is new for each computed map: the graph compares it, never the claims.
+struct BranchMap: Sendable {
+    var names: [String] = []
+    var claims: [Int32] = []
+    var logGeneration = -1
+    var generation = 0
+
+    /// The branch of `commits[index]` in `log`, if this map was computed for `log`'s commits.
+    func branch(at index: Int, in log: LogSnapshot) -> String? {
+        guard logGeneration == log.generation, claims.count == log.commits.count, claims.indices.contains(index),
+              claims[index] >= 0
+        else { return nil }
+        return names[Int(claims[index])]
+    }
+}
+
 /// A commit or a stash as the detail panel shows it: its message, people, dates, parents and changed files (against
 /// its first parent; a stash adds the untracked files it saved).
 struct CommitDetail: Sendable {
@@ -442,6 +460,8 @@ final class RepoSession: Identifiable {
     private(set) var status: Loadable<WorkingStatus> = .idle
     private(set) var refs: Loadable<Refs> = .idle
     private(set) var log: Loadable<LogSnapshot> = .idle
+    /// The branch each commit of `log` is on, computed off the main actor for each log snapshot and refs change.
+    private(set) var branchMap = BranchMap()
     /// The merge, rebase, cherry-pick or revert in progress (the operation banner), read with every status read; nil
     /// until the first one.
     private(set) var repoState: RepoState?
@@ -540,6 +560,7 @@ final class RepoSession: Identifiable {
     /// The scope of the refresh in flight: a newer refresh cancels it and takes over its scope.
     @ObservationIgnored private var refreshScope: RefreshScope = []
     @ObservationIgnored private var logTask: Task<Void, Never>?
+    @ObservationIgnored private var branchMapTask: Task<Void, Never>?
     /// The last load's `LogSnapshot.generation`.
     @ObservationIgnored private var logGeneration = 0
     /// The stashes, read with the refs; nil until the first read. Compared with the log's to reload it when they change.
@@ -716,6 +737,7 @@ final class RepoSession: Identifiable {
         fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
+        branchMapTask?.cancel()
         worktreeTask?.cancel()
         setUpTask?.cancel()
         autoFetchTask?.cancel()
@@ -730,6 +752,7 @@ final class RepoSession: Identifiable {
         fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
+        branchMapTask?.cancel()
         worktreeTask?.cancel()
         setUpTask?.cancel()
         autoFetchTask?.cancel()
@@ -1297,7 +1320,9 @@ final class RepoSession: Identifiable {
         var moved = false
         if let newRefs {
             moved = refs.value.map { $0 != newRefs } ?? false
+            let changed = refs.value != newRefs
             refs = .loaded(newRefs)
+            if changed { updateBranchMap() }
         }
         dropVanishedSelection()
         return moved || syntheticRowsChanged
@@ -1389,6 +1414,7 @@ final class RepoSession: Identifiable {
                     guard isFirstLoad, !Task.isCancelled else { return }
                     await MainActor.run {
                         self?.log = .loaded(first)
+                        self?.updateBranchMap()
                         self?.loadWorktrees(backend)
                     }
                 }
@@ -1398,6 +1424,7 @@ final class RepoSession: Identifiable {
                 log = .loaded(snapshot)
                 logTask = nil
                 UITiming.logComplete(commitCount: snapshot.commits.count)
+                updateBranchMap()
                 if !isFirstLoad { dropVanishedSelection(previousLog: previous) }
                 // A log without a page (an unborn branch) never started the worktrees' first read.
                 if case .idle = self.worktrees { loadWorktrees(backend) }
@@ -1542,8 +1569,34 @@ final class RepoSession: Identifiable {
             guard !Task.isCancelled, let self else { return }
             log = .loaded(snapshot)
             logTask = nil
+            updateBranchMap()
             if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
         }
+    }
+
+    /// Computes `branchMap` for the log and refs now, off the main actor; a newer run cancels this one. Nothing until
+    /// both are read.
+    private func updateBranchMap() {
+        guard let log = log.value, let refs = refs.value else { return }
+        branchMapTask?.cancel()
+        branchMapTask = Task { [weak self] in
+            let (names, claims, ms) = await Self.attributeBranches(log, refs: refs)
+            guard !Task.isCancelled, let self else { return }
+            branchMap = BranchMap(
+                names: names, claims: claims, logGeneration: log.generation, generation: branchMap.generation &+ 1)
+            branchMapTask = nil
+            UITiming.branchMap(count: claims.count, ms: ms)
+        }
+    }
+
+    /// `BranchAttribution.claims` of `log` and `refs`, with how long it took (ms).
+    @concurrent
+    private nonisolated static func attributeBranches(_ log: LogSnapshot, refs: Refs) async
+        -> ([String], [Int32], Double)
+    {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let (names, claims) = BranchAttribution.claims(commits: log.commits, refs: refs, index: log.commitIndex)
+        return (names, claims, Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
     }
 
     /// `log` with `worktrees`' rows in place of its own (after the WIP row, before the stashes), every row laid out again.

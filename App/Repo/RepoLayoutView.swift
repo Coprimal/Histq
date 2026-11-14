@@ -238,7 +238,8 @@ private struct CommitListPanel: View {
                               onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
                               onOpenWorktree: { [session] path in session.openWorktree(path) },
                               pullRequests: session.github.branchPullRequests,
-                              onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) })
+                              onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },
+                              branchMap: session.branchMap)
                         .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
                 case .failed(let message):
                     Label(message, systemImage: "exclamationmark.triangle")
