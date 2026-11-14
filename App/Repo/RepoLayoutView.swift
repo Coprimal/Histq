@@ -287,10 +287,18 @@ private struct SkeletonCommitRows: View {
 
 /// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection count, or the
 /// overview cards (an unborn branch). Until it loads, the selection's cards hold skeleton rows (`PlaceholderCard`:
-/// spinner after 150 ms, the `placeholder` line); then the `content` line. All carry `session.selectDetail`.
+/// spinner after 150 ms, the `placeholder` line); then the `content` line. A commit of the log skips the placeholder:
+/// its header shows in the click's frame (`content-info`), its files once read (`content`). All carry
+/// `session.selectDetail`.
 private struct DetailPanel: View {
     let session: RepoSession
     @Environment(WindowModel.self) private var model
+
+    /// A select's content is on screen once its detail is ready (a commit's files read).
+    private struct ContentKey: Equatable {
+        let token: Int
+        let isReady: Bool
+    }
 
     var body: some View {
         Group {
@@ -303,14 +311,22 @@ private struct DetailPanel: View {
                     placeholder
                 }
             case .loaded(let detail):
+                // Keyed on the select, not on appearing: a switch between two loaded commits can keep this view. A
+                // commit's header shows before its files: `content` waits for them (`content-info` is the header's).
                 loaded(detail)
-                    .onAppear { UITiming.content(session.selectDetail) }
+                    .onChange(of: ContentKey(token: session.selectToken, isReady: detail.isReady), initial: true) {
+                        _, key in
+                        if key.isReady { UITiming.content(session.selectDetail) }
+                    }
             case .failed(let message):
                 FailedCard(message: message, path: session.url.path)
-                    .onAppear { UITiming.content("\(session.selectDetail) failed") }
+                    .onChange(of: session.selectToken, initial: true) {
+                        UITiming.content("\(session.selectDetail) failed")
+                    }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .coordinateSpace(.named(FilesLayoutLog.coordinateSpace))
     }
 
     /// The loading selection's cards. A tab that just opened shows the WIP's while its status is unknown or dirty.
@@ -319,12 +335,12 @@ private struct DetailPanel: View {
         case .wip:
             WIPPlaceholder(hasConflicts: hasConflicts)
         case .commit, .stash, .ref:
-            CommitDetailPlaceholder()
+            CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
         case .multiple(let count):
             MultipleSelectionCard(count: count)
         case .overview:
             if session.status.value?.entries.isEmpty == true {
-                CommitDetailPlaceholder()
+                CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
             } else {
                 WIPPlaceholder(hasConflicts: hasConflicts)
             }
@@ -341,7 +357,8 @@ private struct DetailPanel: View {
         case .wip:
             WIPPanel(session: session)
         case .commit(let commit):
-            CommitDetailPanel(session: session, commit: commit)
+            CommitDetailPanel(session: session, commit: commit, token: session.selectToken,
+                              timingDetail: session.selectDetail)
         case .multiple(let count):
             MultipleSelectionCard(count: count)
         case .overview:

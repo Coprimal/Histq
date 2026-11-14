@@ -91,3 +91,35 @@ struct DelayedSpinner: View {
             }
     }
 }
+
+/// Shows `content` only when `token`'s load takes over `DelayedSpinner.delay`, so a fast load never flashes it (a
+/// commit's file rows while its header already shows). Logs `spinner <detail>` when it shows. Fills the space it is
+/// offered, `content` at its top.
+struct DelayedReveal<Token: Hashable, Content: View>: View {
+    /// Changes with each select: a new one hides `content` and waits again.
+    let token: Token
+    let detail: String
+    /// Checked when the delay ends (see `DelayedSpinner.isCurrent`).
+    var isCurrent: @MainActor () -> Bool = { true }
+    @ViewBuilder let content: () -> Content
+    /// The token whose delay ended: a later token never shows the earlier one's content.
+    @State private var shownToken: Token?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Color.clear
+            .overlay(alignment: .topLeading) {
+                if shownToken == token {
+                    VStack(alignment: .leading, spacing: 0) {
+                        content()
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .task(id: token) {
+                guard (try? await Task.sleep(for: DelayedSpinner.delay)) != nil, isCurrent() else { return }
+                withAnimation(reduceMotion ? nil : Motion.standard) { shownToken = token }
+                UITiming.spinner(detail)
+            }
+    }
+}

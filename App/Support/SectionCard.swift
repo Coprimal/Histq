@@ -6,6 +6,8 @@ import SwiftUI
 enum SectionCardMetrics {
     /// Between two stacked cards.
     static let spacing: CGFloat = 8
+    /// A titled card's header row.
+    static let headerHeight: CGFloat = 32
 }
 
 /// A titled card (`GlassCard`: surface fill, 1 pt `surfaceBorder` edge, the content cards' radius). Its header holds
@@ -39,8 +41,6 @@ struct SectionCard<Content: View, Accessory: View>: View {
         self.content = content
         self.accessory = accessory
     }
-
-    private static var headerHeight: CGFloat { 32 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -104,7 +104,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, isExpanded == nil ? SettingsMetrics.cardPadding : 10)
-        .frame(height: Self.headerHeight)
+        .frame(height: SectionCardMetrics.headerHeight)
         .contentShape(Rectangle())
     }
 }

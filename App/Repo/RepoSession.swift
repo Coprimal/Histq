@@ -73,6 +73,8 @@ struct LogSnapshot: Sendable {
     var synthetic: [GraphSyntheticRow] = []
     /// The stashes of the stash rows, newest first.
     var stashes: [Stash] = []
+    /// `commits`' index of each hash, filled with the pages off the main actor: a click finds its commit's header here.
+    var commitIndex: [String: Int] = [:]
     /// The other worktrees with changes whose WIP rows are laid out (after the WIP row, before the stashes).
     var worktrees: [WorktreeInfo] = []
     /// Every page has been parsed and laid out; false while only the first pages are in.
@@ -96,8 +98,70 @@ struct CommitDetail: Sendable {
     let committerDate: Date
     let subject: String
     let body: String
-    let files: [FileChange]
+    /// Nil while they load: a header built from the log's commit (`init(header:)`) shows in the click's frame.
+    let files: [FileChange]?
     let isStash: Bool
+}
+
+extension CommitDetail {
+    /// The log's commit as a detail whose files are still loading.
+    init(header commit: Commit) {
+        self.init(
+            hash: commit.hash, parents: commit.parents, authorName: commit.authorName, authorEmail: commit.authorEmail,
+            authorDate: commit.authorDate, committerName: commit.committerName, committerEmail: commit.committerEmail,
+            committerDate: commit.committerDate, subject: commit.subject, body: commit.body, files: nil, isStash: false)
+    }
+
+    /// This detail with `files`.
+    func with(files: [FileChange]) -> CommitDetail {
+        CommitDetail(
+            hash: hash, parents: parents, authorName: authorName, authorEmail: authorEmail, authorDate: authorDate,
+            committerName: committerName, committerEmail: committerEmail, committerDate: committerDate,
+            subject: subject, body: body, files: files, isStash: isStash)
+    }
+}
+
+/// The last commit details read, `capacity` at most, the least recently used dropped first. Commits never change, so
+/// an entry is never stale.
+struct CommitDetailCache {
+    struct Key: Hashable {
+        let hash: String
+        let isStash: Bool
+    }
+
+    static let capacity = 200
+    private var entries: [Key: CommitDetail] = [:]
+    /// Least recently used first.
+    private var order: [Key] = []
+
+    /// The detail of `key`, now the most recently used.
+    mutating func value(_ key: Key) -> CommitDetail? {
+        guard let detail = entries[key] else { return nil }
+        touch(key)
+        return detail
+    }
+
+    /// Whether `key` is kept, without making it the most recently used.
+    func contains(_ key: Key) -> Bool {
+        entries[key] != nil
+    }
+
+    /// Keeps `detail` once its files are read.
+    mutating func insert(_ detail: CommitDetail) {
+        guard detail.files != nil else { return }
+        let key = Key(hash: detail.hash, isStash: detail.isStash)
+        if entries.updateValue(detail, forKey: key) != nil {
+            touch(key)
+            return
+        }
+        order.append(key)
+        if order.count > Self.capacity { entries[order.removeFirst()] = nil }
+    }
+
+    private mutating func touch(_ key: Key) {
+        if let index = order.lastIndex(of: key) { order.remove(at: index) }
+        order.append(key)
+    }
 }
 
 /// A worktree of the repo as the sidebar card and the graph show it.
@@ -224,6 +288,12 @@ final class RepoSession: Identifiable {
         /// A commit or a stash.
         case commit(CommitDetail)
         case multiple(Int)
+
+        /// False for a commit whose files are still loading.
+        var isReady: Bool {
+            if case .commit(let commit) = self { return commit.files != nil }
+            return true
+        }
     }
 
     /// A user-initiated write (the WIP panel, the action bar, the menus and dialogs), run by `perform` with the write
@@ -463,6 +533,9 @@ final class RepoSession: Identifiable {
     /// The runner and the folders, set up once (`backend()`).
     @ObservationIgnored private var setUpTask: Task<Backend, Error>?
     @ObservationIgnored private var detailTask: Task<Void, Never>?
+    /// Reads the neighbours of the commit a select settled on into `commitCache` (`prefetchNeighbours`).
+    @ObservationIgnored private var prefetchTask: Task<Void, Never>?
+    @ObservationIgnored private var commitCache = CommitDetailCache()
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     /// The scope of the refresh in flight: a newer refresh cancels it and takes over its scope.
     @ObservationIgnored private var refreshScope: RefreshScope = []
@@ -618,6 +691,10 @@ final class RepoSession: Identifiable {
         if undos + redos > 0 {
             Task { [weak self] in await self?.runLaunchHistory(undos: undos, redos: redos) }
         }
+        // `-HistqSelectWalk <n>[,<ms>]`: times switches between commits (`runSelectWalk`).
+        if let spec = AppState.launchFlag("-HistqSelectWalk") {
+            Task { [weak self] in await self?.runSelectWalk(spec) }
+        }
         // `-HistqOperation`: the operation banner's buttons on a fixture copy, once the state is read.
         if let step = AppState.launchFlag("-HistqOperation") {
             Task { [weak self] in
@@ -635,6 +712,7 @@ final class RepoSession: Identifiable {
         // A window closing drops its sessions without `close()`.
         watcher.stop()
         detailTask?.cancel()
+        prefetchTask?.cancel()
         fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
@@ -648,6 +726,7 @@ final class RepoSession: Identifiable {
     func close() {
         watcher.stop()
         detailTask?.cancel()
+        prefetchTask?.cancel()
         fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
@@ -875,20 +954,33 @@ final class RepoSession: Identifiable {
 
     // MARK: Select
 
-    /// Switches the detail to `selection` now: `detail` is `.loading` when this returns, so the placeholder shows in
-    /// the same frame as the click. The load runs in a task that a newer select cancels. Selecting the current
-    /// selection again (a tab switch) reloads it.
+    /// Switches the detail to `selection` now, in the click's frame: a commit read before shows whole from the cache
+    /// (no load), a commit of the log shows its header with its files loading, anything else is `.loading` (the
+    /// placeholder). The load runs in a task that a newer select cancels. Selecting the current selection again (a tab
+    /// switch) reloads it, unless the cache has it. A commit on screen whole prefetches its neighbours
+    /// (`prefetchNeighbours`); a newer select cancels that too.
     func select(_ selection: Selection) {
         // Another row (a parent jump, a vanished WIP) shows the graph again; a tab switch keeps the open file.
         if selection != self.selection { closeFile() }
         self.selection = selection
         selectToken &+= 1
         selectDetail = timingDetail(selection)
-        detail = .loading
         detailTask?.cancel()
+        prefetchTask?.cancel()
         let token = selectToken
         let isRestored = selectionIsRestored
         selectionIsRestored = false
+        let instant: CommitDetail? = switch selection {
+        case .commit(let hash): instantDetail(hash, isStash: false)
+        case .stash(let hash): instantDetail(hash, isStash: true)
+        default: nil
+        }
+        detail = instant.map { .loaded(.commit($0)) } ?? .loading
+        if instant?.files != nil {
+            detailTask = nil
+            if case .commit(let hash) = selection { prefetchNeighbours(of: hash) }
+            return
+        }
         detailTask = Task { [weak self] in
             await self?.loadDetail(selection, token: token, isRestored: isRestored)
         }
@@ -915,6 +1007,58 @@ final class RepoSession: Identifiable {
         }
         UITiming.select(timingDetail(selection))
         select(selection)
+    }
+
+    /// What a select can show at once: the cached detail, else (a commit, not a stash) the log's header with its files
+    /// still to load; nil when neither has it.
+    private func instantDetail(_ hash: String, isStash: Bool) -> CommitDetail? {
+        if let cached = commitCache.value(.init(hash: hash, isStash: isStash)) { return cached }
+        return isStash ? nil : logHeader(hash)
+    }
+
+    /// `readCommit` through the cache. A commit of the log reads only its files: its header is the log's.
+    private func readCommitCached(_ backend: Backend, hash: String, isStash: Bool) async throws -> CommitDetail {
+        if let cached = commitCache.value(.init(hash: hash, isStash: isStash)) { return cached }
+        let detail = if !isStash, let header = logHeader(hash) {
+            try await Self.readFiles(backend, cwd: url, of: header)
+        } else {
+            try await Self.readCommit(backend, cwd: url, hash: hash, isStash: isStash)
+        }
+        commitCache.insert(detail)
+        return detail
+    }
+
+    /// Once a select settled on commit `hash` of the log (its files on screen): reads the files of the commits just
+    /// above and below it in the log into `commitCache`, both at once (two git processes at most, off the main actor),
+    /// so the next click up or down shows whole. Skips cached commits; stashes are not in the log. Never touches
+    /// `detail` or the selection, drops its errors; the next select cancels it and its git processes.
+    private func prefetchNeighbours(of hash: String) {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        guard let log = log.value, let index = log.commitIndex[hash] else { return }
+        let headers = [index - 1, index + 1]
+            .filter { log.commits.indices.contains($0) }
+            .map { CommitDetail(header: log.commits[$0]) }
+            .filter { !commitCache.contains(.init(hash: $0.hash, isStash: false)) }
+        guard !headers.isEmpty else { return }
+        let url = url
+        prefetchTask = Task { [weak self] in
+            guard let backend = try? await self?.backend() else { return }
+            await withTaskGroup(of: CommitDetail?.self) { group in
+                for header in headers {
+                    group.addTask { try? await Self.readFiles(backend, cwd: url, of: header) }
+                }
+                for await detail in group {
+                    if let detail { self?.commitCache.insert(detail) }
+                }
+            }
+        }
+    }
+
+    /// The log's commit `hash` as a detail whose files are still loading; nil when the log does not have it.
+    private func logHeader(_ hash: String) -> CommitDetail? {
+        guard let log = log.value, let index = log.commitIndex[hash] else { return nil }
+        return CommitDetail(header: log.commits[index])
     }
 
     private func timingDetail(_ selection: Selection) -> String {
@@ -945,7 +1089,7 @@ final class RepoSession: Identifiable {
                     graphSelection = [.wip]
                     loaded = .wip
                 } else if let head = status.value?.branch.commit {
-                    let commit = try await Self.readCommit(backend, cwd: url, hash: head, isStash: false)
+                    let commit = try await readCommitCached(backend, hash: head, isStash: false)
                     guard token == selectToken else { return }
                     self.selection = .commit(head)
                     graphSelection = [.commit(head)]
@@ -961,7 +1105,7 @@ final class RepoSession: Identifiable {
                     loadLog(backend)
                 }
                 let isStash = if case .stash = selection { true } else { false }
-                loaded = .commit(try await Self.readCommit(backend, cwd: url, hash: hash, isStash: isStash))
+                loaded = .commit(try await readCommitCached(backend, hash: hash, isStash: isStash))
             case .multiple(let count):
                 loaded = .multiple(count)
             case .ref(let item):
@@ -975,10 +1119,16 @@ final class RepoSession: Identifiable {
                 if resolved != item { sidebarSelection = resolved }
                 self.selection = .commit(hash)
                 graphSelection = [.commit(hash)]
-                loaded = .commit(try await Self.readCommit(backend, cwd: url, hash: hash, isStash: false))
+                // Resolved: the cached detail, or the log's header while its files load, as a click on its row.
+                if let instant = instantDetail(hash, isStash: false) {
+                    detail = .loaded(.commit(instant))
+                    if instant.files != nil { return prefetchNeighbours(of: hash) }
+                }
+                loaded = .commit(try await readCommitCached(backend, hash: hash, isStash: false))
             }
             guard token == selectToken else { return }
             detail = .loaded(loaded)
+            if case .commit(let commit) = loaded, !commit.isStash { prefetchNeighbours(of: commit.hash) }
         } catch {
             guard token == selectToken, !Self.isCancellation(error) else { return }
             if isRestored, case .commit = selection {
@@ -1285,6 +1435,9 @@ final class RepoSession: Identifiable {
         snapshot.syntheticRows = layout.append(snapshot.synthetic)
         var isFirst = true
         for try await page in pages {
+            for (offset, commit) in page.enumerated() {
+                snapshot.commitIndex[commit.hash] = snapshot.commits.count + offset
+            }
             snapshot.commits += page
             snapshot.rows += layout.append(page)
             if isFirst {
@@ -2412,13 +2565,38 @@ final class RepoSession: Identifiable {
         }
         RepoMenus.debugLog("done history")
     }
+
+    /// DEBUG `-HistqSelectWalk <n>[,<ms>]` (timing of commit switches): once the whole log is laid out and the launch's
+    /// detail is loaded, selects the log's first n commit rows one by one (the WIP and stash rows are not commits)
+    /// through `selectGraph`, the click path, `ms` apart (default 250), then walks back up from row n-1 to row 1
+    /// (revisits), and logs `walk done`. Each select logs its own `select`, `content-info` (a commit of the log; else
+    /// `placeholder`) and `content` lines.
+    private func runSelectWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let count = parts.first ?? nil, count > 0 else {
+            return Self.logger.error("-HistqSelectWalk: expected <n>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 1 ? parts[1] : nil) ?? 250
+        for _ in 0..<600 {
+            if log.value?.isComplete == true, detail.value != nil { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        // Lets the launch's last frames go by, so the first select is not timed against them.
+        try? await Task.sleep(for: .milliseconds(500))
+        let hashes = (log.value?.commits ?? []).prefix(count).map(\.hash)
+        UITiming.walk("start \(hashes.count) every \(interval) ms")
+        for hash in hashes + hashes.dropLast().reversed() {
+            selectGraph([.commit(hash)])
+            try? await Task.sleep(for: .milliseconds(interval))
+        }
+        UITiming.walk("done")
+    }
     #endif
 
     // MARK: Commit detail
 
-    /// One commit's message, people, dates and parents (`git log -1`), then its files against its first parent
-    /// (`diff-tree --name-status`; a root commit against the empty tree, a merge against its first parent, a stash
-    /// adds its untracked files). Read environment, off the main actor.
+    /// One commit's message, people, dates and parents (`git log -1`, the log's fields: `%an`/`%cn`, the body's
+    /// trailing newlines dropped), then its files (`readFileChanges`). Read environment, off the main actor.
     @concurrent
     private nonisolated static func readCommit(_ backend: Backend, cwd: URL, hash: String, isStash: Bool) async throws
         -> CommitDetail
@@ -2434,11 +2612,34 @@ final class RepoSession: Identifiable {
         guard fields.count == 10 else { throw CommitReadError.notACommit(hash) }
         let parents = fields[1].split(separator: " ").map(String.init)
         let date = { (field: String) in Date(timeIntervalSince1970: TimeInterval(field) ?? 0) }
+        let files = try await readFileChanges(backend, cwd: cwd, env: env, hash: fields[0], parents: parents,
+                                              isStash: isStash)
+        return CommitDetail(
+            hash: fields[0], parents: parents, authorName: fields[2], authorEmail: fields[3],
+            authorDate: date(fields[4]), committerName: fields[5], committerEmail: fields[6],
+            committerDate: date(fields[7]), subject: fields[8], body: fields[9], files: files, isStash: isStash)
+    }
 
+    /// `header` (the log's commit, its files nil) with its files: `readCommit`'s second half only, one git process.
+    @concurrent
+    private nonisolated static func readFiles(_ backend: Backend, cwd: URL, of header: CommitDetail) async throws
+        -> CommitDetail
+    {
+        guard GitOperations.isObjectID(header.hash) else { throw CommitReadError.notACommit(header.hash) }
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let files = try await readFileChanges(backend, cwd: cwd, env: env, hash: header.hash, parents: header.parents,
+                                              isStash: header.isStash)
+        return header.with(files: files)
+    }
+
+    /// The files of commit `hash` against its first parent (`diff-tree --name-status`; a root commit against the empty
+    /// tree, a merge against its first parent, a stash adds its untracked files).
+    private nonisolated static func readFileChanges(
+        _ backend: Backend, cwd: URL, env: [String: String], hash: String, parents: [String], isStash: Bool
+    ) async throws -> [FileChange] {
         let fileOptions = ["diff-tree", "-r", "-z", "--name-status", "-M", "--no-ext-diff", "--no-textconv",
                            "--no-commit-id"]
-        let full = fields[0]
-        let revisions = parents.first.map { ["--end-of-options", $0, full] } ?? ["--root", "--end-of-options", full]
+        let revisions = parents.first.map { ["--end-of-options", $0, hash] } ?? ["--root", "--end-of-options", hash]
         var files = parseNameStatus(
             try await backend.runner.run(fileOptions + revisions + ["--"], cwd: cwd, env: env).stdout)
         if isStash, parents.count > 2 {
@@ -2447,10 +2648,7 @@ final class RepoSession: Identifiable {
             let known = Set(files.map(\.path))
             files += untracked.filter { !known.contains($0.path) }.map { FileChange(kind: .untracked, path: $0.path) }
         }
-        return CommitDetail(
-            hash: full, parents: parents, authorName: fields[2], authorEmail: fields[3], authorDate: date(fields[4]),
-            committerName: fields[5], committerEmail: fields[6], committerDate: date(fields[7]), subject: fields[8],
-            body: fields[9], files: files, isStash: isStash)
+        return files
     }
 
     /// `--name-status -z`: a status (`M`, `A`, `D`, `T`, `R100`, `C75`), then the path; renames and copies give the

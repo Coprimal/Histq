@@ -10,6 +10,8 @@ public struct Commit: Sendable, Hashable, Identifiable {
     public let authorName: String
     public let authorEmail: String
     public let authorDate: Date
+    public let committerName: String
+    public let committerEmail: String
     public let committerDate: Date
     public let subject: String
     public let body: String
@@ -19,13 +21,15 @@ public struct Commit: Sendable, Hashable, Identifiable {
 
     public init(
         hash: String, parents: [String], authorName: String, authorEmail: String, authorDate: Date,
-        committerDate: Date, subject: String, body: String
+        committerDate: Date, subject: String, body: String, committerName: String = "", committerEmail: String = ""
     ) {
         self.hash = hash
         self.parents = parents
         self.authorName = authorName
         self.authorEmail = authorEmail
         self.authorDate = authorDate
+        self.committerName = committerName
+        self.committerEmail = committerEmail
         self.committerDate = committerDate
         self.subject = subject
         self.body = body
@@ -43,7 +47,7 @@ public enum LogReader {
     /// last, so a stray `\x1f` in a name or message cannot shift the hash, parents or dates (see `LogParser`).
     public static let arguments = [
         "log", "-z", "--exclude=refs/stash", "--exclude=refs/notes/*", "--all", "--topo-order",
-        "--format=%H%x1f%P%x1f%at%x1f%ct%x1f%an%x1f%ae%x1f%s%x1f%b",
+        "--format=%H%x1f%P%x1f%at%x1f%ct%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%b",
     ]
 
     /// Streams the history of the repository at `cwd` in pages of up to `pageSize` commits (the last page
@@ -82,21 +86,22 @@ public enum LogReader {
 /// Turns NUL-terminated records into commits, one record each.
 enum LogParser {
     /// A record needs a hash, parents and both dates, or it is no commit. The body takes everything after
-    /// the seventh `\x1f`, so a stray `\x1f` in a name or subject only misplaces text.
+    /// the ninth `\x1f`, so a stray `\x1f` in a name, email or subject only misplaces text.
     static func parse(_ record: Substring) -> Commit? {
-        let fields = record.split(separator: "\u{1F}", maxSplits: 7, omittingEmptySubsequences: false)
+        let fields = record.split(separator: "\u{1F}", maxSplits: 9, omittingEmptySubsequences: false)
         guard fields.count >= 4, isHash(fields[0]),
               let authorTime = TimeInterval(fields[2]), let commitTime = TimeInterval(fields[3])
         else { return nil }
         let parents = fields[1].split(separator: " ")
         guard parents.allSatisfy(isHash) else { return nil }
         let text = { (index: Int) in index < fields.count ? fields[index] : "" }
-        var body = text(7)
+        var body = text(9)
         while body.last == "\n" { body.removeLast() }
         return Commit(
             hash: String(fields[0]), parents: parents.map(String.init), authorName: String(text(4)),
             authorEmail: String(text(5)), authorDate: Date(timeIntervalSince1970: authorTime),
-            committerDate: Date(timeIntervalSince1970: commitTime), subject: String(text(6)), body: String(body))
+            committerDate: Date(timeIntervalSince1970: commitTime), subject: String(text(8)), body: String(body),
+            committerName: String(text(6)), committerEmail: String(text(7)))
     }
 
     /// A full SHA-1 (40) or SHA-256 (64) object name in lowercase hex.

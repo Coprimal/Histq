@@ -123,11 +123,18 @@ timings, not by feel. In a state-dir run, Debug builds append one line per event
 
 Events: `open` (a repository opened in a tab), `select` (the selection changed), `placeholder` (the detail's
 placeholder is on screen), `spinner` (the delayed spinner faded in, only when a load takes over about 150 ms),
-`content` (the content is on screen; `content log-complete <n>` when the whole history is laid out). Watcher refreshes
-go to `build/qa/state/refresh.log` instead.
+`content` (the content is on screen, logged for every select, also between two loaded commits; for a commit, once its
+files are; `content log-complete <n>` when the whole history is laid out), `content-info` (a commit's info card is on
+screen) and `layout <detail> <state> filesTop=<y> filesBottom=<y> panelBottom=<y>` (the commit detail's Files card edges
+and the panel's height in the detail panel; `placeholder`, `pending` (the header from the log, files loading) or
+`loaded`; for each select, each state and whenever they move). Watcher refreshes go to `build/qa/state/refresh.log`
+instead.
 
 Read the file right after a `scripts/shot.sh` run (which wipes the state dir first): each `select` line must have a
-`placeholder` line at most 16 ms later, and a `content` line after it.
+`placeholder` line, or for a commit of the log a `content-info` line, then a `content` line. Over a
+`-HistqSelectWalk` in a Debug build, `content-info` comes a median of at most 16 ms after `select` (p95 at most 33 ms),
+a commit selected again (or prefetched) shows its `content` with a p95 of at most 33 ms, and a commit of the log never
+logs `placeholder` or `spinner`. A commit with many files can take two frames in Debug; Release is faster.
 
 ```sh
 cat build/qa/state/timing.log
@@ -144,6 +151,7 @@ without it a test run would read and write the state of your installed Histq.
 | `-HistqStateDir <dir>` | Keeps all files, logs and session state in `<dir>`, and uses the QA preferences suite and Keychain service (`com.math2it.histq.qa`). |
 | `-HistqBackground YES` | Never activates the app; windows stay behind others and are never key. |
 | `-HistqSelect <kind>[:<value>]` | Selects something at launch through the click path. Kinds: `tab:<n>`, `wip`, `commit:<sha>`, `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>` (`general`, `appearance`, `profiles`, `ssh`, `integrations`, `ai`, `terminal`), `sidebar:<tab>` (`branches`, `tags`, `prs`), `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
+| `-HistqSelectWalk <n>[,<ms>]` | Once the log is laid out, selects the first n commit rows through the click path, `ms` apart (default 250), then walks back up (revisits) and logs `walk done`. |
 | `-HistqWindowSize <w>x<h>` | Size of new windows, e.g. `912x520`. |
 | `-HistqTabbedWindows <n>` | Spreads the launch's repositories over n native-tab windows. |
 | `-HistqTabPosition left\|top` | Vertical tab list or native tabs, overriding the preference. |

@@ -22,7 +22,7 @@ struct LogReaderTests {
             tree \(tree)
             parent \(root)
             author \(author) <real@histq.invalid> 1700000000 +0000
-            committer Real Committer <real@histq.invalid> 1700000100 +0000
+            committer Real Committer <committer@histq.invalid> 1700000100 +0000
 
             crafted subject
 
@@ -45,6 +45,9 @@ struct LogReaderTests {
         #expect(crafted.committerDate == Date(timeIntervalSince1970: 1_700_000_100))
         if !inAuthorName {
             #expect(crafted.authorName == "Real Author")
+            #expect(crafted.authorEmail == "real@histq.invalid")
+            #expect(crafted.committerName == "Real Committer")
+            #expect(crafted.committerEmail == "committer@histq.invalid")
             #expect(crafted.subject == "crafted subject")
             #expect(crafted.body == body, "the full, unmodified body")
         }

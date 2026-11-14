@@ -209,12 +209,19 @@ enum UITiming {
     static func spinner(_ detail: String) { record("spinner", detail) }
     /// The detail's content is on screen.
     static func content(_ detail: String) { record("content", detail) }
+    /// A commit's info card (subject, people, sha, parents) is on screen; its files may still be loading.
+    static func contentInfo(_ detail: String) { record("content-info", detail) }
+    /// The commit detail's Files card in the detail panel: `layout <detail> <state> filesTop=<y> filesBottom=<y>
+    /// panelBottom=<y>`.
+    static func layout(_ detail: String) { record("layout", detail) }
     /// A repo's whole log has been parsed and laid out: `content log-complete <commit count>`.
     static func logComplete(commitCount: Int) { record("content", "log-complete \(commitCount)") }
     /// The repo watcher triggered a refresh (`status`, `refs`, `log`, `status+refs`); goes to `refresh.log`.
     static func refresh(_ scope: String) { record("refresh", scope, file: "refresh.log") }
     /// DEBUG double-click probe (`DoubleClickProbe`): `click …` for a mouse-down, `dblclick …` for a seam run.
     static func probe(_ event: String, _ detail: String) { record(event, detail) }
+    /// DEBUG `-HistqSelectWalk`: `walk start <n> every <ms> ms`, then `walk done`.
+    static func walk(_ detail: String) { record("walk", detail) }
     /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
     static func toolbar(_ detail: String) { record("toolbar", detail) }
 
