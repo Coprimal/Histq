@@ -8,7 +8,7 @@
 	<key>SUFeedURL</key>
 	<string>https://raw.githubusercontent.com/dinhanhthi/Histq/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string></string>
+	<string>mtFSMNMbgmIhck1LAIiRmgVWyH/iMJ/9nP5Xhc3X/+M=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
