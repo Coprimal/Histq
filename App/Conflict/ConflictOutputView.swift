@@ -171,6 +171,7 @@ final class ConflictOutputController: NSObject, NSTextViewDelegate {
         }
         textView.tints = Self.tints(merge)
         textView.needsDisplay = true
+        ruler?.tints = textView.tints
         ruler?.lineCount = merge.outputLines.count
         ruler?.needsDisplay = true
     }
@@ -246,8 +247,8 @@ final class ConflictOutputController: NSObject, NSTextViewDelegate {
     }
 }
 
-/// Output's text view: draws each line's band behind the text, full width, at its fixed line position. Esc does
-/// nothing here (no completion list).
+/// Output's text view: draws each line's band behind the text, full width, at its fixed line position (the ruler draws
+/// the band's start and its edge bar under the number). Esc does nothing here (no completion list).
 final class ConflictTextView: NSTextView {
     weak var controller: ConflictOutputController?
     var tints: [Int: (fill: NSColor, bar: NSColor?)] = [:]
@@ -265,18 +266,16 @@ final class ConflictTextView: NSTextView {
             let y = top + CGFloat(line) * height
             tint.fill.setFill()
             NSRect(x: 0, y: y, width: width, height: height).fill(using: .sourceOver)
-            if let bar = tint.bar {
-                bar.setFill()
-                NSRect(x: 0, y: y, width: ConflictLayout.barWidth, height: height).fill()
-            }
         }
     }
 
     override func cancelOperation(_ sender: Any?) {}
 }
 
-/// Output's line numbers, at the same fixed line positions as the text.
+/// Output's line numbers, at the same fixed line positions as the text, over the line's band (the text view's) with its
+/// edge bar at the far left.
 final class ConflictLineRuler: NSRulerView {
+    var tints: [Int: (fill: NSColor, bar: NSColor?)] = [:]
     var lineCount = 0 {
         didSet {
             let digits = max(3, String(lineCount).count)
@@ -322,6 +321,14 @@ final class ConflictLineRuler: NSRulerView {
         let numberHeight = DiffLayout.numberFont.boundingRectForFont.height
         for line in first...last {
             let y = convert(NSPoint(x: 0, y: top + CGFloat(line) * height), from: textView).y
+            if let tint = tints[line] {
+                tint.fill.setFill()
+                NSRect(x: 0, y: y, width: bounds.width, height: height).fill(using: .sourceOver)
+                if let bar = tint.bar {
+                    bar.setFill()
+                    NSRect(x: 0, y: y, width: ConflictLayout.barWidth, height: height).fill()
+                }
+            }
             NSString(string: "\(line + 1)").draw(
                 in: NSRect(x: 0, y: y + (height - numberHeight) / 2, width: ruleThickness - 8, height: height),
                 withAttributes: Self.attributes)

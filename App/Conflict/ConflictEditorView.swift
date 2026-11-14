@@ -149,7 +149,7 @@ private struct ConflictHeaderCard: View {
                     .fixedSize()
                     .disabled(isBusy || document == nil)
                     .help("Runs git mergetool on this file (the tool set in Settings, else git's merge.tool)")
-                    if document?.merge != nil {
+                    if let merge = document?.merge {
                         Button {
                             session.saveConflict()
                         } label: {
@@ -158,19 +158,22 @@ private struct ConflictHeaderCard: View {
                         }
                         .buttonStyle(RowTextButtonStyle(prominent: true))
                         .fixedSize()
-                        .disabled(isBusy || (document?.merge?.unresolvedCount ?? 1) > 0)
-                        .help((document?.merge?.unresolvedCount ?? 1) > 0
-                              ? "Resolve every conflict first: tick lines in A or B, or edit Output"
-                              : "Save the Output and mark the file resolved (git add)")
+                        .disabled(isBusy || (merge.unresolvedCount > 0 && !merge.hasResolutions))
+                        .help(merge.unresolvedCount == 0
+                              ? "Save the Output and mark the file resolved (git add)"
+                              : merge.hasResolutions
+                              ? "Save: asks how to write the conflicts left unresolved"
+                              : "Resolve a conflict first: tick lines in A or B, or edit Output")
                     }
                     Button {
-                        session.closeFile()
+                        session.closeConflictEditor()
                     } label: {
                         Image(systemName: "xmark")
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(RowIconButtonStyle())
-                    .help("Close (back to the graph; unsaved choices are lost)")
+                    .disabled(isBusy)
+                    .help("Close (back to the graph; asks first when there are unsaved choices)")
                     .accessibilityLabel("Close the conflict editor")
                     .padding(.trailing, 4)
                 }
@@ -307,6 +310,19 @@ private struct ConflictOutputCard: View {
                 HStack(spacing: 10) {
                     Text("Output")
                         .font(.body.weight(.semibold))
+                    if merge.hasResolutions {
+                        Button {
+                            session.resetConflict()
+                            sync.jump(toConflict: 0)
+                        } label: {
+                            Label("Reset", systemImage: "arrow.counterclockwise")
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(RowTextButtonStyle())
+                        .fixedSize()
+                        .disabled(session.conflictBusy != nil)
+                        .help("Drop every tick and edit: Output as loaded (the file is not changed)")
+                    }
                     Spacer(minLength: 8)
                     if count > 0 {
                         // AI (task 12.3): replaces only this conflict's Output, as a manual edit, once applied.
@@ -364,6 +380,57 @@ private struct ConflictOutputCard: View {
         .disabled(k < 0 || k >= count)
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+/// Save with conflicts left unresolved (GitKraken's prompt): Save Output writes Output as shown and marks the file
+/// resolved, Create Conflict Chunks writes git's conflict markers for the unresolved ones and leaves the file
+/// conflicted, Cancel (Escape) changes nothing. No button is one Return away: both writes change the file.
+struct ConflictSaveModal: View {
+    let session: RepoSession
+
+    var body: some View {
+        ModalCard(title: "You have unresolved conflicts", subtitle: "How would you like to proceed?",
+                  systemImage: "exclamationmark.triangle", width: 500, takesFocus: true) {
+            EmptyView()
+        } actions: {
+            Button("Cancel") { session.cancelConflictSave() }
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            Button("Create Conflict Chunks") { session.saveConflictChunks() }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true, destructive: true))
+                .help("Write Git's conflict markers for the unresolved conflicts; the file stays conflicted")
+            Button("Save Output") { session.saveConflictOutput() }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .help("Write the Output as shown (unresolved conflicts keep the base text) and mark the file resolved")
+        }
+    }
+}
+
+/// Leaving the conflict editor with unsaved ticks or edits (another file, graph row, ref or pull request, the close
+/// button): Save runs the editor's Save (the save prompt follows when conflicts are left) and then leaves, Don't Save
+/// drops them and leaves, Cancel (Escape) stays. No button is one Return away: Save writes the file, Don't Save loses
+/// the choices.
+struct ConflictLeaveModal: View {
+    let session: RepoSession
+    let fileName: String
+
+    var body: some View {
+        ModalCard(title: "Save changes to \(fileName)?",
+                  subtitle: "Your conflict resolutions will be lost if you don't save them.",
+                  systemImage: "exclamationmark.triangle", width: 460, takesFocus: true) {
+            EmptyView()
+        } actions: {
+            Button("Cancel") { session.cancelConflictLeave() }
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            Button("Don't Save") { session.leaveConflictDiscarding() }
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .help("Drop the ticks and edits, then go on")
+            Button("Save") { session.leaveConflictSaving() }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .help("Save the Output (asks how when conflicts are left), then go on")
+        }
     }
 }
 

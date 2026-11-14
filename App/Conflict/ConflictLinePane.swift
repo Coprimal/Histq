@@ -1,6 +1,6 @@
 // Pane A or B of the conflict editor: that side's whole file in an NSTableView with fixed 18 pt rows that never wrap.
-// Lines inside a conflict are tinted (A blue, B gold; stronger once ticked) and get one checkbox in the gutter (the
-// pane's header checkbox takes the whole side). ⌘C copies the selected lines whole.
+// Lines inside a conflict get one checkbox in the gutter (the pane's header checkbox takes the whole side) and, right of
+// it as in GitKraken, an edge bar and a band over the number and the text (A blue, B gold; stronger once ticked). ⌘C copies the selected lines whole.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -8,7 +8,7 @@ import SwiftUI
 /// Sizes shared by the three panes: one line height everywhere, so a scroll offset maps to a line in each pane.
 enum ConflictLayout {
     static let lineHeight: CGFloat = DiffLayout.lineHeight
-    /// The line checkbox's column.
+    /// The line checkbox's column, never tinted: a conflict line's edge bar starts right after it.
     static let checkboxWidth: CGFloat = 20
     static let barWidth: CGFloat = 3
 }
@@ -196,7 +196,8 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
     }
 }
 
-/// A line of pane A or B: its band and edge bar inside a conflict, the line checkbox, the number, the text.
+/// A line of pane A or B: the line checkbox, then inside a conflict its edge bar and band (over the number and the
+/// text), the number, the text.
 final class ConflictLineCellView: NSView {
     private let lineBox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private var number = 0
@@ -244,8 +245,9 @@ final class ConflictLineCellView: NSView {
     override func layout() {
         super.layout()
         let size = lineBox.intrinsicContentSize
-        lineBox.frame = NSRect(x: ConflictLayout.barWidth + 3, y: (bounds.height - size.height) / 2, width: size.width,
-                               height: size.height)
+        // Centered in its column, left of the edge bar.
+        lineBox.frame = NSRect(x: max(0, (ConflictLayout.checkboxWidth - size.width) / 2),
+                               y: (bounds.height - size.height) / 2, width: size.width, height: size.height)
     }
 
     @objc private func linePressed() { onToggle?() }
@@ -276,10 +278,11 @@ final class ConflictLineCellView: NSView {
             let fill = state.isTicked
                 ? (isA ? Palette.conflictATickedFill : Palette.conflictBTickedFill)
                 : (isA ? Palette.conflictAFill : Palette.conflictBFill)
+            let x = ConflictLayout.checkboxWidth
             fill.setFill()
-            bounds.fill(using: .sourceOver)
+            NSRect(x: x, y: 0, width: max(0, bounds.width - x), height: height).fill(using: .sourceOver)
             (isA ? Palette.conflictA : Palette.conflictB).setFill()
-            NSRect(x: 0, y: 0, width: ConflictLayout.barWidth, height: height).fill()
+            NSRect(x: x, y: 0, width: ConflictLayout.barWidth, height: height).fill()
         }
         let numberX = ConflictLayout.checkboxWidth + 4
         let numberY = (height - DiffLayout.numberFont.boundingRectForFont.height) / 2

@@ -391,6 +391,9 @@ final class RepoSession: Identifiable {
         /// A conflicted file resolved by the conflict editor: `content` written to it (atomically, keeping its mode),
         /// or the file deleted when nil, then `git add` so the path leaves the unmerged list.
         case resolveConflict(path: String, content: Data?)
+        /// The conflict editor's Create Conflict Chunks: `content` (git's conflict markers) written to a conflicted file
+        /// like `resolveConflict`, without `git add`, so the path stays conflicted.
+        case writeConflictChunks(path: String, content: Data)
         /// `git mergetool` on one conflicted path: `tool` is `PrefKey.mergeTool`, nil for git's configured tool. It runs
         /// the repo's configured merge command, so only on the user's click.
         case mergeTool(path: String, tool: String?)
@@ -507,11 +510,25 @@ final class RepoSession: Identifiable {
     var pullRequestForm: PullRequestForm?
     /// The AI result card (`AIResultSheet`, task 12.3): the job it shows, running or finished.
     private(set) var aiRun: AIRun?
+    /// The conflict editor's Save asks how to write the conflicts left unresolved (`ConflictSaveModal`).
+    var conflictSavePrompt = false
+    /// Leaving a conflict editor with unsaved ticks or edits asks first (`ConflictLeaveModal`): the way out waits here.
+    private(set) var conflictLeave: ConflictLeave?
+    /// The way out the leave prompt's Save took on: applied once the write succeeds, after the save prompt
+    /// (`conflictSavePrompt`) when conflicts are left; dropped when that prompt is cancelled.
+    private var pendingLeave: ConflictLeave?
+
+    /// A way out of a dirty conflict editor (another file, graph row, ref, pull request, or its close button): `name`
+    /// is the open file's name; `navigate` runs once the editor is closed (Save or Don't Save).
+    struct ConflictLeave {
+        let name: String
+        let navigate: @MainActor () -> Void
+    }
 
     /// A form, confirmation, host-key or rebase modal is open (`ModalHost` shows it over the window).
     var hasModal: Bool {
         dialog != nil || confirmation != nil || hostKeyCheck != nil || rebaseRequest != nil || worktreeForm != nil
-            || pullRequestForm != nil || aiRun != nil
+            || pullRequestForm != nil || aiRun != nil || conflictSavePrompt || conflictLeave != nil
     }
 
     /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
@@ -522,6 +539,8 @@ final class RepoSession: Identifiable {
         rebaseRequest = nil
         worktreeForm = nil
         pullRequestForm = nil
+        cancelConflictSave()
+        conflictLeave = nil
         closeAI()
     }
     /// The undo journal's next entries, read with the refs; the toolbar, the Edit menu and the palette show them.
@@ -1017,6 +1036,7 @@ final class RepoSession: Identifiable {
     /// Selects graph rows: the path a click in the graph takes (and `-HistqSelect wip|commit:<sha>`, a parent
     /// jump). One row shows its detail, several a count; none keeps the detail as it is.
     func selectGraph(_ items: [GraphItem]) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items) }) { return }
         // Another worktree's row is never a selection: a click on it opens that worktree (`openWorktree`).
         let items = items.filter { if case .worktree = $0 { false } else { true } }
         closeFile()
@@ -1202,6 +1222,7 @@ final class RepoSession: Identifiable {
     /// commit) in the same call; the graph scrolls that row into view. Before the refs are read (a launch request), the
     /// detail shows the commit placeholder at once and jumps once they are in (`Selection.ref`).
     func selectRef(_ item: SidebarItem) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectRef(item) }) { return }
         closeFile()
         selectSidebarItem(item)
         guard let refs = refs.value else { return select(.ref(item)) }
@@ -1707,6 +1728,11 @@ final class RepoSession: Identifiable {
     /// placeholder shows in the click's frame. The diff loads in a task that a newer select cancels.
     /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`).
     func selectFile(_ target: FileTarget) {
+        if isConflictDirty {
+            // The open conflict's row again keeps its ticks (a reload would drop them).
+            if target == openFile { return }
+            if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target) }) { return }
+        }
         UITiming.select(fileDetail(target))
         if openHosted != nil {
             openHosted = nil
@@ -1747,11 +1773,66 @@ final class RepoSession: Identifiable {
         conflict = .idle
         conflictBusy = nil
         conflictError = nil
+        cancelConflictSave()
+        conflictLeave = nil
+    }
+
+    /// The conflict editor's close button: shows the graph again, asking first when there are unsaved resolutions.
+    func closeConflictEditor() {
+        if asksBeforeLeavingConflict({}) { return }
+        closeFile()
+    }
+
+    /// The open conflict editor has ticks or edits that are not saved.
+    var isConflictDirty: Bool {
+        openFile?.isConflict == true && conflict.value?.merge?.hasResolutions == true
+    }
+
+    /// Leaving a dirty conflict editor (`isConflictDirty`) shows the leave prompt in this call (nothing read) and
+    /// returns true: `navigate` waits for its Save or Don't Save. False when nothing is unsaved: go on at once.
+    private func asksBeforeLeavingConflict(_ navigate: @escaping @MainActor () -> Void) -> Bool {
+        // While a merge editor with unsaved choices is being written (Save, Save Output, Create Conflict Chunks), it
+        // can't be left: the click is dropped, so a Save's own way out is never raced by a newer one. A chooser's
+        // write (nothing unsaved) never holds a click.
+        if conflictBusy != nil, isConflictDirty { return true }
+        guard isConflictDirty, let target = openFile else { return false }
+        if conflictLeave == nil {
+            conflictLeave = ConflictLeave(name: (target.path as NSString).lastPathComponent, navigate: navigate)
+        }
+        return true
+    }
+
+    /// The leave prompt's Save: the editor's Save (with conflicts left, the save prompt follows); the way out runs once
+    /// the file is written.
+    func leaveConflictSaving() {
+        guard let leave = conflictLeave else { return }
+        conflictLeave = nil
+        pendingLeave = leave
+        if saveConflict() == nil, !conflictSavePrompt { pendingLeave = nil }
+    }
+
+    /// The leave prompt's Don't Save: drops the ticks and edits and takes the way out.
+    func leaveConflictDiscarding() {
+        guard let leave = conflictLeave else { return }
+        closeFile()
+        leave.navigate()
+    }
+
+    /// The leave prompt's Cancel (Escape): the editor stays as it was.
+    func cancelConflictLeave() {
+        conflictLeave = nil
+    }
+
+    /// The save prompt's Cancel (Escape): nothing is written, and a way out waiting on the save is dropped.
+    func cancelConflictSave() {
+        conflictSavePrompt = false
+        pendingLeave = nil
     }
 
     /// Shows a pull request or an issue of the PRs tab in panel2 now (a click on its row): the open file closes and the
     /// item's placeholder shows in the click's frame; a pull request's detail starts loading in the same call.
     func selectHosted(_ item: HostedItem) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectHosted(item) }) { return }
         UITiming.select(item.timingDetail)
         closeFile()
         openHosted = item
@@ -1821,6 +1902,8 @@ final class RepoSession: Identifiable {
 
     private func startFileLoad() {
         fileToken &+= 1
+        cancelConflictSave()
+        conflictLeave = nil
         if openFile?.isConflict == true {
             conflict = .loading
             conflictBusy = nil
@@ -2085,28 +2168,93 @@ final class RepoSession: Identifiable {
         conflict = .loaded(document)
     }
 
-    /// Save: writes Output's bytes to the file, then `git add`. Only once every conflict is resolved.
-    func saveConflict() {
-        guard let merge = conflict.value?.merge, merge.unresolvedCount == 0 else { return }
-        resolveConflict(keeping: merge.outputData, title: "Saving…")
+    /// Save: with every conflict resolved, writes Output's bytes to the file, then `git add`. With conflicts left
+    /// unresolved (and at least one tick or edit), asks how to write them first (`conflictSavePrompt`). Returns the
+    /// write's task when it started one.
+    @discardableResult
+    func saveConflict() -> Task<Bool, Never>? {
+        guard conflictBusy == nil, let merge = conflict.value?.merge,
+              merge.unresolvedCount == 0 || merge.hasResolutions
+        else { return nil }
+        guard merge.unresolvedCount == 0 else {
+            conflictSavePrompt = true
+            return nil
+        }
+        return resolveConflict(keeping: merge.outputData, title: "Saving…")
+    }
+
+    /// The save prompt's Save Output: writes Output as shown (unresolved conflicts keep their base lines) and marks
+    /// the file resolved (`git add`).
+    @discardableResult
+    func saveConflictOutput() -> Task<Bool, Never>? {
+        conflictSavePrompt = false
+        guard let merge = conflict.value?.merge else { return nil }
+        return resolveConflict(keeping: merge.outputData, title: "Saving…")
+    }
+
+    /// The save prompt's Create Conflict Chunks: writes Output with git's conflict markers for every unresolved conflict
+    /// (A as `HEAD`, as git labels it, B by its pane's name), without `git add`. The file stays conflicted and the
+    /// editor loads it again from its stages.
+    @discardableResult
+    func saveConflictChunks() -> Task<Bool, Never>? {
+        conflictSavePrompt = false
+        guard let document = conflict.value, let merge = document.merge else { return nil }
+        let labels = ConflictLabels(a: "HEAD", b: document.source.labels.b)
+        let content = merge.outputDataWithConflictMarkers(labels: labels)
+        return writeConflict(title: "Saving…", reload: true) { .writeConflictChunks(path: $0, content: content) }
+    }
+
+    /// Output's Reset: drops every tick and manual edit (Output as freshly loaded), back to conflict 1. The file on
+    /// disk is untouched.
+    func resetConflict() {
+        guard conflictBusy == nil else { return }
+        updateConflict { document in
+            document.merge?.reset()
+            document.current = 0
+        }
     }
 
     /// Resolves the open conflicted file with `content` (Output, the version a chooser keeps), or deletes it when nil,
     /// through the write path; the status refresh after it closes the editor once git no longer lists the path.
-    func resolveConflict(keeping content: Data?, title: String) {
-        guard let target = openFile, target.isConflict, conflictBusy == nil else { return }
+    @discardableResult
+    func resolveConflict(keeping content: Data?, title: String) -> Task<Bool, Never>? {
+        writeConflict(title: title) { .resolveConflict(path: $0, content: content) }
+    }
+
+    /// Runs a conflict editor write (`write` of the open path) with `title` as its busy label; a failure shows in the
+    /// header card. `reload`: the editor loads the file's stages again after a successful write. The task's value says
+    /// whether the write succeeded; nil when nothing started (no conflict open, or a write in flight).
+    private func writeConflict(title: String, reload: Bool = false, _ write: (String) -> Write) -> Task<Bool, Never>? {
+        // The leave prompt's way out, if this write is its Save: taken now, applied only if the write succeeds.
+        guard let target = openFile, target.isConflict, conflictBusy == nil else { return nil }
+        let leave = pendingLeave
+        pendingLeave = nil
         conflictBusy = title
         conflictError = nil
         let token = fileToken
-        Task { [weak self] in
-            guard let self else { return }
+        let write = write(target.path)
+        return Task { [weak self] in
+            guard let self else { return false }
             do {
-                try await perform(.resolveConflict(path: target.path, content: content))
+                try await perform(write)
             } catch {
-                guard token == fileToken else { return }
+                guard token == fileToken else { return false }
                 conflictError = Self.message(for: error)
+                conflictBusy = nil
+                return false
             }
-            if token == fileToken { conflictBusy = nil }
+            guard token == fileToken else { return true }
+            conflictBusy = nil
+            if let leave {
+                closeFile()
+                leave.navigate()
+                return true
+            }
+            if reload, openFile == target {
+                conflict = .loading
+                loadConflict()
+            }
+            return true
         }
     }
 
@@ -2221,7 +2369,7 @@ final class RepoSession: Identifiable {
     }
 
     /// Apply of a suggested resolution: replaces only the target region's Output, as a manual edit, with the file's
-    /// line breaks. Never saves or stages (Save does, once every conflict is resolved). Returns why it could not, when
+    /// line breaks. Never saves or stages (Save does). Returns why it could not, when
     /// the editor no longer shows that load of that file or that conflict.
     func applyAIResolution(_ answer: String, to target: AIResolutionTarget) -> String? {
         guard case .loaded(let document) = conflict, document.loadID == target.loadID, openFile?.path == target.path,
@@ -2290,19 +2438,36 @@ final class RepoSession: Identifiable {
     /// Whether `-HistqResolve` already ran in this launch.
     private static var launchResolveDone = false
 
-    /// DEBUG `-HistqResolve A1,B2,AB3[,save]`: once, when the first conflict loads, ticks the named sides of conflict k
-    /// (1-based) through the hunk checkboxes' path, then presses Save when `save` is listed. `keep` or `delete` presses
-    /// the modify/delete chooser's Keep File or Delete File instead. A short wait lets the editor show first.
+    /// DEBUG `-HistqResolve A1,B2,AB3[,save|save-output|save-chunks|reset]`: once, when the first conflict loads, ticks
+    /// the named sides of conflict k (1-based) through the hunk checkboxes' path, then presses Save when `save` is
+    /// listed (with conflicts left, the save prompt stays open). `save-output` / `save-chunks` press Save, then the
+    /// prompt's Save Output / Create Conflict Chunks (a plain save when every conflict is resolved); `reset` presses
+    /// Output's Reset. `keep` or `delete` presses the modify/delete chooser's Keep File or Delete File instead. A short
+    /// wait lets the editor show first. The outcome goes to `operations.txt` (`resolve <step>: …`).
+    /// DEBUG `-HistqSelectAfter <path>` (with or without `-HistqResolve`): then selects that WIP file as its row's click
+    /// does, to drive the leave prompt; `leave-save`, `dontsave` or `cancel` in `-HistqResolve` press that prompt's
+    /// Save, Don't Save or Cancel after it (`leave-save-output`: Save, then the save prompt's Save Output). The open file and the prompt go to `operations.txt` (`select after …`).
     private func runLaunchResolve() {
-        guard !Self.launchResolveDone, let spec = AppState.launchFlag("-HistqResolve") else { return }
+        let spec = AppState.launchFlag("-HistqResolve")
+        let after = AppState.launchFlag("-HistqSelectAfter")
+        guard !Self.launchResolveDone, spec != nil || after != nil else { return }
         Self.launchResolveDone = true
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard let self else { return }
-            var save = false
-            for item in spec.split(separator: ",") {
-                if item == "save" {
-                    save = true
+            var save: Substring?
+            var leave: Substring?
+            for item in (spec ?? "").split(separator: ",") {
+                if item == "save" || item == "save-output" || item == "save-chunks" {
+                    save = item
+                    continue
+                }
+                if item == "leave-save" || item == "leave-save-output" || item == "dontsave" || item == "cancel" {
+                    leave = item
+                    continue
+                }
+                if item == "reset" {
+                    resetConflict()
                     continue
                 }
                 if item == "keep" || item == "delete" {
@@ -2310,8 +2475,9 @@ final class RepoSession: Identifiable {
                         Self.logger.error("-HistqResolve: \(item, privacy: .public) needs a modify/delete conflict")
                         return
                     }
-                    return resolveConflict(keeping: item == "keep" ? a ?? b : nil,
-                                           title: item == "keep" ? "Keeping…" : "Deleting…")
+                    resolveConflict(keeping: item == "keep" ? a ?? b : nil,
+                                    title: item == "keep" ? "Keeping…" : "Deleting…")
+                    return
                 }
                 let sides = item.prefix { $0 == "A" || $0 == "B" }
                 guard let k = Int(item.dropFirst(sides.count)), k >= 1 else {
@@ -2321,8 +2487,52 @@ final class RepoSession: Identifiable {
                 if sides.contains("A") { setConflictTicked(true, side: .a, conflict: k - 1) }
                 if sides.contains("B") { setConflictTicked(true, side: .b, conflict: k - 1) }
             }
-            if save { saveConflict() }
+            if let save { await runLaunchSave(String(save)) }
+            if let merge = conflict.value?.merge {
+                RepoMenus.debugLog("resolve state: unresolved=\(merge.unresolvedCount)/\(merge.conflictCount) "
+                    + "resolutions=\(merge.hasResolutions) prompt=\(conflictSavePrompt)")
+            }
+            guard let after else { return }
+            selectWIPFile(after)
+            logLaunchLeave("select after \(after)")
+            switch leave {
+            case "leave-save": leaveConflictSaving()
+            case "leave-save-output":
+                leaveConflictSaving()
+                if conflictSavePrompt, let task = saveConflictOutput() { _ = await task.value }
+            case "dontsave": leaveConflictDiscarding()
+            case "cancel": cancelConflictLeave()
+            default: return
+            }
+            logLaunchLeave("\(leave ?? "")")
         }
+    }
+
+    /// Logs the open file and the conflict prompts after a `-HistqSelectAfter` step.
+    private func logLaunchLeave(_ step: String) {
+        RepoMenus.debugLog("\(step): open=\(openFile?.path ?? "graph") leavePrompt=\(conflictLeave?.name ?? "none") "
+            + "savePrompt=\(conflictSavePrompt)")
+    }
+
+    /// `-HistqResolve`'s Save step: Save, then (with conflicts left) the prompt's button `step` names; logs the write's
+    /// outcome.
+    private func runLaunchSave(_ step: String) async {
+        var task = saveConflict()
+        if !conflictSavePrompt {
+            // Every conflict resolved: Save wrote the file.
+            guard let task else { return RepoMenus.debugLog("fail resolve \(step): Save did nothing") }
+            let ok = await task.value
+            return RepoMenus.debugLog(
+                ok ? "ok resolve \(step): saved" : "fail resolve \(step): \(conflictError ?? "stale")")
+        }
+        switch step {
+        case "save-output": task = saveConflictOutput()
+        case "save-chunks": task = saveConflictChunks()
+        default: return RepoMenus.debugLog("ok resolve \(step): prompt shown")
+        }
+        guard let task else { return RepoMenus.debugLog("fail resolve \(step): nothing written") }
+        let ok = await task.value
+        RepoMenus.debugLog(ok ? "ok resolve \(step)" : "fail resolve \(step): \(conflictError ?? "stale")")
     }
     #endif
 
@@ -2867,6 +3077,8 @@ final class RepoSession: Identifiable {
         case .resolveConflict(let path, let content):
             try writeResolution(content, to: path, cwd: cwd)
             try await ops.stage([path])
+        case .writeConflictChunks(let path, let content):
+            try writeResolution(content, to: path, cwd: cwd)
         case .mergeTool(let path, let tool):
             let runner = backend.runner
             let args = ["--literal-pathspecs", "mergetool", "--no-prompt"] + (tool.map { ["--tool=\($0)"] } ?? [])

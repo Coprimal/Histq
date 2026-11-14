@@ -90,6 +90,8 @@ public struct ThreeWayMerge: Sendable, Hashable {
     public var outputText: String { outputLines.joined() }
     /// Output's bytes, the content to save: base/A/B lines keep their original bytes.
     public var outputData: Data { Data(outputBytes.joined()) }
+    /// Any tick or manual edit (Save and Reset have something to act on).
+    public var hasResolutions: Bool { !tickedA.isEmpty || !tickedB.isEmpty || !manual.isEmpty }
 
     /// The file's line break: "\r\n" when most of A's and B's lines end with CRLF, else "\n" (a suggested resolution
     /// is converted to it).
@@ -149,6 +151,14 @@ public struct ThreeWayMerge: Sendable, Hashable {
     /// counts as resolved.
     public mutating func setManualText(_ text: String?, region index: Int) {
         manual[index] = text.map { Self.byteLines(Data($0.utf8)) }
+        render()
+    }
+
+    /// Drops every tick and manual edit: Output is as freshly loaded.
+    public mutating func reset() {
+        tickedA = []
+        tickedB = []
+        manual = [:]
         render()
     }
 
@@ -235,6 +245,34 @@ public struct ThreeWayMerge: Sendable, Hashable {
         }
         outputBytes = output
         outputLines = output.map(Self.display)
+    }
+
+    /// Output's bytes with every unresolved conflict written as git's conflict markers instead of its base lines:
+    /// `<<<<<<< <labels.a>`, A's lines, `=======`, B's lines, `>>>>>>> <labels.b>` (the marker lines end with
+    /// `lineBreak`). Resolved regions are as in Output. A line without a break gets the file's `lineBreak` when more
+    /// lines follow it, as git writes it.
+    public func outputDataWithConflictMarkers(labels: ConflictLabels) -> Data {
+        let lineBreak = Array(self.lineBreak.utf8)
+        func marker(_ text: String, _ label: String) -> [UInt8] {
+            // A label is one line: a line break in it would forge marker lines.
+            let label = label.filter { $0 != "\n" && $0 != "\r" && $0 != "\r\n" }
+            return Array((label.isEmpty ? text : "\(text) \(label)").utf8) + lineBreak
+        }
+        var lines: [[UInt8]] = []
+        for region in regions {
+            if region.isUnresolved {
+                lines.append(marker("<<<<<<<", labels.a))
+                lines += aBytes[region.a]
+                lines.append(marker("=======", ""))
+                lines += bBytes[region.b]
+                lines.append(marker(">>>>>>>", labels.b))
+            } else {
+                lines += outputBytes[region.output]
+            }
+        }
+        // As git does, a line without a break gets the file's own break when more lines follow it.
+        for i in lines.indices.dropLast() where lines[i].last != 0x0A { lines[i] += lineBreak }
+        return Data(lines.joined())
     }
 
     // MARK: Merge

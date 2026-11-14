@@ -3,7 +3,8 @@
 // `git merge-file` reports; the initial Output applies one-sided changes and shows the base for unresolved
 // conflicts; A for #1, B for #2 and A+B for #3 gives the expected file byte for byte; the line map links
 // conflict starts across panes; a manual edit survives ticks in another region; modify/delete and add/add
-// load as their own cases; a Latin-1 conflict keeps its bytes in Output; a binary conflict is never text.
+// load as their own cases; a Latin-1 conflict keeps its bytes in Output; a binary conflict is never text; unresolved
+// conflicts are written as git's markers (byte for byte as `git merge` left long.txt) and reset() undoes every choice.
 import Foundation
 import HistqCore
 import Testing
@@ -180,5 +181,54 @@ struct ThreeWayMergeTests {
         #expect(base == Data([0x89, 0x50, 0x00, 0x01]))
         #expect(a == Data([0x89, 0x50, 0x00, 0x02]) && b == Data([0x89, 0x50, 0x00, 0x03]))
         #expect(source.merge() == nil)
+    }
+}
+
+/// Create Conflict Chunks and Reset (task 5.1): the bytes written to the user's file.
+struct ThreeWayMergeChunksTests {
+    @Test("an unresolved conflict is written with git's markers while a resolved one keeps its chosen lines")
+    func conflictMarkersKeepResolvedLines() async throws {
+        let fx = try await ThreeWayMergeTests.Repo()
+        defer { fx.copy.remove() }
+        var merge = try await fx.longMerge()
+        let labels = ConflictLabels(a: "HEAD", b: "feature")
+        // Nothing resolved: the file exactly as `git merge` left it in the working tree.
+        let gitFile = try Data(contentsOf: fx.repo.appending(path: "long.txt"))
+        #expect(merge.outputDataWithConflictMarkers(labels: labels) == gitFile)
+
+        // A for #1: its chunk becomes main's line, #2 and #3 keep their markers byte for byte.
+        merge.setTicked(true, side: .a, conflict: 0)
+        let chunk1 = "<<<<<<< HEAD\nline 10: nội dung main\n=======\nline 10: nội dung feature\n>>>>>>> feature\n"
+        let text = String(decoding: gitFile, as: UTF8.self)
+        let expected = text.replacingOccurrences(of: chunk1, with: "line 10: nội dung main\n")
+        #expect(expected != text)
+        #expect(merge.outputDataWithConflictMarkers(labels: labels) == Data(expected.utf8))
+    }
+
+    @Test("a conflict on a last line without a line break gets one before each marker, and the last marker ends the file")
+    func conflictMarkersAtEndWithoutFinalBreak() {
+        let merge = ThreeWayMerge(baseLines: ["x\n", "old"], aLines: ["x\n", "a"], bLines: ["x\n", "b"])
+        #expect(merge.unresolvedCount == 1)
+        #expect(merge.outputData == Data("x\nold".utf8))
+        let data = merge.outputDataWithConflictMarkers(labels: ConflictLabels(a: "HEAD", b: "feature"))
+        #expect(data == Data("x\n<<<<<<< HEAD\na\n=======\nb\n>>>>>>> feature\n".utf8))
+    }
+
+    @Test("reset() gives back the freshly loaded output")
+    func resetGivesFreshOutput() async throws {
+        let fx = try await ThreeWayMergeTests.Repo()
+        defer { fx.copy.remove() }
+        let fresh = try await fx.longMerge()
+        #expect(!fresh.hasResolutions)
+        var merge = fresh
+        merge.setTicked(true, side: .a, conflict: 0)
+        merge.setTicked(true, side: .b, conflict: 1)
+        merge.setManualText("hand merged 70\n", region: merge.conflictRegions[2])
+        #expect(merge.hasResolutions && merge.unresolvedCount == 0)
+        merge.reset()
+        #expect(!merge.hasResolutions)
+        #expect(merge.unresolvedCount == 3)
+        #expect(merge.outputData == fresh.outputData)
+        #expect(merge == fresh)
     }
 }
