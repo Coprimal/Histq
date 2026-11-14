@@ -115,29 +115,50 @@ final class RefBadgeCellView: NSView {
 
     /// A glyph's slot width: the check keeps the small one.
     private static func iconWidth(_ name: String) -> CGFloat {
-        name == "checkmark" ? Style.icon : Style.refIcon
+        name == "checkmark.circle.fill" ? Style.icon : Style.refIcon
     }
 
     /// SF Symbols in the badge text color, drawn at a size that fills their slot (the cloud and tag are 16 pt wide at
-    /// 12 pt, scaled down to 15; at 10.5 pt they stayed 14).
+    /// 12 pt, scaled down to 15; at 10.5 pt they stayed 14). A Lucide icon (24 pt) is tinted the same color.
     @MainActor private static func symbol(_ name: String) -> NSImage? {
         if let cached = symbols[name] { return cached }
-        let configuration = NSImage.SymbolConfiguration(pointSize: name == "checkmark" ? 10.5 : 12, weight: .regular)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [Palette.graphBadgeText]))
+        if name.hasPrefix("lucide-") {
+            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map(tinted)
+            symbols[name] = image
+            return image
+        }
+        let isCheck = name == "checkmark.circle.fill"
+        var configuration = NSImage.SymbolConfiguration(pointSize: isCheck ? 10.5 : 12, weight: .regular)
+        // In the palette color the check's own layer fills in the disc; tinted whole, it stays a cutout.
+        if !isCheck {
+            configuration = configuration.applying(NSImage.SymbolConfiguration(paletteColors: [Palette.graphBadgeText]))
+        }
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration)
+            .map { isCheck ? tinted($0) : $0 }
         symbols[name] = image
         return image
     }
 
     @MainActor private static var symbols: [String: NSImage?] = [:]
 
+    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color: it would draw black.
+    private static func tinted(_ template: NSImage) -> NSImage {
+        NSImage(size: template.size, flipped: false) { rect in
+            template.draw(in: rect)
+            Palette.graphBadgeText.setFill()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
+
     private static func icons(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
         switch badge.kind {
         case .branch(let isLocal, let isRemote, let isHead):
-            return (isHead ? ["checkmark"] : [], (isLocal ? ["laptopcomputer"] : []) + (isRemote ? ["cloud"] : []))
+            return (isHead ? ["checkmark.circle.fill"] : [],
+                    (isLocal ? ["lucide-laptop-minimal"] : []) + (isRemote ? ["cloud"] : []))
         case .tag: return (["tag"], [])
-        case .head: return (["checkmark"], [])
+        case .head: return (["checkmark.circle.fill"], [])
         case .worktree: return (["folder"], [])
         }
     }

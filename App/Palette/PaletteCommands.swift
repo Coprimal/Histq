@@ -115,7 +115,7 @@ enum PaletteCommands {
         let enabled = !session.isRunning(.checkout)
         for branch in refs.localBranches where branch.name != session.currentBranch {
             snapshot.add("Checkout \(branch.name)", detail: "Local branch", section: .checkout,
-                         systemImage: "arrow.triangle.branch", enabled: enabled) {
+                         systemImage: "lucide-git-branch", enabled: enabled) {
                 RepoMenus.checkout(.local(branch.name), session)
             }
         }
@@ -195,11 +195,11 @@ enum PaletteCommands {
         guard let refs else { return }
         if let current {
             snapshot.add(RepoMenus.ref(.local(current), session), detail: "Branch \(current)",
-                         systemImage: "arrow.triangle.branch", skip: isCheckout)
+                         systemImage: "lucide-git-branch", skip: isCheckout)
         }
         for branch in refs.localBranches where branch.name != current {
             snapshot.add(RepoMenus.ref(.local(branch.name), session), detail: "Branch \(branch.name)",
-                         systemImage: "arrow.triangle.branch", submenus: false, skip: isCheckout)
+                         systemImage: "lucide-git-branch", submenus: false, skip: isCheckout)
         }
         for branch in refs.remoteBranches {
             snapshot.add(RepoMenus.ref(.remote(branch.name), session), detail: "Remote branch \(branch.name)",

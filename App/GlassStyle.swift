@@ -717,11 +717,11 @@ struct CapsuleTabs<Tab: Hashable>: View {
             if let systemImage {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 4) {
-                        Image(systemName: systemImage)
+                        IconImage(systemImage, size: 13)
                         title
                     }
                     .fixedSize()
-                    Image(systemName: systemImage)
+                    IconImage(systemImage, size: 13)
                 }
             } else {
                 title

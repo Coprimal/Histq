@@ -241,7 +241,7 @@ private struct CommandPaletteRow: View {
     var body: some View {
         Button(action: onActivate) {
             HStack(spacing: 8) {
-                Label(item.title, systemImage: item.systemImage)
+                Label { Text(item.title) } icon: { IconImage(item.systemImage) }
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .layoutPriority(1)

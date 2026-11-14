@@ -38,7 +38,7 @@ enum SidebarTab: String, CaseIterable, Hashable, Sendable {
 
     var systemImage: String {
         switch self {
-        case .branches: "arrow.triangle.branch"
+        case .branches: "lucide-git-branch"
         case .tags: "tag"
         case .prs: "arrow.triangle.pull"
         }
@@ -79,9 +79,9 @@ enum SidebarMetrics {
     /// The extra indent of a remote's branches under the remote's row: one step, as GitKraken nests them.
     static let nestedIndent: CGFloat = 16
     /// The section and row icons (GitKraken's): Local is this Mac, Remote the cloud, each branch a branch.
-    static let localImage = "laptopcomputer"
+    static let localImage = "lucide-laptop-minimal"
     static let remoteImage = "cloud"
-    static let branchImage = "arrow.triangle.branch"
+    static let branchImage = "lucide-git-branch"
     /// The Worktrees card and each worktree's row: a folder, as GitKraken draws them.
     static let worktreeImage = "folder"
 }
@@ -167,7 +167,7 @@ private struct BranchSections: View {
             ForEach(refs.localBranches, id: \.refName) { branch in
                 // As in GitKraken, the checked-out branch shows a check in place of the branch icon.
                 BranchRow(session: session, item: .local(branch.name), name: branch.name,
-                          systemImage: branch.isHead ? "checkmark" : SidebarMetrics.branchImage) {
+                          systemImage: branch.isHead ? "checkmark.circle.fill" : SidebarMetrics.branchImage) {
                     AheadBehind(branch: branch)
                 }
             }
@@ -425,7 +425,7 @@ private struct BranchRow<Trailing: View>: View {
         let selected = session.sidebarSelection == item
         HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
-            Image(systemName: systemImage)
+            IconImage(systemImage)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(name)

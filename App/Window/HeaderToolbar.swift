@@ -83,7 +83,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // An icon at the left of the title, inside the button, as the profile chip has its dot. Template symbols, so
         // they take the toolbar's text color.
         repoItem.image = NSImage(systemSymbolName: "book.closed", accessibilityDescription: "Repository")
-        branchItem.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
+        branchItem.image = NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch")
         // Kept out of the overflow menu longer than the buttons.
         repoItem.visibilityPriority = .high
         branchItem.visibilityPriority = .high
@@ -144,7 +144,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         item.label = label
         item.paletteLabel = label
         item.toolTip = label
-        item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: label)
+        item.image = NSImage.icon(systemImage, accessibilityDescription: label, size: 20)
         item.isBordered = true
         item.target = self
         // Its state is set from the model, never validated by AppKit.
@@ -279,7 +279,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         guard symbols[ObjectIdentifier(item)] != systemImage else { return }
         symbols[ObjectIdentifier(item)] = systemImage
         // A symbol this system lacks keeps the current icon rather than an empty button.
-        if let image = NSImage(systemSymbolName: systemImage, accessibilityDescription: label) { item.image = image }
+        if let image = NSImage.icon(systemImage, accessibilityDescription: label, size: 20) { item.image = image }
     }
 
     /// In place of a running action's icon (there is no spinner in a toolbar button without a custom view).
@@ -433,7 +433,7 @@ enum ToolbarAction: CaseIterable {
         case .pull: "arrow.down.to.line"
         case .push: "arrow.up.to.line"
         case .fetch: "arrow.triangle.2.circlepath"
-        case .branch: "arrow.branch"
+        case .branch: "lucide-git-branch"
         case .stash: "tray.and.arrow.down"
         case .pop: "tray.and.arrow.up"
         }

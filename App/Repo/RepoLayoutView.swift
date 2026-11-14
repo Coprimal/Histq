@@ -378,7 +378,7 @@ private struct OverviewCards: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SectionCardMetrics.spacing) {
-            SectionCard("Branch", systemImage: "arrow.triangle.branch") {
+            SectionCard("Branch", systemImage: "lucide-git-branch") {
                 VStack(alignment: .leading, spacing: 4) {
                     if let branch {
                         Text(branch)

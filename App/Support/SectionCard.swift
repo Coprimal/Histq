@@ -88,7 +88,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
                     .foregroundStyle(.secondary)
             }
             if let systemImage {
-                Image(systemName: systemImage)
+                IconImage(systemImage)
                     .foregroundStyle(.secondary)
             }
             Text(title)
