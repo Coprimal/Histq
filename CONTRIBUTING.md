@@ -35,6 +35,31 @@ validation. Pass it to every `xcodebuild` call on this project, including `-show
 Never pass `-derivedDataPath` to a local `xcodebuild`: the default DerivedData folder is the one Xcode uses, so a
 command-line build and Cmd-R in Xcode share one cache instead of building twice.
 
+**Signing**: Debug is signed with Developer ID like Release (team in `project.yml`), so Keychain items (the GitHub
+token, AI keys) and macOS grants survive rebuilds and are shared with the installed app. Without that certificate, add
+these overrides to every `xcodebuild` build:
+
+```sh
+CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=
+```
+
+An ad hoc build is signed differently on every rebuild, so macOS asks again for access to Keychain items and for its
+grants.
+
+To check that Debug and Release still sign alike (identity, team, hardened runtime, entitlements without the Debug-only
+keys, designated requirements both ways, and the Info.plist keys), build both and run
+`scripts/check-build-parity.sh`, which prints `PARITY OK` or each mismatch:
+
+```sh
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation build
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation build
+D="$(xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation -showBuildSettings 2>/dev/null | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1)/Histq.app"
+R="$(xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation -showBuildSettings 2>/dev/null | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1)/Histq.app"
+scripts/check-build-parity.sh "$D" "$R"
+```
+
+A local Release build is not the notarized export that ships; the release flow checks the export itself.
+
 ## Fixtures
 
 `scripts/make-fixtures.sh` builds deterministic git repositories for tests and QA, isolated from your own git config:
@@ -150,7 +175,14 @@ The full list, with each argument's exact behavior, is in the doc comments where
 - `Packages/HistqCore/`: a Foundation-only Swift package with everything that is not UI: running git, parsing its
   output, graph layout, diffs, three-way merge, profiles, the GitHub client and the AI clients. Tests are in
   `Packages/HistqCore/Tests/HistqCoreTests`.
-- `scripts/`: `make-fixtures.sh` and `shot.sh`.
+- `scripts/`: `make-fixtures.sh`, `shot.sh`, `check-build-parity.sh` and the release scripts.
 - `project.yml`: the XcodeGen project (source of truth for `Histq.xcodeproj`, which is generated and git-ignored).
 - `assets/`: the original logo artwork.
 - `build/` and `docs/` are git-ignored (QA output, local plans and notes).
+
+## Releasing
+
+Releases are maintainer-only. Run `/cf-ship`, which follows the project guide in
+`.coding-friend/skills/cf-ship-custom/SKILL.md` and calls `scripts/ship.sh`. The one-time setup (certificate,
+notarization profile, Sparkle key), the release steps and the rollback are in `docs/RELEASING.md`, a local file kept
+out of git.

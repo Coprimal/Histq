@@ -102,6 +102,15 @@ request. Real avatars are opt-in (Settings, Appearance). When they are on, Histq
 author's email to `gravatar.com`, and for GitHub noreply addresses and pull request authors on github.com, the GitHub
 user id or login to `avatars.githubusercontent.com`. These requests carry no token and no cookies.
 
+### Updates
+
+Histq checks for new versions with [Sparkle](https://sparkle-project.org). At most once a day, and when you choose
+"Check for Updates…" in the Histq menu, it downloads the update feed
+`https://raw.githubusercontent.com/dinhanhthi/Histq/main/appcast.xml` from GitHub. The request carries no token and
+no system profile; its User-Agent names Histq's and Sparkle's versions. When you install an offered update, its
+archive is downloaded from the project's GitHub releases. A build without Histq's update signing key
+(`SUPublicEDKey` in `App/Info.plist`) never checks: "Check for Updates…" is then disabled.
+
 ### Nothing else
 
 Apart from the cases above, nothing leaves your Mac. The terminal drawer runs your own shell locally; what you run in

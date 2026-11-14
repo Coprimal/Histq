@@ -5,5 +5,13 @@
 	<!-- Partial Info.plist: merged with the generated one (GENERATE_INFOPLIST_FILE=YES). -->
 	<key>HistqGitHubClientID</key>
 	<string>$(HISTQ_GITHUB_CLIENT_ID)</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/dinhanhthi/Histq/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string></string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

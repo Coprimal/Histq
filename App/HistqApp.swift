@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var entries: [Entry] = []
     /// The tab position the windows' minimum sizes were last set for.
     private var tabPosition = TabPosition.current
+    /// Sparkle; stays off (menu item disabled) while `SUPublicEDKey` is empty.
+    private let updater = Updater()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Histq is dark mode only, whatever the system's appearance.
@@ -82,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        updater.start()
         // Folders given at launch (`open -a Histq <repo>`) arrive in `application(_:open:)` first and already made
         // the window: they are what this launch shows. Without any, the last session comes back once read.
         guard entries.isEmpty else { return finishLaunching() }
@@ -486,8 +489,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         target()?.model.toggleTerminal()
     }
 
+    @objc func checkForUpdates(_ sender: Any?) {
+        updater.checkForUpdates()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
+        if menuItem.action == #selector(checkForUpdates(_:)) {
+            // Disabled while the updater is off (no update signing key in this build yet).
+            menuItem.toolTip = updater.canCheckForUpdates ? nil : "Updates are off: this build has no update signing key."
+            return updater.canCheckForUpdates
+        }
         if menuItem.action == #selector(toggleTerminal(_:)) {
             let session = target()?.model.actionSession
             // A pending drawer (opened with a new tab, no shell yet): the item starts the shell, it does not hide.
@@ -498,11 +510,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    /// App menu (About, Settings, Hide, Quit), File, Edit, View (the terminal) and Window menus: without Edit, text
-    /// fields lose copy and paste.
+    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal) and Window menus:
+    /// without Edit, text fields lose copy and paste.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Histq", action: #selector(showAbout), keyEquivalent: "").target = self
+        appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+            .target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
         appMenu.addItem(.separator())

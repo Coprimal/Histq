@@ -20,6 +20,10 @@ packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
     revision: 464df5207fc2432e16c9a23abe538187196daf5f
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    # Sparkle 2.10.1, pinned by commit (git ls-remote ... refs/tags/2.10.1; lightweight tag, no ^{}).
+    revision: ab7d71291238df6e0492143b120c9b696a35f603
 targets:
   "Histq":
     type: application
@@ -29,11 +33,12 @@ targets:
     dependencies:
       - package: HistqCore
       - package: SwiftTerm
+      - package: Sparkle
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.math2it.histq"
         GENERATE_INFOPLIST_FILE: YES
-        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID), merged with the generated ones.
+        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID, Sparkle's SU*), merged with the generated ones.
         INFOPLIST_FILE: App/Info.plist
         # The client ID of the GitHub OAuth App used by "Sign in with GitHub" (device flow; a public value, no secret).
         # Empty until one is registered: Settings › Integrations then shows how to set it, and paste/import still work.
