@@ -166,6 +166,28 @@ enum Palette {
     /// White 0.6
     static let syntaxPunctuation = NSColor.white.withAlphaComponent(0.6)
 
+    // MARK: Terminal (AppKit: SwiftTerm draws its own cells)
+
+    /// The terminal's background: its card's `surface`, so the cells and the card's padding read as one. #2C2C2E
+    static let terminalBackground = srgb(0x2C2C2E)
+    /// Text without a color of its own, like the diff's code. White 0.86
+    static let terminalForeground = NSColor.white.withAlphaComponent(0.86)
+    /// The caret: the accent (`AccentColor` #2F86FB).
+    static let terminalCaret = srgb(0x2F86FB)
+    /// Selected text's band, like the graph's selected rows but a step brighter so it reads over colored output.
+    /// White 0.22
+    static let terminalSelection = NSColor.white.withAlphaComponent(0.22)
+    /// The 16 ANSI colors (black, red, green, yellow, blue, magenta, cyan, white, then their bright forms), in the
+    /// graph lanes' hues so the terminal matches the rest of the window.
+    /// #1C1C1E #F0605C #5CC98A #F2B630 #5E8EF0 #E260B0 #4FB8D6 #D1D1D6
+    /// #636366 #FF7B77 #7FE0A5 #FFCB5C #82A9FF #F07FC4 #74CFE8 #FFFFFF
+    static let terminalANSI: [NSColor] = [
+        srgb(0x1C1C1E), srgb(0xF0605C), srgb(0x5CC98A), srgb(0xF2B630),
+        srgb(0x5E8EF0), srgb(0xE260B0), srgb(0x4FB8D6), srgb(0xD1D1D6),
+        srgb(0x636366), srgb(0xFF7B77), srgb(0x7FE0A5), srgb(0xFFCB5C),
+        srgb(0x82A9FF), srgb(0xF07FC4), srgb(0x74CFE8), srgb(0xFFFFFF),
+    ]
+
     /// An opaque sRGB color from `0xRRGGBB`.
     private static func srgb(_ hex: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,

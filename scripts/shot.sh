@@ -45,10 +45,13 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do
   shift
 done
 [ $# -gt 0 ] && shift  # drop `--`
-open_args+=(--args -HistqStateDir "$STATE_DIR" -HistqBackground YES)
+# -ApplePersistenceIgnoreState: a QA instance that crashed would otherwise make every later launch open AppKit's
+# "reopen windows?" alert instead of the window (the app's windows are not restorable anyway).
+open_args+=(--args -HistqStateDir "$STATE_DIR" -HistqBackground YES -ApplePersistenceIgnoreState YES)
 [ $# -gt 0 ] && open_args+=("$@")
 
-APP="$(cd "$ROOT" && xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -showBuildSettings 2>/dev/null \
+# -skipPackagePluginValidation: SwiftTerm's build-tool plugin (task 13.1) is not validated from the command line.
+APP="$(cd "$ROOT" && xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -skipPackagePluginValidation -showBuildSettings 2>/dev/null \
   | sed -n 's/^ *BUILT_PRODUCTS_DIR = //p' | head -1 || true)"
 [ -n "$APP" ] || die "BUILT_PRODUCTS_DIR not found (xcodebuild -showBuildSettings failed in $ROOT)"
 APP="$APP/Histq.app"

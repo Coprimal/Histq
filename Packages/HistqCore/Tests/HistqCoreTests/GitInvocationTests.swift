@@ -365,6 +365,49 @@ struct GitInvocationTests {
         }
     }
 
+    @Test("the terminal's shell gets none of Histq's token, git config list, loader or askpass variables")
+    func terminalProcessEnvironmentDropsHistqVariables() {
+        // What Histq's own process could carry: a token, a command-scope config list (with a stale higher index the
+        // profile's shorter list would not overwrite), a loader injection and the askpass programs of its git runs.
+        let base = [
+            "HOME": "/Users/someone", "PATH": "/usr/bin:/bin", "LANG": "fr_FR.UTF-8", "TERM": "dumb",
+            "HISTQ_GIT_TOKEN": Self.token, "HISTQ_OTHER": "histq",
+            "GIT_CONFIG_COUNT": "41", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "/tmp/evil",
+            "GIT_CONFIG_KEY_40": "core.pager", "GIT_CONFIG_VALUE_40": "/tmp/evil-pager",
+            "GIT_CONFIG_PARAMETERS": "'alias.st'='!/tmp/evil'",
+            "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+            "GIT_ASKPASS": "/usr/bin/false", "SSH_ASKPASS": "/usr/bin/false",
+        ]
+        let dropped = ["HISTQ_GIT_TOKEN", "HISTQ_OTHER", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_KEY_40",
+                       "GIT_CONFIG_VALUE_40", "DYLD_INSERT_LIBRARIES", "GIT_ASKPASS", "SSH_ASKPASS"]
+        let profile = Self.tokenProfile
+
+        let env = GitInvocation.terminalProcessEnvironment(base: base, profile: profile)
+        for key in dropped { #expect(env[key] == nil, "\(key)") }
+        #expect(!env.values.contains { $0.contains("evil") || $0.contains(Self.token) })
+        // The config list is the profile's alone, from 0.
+        #expect(Self.configEntries(env) == Self.configEntries(GitInvocation.terminalEnvironment(profile: profile)))
+        #expect(Self.configEntries(env).contains("user.name=Profile Person"))
+        #expect(Self.configEntries(env).contains("user.email=profile@histq.invalid"))
+        #expect(!Self.configEntries(env).contains { $0.hasPrefix("credential.") })
+        #expect(env["GIT_SSH_COMMAND"] == "ssh -i '/keys/id_ed25519' -o IdentitiesOnly=yes")
+        #expect(env["TERM"] == "xterm-256color")
+        #expect(env["COLORTERM"] == "truecolor")
+        // The user's own variables stay.
+        #expect(env["HOME"] == "/Users/someone")
+        #expect(env["PATH"] == "/usr/bin:/bin")
+        #expect(env["LANG"] == "fr_FR.UTF-8")
+
+        // Without a profile no config list at all: nothing of the base's survives.
+        let plain = GitInvocation.terminalProcessEnvironment(base: base, profile: nil)
+        #expect(plain.keys.filter { $0.hasPrefix("GIT_CONFIG_") || $0.hasPrefix("HISTQ_") }.isEmpty)
+        for key in dropped { #expect(plain[key] == nil, "\(key)") }
+        #expect(plain["TERM"] == "xterm-256color")
+        #expect(plain["COLORTERM"] == "truecolor")
+        #expect(!(plain["LANG"] ?? "").isEmpty)
+        #expect(!(GitInvocation.terminalProcessEnvironment(base: [:], profile: nil)["LANG"] ?? "").isEmpty)
+    }
+
     /// The network side (fetch, pull and push hooks, with and without the token) is in NetworkTokenTests.
     @Test("a commit's hooks never see the token")
     func commitHooksDoNotSeeToken() async throws {

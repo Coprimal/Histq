@@ -276,7 +276,7 @@ struct AIResultSheet: View {
             } else {
                 ScrollView {
                     previewText(text)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, minHeight: AIResultMetrics.previewHeight - 16, alignment: .topLeading)
                         .padding(.horizontal, 11)
                         .padding(.vertical, 8)
                 }

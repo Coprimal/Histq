@@ -9,24 +9,41 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// A page of GitHub HTML that fills its frame and scrolls on its own. `html` goes into the page's body: GitHub's
-/// `body_html` as GitHub sanitized it, and markup Histq built around it with every other value passed through
-/// `GitHubHTML.escape`.
-struct GitHubHTMLView: NSViewRepresentable {
+/// A page of GitHub HTML as tall as its content, at most the height it is offered, scrolling on its own past that.
+/// `html` goes into the page's body: GitHub's `body_html` as GitHub sanitized it, and markup Histq built around it with
+/// every other value passed through `GitHubHTML.escape`.
+struct GitHubHTMLView: View {
     let html: String
-    /// Called once the page has been laid out (the timing log's content line).
+    /// Called once per page, when it is laid out (the timing log's content line).
     var onLoad: @MainActor () -> Void = {}
+    /// The body's height at the current width; nil until the first page is measured.
+    @State private var contentHeight: CGFloat?
+
+    /// The frame before the first measurement, and the least the page shrinks to in a short panel.
+    private static let minimumHeight: CGFloat = 40
+
+    var body: some View {
+        GitHubHTMLPage(html: html, onLoad: onLoad) { contentHeight = $0 }
+            .frame(minHeight: Self.minimumHeight, maxHeight: max(Self.minimumHeight, contentHeight ?? 0))
+    }
+}
+
+/// The web view behind `GitHubHTMLView`: loads the page and reports the body's height after each load and width change.
+private struct GitHubHTMLPage: NSViewRepresentable {
+    let html: String
+    let onLoad: @MainActor () -> Void
+    let onHeight: @MainActor (CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> MeasuredWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.preferences.isElementFullscreenEnabled = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = MeasuredWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = false
@@ -35,21 +52,43 @@ struct GitHubHTMLView: NSViewRepresentable {
         view.underPageBackgroundColor = GitHubHTML.background
         // Hidden until the first page is laid out: no white frame before the dark stylesheet applies.
         view.alphaValue = 0
+        view.onWidthChange = { [weak coordinator = context.coordinator, weak view] in
+            guard let coordinator, let view else { return }
+            coordinator.widthChanged(view)
+        }
+        #if DEBUG
+        GitHubHTMLProbe.paintWhenOccluded(view)
+        #endif
         return view
     }
 
-    func updateNSView(_ view: WKWebView, context: Context) {
+    func updateNSView(_ view: MeasuredWebView, context: Context) {
         context.coordinator.onLoad = onLoad
+        context.coordinator.onHeight = onHeight
         guard context.coordinator.loadedHTML != html else { return }
         context.coordinator.loadedHTML = html
         context.coordinator.expectsLoad = true
+        context.coordinator.isLoaded = false
         view.loadHTMLString(GitHubHTML.document(body: html), baseURL: nil)
     }
 
-    static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
+    static func dismantleNSView(_ view: MeasuredWebView, coordinator: Coordinator) {
+        view.onWidthChange = nil
         view.stopLoading()
         view.navigationDelegate = nil
         view.uiDelegate = nil
+    }
+
+    /// Tells when its width changes: the text reflows, so the page's height must be measured again. Height changes
+    /// are not reported, since they follow the measurement itself.
+    final class MeasuredWebView: WKWebView {
+        var onWidthChange: (@MainActor () -> Void)?
+
+        override func setFrameSize(_ newSize: NSSize) {
+            let oldWidth = frame.width
+            super.setFrameSize(newSize)
+            if newSize.width != oldWidth { onWidthChange?() }
+        }
     }
 
     @MainActor
@@ -57,7 +96,18 @@ struct GitHubHTMLView: NSViewRepresentable {
         var loadedHTML: String?
         /// Set by `loadHTMLString`: the one main-frame load of `about:blank` the page may make.
         var expectsLoad = false
+        /// The current page has finished loading, so it can be measured.
+        var isLoaded = false
         var onLoad: @MainActor () -> Void = {}
+        var onHeight: @MainActor (CGFloat) -> Void = { _ in }
+        /// A measurement is running; `measureAgain` asks for one more after it (the width changed meanwhile).
+        private var isMeasuring = false
+        private var measureAgain = false
+
+        /// The body's border box, not `documentElement.scrollHeight`, which is never less than the view's own height
+        /// and so would never let the card shrink. Runs in the app's own content world (`.defaultClient`), apart
+        /// from the page, which still has no JavaScript of its own: the page's settings and policy stay as they are.
+        private static let heightScript = "Math.ceil(document.body.getBoundingClientRect().height)"
 
         func webView(
             _ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
@@ -73,9 +123,47 @@ struct GitHubHTMLView: NSViewRepresentable {
             decisionHandler(isOwnLoad ? .allow : .cancel)
         }
 
+        /// Shown and logged once the first height is known, so the card grows before the text appears. A view
+        /// without a width yet (laid out later) would measure every word on its own line: it shows at once and is
+        /// measured on its first width change.
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.alphaValue = 1
-            onLoad()
+            isLoaded = true
+            let reveal: @MainActor () -> Void = { [onLoad] in
+                webView.alphaValue = 1
+                onLoad()
+                #if DEBUG
+                GitHubHTMLProbe.run(webView)
+                #endif
+            }
+            guard webView.frame.width > 0 else { return reveal() }
+            measure(webView, then: reveal)
+        }
+
+        func widthChanged(_ webView: WKWebView) {
+            guard isLoaded, webView.frame.width > 0 else { return }
+            measure(webView)
+        }
+
+        private func measure(_ webView: WKWebView, then completion: (@MainActor () -> Void)? = nil) {
+            guard !isMeasuring else {
+                measureAgain = true
+                completion?()
+                return
+            }
+            isMeasuring = true
+            webView.evaluateJavaScript(Self.heightScript, in: nil, in: .defaultClient) { [weak self] result in
+                if case .success(let value) = result, let height = (value as? NSNumber)?.doubleValue, height > 0 {
+                    self?.onHeight(CGFloat(height))
+                    UITiming.content("html height \(Int(height)) at width \(Int(webView.frame.width))")
+                }
+                completion?()
+                guard let self else { return }
+                isMeasuring = false
+                if measureAgain {
+                    measureAgain = false
+                    widthChanged(webView)
+                }
+            }
         }
 
         /// `target="_blank"` links: the link click already went to the browser; no window is ever made.
@@ -174,3 +262,64 @@ enum GitHubHTML {
             + String(format: "%.3f", srgb.alphaComponent) + ")"
     }
 }
+
+#if DEBUG
+/// DEBUG probe of a QA run (state dir set and `-HistqHTMLProbe YES`): what the page really drew, apart from what a
+/// window capture shows. Only on that flag: counting the ink walks every pixel on the main thread. Half a second after
+/// the page shows, `takeSnapshot` renders it in the web process, whether the window is visible or not;
+/// the PNG goes to `<stateDir>/html-<n>.png` and the timing log gets `html <n> snapshot <w>x<h> ink <pixels>`
+/// (pixels that differ from the page background), the view's frame and whether AppKit reports the window visible.
+enum GitHubHTMLProbe {
+    @MainActor private static var count = 0
+
+    /// A background QA launch orders its window behind the others, so AppKit reports it occluded and WebKit never
+    /// paints the page into the window (the capture shows the view's empty background). WebKit's private occlusion
+    /// switch makes it paint as in a visible window; DEBUG background launches only, never in Release.
+    @MainActor static func paintWhenOccluded(_ view: WKWebView) {
+        guard AppState.isBackgroundLaunch else { return }
+        let selector = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        let responds = view.responds(to: selector)
+        if responds {
+            typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(view.method(for: selector), to: Setter.self)(view, selector, false)
+        }
+        UITiming.content("html occlusion-detection-off \(responds)")
+    }
+
+    @MainActor static func run(_ view: WKWebView) {
+        guard let directory = AppState.stateDirectory, AppState.launchFlag("-HistqHTMLProbe") == "YES" else { return }
+        count += 1
+        let index = count
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let visible = view.window?.occlusionState.contains(.visible) ?? false
+            let size = "\(Int(view.frame.width))x\(Int(view.frame.height))"
+            UITiming.content("html \(index) frame \(size) window-visible \(visible)")
+            view.takeSnapshot(with: nil) { image, error in
+                guard let image, let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else {
+                    return UITiming.content("html \(index) snapshot failed \(error.map { "\($0)" } ?? "")")
+                }
+                let ink = inkPixels(bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?
+                    .write(to: directory.appending(path: "html-\(index).png"))
+                UITiming.content("html \(index) snapshot \(bitmap.pixelsWide)x\(bitmap.pixelsHigh) ink \(ink)")
+            }
+        }
+    }
+
+    /// Pixels whose color is more than a few steps away from the top-left pixel (the page background).
+    private static func inkPixels(_ bitmap: NSBitmapImageRep) -> Int {
+        guard let reference = bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else { return -1 }
+        var ink = 0
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: 1) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: 1) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                let delta = abs(color.redComponent - reference.redComponent)
+                    + abs(color.greenComponent - reference.greenComponent)
+                    + abs(color.blueComponent - reference.blueComponent)
+                if delta > 0.06 { ink += 1 }
+            }
+        }
+        return ink
+    }
+}
+#endif

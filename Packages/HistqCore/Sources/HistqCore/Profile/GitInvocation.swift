@@ -226,6 +226,37 @@ public enum GitInvocation {
         return env
     }
 
+    /// The whole environment of a terminal's shell: `base` (Histq's own, the user's launchd environment) without what
+    /// belongs to Histq or to a git command it runs, then the terminal's type, a UTF-8 `LANG` when there is none, and
+    /// `terminalEnvironment(profile:)`. No `HISTQ_GIT_TOKEN`, credential helper or askpass program ever reaches it.
+    public static func terminalProcessEnvironment(base: [String: String], profile: Profile?) -> [String: String] {
+        var env = base.filter { !isHistqOwned($0.key) }
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
+        if env["LANG"]?.isEmpty ?? true { env["LANG"] = defaultLanguage() }
+        env.merge(terminalEnvironment(profile: profile)) { _, profileValue in profileValue }
+        return env.filter { !$0.key.hasPrefix("HISTQ_") }
+    }
+
+    /// Variables of Histq's process, not the user's: the token variable, a git command's config list (the profile's
+    /// replaces it from 0), the askpass programs a git command gets (`/usr/bin/false`, which would make every
+    /// password prompt in the shell fail), the launch's loader and bundle identity.
+    private static func isHistqOwned(_ key: String) -> Bool {
+        key.hasPrefix("HISTQ_") || key == "GIT_CONFIG_COUNT" || key == "GIT_CONFIG_PARAMETERS"
+            || key.hasPrefix("GIT_CONFIG_KEY_") || key.hasPrefix("GIT_CONFIG_VALUE_") || key.hasPrefix("DYLD_")
+            || key == "GIT_ASKPASS" || key == "SSH_ASKPASS"
+            || key == "__CFBundleIdentifier" || key == "XPC_SERVICE_NAME"
+    }
+
+    /// The system locale as a UTF-8 `LANG` (`en_US.UTF-8`), as Terminal.app sets it; en_US when the system has no
+    /// such locale (a region without its own, `en_VN`).
+    private static func defaultLanguage() -> String {
+        let identifier = Locale.current.identifier.split(separator: "@").first.map(String.init) ?? ""
+        let candidate = "\(identifier).UTF-8"
+        return !identifier.isEmpty && FileManager.default.fileExists(atPath: "/usr/share/locale/\(candidate)")
+            ? candidate : "en_US.UTF-8"
+    }
+
     /// The background fetch environment for a `git fetch --all` run in `cwd`: lists the user's credential helpers
     /// first, and throws `BackgroundFetchError.repoSetsNetworkConfig` for a repo with its own http or proxy config.
     /// `token` adds the profile's token helper after the replayed helpers (see

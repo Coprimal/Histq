@@ -487,6 +487,12 @@ final class RepoSession: Identifiable {
     private(set) var openHosted: HostedItem?
     /// Changes with every PR or issue select: its placeholder logs a line per select.
     private(set) var hostedToken = 0
+    /// The tab's terminal (task 13.1): made on the first open the user asks for (`openTerminal`; a drawer shown with a
+    /// new tab has none until clicked), kept while the drawer is closed or another tab shows, ended with the tab
+    /// (`close()`) or its window. Nil until then, and again after its shell exited on its own.
+    private(set) var terminal: RepoTerminal?
+    /// The terminal drawer shows under the graph.
+    private(set) var isTerminalOpen = false
     /// The tab's GitHub repository and lists (the PRs tab).
     let github = GitHubStore()
     /// The open pull request's detail (panel2), loaded when its row is selected.
@@ -538,6 +544,9 @@ final class RepoSession: Identifiable {
         // Posted for every key, possibly off the main thread; only a change of the interval restarts the timer.
         preferencesObserver = PreferencesObserver { [weak self] in self?.scheduleAutoFetch() }
         #if DEBUG
+        // `-HistqOpenTerminal YES`: the drawer opens with the tab and starts its shell, as an explicit open does (QA
+        // shots of the terminal).
+        if AppState.launchFlag("-HistqOpenTerminal") == "YES" { openTerminal() }
         // `-HistqRun`: menu actions on a fixture copy, once the refs and the whole log are in.
         if let spec = AppState.launchFlag("-HistqRun") {
             Task { [weak self] in
@@ -652,6 +661,69 @@ final class RepoSession: Identifiable {
         // The tab is removed before the selection moves, so `ModalHost` never closes its modals: a running AI job
         // must stop here, before it sends the diff.
         closeAI()
+        endTerminal()
+    }
+
+    // MARK: Terminal
+
+    /// The drawer is open but its shell has not started: shown with a new tab (`showTerminalDrawer`), it waits for the
+    /// user to click into it.
+    var isTerminalPending: Bool { isTerminalOpen && terminal == nil }
+
+    /// The toolbar's Terminal button and View › Show Terminal (⌃`). A pending drawer starts its shell instead of
+    /// hiding: the user asked for the terminal.
+    func toggleTerminal() {
+        if isTerminalOpen, !isTerminalPending { closeTerminal() } else { openTerminal() }
+    }
+
+    /// Shows the drawer in this frame and gives the terminal the focus; the first open also starts the shell, once the
+    /// tab's profile is known (until then the drawer shows the empty terminal). Only for what the user asked: the
+    /// toolbar, ⌃`, a click into a pending drawer.
+    func openTerminal() {
+        let terminal = terminal ?? makeTerminal()
+        terminal.wantsFocus = true
+        isTerminalOpen = true
+    }
+
+    /// Settings › Terminal "Open terminal with each new tab": shows the drawer without starting a shell (a running
+    /// one just shows). A shell prompt (oh-my-zsh, starship, p10k) runs `git status` in the repo, so the repo's own
+    /// `.git/config` (`core.fsmonitor`, a pager, an alias) would run its commands only because a tab opened; the
+    /// drawer waits for a click into it. The graph keeps the keyboard.
+    func showTerminalDrawer() {
+        isTerminalOpen = true
+    }
+
+    /// Hides the drawer; the shell keeps running. The graph gets the focus back.
+    func closeTerminal() {
+        guard isTerminalOpen else { return }
+        terminal?.returnFocusToGraph()
+        isTerminalOpen = false
+    }
+
+    /// Ends the tab's shell (the tab or its window closes).
+    func endTerminal() {
+        terminal?.end()
+        terminal = nil
+        isTerminalOpen = false
+    }
+
+    private func makeTerminal() -> RepoTerminal {
+        let terminal = RepoTerminal()
+        // `exit` in the shell: the drawer closes, and the next open starts a new shell.
+        terminal.onExit = { [weak self, weak terminal] in
+            guard let self, let terminal, self.terminal === terminal else { return }
+            closeTerminal()
+            self.terminal = nil
+        }
+        self.terminal = terminal
+        Task { [weak self, weak terminal] in
+            guard let self else { return }
+            // A shell started before the profile store's first read would have the user's global identity for good.
+            let profile = await writeProfile()
+            guard let terminal, self.terminal === terminal else { return }
+            terminal.start(in: url, profile: profile)
+        }
+        return terminal
     }
 
     // MARK: Profile

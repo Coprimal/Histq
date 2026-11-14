@@ -401,11 +401,12 @@ private struct IssueContent: View {
                 GitHubHTMLView(html: detail.timelineHTML) { [number = detail.issue.number] in
                     UITiming.content("issue \(number) conversation html")
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity)
             }
             IssueCommentCard(session: session)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // At the top: a short conversation's card hugs its text, with the comment box right under it.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 

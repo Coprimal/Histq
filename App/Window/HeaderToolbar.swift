@@ -89,13 +89,14 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         branchItem.visibilityPriority = .high
         profileItem.visibilityPriority = .high
 
-        // Undo and Redo move through the tab's operation journal (enabled and named from it in `apply`); Phase 13
-        // opens the repo in a terminal. Search opens the command palette.
+        // Undo and Redo move through the tab's operation journal (enabled and named from it in `apply`); Terminal
+        // shows or hides the tab's terminal drawer. Search opens the command palette.
         configureButton(undoItem, label: "Undo", systemImage: Self.undoSymbol)
         configureButton(redoItem, label: "Redo", systemImage: Self.redoSymbol)
         undoItem.action = #selector(undo(_:))
         redoItem.action = #selector(redo(_:))
         configureButton(terminalItem, label: "Terminal", systemImage: "terminal")
+        terminalItem.action = #selector(toggleTerminal(_:))
         configureButton(searchItem, label: "Search", systemImage: "magnifyingglass")
         for item in [undoItem, redoItem, terminalItem] { item.isEnabled = false }
         searchItem.label = "Command Palette"
@@ -185,9 +186,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: State
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
-    /// selected tab's title, its session's refs, running operations, status, stashes, remotes, profile, undo status
-    /// and operation in progress, the profile store, the page and the Settings modal are read, so other tabs and
-    /// the content's own state never wake the toolbar.
+    /// selected tab's title, its session's refs, running operations, status, stashes, remotes, profile, undo status,
+    /// operation in progress and terminal drawer, the profile store, the page and the Settings modal are read, so
+    /// other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -242,6 +243,13 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         #if DEBUG
         logUndoItem()
         #endif
+
+        let isTerminalOpen = session?.isTerminalOpen ?? false
+        set(terminalItem, enabled: session != nil)
+        // A pending drawer: the button starts its shell, so it does not offer to hide it.
+        let hidesTerminal = isTerminalOpen && session?.isTerminalPending == false
+        set(terminalItem, toolTip: hidesTerminal ? "Hide Terminal (⌃`)" : "Show Terminal (⌃`)")
+        set(terminalItem, systemImage: isTerminalOpen ? "terminal.fill" : "terminal", label: "Terminal")
 
         let isSettings = model.isSettingsOpen
         set(settingsItem, systemImage: isSettings ? "gearshape.fill" : "gearshape", label: "Settings")
@@ -336,6 +344,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     @objc private func toggleSettings(_ sender: Any?) {
         model.toggleSettings()
+    }
+
+    @objc private func toggleTerminal(_ sender: Any?) {
+        model.toggleTerminal()
     }
 
     @objc private func togglePalette(_ sender: Any?) {

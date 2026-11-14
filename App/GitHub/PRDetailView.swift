@@ -738,11 +738,12 @@ private struct PRConversationTab: View {
                 GitHubHTMLView(html: detail.timelineHTML) { [number = detail.pull.number] in
                     UITiming.content("pr \(number) conversation html")
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity)
             }
             PRComposerCard(session: session, detail: detail)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // At the top: a short conversation's card hugs its text, with the comment box right under it.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 

@@ -16,6 +16,10 @@ settings:
 packages:
   HistqCore:
     path: Packages/HistqCore
+  # The terminal drawer (task 13.1). Pinned by revision: tag v1.19.0 (not the v1.20.0 prerelease or the 1.99.x 2.0 previews).
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    revision: 464df5207fc2432e16c9a23abe538187196daf5f
 targets:
   "Histq":
     type: application
@@ -24,6 +28,7 @@ targets:
       - path: App
     dependencies:
       - package: HistqCore
+      - package: SwiftTerm
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.math2it.histq"

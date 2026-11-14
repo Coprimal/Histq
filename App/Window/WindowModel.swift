@@ -50,6 +50,8 @@ final class WindowModel {
     private(set) var modal: WindowModal?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
+    /// The terminal drawer's height in this window's tabs (dragged with its handle); each tab has its own terminal.
+    var terminalHeight: CGFloat = TerminalDrawerMetrics.defaultHeight
 
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "window")
 
@@ -146,12 +148,149 @@ final class WindowModel {
         let session = RepoSession(url: url)
         // A worktree's "Open in New Tab" and its graph row open it in this window.
         session.openInTab = { [weak self] url in self?.openTab(url) }
-        if let saved = restored.removeValue(forKey: id) {
+        let saved = restored.removeValue(forKey: id)
+        if let saved {
             if let profile = saved.profile { session.restoreProfile(profile.profileID) }
             if let commit = saved.commit { session.restoreSelection(commit) }
         }
+        // Settings › Terminal "Open terminal with each new tab": a repo the user opens now (Open, a recent repo, a clone
+        // or init filling a Welcome tab, a restored Welcome tab too), not a restored repo tab. Only the drawer: its
+        // shell starts when the user clicks into it (`showTerminalDrawer`).
+        if saved?.path == nil, Preferences.defaults.bool(forKey: PrefKey.terminalOpenWithNewTab.rawValue) {
+            session.showTerminalDrawer()
+        }
+        #if DEBUG
+        if AppState.launchFlag("-HistqTerminalProbe") == url.lastPathComponent, !Self.terminalProbeStarted {
+            Self.terminalProbeStarted = true
+            Task { [weak self] in await self?.runTerminalProbe(session, tabID: id) }
+        }
+        if let spec = AppState.launchFlag("-HistqTerminalSettingsProbe"), !Self.terminalProbeStarted {
+            Self.terminalProbeStarted = true
+            Task { [weak self] in await self?.runTerminalSettingsProbe(spec, session: session) }
+        }
+        #endif
         return session
     }
+
+    /// The toolbar's Terminal button and View › Show Terminal (⌃`): the selected repo tab's drawer.
+    func toggleTerminal() {
+        actionSession?.toggleTerminal()
+    }
+
+    #if DEBUG
+    private static var terminalProbeStarted = false
+
+    /// DEBUG `-HistqTerminalProbe <repo folder name>` (QA of the terminal where no screenshot can be taken, on fixture
+    /// copies): opens that repo's terminal (its first session) and logs the shell's pid and its first screen (the
+    /// prompt) to `operations.txt`; types one line that writes what the shell sees (`git var GIT_AUTHOR_IDENT`, the
+    /// count of `HISTQ_GIT_TOKEN` and credential variables, its `GIT_CONFIG_*` list) to `terminal-probe.txt` in the
+    /// state dir; then closes the tab as ⌘W does and logs whether the pid is gone (`kill(pid, 0)`).
+    private func runTerminalProbe(_ session: RepoSession, tabID: Tab.ID) async {
+        session.openTerminal()
+        var pid: pid_t = 0
+        for _ in 0..<100 {
+            pid = session.terminal?.shellPid ?? 0
+            if pid > 0 { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        guard pid > 0, let terminal = session.terminal else { return RepoMenus.debugLog("terminal: no shell started") }
+        RepoMenus.debugLog("terminal pid \(pid) shell \(RepoTerminal.loginShell())")
+        // The prompt: the screen once the shell has drawn something and been quiet for a moment.
+        for _ in 0..<100 {
+            if !terminal.screenLines().isEmpty { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        try? await Task.sleep(for: .milliseconds(800))
+        for line in terminal.screenLines().prefix(6) { RepoMenus.debugLog("terminal prompt: \(line)") }
+        let output = StatePaths.root.appending(path: "terminal-probe.txt").path
+        let partial = output + ".part"
+        terminal.type("{ git var GIT_AUTHOR_IDENT; echo token=$(env | grep -c HISTQ_GIT_TOKEN); "
+            + "echo credential=$(env | grep -ci credential); env | grep '^GIT_CONFIG_' | sort; echo pwd=$(pwd); } "
+            + "> '\(partial)' 2>&1; mv '\(partial)' '\(output)'\r")
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: output) { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        for line in terminal.screenLines().suffix(3) { RepoMenus.debugLog("terminal screen: \(line)") }
+        RepoMenus.debugLog("terminal close tab")
+        if !closeTab(id: tabID) { closeWindow() }
+        let start = ContinuousClock.now
+        for _ in 0..<60 {
+            if kill(pid, 0) == -1, errno == ESRCH { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        let gone = kill(pid, 0) == -1 && errno == ESRCH
+        RepoMenus.debugLog("terminal pid \(pid) after close: \(gone ? "gone" : "alive") "
+            + "(\(Int((ContinuousClock.now - start) / .milliseconds(1))) ms)")
+    }
+
+    /// DEBUG `-HistqTerminalSettingsProbe <spec>` (QA of Settings › Terminal; the app's first session). Writes the
+    /// preferences as the Settings page does, so the production observers apply them, and logs to `operations.txt`:
+    /// - `live` (with `-HistqOpenTerminal YES`): the open terminal's font, cursor and scrollback, read from the view,
+    ///   before, after setting Menlo 16 / bar / 1000, and after removing the keys again.
+    /// - `newtab:<repo a>,<repo b>`: opens `a` with "Open terminal with each new tab" off (control), then `b` with it
+    ///   on, logging whether each new tab's drawer opened and its shell started (5 s for an open drawer: it must stay
+    ///   "none" until the click); then clicks the pending drawer as its placeholder does and logs the shell's pid;
+    ///   removes the key.
+    private func runTerminalSettingsProbe(_ spec: String, session: RepoSession) async {
+        let defaults = Preferences.defaults
+        if spec == "live" {
+            var pid: pid_t = 0
+            for _ in 0..<100 {
+                pid = session.terminal?.shellPid ?? 0
+                if pid > 0 { break }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard pid > 0, let terminal = session.terminal else {
+                return RepoMenus.debugLog("terminal settings: no shell started")
+            }
+            // The drawer's layout settles first, so the column counts compare at one width.
+            try? await Task.sleep(for: .milliseconds(500))
+            RepoMenus.debugLog("terminal settings before: \(terminal.appearanceDescription())")
+            let keys: [PrefKey] = [.terminalFontName, .terminalFontSize, .terminalCursor, .terminalScrollback]
+            defaults.set("Menlo-Regular", forKey: PrefKey.terminalFontName.rawValue)
+            defaults.set(16.0, forKey: PrefKey.terminalFontSize.rawValue)
+            defaults.set("bar", forKey: PrefKey.terminalCursor.rawValue)
+            defaults.set(1000, forKey: PrefKey.terminalScrollback.rawValue)
+            try? await Task.sleep(for: .milliseconds(300))
+            RepoMenus.debugLog("terminal settings after set: \(terminal.appearanceDescription())")
+            for key in keys { defaults.removeObject(forKey: key.rawValue) }
+            try? await Task.sleep(for: .milliseconds(300))
+            RepoMenus.debugLog("terminal settings after remove: \(terminal.appearanceDescription())")
+        } else if spec.hasPrefix("newtab:") {
+            let paths = spec.dropFirst("newtab:".count).split(separator: ",").map(String.init)
+            guard paths.count == 2 else { return RepoMenus.debugLog("terminal settings: newtab needs two repos") }
+            let key = PrefKey.terminalOpenWithNewTab.rawValue
+            for (path, on) in zip(paths, [false, true]) {
+                if on { defaults.set(true, forKey: key) } else { defaults.removeObject(forKey: key) }
+                openTab(URL(fileURLWithPath: path, isDirectory: true))
+                guard let opened = selectedSession else { continue }
+                let drawer = opened.isTerminalOpen
+                var pid: pid_t = 0
+                for _ in 0..<(drawer ? 100 : 10) {
+                    pid = opened.terminal?.shellPid ?? 0
+                    if pid > 0 { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                RepoMenus.debugLog("terminal new tab \(opened.url.lastPathComponent) pref \(on ? "on" : "off"): "
+                    + "drawer \(drawer ? "open" : "closed") shell \(pid > 0 ? "pid \(pid)" : "none") "
+                    + "terminal \(opened.terminal == nil ? "none" : "made") pending \(opened.isTerminalPending)")
+                // The placeholder's click: only now does the shell start.
+                guard opened.isTerminalPending else { continue }
+                opened.openTerminal()
+                for _ in 0..<100 {
+                    pid = opened.terminal?.shellPid ?? 0
+                    if pid > 0 { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                RepoMenus.debugLog("terminal new tab \(opened.url.lastPathComponent) after click: "
+                    + "shell \(pid > 0 ? "pid \(pid)" : "none") pending \(opened.isTerminalPending)")
+            }
+            defaults.removeObject(forKey: key)
+        }
+    }
+    #endif
 
     // MARK: Session restore
 

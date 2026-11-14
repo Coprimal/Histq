@@ -1,7 +1,7 @@
 // A repo tab's three panels (Rex style: each a `PanelContainer` of solid cards, with a small gap): the sidebar,
 // the commit graph (or the open file's diff, or a conflicted file's conflict editor) under the operation banner while
-// a merge, rebase, cherry-pick or revert is in progress, and the detail. The two gaps are draggable dividers; the
-// side panels' widths are saved in `PrefKey.panelWidths`.
+// a merge, rebase, cherry-pick or revert is in progress, with the tab's terminal drawer under it when open, and the
+// detail. The two gaps are draggable dividers; the side panels' widths are saved in `PrefKey.panelWidths`.
 import HistqCore
 import SwiftUI
 
@@ -81,6 +81,9 @@ struct RepoLayoutView: View {
     @State private var dragWidths: PanelWidths?
     /// The widths when the drag began.
     @State private var dragStart: PanelWidths?
+    /// The height panel 2 gives the graph and the terminal drawer, below its banners: what bounds the drawer, so an
+    /// error or operation banner never pushes the graph under its minimum. Nil until first measured.
+    @State private var graphAndDrawerHeight: CGFloat?
 
     private enum DividerSide { case sidebar, detail }
 
@@ -92,7 +95,7 @@ struct RepoLayoutView: View {
                 if let failure = session.failure {
                     ActionErrorBanner(session: session, failure: failure)
                 }
-                panels(widths: widths, available: available)
+                panels(widths: widths, available: available, height: proxy.size.height)
             }
             .padding([.horizontal, .bottom], RepoLayoutMetrics.inset)
         }
@@ -100,8 +103,9 @@ struct RepoLayoutView: View {
         .background(GitHubDriver(session: session))
     }
 
-    /// The three panels and their dividers.
-    private func panels(widths: PanelWidths, available: CGFloat) -> some View {
+    /// The three panels and their dividers. `height`: the layout's, which bounds the terminal drawer until panel 2's
+    /// own height is measured.
+    private func panels(widths: PanelWidths, available: CGFloat, height: CGFloat) -> some View {
         HStack(spacing: 0) {
             // Each panel's cards sit in its own `PanelContainer` (bg_card), a level between the window glass and
             // the cards.
@@ -114,7 +118,17 @@ struct RepoLayoutView: View {
                 VStack(spacing: SectionCardMetrics.spacing) {
                     // Reads the operation itself, so a status read redraws the banner and not the panels.
                     OperationBanner(session: session)
-                    panel2
+                    VStack(spacing: 0) {
+                        panel2
+                        // The tab's terminal under the graph (and under an open file); its handle is the gap above
+                        // it. Without a terminal yet (shown with a new tab) it shows its placeholder.
+                        if session.isTerminalOpen {
+                            TerminalDrawer(
+                                session: session, terminal: session.terminal,
+                                available: graphAndDrawerHeight ?? height)
+                        }
+                    }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
                 }
             }
             .frame(maxWidth: .infinity)

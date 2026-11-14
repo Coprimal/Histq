@@ -374,6 +374,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // The closed window's views can keep its sessions (and their AI runs) alive a while: a running AI job stops
         // now, before it sends the diff.
         model?.sessions.values.forEach { $0.closeAI() }
+        // Closing a window never calls the sessions' `close()`: their shells end here.
+        model?.sessions.values.forEach { $0.endTerminal() }
         entries.removeAll { $0.window === window }
         SessionStore.schedule()
     }
@@ -478,13 +480,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         show(entry)
     }
 
+    /// ⌃`: shows or hides the selected repo tab's terminal drawer. A main menu item, so it works with the focus in the
+    /// terminal too.
+    @objc func toggleTerminal(_ sender: Any?) {
+        target()?.model.toggleTerminal()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
+        if menuItem.action == #selector(toggleTerminal(_:)) {
+            let session = target()?.model.actionSession
+            // A pending drawer (opened with a new tab, no shell yet): the item starts the shell, it does not hide.
+            let hides = session?.isTerminalOpen == true && session?.isTerminalPending == false
+            menuItem.title = hides ? "Hide Terminal" : "Show Terminal"
+            return session != nil
+        }
         return true
     }
 
-    /// App menu (About, Settings, Hide, Quit), File, Edit and Window menus: without Edit, text fields lose copy and
-    /// paste.
+    /// App menu (About, Settings, Hide, Quit), File, Edit, View (the terminal) and Window menus: without Edit, text
+    /// fields lose copy and paste.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Histq", action: #selector(showAbout), keyEquivalent: "").target = self
@@ -516,12 +531,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let viewMenu = NSMenu(title: "View")
+        let terminalItem = viewMenu.addItem(withTitle: "Show Terminal", action: #selector(toggleTerminal(_:)),
+                                            keyEquivalent: "`")
+        terminalItem.keyEquivalentModifierMask = [.control]
+        terminalItem.target = self
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         NSApp.windowsMenu = windowMenu
         let mainMenu = NSMenu()
-        for submenu in [appMenu, fileMenu, editMenu, windowMenu] {
+        for submenu in [appMenu, fileMenu, editMenu, viewMenu, windowMenu] {
             let item = NSMenuItem()
             item.submenu = submenu
             mainMenu.addItem(item)
