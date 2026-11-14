@@ -30,3 +30,5 @@ sparkle_private_key*
 *_sparkle_private_key*
 *.p12
 *.pem
+
+*.env
