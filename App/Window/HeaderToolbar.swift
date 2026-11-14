@@ -19,8 +19,13 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     let toolbar = NSToolbar(identifier: "HeaderToolbar")
     private let model: WindowModel
 
-    private let repoItem = NSMenuToolbarItem(itemIdentifier: ID.repo)
-    private let branchItem = NSMenuToolbarItem(itemIdentifier: ID.branch)
+    // Fixed widths, so the items after them never move between tabs or branches (titles cut with "…").
+    private let repoItem = ToolbarDropdown(
+        ID.repo, label: "Repository", width: 150,
+        image: NSImage(systemSymbolName: "book.closed", accessibilityDescription: "Repository"))
+    private let branchItem = ToolbarDropdown(
+        ID.branch, label: "Branch", width: 160,
+        image: NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch"))
     private let profileItem = NSMenuToolbarItem(itemIdentifier: ID.profile)
     /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
     private var profileDot: String?
@@ -77,16 +82,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: Items
 
     private func configureItems() {
-        configureMenu(repoItem, label: "Repository")
-        configureMenu(branchItem, label: "Branch")
+        for dropdown in [repoItem, branchItem] {
+            dropdown.menu.delegate = self
+            dropdown.overflowMenu.delegate = self
+        }
         configureMenu(profileItem, label: "Profile")
-        // An icon at the left of the title, inside the button, as the profile chip has its dot. Template symbols, so
-        // they take the toolbar's text color.
-        repoItem.image = NSImage(systemSymbolName: "book.closed", accessibilityDescription: "Repository")
-        branchItem.image = NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch")
         // Kept out of the overflow menu longer than the buttons.
-        repoItem.visibilityPriority = .high
-        branchItem.visibilityPriority = .high
         profileItem.visibilityPriority = .high
 
         // Undo and Redo move through the tab's operation journal (enabled and named from it in `apply`); Terminal
@@ -176,8 +177,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem?
     {
         switch itemIdentifier {
-        case ID.repo: repoItem
-        case ID.branch: branchItem
+        case ID.repo: repoItem.item
+        case ID.branch: branchItem.item
         case ID.profile: profileItem
         default: groups[itemIdentifier]
         }
@@ -201,15 +202,26 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private func apply() {
         let selected = model.selectedIndex.map { model.tabs[$0] }
         let session = model.actionSession
-        set(repoItem, title: Self.truncated(selected?.repoURL == nil ? "Histq" : selected?.title ?? "Histq", 28))
-        set(repoItem, toolTip: selected?.repoURL?.path ?? "Switch repository")
+        repoItem.title = selected?.repoURL == nil ? "Histq" : selected?.title ?? "Histq"
+        repoItem.toolTip = selected?.repoURL?.path ?? "Switch repository"
 
-        set(branchItem, hidden: session == nil)
+        if branchItem.item.isHidden != (session == nil) {
+            branchItem.item.isHidden = session == nil
+            // Without a new measure after the toolbar has laid out the branch item's new state, the repo item
+            // keeps a 4 pt narrower slot until its size is next invalidated (its menu first filled), then moves by
+            // 2 pt and the items after it by 4.
+            DispatchQueue.main.async { [repoItem] in
+                repoItem.button.window?.layoutIfNeeded()
+                repoItem.button.invalidateIntrinsicContentSize()
+            }
+        }
         if let session {
             let isBusy = session.isRunning(.checkout)
-            set(branchItem, title: Self.truncated(Self.branchTitle(session.refs.value?.head), 32))
-            set(branchItem, enabled: !isBusy && session.refs.value != nil)
-            set(branchItem, toolTip: isBusy ? "Checking out…" : "Check out another branch")
+            let title = Self.branchTitle(session.refs.value?.head)
+            branchItem.title = title
+            branchItem.isEnabled = !isBusy && session.refs.value != nil
+            // The full name, as the title may be cut.
+            branchItem.toolTip = isBusy ? "Checking out…" : "\(title): check out another branch"
         }
 
         // Hidden, like the branch menu, where no repo tab shows (Welcome, About).
@@ -253,6 +265,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
         let isSettings = model.isSettingsOpen
         set(settingsItem, systemImage: isSettings ? "gearshape.fill" : "gearshape", label: "Settings")
+        #if DEBUG
+        logItemFrames()
+        #endif
     }
 
     // Each setter writes only a changed value: an unchanged write still relayouts the toolbar.
@@ -299,6 +314,21 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         loggedUndoItem = line
         RepoMenus.debugLog(line)
     }
+
+    /// DEBUG `-HistqToolbarFrames YES`: after each `apply`, once the toolbar has laid out, logs the repo and branch
+    /// dropdowns' frames in window coordinates (`toolbar repo=<x>,<w> branch=<x>,<w>`) to `timing.log`.
+    private func logItemFrames() {
+        guard AppState.launchToolbarFrames else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, repoItem.button.window != nil else { return }
+            let frames = [("repo", repoItem), ("branch", branchItem)].map { name, dropdown in
+                let frame = dropdown.button.convert(dropdown.button.bounds, to: nil)
+                return "\(name)=\(Int(frame.minX.rounded())),\(Int(frame.width.rounded()))"
+            }
+            UITiming.toolbar(frames.joined(separator: " "))
+        }
+    }
+
     #endif
 
     private static func branchTitle(_ head: Head?) -> String {
@@ -309,7 +339,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         }
     }
 
-    /// `text` cut with "…" after `limit` characters (a toolbar button without a view has no width limit).
+    /// `text` cut with "…" after `limit` characters (a toolbar button without a view has no width limit; the repo and
+    /// branch dropdowns have one and cut their titles themselves).
     private static func truncated(_ text: String, _ limit: Int) -> String {
         text.count > limit ? String(text.prefix(limit - 1)) + "…" : text
     }
@@ -358,21 +389,26 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         let entries: [MenuEntry] = switch menu {
-        case repoItem.menu: repoEntries()
-        case branchItem.menu: model.actionSession.map(RepoMenus.branchPicker) ?? []
+        case repoItem.menu, repoItem.overflowMenu: repoEntries()
+        case branchItem.menu, branchItem.overflowMenu: model.actionSession.map(RepoMenus.branchPicker) ?? []
         case profileItem.menu: model.actionSession.map { ProfilePicker.entries(session: $0, model: model) } ?? []
         case pullItem.menu: model.actionSession.map(RepoMenus.pull) ?? []
         case pushItem.menu: model.actionSession.map(RepoMenus.push) ?? []
         default: []
         }
         let built = MenuBuilder.menu(entries)
-        let items = built.items
+        var items = built.items
         built.removeAllItems()
-        menu.items = items
-        if menu === repoItem.menu, let index = items.firstIndex(where: { $0.title == Self.recentMarker }) {
+        if menu === repoItem.menu || menu === repoItem.overflowMenu,
+           let index = items.firstIndex(where: { $0.title == Self.recentMarker })
+        {
             // The recent repos under a section header.
-            menu.removeItem(at: index)
-            menu.insertItem(NSMenuItem.sectionHeader(title: "Recent"), at: index)
+            items[index] = NSMenuItem.sectionHeader(title: "Recent")
+        }
+        if let dropdown = [repoItem, branchItem].first(where: { $0.menu === menu }) {
+            menu.items = [dropdown.titleItem] + items
+        } else {
+            menu.items = items
         }
         if menu === profileItem.menu { ProfilePicker.decorate(menu) }
     }
@@ -397,6 +433,128 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             NSApp.sendAction(#selector(AppDelegate.openDocument(_:)), to: nil, from: nil)
         }]
         return entries
+    }
+}
+
+// MARK: - Dropdown
+
+/// A toolbar pull-down at a fixed width (the repo and branch menus): an icon, the title cut with "…" at the end, and
+/// the chevron, in the same capsule as the menu items beside it. Its width never follows the title, so the toolbar
+/// never shifts between tabs or branches. The menu is filled when it opens (the toolbar's `menuNeedsUpdate`); when
+/// the item is in the overflow menu, `overflowMenu` is filled from the same entries.
+@MainActor
+private final class ToolbarDropdown {
+    let item: NSToolbarItem
+    let button = WindowAwarePopUpButton(frame: .zero, pullsDown: true)
+    /// The menu the button pulls down. A pull-down shows its first item as the button's title and never lists it,
+    /// so `menuNeedsUpdate` keeps `titleItem` first.
+    let menu = NSMenu()
+    let titleItem = NSMenuItem()
+    /// The submenu of the item's overflow form.
+    let overflowMenu = NSMenu()
+    private let width: CGFloat
+    /// The button's width beside its title (icon, chevron, insets), measured once it is in the toolbar.
+    private var chrome: CGFloat?
+
+    init(_ id: NSToolbarItem.Identifier, label: String, width: CGFloat, image: NSImage?) {
+        self.width = width
+        item = NSToolbarItem(itemIdentifier: id)
+        item.label = label
+        item.paletteLabel = label
+        // Kept out of the overflow menu longer than the buttons.
+        item.visibilityPriority = .high
+        // Its state is set from the model, never validated by AppKit.
+        item.autovalidates = false
+
+        for menu in [menu, overflowMenu] { menu.autoenablesItems = false }
+        // A template image, so it takes the toolbar's text color.
+        titleItem.image = image
+        menu.items = [titleItem]
+        button.menu = menu
+        button.bezelStyle = .toolbar
+        button.imagePosition = .imageLeading
+        button.usesSingleLineMode = true
+        button.lineBreakMode = .byTruncatingTail
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        button.setAccessibilityLabel(label)
+        button.didMoveToWindow = { [weak self] in self?.fitTitle() }
+        item.view = button
+
+        let form = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+        form.image = image
+        form.submenu = overflowMenu
+        item.menuFormRepresentation = form
+    }
+
+    // Each setter writes only a changed value: an unchanged write still relayouts the toolbar.
+
+    /// The full title (the overflow menu shows it); the button shows it cut to its width.
+    var title = "" {
+        didSet {
+            guard title != oldValue else { return }
+            item.menuFormRepresentation?.title = title
+            fitTitle()
+        }
+    }
+
+    var toolTip: String? {
+        get { button.toolTip }
+        set { if button.toolTip != newValue { button.toolTip = newValue } }
+    }
+
+    var isEnabled: Bool {
+        get { button.isEnabled }
+        set {
+            guard button.isEnabled != newValue else { return }
+            button.isEnabled = newValue
+            item.isEnabled = newValue
+            item.menuFormRepresentation?.isEnabled = newValue
+        }
+    }
+
+    /// Shows `title` cut with "…" to fit on one line. On macOS 26 a pull-down draws its title with SwiftUI, which
+    /// wraps a long one onto two lines whatever the button's line break mode, so the cut is measured here. Before
+    /// the button is in the toolbar (another control size) the full title shows.
+    private func fitTitle() {
+        let font = button.font ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        func textWidth(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: attributes).width }
+        var shown = title
+        if button.window != nil {
+            // Measured while the menu holds only the title item (it is filled on open), which a pull-down's size
+            // also follows.
+            if chrome == nil, menu.items.count == 1 {
+                chrome = (button.cell?.cellSize.width ?? 0) - textWidth(titleItem.title)
+            }
+            if let chrome { shown = Self.cut(title, toWidth: width - chrome, measure: textWidth) }
+        }
+        guard titleItem.title != shown else { return }
+        titleItem.title = shown
+        button.synchronizeTitleAndSelectedItem()
+    }
+
+    /// `text`, or its longest prefix plus "…" whose width is at most `limit`.
+    private static func cut(_ text: String, toWidth limit: CGFloat, measure: (String) -> CGFloat) -> String {
+        guard measure(text) > limit else { return text }
+        let characters = Array(text)
+        var low = 0, high = characters.count - 1
+        while low < high {
+            let middle = (low + high + 1) / 2
+            if measure(String(characters[..<middle]) + "…") <= limit { low = middle } else { high = middle - 1 }
+        }
+        return String(characters[..<low]) + "…"
+    }
+}
+
+/// A pull-down that reports its move into a window, where the toolbar has set its control size.
+final class WindowAwarePopUpButton: NSPopUpButton {
+    var didMoveToWindow: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { didMoveToWindow?() }
     }
 }
 

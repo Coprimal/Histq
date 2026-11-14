@@ -24,6 +24,27 @@ public enum AIAnswerError: Error, Equatable, Sendable, CustomStringConvertible {
     }
 }
 
+/// The language the model writes its answer in. A fixed list (no free text from the user goes in the prompt); with
+/// `.english`, the default, the prompt has no language rule at all.
+public enum AIResponseLanguage: String, CaseIterable, Sendable {
+    case english, vietnamese, french, german, spanish, japanese, chineseSimplified, korean, portuguese, italian
+
+    public var displayName: String {
+        switch self {
+        case .english: "English"
+        case .vietnamese: "Vietnamese"
+        case .french: "French"
+        case .german: "German"
+        case .spanish: "Spanish"
+        case .japanese: "Japanese"
+        case .chineseSimplified: "Chinese (Simplified)"
+        case .korean: "Korean"
+        case .portuguese: "Portuguese"
+        case .italian: "Italian"
+        }
+    }
+}
+
 /// One prompt, ready to send, and the rules to read its reply.
 public struct AIPrompt: Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
@@ -116,7 +137,8 @@ public enum AIPrompts {
 
     /// A commit message for the staged changes (`git diff --cached` output).
     public static func commitMessage(
-        stagedDiff: String, budget: Int = diffBudget, token: () -> String = randomToken
+        stagedDiff: String, language: AIResponseLanguage = .english, budget: Int = diffBudget,
+        token: () -> String = randomToken
     ) -> AIPrompt {
         make(
             kind: .commitMessage,
@@ -128,28 +150,32 @@ public enum AIPrompts {
                 - Plain text only: no Markdown headings, no code fences, no quotes around the message.
                 """,
             request: "Write the commit message for these staged changes.",
-            data: [("staged diff", budgeted(stagedDiff, budget: budget))], token: token)
+            data: [("staged diff", budgeted(stagedDiff, budget: budget))],
+            languageRule: languageRule(language, answer: "the commit message"), token: token)
     }
 
     /// An explanation of one commit: its message and its diff (`git show --format= <commit>` output).
     public static func explainCommit(
-        message: String, diff: String, budget: Int = diffBudget, token: () -> String = randomToken
+        message: String, diff: String, language: AIResponseLanguage = .english, budget: Int = diffBudget,
+        token: () -> String = randomToken
     ) -> AIPrompt {
         make(
             kind: .explanation, task: explainRules, request: "Explain this commit.",
             data: [
                 ("commit message", String(message.prefix(maxMessageCharacters))),
                 ("commit diff", budgeted(diff, budget: budget)),
-            ], token: token)
+            ], languageRule: languageRule(language, answer: "your answer"), token: token)
     }
 
     /// An explanation of the uncommitted changes (the working tree and index diff against HEAD).
     public static func explainWorkingChanges(
-        diff: String, budget: Int = diffBudget, token: () -> String = randomToken
+        diff: String, language: AIResponseLanguage = .english, budget: Int = diffBudget,
+        token: () -> String = randomToken
     ) -> AIPrompt {
         make(
             kind: .explanation, task: explainRules, request: "Explain these uncommitted changes.",
-            data: [("uncommitted diff", budgeted(diff, budget: budget))], token: token)
+            data: [("uncommitted diff", budgeted(diff, budget: budget))],
+            languageRule: languageRule(language, answer: "your answer"), token: token)
     }
 
     /// A resolution of one conflict region of `path`: A (ours), B (theirs) and their common base (nil for an
@@ -183,12 +209,17 @@ public enum AIPrompts {
         - Markdown is allowed. Be concise.
         """
 
+    /// "Write <answer> in <language>.", or nil for English (the prompt then stays exactly as it was before languages).
+    private static func languageRule(_ language: AIResponseLanguage, answer: String) -> String? {
+        language == .english ? nil : "Write \(answer) in \(language.displayName)."
+    }
+
     private static func make(
         kind: AIPrompt.Kind, task: String, request: String, data: [(label: String, content: String)],
-        token: () -> String
+        languageRule: String? = nil, token: () -> String
     ) -> AIPrompt {
         let boundary = makeBoundary(avoiding: data.map(\.content), candidate: token)
-        let system = """
+        var system = """
             You are the AI assistant of Histq, a git client.
 
             \(task)
@@ -201,6 +232,7 @@ public enum AIPrompts {
             Write your whole answer between a line "BEGIN ANSWER \(boundary)" and a line "END ANSWER \(boundary)", \
             each on its own line. Only the text between these two lines is used; anything outside them is ignored.
             """
+        if let languageRule { system += "\n\n" + languageRule }
         var user = request + "\n"
         for (label, content) in data {
             user += "\nBEGIN DATA \(boundary) (\(label))\n"

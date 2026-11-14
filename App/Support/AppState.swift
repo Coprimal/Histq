@@ -38,6 +38,12 @@ enum AppState {
 
     /// The DEBUG `-HistqSelect <kind>[:<value>]` request of this launch, or nil.
     static let launchSelection: SelectRequest? = launchFlag("-HistqSelect").flatMap(SelectRequest.init(parsing:))
+
+    /// DEBUG `-HistqDoubleClick toolbar|tabrow`: the row `DoubleClickProbe` double-clicks once the window is up.
+    static let launchDoubleClick: String? = launchFlag("-HistqDoubleClick")
+
+    /// DEBUG `-HistqToolbarFrames YES`: the toolbar logs its repo and branch dropdowns' frames (`HeaderToolbar`).
+    static let launchToolbarFrames: Bool = launchFlag("-HistqToolbarFrames") == "YES"
 }
 
 /// Where the app keeps its files: `~/Library/Application Support/Histq`, or the DEBUG state dir.
@@ -126,6 +132,10 @@ enum PrefKey: String, CaseIterable {
     case aiModels
     /// The custom AI provider's base URL as typed (validated with `AIEndpoint.normalize` where it is used).
     case aiCustomBaseURL
+    /// The language of the AI explanations (Explain): an `AIResponseLanguage` raw value ("english", "vietnamese", …).
+    case aiResponseLanguage
+    /// The language of the AI commit messages (Generate Message): an `AIResponseLanguage` raw value.
+    case aiCommitLanguage
 
     /// The value a key has until the user sets it.
     var defaultValue: Any {
@@ -154,6 +164,8 @@ enum PrefKey: String, CaseIterable {
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
         case .aiCustomBaseURL: ""
+        case .aiResponseLanguage: "english"
+        case .aiCommitLanguage: "english"
         }
     }
 }
@@ -201,6 +213,10 @@ enum UITiming {
     static func logComplete(commitCount: Int) { record("content", "log-complete \(commitCount)") }
     /// The repo watcher triggered a refresh (`status`, `refs`, `log`, `status+refs`); goes to `refresh.log`.
     static func refresh(_ scope: String) { record("refresh", scope, file: "refresh.log") }
+    /// DEBUG double-click probe (`DoubleClickProbe`): `click …` for a mouse-down, `dblclick …` for a seam run.
+    static func probe(_ event: String, _ detail: String) { record(event, detail) }
+    /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
+    static func toolbar(_ detail: String) { record("toolbar", detail) }
 
     #if DEBUG
     /// The launch origin, in uptime nanoseconds; set by `markLaunch()` at the top of `main()`.

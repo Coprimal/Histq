@@ -1,6 +1,6 @@
-// Text-only streaming chat with one cloud provider (ported from Dblore's `AIChatClient`, `AIClientFactory` and
-// `AIRedirectGuard`, without tools, model lists, OAuth or local models). The `URLSession` is injected, so tests serve
-// inline SSE through a stub `URLProtocol` and never reach the network.
+// Text-only streaming chat with one cloud provider, and its model list (ported from Dblore's `AIChatClient`,
+// `AIClientFactory` and `AIRedirectGuard`, without tools, OAuth or local models). The `URLSession` is injected, so
+// tests serve inline SSE and JSON through a stub `URLProtocol` and never reach the network.
 //
 // The API key is a secret: it only ever goes in a request header to the provider's own host. A built-in provider
 // always uses its fixed base URL and a custom one must pass `AIEndpoint.normalize`; a redirect to another origin is
@@ -76,6 +76,8 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
     static let errorBodyLimit = 4096
     /// The longest error message kept from a response body.
     static let maxMessageCharacters = 500
+    /// Max bytes of a model list; a bigger answer is refused, not cut.
+    static let modelListBodyLimit = 4 * 1024 * 1024
 
     /// `customBaseURL` is used only by `.custom`: a built-in provider always talks to its own `defaultBaseURL`, so its
     /// key can never be sent elsewhere. `apiKey` is trimmed; an empty key is refused unless the provider takes none.
@@ -120,6 +122,37 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
         }
         let urlRequest = AIProviderRequests.make(request, provider: provider, baseURL: baseURL, apiKey: apiKey)
         return Self.streamLines(urlRequest, session: session, parser: AISSEParser(wire: provider.wire), secret: apiKey)
+    }
+
+    /// The provider's model ids (`AIModelList.parse`), through the same redirect guard as `stream`. Errors are
+    /// `AIClientError`s without the key; a cancelled task throws `CancellationError`.
+    public func listModels() async throws -> [String] {
+        let request = AIProviderRequests.modelList(provider: provider, baseURL: baseURL, apiKey: apiKey)
+        do {
+            let (bytes, response) = try await session.bytes(for: request, delegate: AIRedirectGuard())
+            guard let http = response as? HTTPURLResponse else { throw AIClientError.invalidResponse("not HTTP") }
+            if !(200..<300).contains(http.statusCode) {
+                let body = try await Self.collectBody(bytes)
+                throw AIClientError.http(
+                    status: http.statusCode, message: Self.scrubbed(Self.errorMessage(from: body), secret: apiKey))
+            }
+            let body = try await Self.collectBody(bytes, limit: Self.modelListBodyLimit + 1)
+            guard body.count <= Self.modelListBodyLimit else {
+                throw AIClientError.invalidResponse("the model list is over 4 MB")
+            }
+            return try AIModelList.parse(body)
+        } catch let error as AIClientError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch let error as URLError {
+            let detail = "\(error.localizedDescription) (URL error \(error.code.rawValue))"
+            throw AIClientError.transport(Self.scrubbed(detail, secret: apiKey))
+        } catch {
+            throw AIClientError.transport(Self.scrubbed("\(error)", secret: apiKey))
+        }
     }
 
     /// Streams an SSE response through `parser`, with the redirect guard. Iterates raw bytes and hands them to the
@@ -193,11 +226,11 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
         return false
     }
 
-    private static func collectBody(_ bytes: URLSession.AsyncBytes) async throws -> Data {
+    private static func collectBody(_ bytes: URLSession.AsyncBytes, limit: Int = errorBodyLimit) async throws -> Data {
         var body = Data()
         for try await byte in bytes {
             body.append(byte)
-            if body.count >= errorBodyLimit { break }
+            if body.count >= limit { break }
         }
         return body
     }

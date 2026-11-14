@@ -165,14 +165,22 @@ final class AISetup {
         try await AIKeys.delete(for: provider)
     }
 
+    /// The AI clients' session: ephemeral with no URL cache, so a request that carries the key (the model list's GET)
+    /// is never stored on disk, as `URLSession.shared`'s cache could.
+    private nonisolated static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        return URLSession(configuration: configuration)
+    }()
+
     /// The client of `provider` with its key (read off the main thread here, never kept), its fixed base URL or the
     /// custom one. In a DEBUG `-HistqAIStub` run its session is the stub's, which never reaches the network.
     func makeClient(for provider: AIProvider) async throws -> AIChatClient {
         let key = try await AIKeys.key(for: provider)
         #if DEBUG
-        let session = AIStub.isEnabled ? AIStub.session : URLSession.shared
+        let session = AIStub.isEnabled ? AIStub.session : Self.session
         #else
-        let session = URLSession.shared
+        let session = Self.session
         #endif
         return try AIChatClient(provider: provider, apiKey: key, customBaseURL: customBaseURL, session: session)
     }
@@ -185,11 +193,25 @@ struct AISettings: View {
     @State private var keyError: String?
     @State private var test: TestState = .idle
     @State private var testTask: Task<Void, Never>?
+    @State private var modelList: ModelListState = .idle
+    @State private var modelListTask: Task<Void, Never>?
+    @AppStorage(PrefKey.aiResponseLanguage.rawValue, store: Preferences.defaults)
+    private var responseLanguage = "english"
+    @AppStorage(PrefKey.aiCommitLanguage.rawValue, store: Preferences.defaults)
+    private var commitLanguage = "english"
 
     private enum TestState: Equatable {
         case idle
         case running
         case succeeded(String)
+        case failed(String)
+    }
+
+    /// Load models: the provider's model ids, for this page's visit and provider only.
+    private enum ModelListState: Equatable {
+        case idle
+        case loading
+        case loaded([String])
         case failed(String)
     }
 
@@ -199,27 +221,39 @@ struct AISettings: View {
         SettingsPageGate(section: .ai, isLoaded: setup.keysLoaded) {
             providerGroup
             providerDetailsGroup
+            languageGroup
         } skeleton: {
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 4)
+            SettingsSkeletonGroup(rows: 2)
         }
         .onChange(of: model.settingsToken, initial: true) {
             if model.settingsSection == .ai { setup.reloadKeys() }
         }
         .onChange(of: setup.provider) {
             cancelTest()
+            resetModelList()
             keyDraft = ""
             keyError = nil
         }
+        .onChange(of: setup.customBaseURL) {
+            if setup.provider == .custom { resetModelList() }
+        }
         .onDisappear {
             cancelTest()
+            resetModelList()
             keyDraft = ""
         }
         #if DEBUG
-        // `-HistqAI test` (stub runs only): clicks Test Connection once the keys are read.
+        // `-HistqAI test` / `load-models` (stub runs only): clicks Test Connection or Load models once the keys are
+        // read.
         .task(id: setup.keysLoaded) {
-            guard setup.keysLoaded, setup.isReady, AIStub.takeSeam("test") else { return }
-            runTest(setup.provider)
+            guard setup.keysLoaded else { return }
+            if setup.isReady, AIStub.takeSeam("test") {
+                runTest(setup.provider)
+            } else if canLoadModels(setup.provider), AIStub.takeSeam("load-models") {
+                loadModels(setup.provider)
+            }
         }
         #endif
     }
@@ -345,17 +379,65 @@ struct AISettings: View {
 
     private func modelRow(_ provider: AIProvider) -> some View {
         LabeledContent {
-            TextField("Model", text: Binding(get: { setup.typedModel(for: provider) },
-                                             set: { setup.setTypedModel($0, for: provider) }),
-                      prompt: Text(verbatim: provider.defaultModel.isEmpty ? "model id" : provider.defaultModel))
-                .textFieldStyle(.settings)
-                .frame(maxWidth: 240)
-                .labelsHidden()
+            HStack(spacing: 8) {
+                TextField("Model", text: Binding(get: { setup.typedModel(for: provider) },
+                                                 set: { setup.setTypedModel($0, for: provider) }),
+                          prompt: Text(verbatim: provider.defaultModel.isEmpty ? "model id" : provider.defaultModel))
+                    .textFieldStyle(.settings)
+                    .frame(maxWidth: 240)
+                    .labelsHidden()
+                if case .loaded(let ids) = modelList, !ids.isEmpty {
+                    loadedModelsPicker(ids, provider: provider)
+                } else if !provider.requiresAPIKey || setup.keyStored[provider] == true {
+                    // The spinner sits over the hidden title, so the row keeps its width while it loads.
+                    Button { loadModels(provider) } label: {
+                        Text("Load models")
+                            .opacity(modelList == .loading ? 0 : 1)
+                            .overlay {
+                                if modelList == .loading { DelayedSpinner(detail: "ai models") }
+                            }
+                    }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .disabled(modelList == .loading || !canLoadModels(provider))
+                    .help(canLoadModels(provider) ? "Lists the models of \(provider.displayName)"
+                        : setup.customURLError?.description ?? "")
+                }
+            }
         } label: {
             Text("Model")
-            SettingsHint(provider.defaultModel.isEmpty ? "The model id your server serves."
-                : "Empty uses \(provider.defaultModel). Any model id of the provider works.")
+            switch modelList {
+            case .failed(let text):
+                Text(text)
+                    .font(.settingsCaption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            case .loaded(let ids) where ids.isEmpty:
+                SettingsHint("No models listed; type the model id.")
+            default:
+                SettingsHint(provider.defaultModel.isEmpty ? "The model id your server serves."
+                    : "Empty uses \(provider.defaultModel). Any model id of the provider works.")
+            }
         }
+    }
+
+    /// "N models": picking one fills the model field. The check marks the model in use.
+    private func loadedModelsPicker(_ ids: [String], provider: AIProvider) -> some View {
+        CapsuleMenuPicker(label: "Loaded models",
+                          selection: Binding(get: { setup.model(for: provider) },
+                                             set: { setup.setTypedModel($0, for: provider) }),
+                          title: Text(ids.count == 1 ? "1 model" : "\(ids.count) models")) {
+            ForEach(ids, id: \.self) { id in
+                Text(verbatim: id).tag(id)
+            }
+        }
+    }
+
+    /// Load models can run: a built-in provider has its key saved; a custom server has a valid base URL (its key is
+    /// optional and it may have no model yet).
+    private func canLoadModels(_ provider: AIProvider) -> Bool {
+        provider.requiresAPIKey ? setup.keyStored[provider] == true : setup.customURLError == nil
     }
 
     private func testRow(_ provider: AIProvider) -> some View {
@@ -392,6 +474,38 @@ struct AISettings: View {
         }
     }
 
+    // MARK: Language
+
+    private var languageGroup: some View {
+        SettingsGroup("Language") {
+            LabeledContent {
+                languagePicker("Explanations language", selection: $responseLanguage)
+            } label: {
+                Text("Explanations")
+                SettingsHint("Explain, for a commit and for your changes.")
+            }
+            SettingsDivider()
+            LabeledContent {
+                languagePicker("Commit messages language", selection: $commitLanguage)
+            } label: {
+                Text("Commit messages")
+                SettingsHint("Generate Message. Suggest Resolution keeps the code as it is.")
+            }
+        }
+    }
+
+    /// The fixed language list (no free text goes into the prompt); an unknown stored value shows as English.
+    private func languagePicker(_ label: String, selection: Binding<String>) -> some View {
+        let current = AIResponseLanguage(rawValue: selection.wrappedValue) ?? .english
+        return CapsuleMenuPicker(label: label,
+                                 selection: Binding(get: { current }, set: { selection.wrappedValue = $0.rawValue }),
+                                 title: Text(current.displayName)) {
+            ForEach(AIResponseLanguage.allCases, id: \.self) { language in
+                Text(language.displayName).tag(language)
+            }
+        }
+    }
+
     // MARK: Actions
 
     private func saveKey(_ provider: AIProvider) {
@@ -413,6 +527,7 @@ struct AISettings: View {
 
     private func removeKey(_ provider: AIProvider) {
         cancelTest()
+        resetModelList()
         keyBusy = true
         keyError = nil
         Task {
@@ -466,5 +581,33 @@ struct AISettings: View {
         testTask?.cancel()
         testTask = nil
         if test == .running { test = .idle }
+    }
+
+    /// Lists `provider`'s models (one GET with its key); the errors are already without the key.
+    private func loadModels(_ provider: AIProvider) {
+        modelListTask?.cancel()
+        modelList = .loading
+        modelListTask = Task {
+            do {
+                let ids = try await setup.makeClient(for: provider).listModels()
+                try Task.checkCancellation()
+                modelList = .loaded(ids)
+                #if DEBUG
+                AIStub.log("models loaded \(provider.rawValue) \(ids.count): \(ids.joined(separator: ","))")
+                #endif
+            } catch {
+                guard !(error is CancellationError), !Task.isCancelled else { return }
+                modelList = .failed(String(describing: error))
+                #if DEBUG
+                AIStub.log("models failed \(provider.rawValue): \(String(describing: error))")
+                #endif
+            }
+        }
+    }
+
+    private func resetModelList() {
+        modelListTask?.cancel()
+        modelListTask = nil
+        modelList = .idle
     }
 }

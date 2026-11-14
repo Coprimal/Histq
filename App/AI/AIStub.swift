@@ -5,14 +5,16 @@
 // completions otherwise), sent in small chunks over about a second so the preview streams and Cancel can stop it. The
 // answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, an
 // explanation, or for a resolution side A's text then side B's with LF line breaks; a request without one (Test
-// connection) gets "OK". `error` answers HTTP 401 instead. With `-HistqKeychain memory`, every built-in provider gets a
-// fake key in the in-memory Keychain, so the AI buttons are enabled.
+// connection) gets "OK". A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`.
+// `error` answers HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`).
+// With `-HistqKeychain memory`, every built-in provider gets a fake key in the in-memory Keychain, so the AI buttons
+// are enabled.
 //
 // `-HistqAI <hook>[,apply][,cancel]` (stub runs only) clicks one AI button once it can run: `generate` (commit box),
 // `explain-wip` (commit box), `explain` (commit details), `resolve` (conflict editor), `test` (Settings › AI, Test
-// Connection); `apply` applies the finished answer, `cancel` cancels as soon as the first words show, `close-tab` and
-// `close-window` close the card's tab or window while the job still reads its content. Evidence goes to
-// `<stateDir>/ai.log` (never a key).
+// Connection), `load-models` (Settings › AI, Load models); `apply` applies the finished answer, `cancel` cancels as
+// soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
+// reads its content. Evidence goes to `<stateDir>/ai.log` (never a key).
 import Foundation
 import HistqCore
 import os
@@ -96,13 +98,27 @@ enum AIStub {
 
     // MARK: Replies
 
-    /// The whole reply text for a request body.
-    static func replyText(body: Data) -> String {
-        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return "OK" }
+    /// A chat request body's system prompt (Anthropic's `system`, else the first system message) and last user message.
+    private static func prompt(body: Data) -> (system: String, user: String)? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
         let messages = object["messages"] as? [[String: Any]] ?? []
         let system = object["system"] as? String
             ?? messages.first { $0["role"] as? String == "system" }?["content"] as? String ?? ""
         let user = messages.last { $0["role"] as? String == "user" }?["content"] as? String ?? ""
+        return (system, user)
+    }
+
+    /// The language the system prompt's closing rule names ("… in <name>."), or "default" when it has none.
+    static func languageName(body: Data) -> String {
+        guard let system = prompt(body: body)?.system else { return "default" }
+        return AIResponseLanguage.allCases.first { $0 != .english && system.hasSuffix(" in \($0.displayName).") }?
+            .displayName ?? "default"
+    }
+
+    /// The whole reply text for a request body.
+    static func replyText(body: Data) -> String {
+        guard let parts = prompt(body: body) else { return "OK" }
+        let (system, user) = (parts.system, parts.user)
         guard let range = system.range(of: "BEGIN ANSWER histq-[0-9a-f]+", options: .regularExpression) else {
             return "OK"
         }
@@ -188,9 +204,22 @@ final class AIStubProtocol: URLProtocol, @unchecked Sendable {
             || request.value(forHTTPHeaderField: "x-api-key") != nil
         AIStub.log("stub request \(request.httpMethod ?? "") \(url.host() ?? "")\(url.path()) key-header "
             + "\(hasKey ? "present" : "none") body-bytes \(body.count)")
+        let isModelList = request.httpMethod == "GET" && url.path().hasSuffix("/models")
+        if isModelList {
+            AIStub.log("list models \(url.host() ?? "")")
+        } else {
+            AIStub.log("language \(AIStub.languageName(body: body))")
+        }
         if AIStub.mode == "error" {
             respond(url, status: 401, type: "application/json")
             client?.urlProtocol(self, didLoad: Data(#"{"error": {"message": "Incorrect API key provided (stub)."}}"#.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        if isModelList {
+            respond(url, status: 200, type: "application/json")
+            let list = #"{"data":[{"id":"stub-model-a"},{"id":"models/stub-model-b"}]}"#
+            client?.urlProtocol(self, didLoad: Data(list.utf8))
             client?.urlProtocolDidFinishLoading(self)
             return
         }

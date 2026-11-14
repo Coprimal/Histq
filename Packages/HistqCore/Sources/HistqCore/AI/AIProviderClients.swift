@@ -1,6 +1,7 @@
 // The streaming chat requests of the two wires (ported from Dblore's `OpenAICompatibleClient` and `AnthropicClient`,
-// text only). OpenAI, Gemini (through its OpenAI-compatible endpoint), xAI and custom servers speak
-// chat-completions; Anthropic speaks Messages. The key goes in a header only, never in the URL or the body.
+// text only), and their model list requests. OpenAI, Gemini (through its OpenAI-compatible endpoint), xAI and custom
+// servers speak chat-completions; Anthropic speaks Messages. The key goes in a header only, never in the URL or the
+// body.
 import Foundation
 
 enum AIProviderRequests {
@@ -50,11 +51,66 @@ enum AIProviderRequests {
         return urlRequest
     }
 
+    /// The longest a model list request waits.
+    static let modelListTimeout: TimeInterval = 15
+
+    /// `GET <base>/models` (Anthropic: `?limit=1000`, its page size is 20 by default) with the same key headers as
+    /// the chat request. Every base already ends in its version path (`/v1`, `/v1beta/openai`), so none is added.
+    static func modelList(provider: AIProvider, baseURL: URL, apiKey: String) -> URLRequest {
+        var url = baseURL.appendingPathComponent("models")
+        if provider.wire == .anthropicMessages { url.append(queryItems: [URLQueryItem(name: "limit", value: "1000")]) }
+        var request = URLRequest(url: url, timeoutInterval: modelListTimeout)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        switch provider.wire {
+        case .chatCompletions:
+            if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        case .anthropicMessages:
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
+        }
+        return request
+    }
+
     private static func streamingPOST(_ url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         return request
+    }
+}
+
+/// Reads a provider's model list. The answer is untrusted: an id that could not be a model id (empty, over 200
+/// characters, or holding control characters) is dropped, and the list is capped.
+public enum AIModelList {
+    /// The most ids kept.
+    public static let maxModels = 2000
+    /// The longest id kept, in characters.
+    public static let maxIDLength = 200
+
+    /// The ids of `{"data": [{"id": …}]}` (OpenAI-compatible and Anthropic) or `{"models": [{"name": …}]}`, without
+    /// a leading `models/` (Gemini), deduplicated, sorted ascending and capped at `maxModels`. Throws
+    /// `AIClientError.invalidResponse` when the body is not such a list.
+    public static func parse(_ data: Data) throws -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIClientError.invalidResponse("the model list is not JSON")
+        }
+        let raw: [String]
+        if let entries = object["data"] as? [Any] {
+            raw = entries.compactMap { ($0 as? [String: Any])?["id"] as? String }
+        } else if let entries = object["models"] as? [Any] {
+            raw = entries.compactMap { ($0 as? [String: Any])?["name"] as? String }
+        } else {
+            throw AIClientError.invalidResponse("the answer has no model list")
+        }
+        let ids = raw.map { $0.hasPrefix("models/") ? String($0.dropFirst("models/".count)) : $0 }
+            .filter(isUsableID)
+        return Array(Set(ids).sorted().prefix(maxModels))
+    }
+
+    private static func isUsableID(_ id: String) -> Bool {
+        !id.isEmpty && id.count <= maxIDLength
+            && !id.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
     }
 }

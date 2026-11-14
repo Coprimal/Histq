@@ -1928,9 +1928,10 @@ final class RepoSession: Identifiable {
         UITiming.select("ai \(job.logName)")
         aiRun = run
         let url = url
+        let languages = Self.aiLanguages()
         run.start { [weak self] in
             guard let backend = try await self?.backend() else { throw CancellationError() }
-            return try await Self.aiPrompt(job, backend: backend, cwd: url)
+            return try await Self.aiPrompt(job, backend: backend, cwd: url, languages: languages)
         }
     }
 
@@ -1941,21 +1942,32 @@ final class RepoSession: Identifiable {
         aiRun = nil
     }
 
+    /// The languages of Settings › AI: explanations, then commit messages (English for a missing or unknown value).
+    private static func aiLanguages() -> (response: AIResponseLanguage, commit: AIResponseLanguage) {
+        func language(_ key: PrefKey) -> AIResponseLanguage {
+            Preferences.defaults.string(forKey: key.rawValue).flatMap(AIResponseLanguage.init(rawValue:)) ?? .english
+        }
+        return (language(.aiResponseLanguage), language(.aiCommitLanguage))
+    }
+
     /// The job's prompt: the staged, WIP or commit diff read with the read environment (never a profile), cut to the
-    /// prompt's budget. A resolution's text was taken at the click.
+    /// prompt's budget. A resolution's text was taken at the click; it is never translated.
     @concurrent
-    private nonisolated static func aiPrompt(_ job: AIJob, backend: Backend, cwd: URL) async throws -> AIPrompt {
+    private nonisolated static func aiPrompt(
+        _ job: AIJob, backend: Backend, cwd: URL,
+        languages: (response: AIResponseLanguage, commit: AIResponseLanguage)
+    ) async throws -> AIPrompt {
         switch job {
         case .commitMessage:
             let env = try await backend.readEnvironment(cwd: cwd)
             let diff = try await DiffReader.patchText(.staged, runner: backend.runner, cwd: cwd, env: env)
             guard !diff.isEmpty else { throw AIJobError.nothingStaged }
-            return AIPrompts.commitMessage(stagedDiff: diff)
+            return AIPrompts.commitMessage(stagedDiff: diff, language: languages.commit)
         case .explainCommit(let hash, let message):
             guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
             let env = try await backend.readEnvironment(cwd: cwd)
             let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
-            return AIPrompts.explainCommit(message: message, diff: diff)
+            return AIPrompts.explainCommit(message: message, diff: diff, language: languages.response)
         case .explainWorkingChanges:
             // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
             let env = try await backend.readEnvironment(cwd: cwd)
@@ -1963,7 +1975,7 @@ final class RepoSession: Identifiable {
             async let unstaged = DiffReader.patchText(.unstaged, runner: backend.runner, cwd: cwd, env: env)
             let diff = try await staged + unstaged
             guard !diff.isEmpty else { throw AIJobError.noChanges }
-            return AIPrompts.explainWorkingChanges(diff: diff)
+            return AIPrompts.explainWorkingChanges(diff: diff, language: languages.response)
         case .resolution(let target):
             return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b)
         }

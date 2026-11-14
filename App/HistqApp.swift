@@ -107,6 +107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if ProcessInfo.processInfo.arguments.contains("-HistqOpenPalette") {
             Task { @MainActor in await self.debugOpenPalette() }
         }
+        if let row = AppState.launchDoubleClick, AppState.isStateDirMode {
+            // The click monitor only with the seam, so other QA runs' timing.log keeps only its own lines.
+            DoubleClickProbe.install()
+            // Once the window is up and laid out.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let window = self.target()?.window else { return }
+                await DoubleClickProbe.run(row, in: window)
+            }
+        }
         #endif
     }
 
@@ -195,6 +205,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.toolbarStyle = .unified
         // One background for the toolbar and the content, without a line between them.
         window.titlebarAppearsTransparent = true
+        // A transparent title bar ignores double-clicks; AppKit's private flag gives them back, with every value of
+        // System Settings › Desktop & Dock › "Double-click a window's title bar to". Developer ID app, not the App
+        // Store; set only where AppKit has it.
+        if window.responds(to: NSSelectorFromString("setTitlebarHandlesDoubleClickWhenTransparent:")) {
+            window.setValue(true, forKey: "titlebarHandlesDoubleClickWhenTransparent")
+        }
         window.titlebarSeparatorStyle = .none
         // Full size content: the background runs under the toolbar too.
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
@@ -391,6 +407,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func windowDidResize(_ notification: Notification) {
         SessionStore.schedule()
     }
+
+    #if DEBUG
+    func windowShouldZoom(_ window: NSWindow, toFrame newFrame: NSRect) -> Bool {
+        DoubleClickProbe.zoom(window, to: newFrame)
+        return true
+    }
+    #endif
 
     func windowDidBecomeMain(_ notification: Notification) {
         SessionStore.schedule()
