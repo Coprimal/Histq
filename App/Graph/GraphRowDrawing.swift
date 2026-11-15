@@ -19,22 +19,28 @@ struct GraphMetrics: Equatable {
         }
     }
 
-    /// A commit's node (its avatar's circle): as tall as the row less a 1 pt gap above and below, as in GitKraken, so
-    /// the lane line still shows between two stacked avatars (30 pt at regular).
-    var nodeDiameter: CGFloat { rowHeight - 2 }
+    /// The height shared by the band, its edge bar, the selection and the node (the avatar), centered in the row: a
+    /// 3 pt gap above and below, where the lane lines run between two rows, as in GitKraken (20 / 26 / 32 pt).
+    var bandHeight: CGFloat { rowHeight - 6 }
+    /// A commit's node (its avatar's circle): as tall as the band.
+    var nodeDiameter: CGFloat { bandHeight }
     /// From one lane's center to the next: a node and a small gap.
     var laneWidth: CGFloat { nodeDiameter + 4 }
     /// Before lane 0.
     var leading: CGFloat { 6 }
-    /// After the last lane, clear of the band's 2 pt bar at the column's right edge.
-    var trailing: CGFloat { 6 }
+    /// After the last lane at the column's widest (`width(lanes:)`): the gap between its node and the band's 2 pt bar
+    /// at the column's right edge (GitKraken's is about 4 times the 6 pt it was).
+    var trailing: CGFloat { 24 }
+    /// The least gap after the last visible lane: a narrower column shrinks the gap down to this before a lane folds
+    /// (`visibleLanes`), so a width saved before `trailing` grew still shows its lanes.
+    var minTrailing: CGFloat { 6 }
     /// A merge commit's dot: scales with the node, kept even so it centers on whole pixels.
     var mergeDotDiameter: CGFloat { 2 * (nodeDiameter * 0.2).rounded() }
     var lineWidth: CGFloat { 2 }
     /// The radius of a line's bend into or out of a node: a third of the node.
     var bendRadius: CGFloat { (nodeDiameter / 3).rounded() }
-    /// The band's and the badges' inset from the row's top and bottom.
-    var bandInset: CGFloat { 3 }
+    /// The band's, the selection's and the badges' inset from the row's top and bottom.
+    var bandInset: CGFloat { (rowHeight - bandHeight) / 2 }
     /// A stash node's box side: about 0.7 of the node, kept even so the box's edges sit on whole points.
     var stashSide: CGFloat { 2 * (nodeDiameter * 0.35).rounded() }
 
@@ -44,9 +50,10 @@ struct GraphMetrics: Equatable {
     /// The graph column's width that shows `lanes` lanes.
     func width(lanes: Int) -> CGFloat { leading + CGFloat(lanes) * laneWidth + trailing }
 
-    /// How many lanes a graph column `width` wide shows, at least one (the inverse of `width(lanes:)`).
+    /// How many lanes a graph column `width` wide shows, at least one: those that keep `minTrailing` after them
+    /// (`width(lanes: n)` shows n lanes, and so does a column up to `trailing - minTrailing` narrower).
     func visibleLanes(width: CGFloat) -> Int {
-        max(1, Int(((width - leading - trailing) / laneWidth + 0.001).rounded(.down)))
+        max(1, Int(((width - leading - minTrailing) / laneWidth + 0.001).rounded(.down)))
     }
 
     /// Where `lane` is drawn when only `visible` lanes show: a lane past them folds onto the last visible one, as in
@@ -110,8 +117,8 @@ enum GraphRowDrawing {
         let laneColor = lanes[row.color % colorCount]
 
         // The band, from the node to the column's edge, ending in a 2 pt bar in the lane color (gk's message marker).
-        let band = CGRect(x: nodeX, y: bounds.minY + metrics.bandInset,
-                          width: max(0, bounds.maxX - nodeX), height: bounds.height - 2 * metrics.bandInset)
+        let band = CGRect(x: nodeX, y: midY - metrics.bandHeight / 2,
+                          width: max(0, bounds.maxX - nodeX), height: metrics.bandHeight)
         if band.width > 0 {
             Palette.graphLaneBands[row.color % colorCount].setFill()
             context.fill(band)

@@ -569,7 +569,8 @@ final class GraphTextCellView: NSView {
 // MARK: - Row and header
 
 /// A graph row: the selection is a neutral square fill (no accent, no white text, no edge) from the row's node to the
-/// table's right edge, full row height, as in GitKraken; drawn under the cells so the lanes stay on top.
+/// table's right edge, as tall as the band and the node (`GraphMetrics.bandHeight`), as in GitKraken; drawn under the
+/// cells so the lanes stay on top.
 final class GraphRowView: NSTableRowView {
     /// Where the selection starts, in the row's coordinates: the node's left edge (set by the table's controller on
     /// every reuse and column resize).
@@ -577,12 +578,18 @@ final class GraphRowView: NSTableRowView {
         didSet { if highlightStartX != oldValue { needsDisplay = true } }
     }
 
+    /// The selection's inset from the row's top and bottom (`GraphMetrics.bandInset`, set with `highlightStartX`).
+    var bandInset: CGFloat = 0 {
+        didSet { if bandInset != oldValue { needsDisplay = true } }
+    }
+
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 
     override func drawSelection(in dirtyRect: NSRect) {
         let start = min(max(highlightStartX, bounds.minX), bounds.maxX)
         Palette.graphSelection.setFill()
-        NSRect(x: start, y: bounds.minY, width: bounds.maxX - start, height: bounds.height)
+        NSRect(x: start, y: bounds.minY + bandInset, width: bounds.maxX - start,
+               height: max(0, bounds.height - 2 * bandInset))
             .fill(using: .sourceOver)
     }
 }

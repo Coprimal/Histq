@@ -110,6 +110,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqWindowSize <w>x<h>` / `-HistqTabbedWindows <n>` | Size of new windows; spreads the repositories over n native-tab windows. |
 | `-HistqTabPosition left\|top` / `-HistqAvatarMode real\|generated\|initials` | Overrides the preference. |
 | `-HistqGraphWidth <pt>` / `-HistqRefColumnWidth <pt>` | Graph column width as a border drag would set it (logs `graph-col`); Branch / Tag column width. |
+| `-HistqDensityAfter <density>` | Switches the row density about 2 s after launch, as the Settings picker does (logs `graph-cells`). |
 | `-HistqColumnDrag <column>:<dx>` | Drags the border right of `message` or `author` by dx points; logs `columns`. |
 | `-HistqFind "<query>[;next\|prev...]"` / `-HistqFindEarly YES` | Opens the Cmd-F search, types the query, runs each step; `FindEarly` starts on the log's first page. |
 | `-HistqDoubleClick toolbar\|toolbargap\|tabrow` | Double-clicks that window row; logs `click`, `dblclick` and `zoom`. |

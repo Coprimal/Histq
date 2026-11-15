@@ -19,12 +19,13 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     let toolbar = NSToolbar(identifier: "HeaderToolbar")
     private let model: WindowModel
 
-    // Fixed widths, so the items after them never move between tabs or branches (titles cut with "…").
+    // Fixed widths, so the items after them never move between tabs or branches (titles cut with "…"). Each keeps
+    // the title's room it had before the icon's gap (`ToolbarDropdown.iconGap`) was added.
     private let repoItem = ToolbarDropdown(
-        ID.repo, label: "Repository", width: 150,
+        ID.repo, label: "Repository", width: 150 + ToolbarDropdown.iconGap,
         image: NSImage(systemSymbolName: "book.closed", accessibilityDescription: "Repository"))
     private let branchItem = ToolbarDropdown(
-        ID.branch, label: "Branch", width: 160,
+        ID.branch, label: "Branch", width: 160 + ToolbarDropdown.iconGap,
         image: NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch"))
     private let profileItem = NSMenuToolbarItem(itemIdentifier: ID.profile)
     /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
@@ -444,6 +445,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 /// the item is in the overflow menu, `overflowMenu` is filled from the same entries.
 @MainActor
 private final class ToolbarDropdown {
+    /// The space between the icon and the title: transparent room at the icon's trailing side, so the button's own
+    /// layout (and the `chrome` measured from it) includes it.
+    static let iconGap: CGFloat = 4
+
     let item: NSToolbarItem
     let button = WindowAwarePopUpButton(frame: .zero, pullsDown: true)
     /// The menu the button pulls down. A pull-down shows its first item as the button's title and never lists it,
@@ -468,7 +473,7 @@ private final class ToolbarDropdown {
 
         for menu in [menu, overflowMenu] { menu.autoenablesItems = false }
         // A template image, so it takes the toolbar's text color.
-        titleItem.image = image
+        titleItem.image = image.map(Self.padded)
         menu.items = [titleItem]
         button.menu = menu
         button.bezelStyle = .toolbar
@@ -533,6 +538,20 @@ private final class ToolbarDropdown {
         guard titleItem.title != shown else { return }
         titleItem.title = shown
         button.synchronizeTitleAndSelectedItem()
+    }
+
+    /// `image` with `iconGap` of transparent space after it, still a template. A symbol is drawn at the large scale
+    /// the toolbar's pull-down gave it (the padded image is no symbol any more, so the button no longer scales it).
+    private static func padded(_ image: NSImage) -> NSImage {
+        let image = image.withSymbolConfiguration(NSImage.SymbolConfiguration(scale: .large)) ?? image
+        let size = image.size
+        let padded = NSImage(size: NSSize(width: size.width + iconGap, height: size.height), flipped: false) { _ in
+            image.draw(in: NSRect(origin: .zero, size: size))
+            return true
+        }
+        padded.isTemplate = true
+        padded.accessibilityDescription = image.accessibilityDescription
+        return padded
     }
 
     /// `text`, or its longest prefix plus "…" whose width is at most `limit`.

@@ -370,6 +370,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The lane count and metrics the graph column was last fitted to.
     private var fittedLanes = -1
     private var fittedMetrics: GraphMetrics?
+    /// The row density changed in this `update`: the table reloads after the graph column is fitted again.
+    private var densityChanged = false
     /// The last selection sent to `onSelect`: a click reports at mouse down (selection change) and again at mouse up
     /// (`action`), only the first goes out.
     private var reported: [GraphItem] = []
@@ -403,6 +405,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         #if DEBUG
         if let request = AppState.launchFlag("-HistqColumnDrag") { debugColumnDrag(request) }
         if let request = AppState.launchFlag("-HistqGraphWidth") { debugGraphWidth(request) }
+        if let request = AppState.launchFlag("-HistqDensityAfter") { debugDensityAfter(request) }
         #endif
     }
 
@@ -426,6 +429,38 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 return
             }
         }
+    }
+
+    private static var didDensityAfter = false
+
+    /// DEBUG `-HistqDensityAfter <density>`: about 2 s after the table shows rows, writes `PrefKey.rowDensity` as the
+    /// Settings picker does (its `@AppStorage` writes the same defaults), so the graph takes a live density change.
+    /// Logs `density <value>`. Once per launch. Launch without `-rowDensity`: the argument domain would win the read.
+    private func debugDensityAfter(_ request: String) {
+        guard !Self.didDensityAfter else { return }
+        Self.didDensityAfter = true
+        Task { @MainActor [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, let table = self.table else { return }
+                guard table.window != nil, self.rowCount > 0 else { continue }
+                try? await Task.sleep(for: .seconds(2))
+                Preferences.defaults.set(request, forKey: PrefKey.rowDensity.rawValue)
+                UITiming.probe("density", request)
+                try? await Task.sleep(for: .milliseconds(500))
+                self.logGraphCells()
+                return
+            }
+        }
+    }
+
+    /// Logs `graph-cells column=<w> cells=<w,…>`: the graph column's width and its cells' on screen (they must match).
+    private func logGraphCells() {
+        guard let table, let column = table.tableColumn(withIdentifier: GraphColumn.graph.identifier) else { return }
+        var widths = Set<Int>()
+        forEachGraphCell { widths.insert(Int($0.frame.width.rounded())) }
+        UITiming.probe("graph-cells", "column=\(Int(column.width.rounded())) cells="
+            + widths.sorted().map(String.init).joined(separator: ","))
     }
 
     private static var didColumnDrag = false
@@ -474,6 +509,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             table.headerView?.needsDisplay = true
         }
         fitGraphColumn()
+        if densityChanged {
+            // Once the column has its new width: every row view and cell the table keeps (on screen, just around it,
+            // and reused ones) is made again with the new metrics, row height, highlight and lane folding.
+            densityChanged = false
+            table?.reloadData()
+        }
         if view.dimming.token != dimming.token {
             dimming = view.dimming
             refreshDimming()
@@ -497,9 +538,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         if newMetrics != metrics {
             metrics = newMetrics
             table.rowHeight = metrics.rowHeight
-            reloadVisible = true
-            // Cells reload below; the row views stay, so their highlight follows the new node size here.
-            refreshHighlights()
+            // `update` reloads the table once `fitGraphColumn` has fitted the column to the new lane width.
+            densityChanged = true
         }
         if view.dateFormat != dateFormat {
             dateFormat = view.dateFormat
@@ -576,8 +616,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     // MARK: Graph column width
 
     /// Fits the graph column to the log's lanes when their count or the row density changed: at least one lane, at
-    /// most all of them (`GraphMetrics.width(lanes:)`, as in GitKraken: no empty space right of the last lane), and
-    /// the wanted width within that. AppKit's border drag stops at these bounds; the message column fills (`tile`).
+    /// most all of them (`GraphMetrics.width(lanes:)`, as in GitKraken: only the `trailing` gap right of the last
+    /// lane), and the wanted width within that. AppKit's border drag stops at these bounds; the message column fills
+    /// (`tile`).
     /// The cells on screen take the new lane count. Logs `graph-col max=<w> lanes=<n> visible=<v> width=<w>`.
     private func fitGraphColumn() {
         guard let table, let column = table.tableColumn(withIdentifier: GraphColumn.graph.identifier),
@@ -591,10 +632,15 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         // No rows yet (a load in progress): no max, the column keeps its width until the lanes are known.
         let maxWidth = logLanes > 0 ? max(minWidth, metrics.width(lanes: logLanes)) : 10_000
         if lanesChanged { forEachGraphCell { $0.logLanes = self.logLanes; $0.needsDisplay = true } }
+        let width = min(max(wantedGraphWidth ?? column.width, minWidth), maxWidth)
+        // The width is written while the bounds still hold both the old and the new width, then the bounds are set:
+        // a min or max that crosses the current width clamps it without laying the cells out again (no resize
+        // notification), and the width write after it is a no-op, so the cells would keep their old width.
+        column.minWidth = min(minWidth, column.width, width)
+        column.maxWidth = max(maxWidth, column.width, width)
+        if abs(column.width - width) > 0.25 { column.width = width }
         column.maxWidth = maxWidth
         column.minWidth = minWidth
-        let width = min(max(wantedGraphWidth ?? column.width, minWidth), maxWidth)
-        if abs(column.width - width) > 0.25 { column.width = width }
         table.tile()
         guard logLanes > 0 else { return }
         UITiming.probe("graph-col", "max=\(Int(maxWidth.rounded())) lanes=\(logLanes) "
@@ -709,6 +755,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return view
         }()
         view.highlightStartX = highlightStartX(forRow: row, in: tableView)
+        view.bandInset = metrics.bandInset
         return view
     }
 
@@ -729,11 +776,13 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         return min(max(rect.minX + metrics.nodeMinX(lane: lane, node: node), rect.minX), rect.maxX)
     }
 
-    /// Moves the highlight of the rows on screen (a column resize moved the graph column, or the node size changed).
+    /// Moves the highlight of the rows on screen (a column resize moved the graph column).
     private func refreshHighlights() {
         guard let table else { return }
         table.enumerateAvailableRowViews { rowView, row in
-            (rowView as? GraphRowView)?.highlightStartX = self.highlightStartX(forRow: row, in: table)
+            guard let rowView = rowView as? GraphRowView else { return }
+            rowView.highlightStartX = self.highlightStartX(forRow: row, in: table)
+            rowView.bandInset = self.metrics.bandInset
         }
     }
 
@@ -769,7 +818,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             cell.metrics = metrics
             cell.logLanes = logLanes
             cell.avatar = commit.flatMap { $0.isMerge ? nil : avatar(for: $0, in: tableView) }
-            cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? false
+            // Another worktree's row has its folder's badge: its line runs on to the dashed node here too.
+            cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? (worktree(synthetic) != nil)
             cell.hasGhostRef = ghost(at: row, commit: commit) != nil
             if let commit {
                 cell.node = commit.isMerge
