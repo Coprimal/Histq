@@ -615,11 +615,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     // MARK: Graph column width
 
-    /// Fits the graph column to the log's lanes when their count or the row density changed: at least one lane, at
-    /// most all of them (`GraphMetrics.width(lanes:)`, as in GitKraken: only the `trailing` gap right of the last
-    /// lane), and the wanted width within that. AppKit's border drag stops at these bounds; the message column fills
-    /// (`tile`).
-    /// The cells on screen take the new lane count. Logs `graph-col max=<w> lanes=<n> visible=<v> width=<w>`.
+    /// Fits the graph column to the log's lanes when their count or the row density changed: at least lane 0's node
+    /// (`GraphMetrics.minColumnWidth`, every lane folded onto it), at most all of them (`GraphMetrics.width(lanes:)`,
+    /// as in GitKraken: only the `trailing` gap right of the last lane), and the wanted width within that. AppKit's
+    /// border drag stops at these bounds; the message column fills (`tile`).
+    /// The cells on screen take the new lane count. Logs `graph-col max=<w> lanes=<n> visible=<v> width=<w>` (v: the
+    /// unpinned lanes, `GraphMetrics.isPinned`).
     private func fitGraphColumn() {
         guard let table, let column = table.tableColumn(withIdentifier: GraphColumn.graph.identifier),
               logLanes != fittedLanes || metrics != fittedMetrics
@@ -628,7 +629,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         fittedLanes = logLanes
         fittedMetrics = metrics
         if wantedGraphWidth == nil { wantedGraphWidth = column.width }
-        let minWidth = metrics.width(lanes: 1)
+        // Narrow enough for every lane to fold onto lane 0 (`GraphMetrics.drawnX`).
+        let minWidth = metrics.minColumnWidth
         // No rows yet (a load in progress): no max, the column keeps its width until the lanes are known.
         let maxWidth = logLanes > 0 ? max(minWidth, metrics.width(lanes: logLanes)) : 10_000
         if lanesChanged { forEachGraphCell { $0.logLanes = self.logLanes; $0.needsDisplay = true } }
@@ -643,8 +645,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         column.minWidth = minWidth
         table.tile()
         guard logLanes > 0 else { return }
+        let unpinned = (0..<logLanes).filter { !metrics.isPinned(lane: $0, width: column.width) }.count
         UITiming.probe("graph-col", "max=\(Int(maxWidth.rounded())) lanes=\(logLanes) "
-            + "visible=\(metrics.visibleLanes(width: column.width)) width=\(Int(column.width.rounded()))")
+            + "visible=\(unpinned) width=\(Int(column.width.rounded()))")
     }
 
     /// Runs `body` on the graph cells the table has made (on screen and just around it).
@@ -767,9 +770,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let rect = table.rect(ofColumn: column)
         let isSynthetic = row < log.syntheticRows.count
         let graphRow = isSynthetic ? log.syntheticRows[row] : log.rows[row - log.syntheticRows.count]
-        let lane = metrics.foldedLane(graphRow.lane, visible: metrics.visibleLanes(width: rect.width))
         // From the node's center, as GitKraken: the node hides the highlight's left end (no corner beside it).
-        return min(max(rect.minX + metrics.x(lane: lane), rect.minX), rect.maxX)
+        let nodeX = rect.minX + metrics.drawnX(lane: graphRow.lane, width: rect.width)
+        return min(max(nodeX, rect.minX), rect.maxX)
     }
 
     /// Moves the highlight of the rows on screen (a column resize moved the graph column).
@@ -1150,7 +1153,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// Saves the widths after the user drags a column edge (not when the table's own width changes).
     /// Any width change (AppKit's resize, the border drags, `tile`) also moves the selected rows' highlight.
-    /// A graph column resize also redraws its cells on screen: the lanes it shows (folding) follow its width live.
+    /// A graph column resize also redraws its cells on screen: its nodes fold (`GraphMetrics.drawnX`)
+    /// point by point with its width.
     func tableViewColumnDidResize(_ notification: Notification) {
         refreshHighlights()
         let resized = notification.userInfo?["NSTableColumn"] as? NSTableColumn

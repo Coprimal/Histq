@@ -31,8 +31,9 @@ struct GraphMetrics: Equatable {
     /// After the last lane at the column's widest (`width(lanes:)`): the gap between its node and the band's 2 pt bar
     /// at the column's right edge (GitKraken's is about 4 times the 6 pt it was).
     var trailing: CGFloat { 24 }
-    /// The least gap after the last visible lane: a narrower column shrinks the gap down to this before a lane folds
-    /// (`visibleLanes`), so a width saved before `trailing` grew still shows its lanes.
+    /// The least gap between a node's right edge and the column's right edge: a narrower column shrinks the gap down to
+    /// this, then pushes the right-most nodes left (`drawnX`), so a width saved before `trailing` grew still shows its
+    /// lanes.
     var minTrailing: CGFloat { 6 }
     /// A merge commit's dot: scales with the node, kept even so it centers on whole pixels.
     var mergeDotDiameter: CGFloat { 2 * (nodeDiameter * 0.2).rounded() }
@@ -50,15 +51,30 @@ struct GraphMetrics: Equatable {
     /// The graph column's width that shows `lanes` lanes.
     func width(lanes: Int) -> CGFloat { leading + CGFloat(lanes) * laneWidth + trailing }
 
-    /// How many lanes a graph column `width` wide shows, at least one: those that keep `minTrailing` after them
-    /// (`width(lanes: n)` shows n lanes, and so does a column up to `trailing - minTrailing` narrower).
-    func visibleLanes(width: CGFloat) -> Int {
-        max(1, Int(((width - leading - minTrailing) / laneWidth + 0.001).rounded(.down)))
-    }
+    /// The narrowest graph column: lane 0's node and `minTrailing` after it, where every lane has folded onto lane 0.
+    var minColumnWidth: CGFloat { x(lane: 0) + nodeDiameter / 2 + minTrailing }
 
-    /// Where `lane` is drawn when only `visible` lanes show: a lane past them folds onto the last visible one, as in
-    /// GitKraken (the rightmost lanes fold first as the column narrows, down to lane 0).
-    func foldedLane(_ lane: Int, visible: Int) -> Int { min(lane, visible - 1) }
+    /// The right-most node center a graph column `width` wide has room for (`minTrailing` after the node), never left
+    /// of lane 0's.
+    func foldLimit(width: CGFloat) -> CGFloat { max(x(lane: 0), width - minTrailing - nodeDiameter / 2) }
+
+    /// Where `lane`'s node is drawn in a graph column `width` wide, from its left edge: its own center, or the fold
+    /// limit when the column has no room for it. As in GitKraken the column folds continuously: narrowed point by
+    /// point, the right-most node slides left, pinned to the right edge, onto its left neighbour's line, then both
+    /// slide together, down to lane 0.
+    func drawnX(lane: Int, width: CGFloat) -> CGFloat { min(x(lane: lane), foldLimit(width: width)) }
+
+    /// `lane` has no room in a graph column `width` wide: its node is pushed left (`drawnX`) and its lines are not
+    /// drawn. Lane 0 never is.
+    func isPinned(lane: Int, width: CGFloat) -> Bool { x(lane: lane) > foldLimit(width: width) + 0.001 }
+
+    /// The lane lines' opacity in a graph column `width` wide, for a log of `logLanes` lanes: 1 until lane 1 is pinned,
+    /// then fading to 0 as lane 1's nodes slide onto lane 0, so the narrowest column draws no lane line at all
+    /// (GitKraken's collapsed column) without a pop. A one-lane log keeps its line.
+    func lineAlpha(width: CGFloat, logLanes: Int) -> CGFloat {
+        guard logLanes > 1 else { return 1 }
+        return min(1, max(0, (foldLimit(width: width) - x(lane: 0)) / laneWidth))
+    }
 }
 
 /// What a row's node stands for.
@@ -79,12 +95,13 @@ enum GraphRowDrawing {
     /// line from the column's left edge (where the ref badges' line ends) to the node, at `refsAlpha` (a ghost badge's
     /// is faded). `avatar`, when given, fills the node.
     ///
-    /// When `bounds` is narrower than the log's `logLanes`, the lanes past the visible ones fold onto the last visible
-    /// lane (`GraphMetrics.foldedLane`): their nodes are drawn there, over its line, and their own lines are not. A
-    /// line between a visible lane and a folded one is drawn only when its folded end is this row's node (it then ends
-    /// under the node); one that would run on down or up a folded lane is left out, so no line dangles. With a single
-    /// visible lane in a log of several, no lane line is drawn at all (GitKraken's collapsed column): the nodes' ring
-    /// colors and the band's edge bar tell the branches apart.
+    /// When `bounds` is too narrow for the log's `logLanes`, the right-most lanes fold continuously
+    /// (`GraphMetrics.drawnX`): their nodes are pushed left, over their neighbours' lines, and the lines of a pinned
+    /// lane are not drawn. A line between an unpinned lane and a pinned one is drawn only when its pinned end is this
+    /// row's node (it then ends under the node); one that would run on down or up a pinned lane is left out, so no
+    /// line dangles. As lane 1 folds onto lane 0 the remaining lines fade out (`GraphMetrics.lineAlpha`): the
+    /// narrowest column draws none (GitKraken's collapsed column), the nodes' ring colors and the band's edge bar tell
+    /// the branches apart.
     static func draw(
         _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, avatar: NSImage?,
         metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
@@ -95,8 +112,8 @@ enum GraphRowDrawing {
 
         let lanes = Palette.graphLanes
         let colorCount = lanes.count
-        let visible = metrics.visibleLanes(width: bounds.width)
-        let nodeX = bounds.minX + metrics.x(lane: metrics.foldedLane(row.lane, visible: visible))
+        let width = bounds.width
+        let nodeX = bounds.minX + metrics.drawnX(lane: row.lane, width: width)
         let midY = bounds.midY
         let laneColor = lanes[row.color % colorCount]
 
@@ -123,14 +140,28 @@ enum GraphRowDrawing {
             context.setLineWidth(metrics.lineWidth)
         }
 
-        if visible > 1 || logLanes <= 1 {
-            // A segment's edge end (top or bottom) must be on a visible lane; its center end may also be the node.
-            func shows(_ lane: Int, atCenter: Bool) -> Bool { lane < visible || (atCenter && lane == row.lane) }
+        // The same for every row of the column, so the lines never break between rows.
+        let lineAlpha = metrics.lineAlpha(width: width, logLanes: logLanes)
+        if lineAlpha > 0.01 {
+            // Faded, the lines go through one layer: the halves that meet under a node would otherwise darken there.
+            let fades = lineAlpha < 0.99
+            if fades {
+                context.setAlpha(lineAlpha)
+                context.beginTransparencyLayer(auxiliaryInfo: nil)
+            }
+            // A segment's edge end (top or bottom) must be on an unpinned lane; its center end may also be the node.
+            func shows(_ lane: Int, atCenter: Bool) -> Bool {
+                !metrics.isPinned(lane: lane, width: width) || (atCenter && lane == row.lane)
+            }
             for segment in row.top where shows(segment.from, atCenter: false) && shows(segment.to, atCenter: true) {
-                stroke(segment, top: true, visible: visible, metrics: metrics, bounds: bounds, context: context)
+                stroke(segment, top: true, metrics: metrics, bounds: bounds, context: context)
             }
             for segment in row.bottom where shows(segment.from, atCenter: true) && shows(segment.to, atCenter: false) {
-                stroke(segment, top: false, visible: visible, metrics: metrics, bounds: bounds, context: context)
+                stroke(segment, top: false, metrics: metrics, bounds: bounds, context: context)
+            }
+            if fades {
+                context.endTransparencyLayer()
+                context.setAlpha(1)
             }
         }
 
@@ -140,12 +171,13 @@ enum GraphRowDrawing {
 
     /// One line piece. Top half: from the row's top edge at lane `from` to the center at lane `to`. Bottom half: from
     /// the center at `from` to the bottom edge at `to`. Bends turn with `bendRadius` (less when the lanes are closer;
-    /// none when a folded node sits on the other lane: the bend is then a straight line). Lanes fold to `visible`.
+    /// none when a folded node sits on the other lane: the bend is then a straight line). Lanes are at their drawn x
+    /// (`GraphMetrics.drawnX`).
     private static func stroke(
-        _ segment: GraphSegment, top: Bool, visible: Int, metrics: GraphMetrics, bounds: CGRect, context: CGContext
+        _ segment: GraphSegment, top: Bool, metrics: GraphMetrics, bounds: CGRect, context: CGContext
     ) {
-        let fromX = bounds.minX + metrics.x(lane: metrics.foldedLane(segment.from, visible: visible))
-        let toX = bounds.minX + metrics.x(lane: metrics.foldedLane(segment.to, visible: visible))
+        let fromX = bounds.minX + metrics.drawnX(lane: segment.from, width: bounds.width)
+        let toX = bounds.minX + metrics.drawnX(lane: segment.to, width: bounds.width)
         let midY = bounds.midY
         let radius = min(metrics.bendRadius, abs(toX - fromX), bounds.height / 2)
         Palette.graphLanes[segment.color % Palette.graphLanes.count].setStroke()
