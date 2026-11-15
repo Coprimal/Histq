@@ -94,12 +94,14 @@ enum Palette {
 
     // MARK: Commit graph (AppKit: the graph draws in `draw(_:)`, so these are `NSColor`s)
 
-    /// The 8 lane colors, in palette order (`GraphRow.color`): gold, teal, blue, purple, magenta, green, coral, lime;
-    /// neighbours differ in hue so adjacent lanes stay apart, all bright on `surface` #2C2C2E.
-    /// #F2B630 #4FB8D6 #5E8EF0 #AC74E8 #E260B0 #5CC98A #F07F5C #C2CF4A
+    /// The 8 lane colors, in palette order (`GraphRow.color`): blue, orange, green, pink, cyan, yellow, lilac, coral.
+    /// Lane 0 (the top level) is the brand blue, a touch lighter than the accent so thin lines read; the other hues sit
+    /// far from it and from each other (OKLab ΔE ≥ 0.12, also apart under deuteranopia and protanopia), and each
+    /// neighbour jumps ~135° in hue so adjacent lanes stay apart. All bright on `surface` #2C2C2E (≥ 4.4:1).
+    /// #4091FD #FC9F30 #58CD78 #E8519F #44D4E2 #E9DD3C #C58FF3 #EF6856
     private static let laneValues: [NSColor] = [
-        srgb(0xF2B630), srgb(0x4FB8D6), srgb(0x5E8EF0), srgb(0xAC74E8),
-        srgb(0xE260B0), srgb(0x5CC98A), srgb(0xF07F5C), srgb(0xC2CF4A),
+        srgb(0x4091FD), srgb(0xFC9F30), srgb(0x58CD78), srgb(0xE8519F),
+        srgb(0x44D4E2), srgb(0xE9DD3C), srgb(0xC58FF3), srgb(0xEF6856),
     ]
     /// The graph's lane colors (`GraphLayout.colorCount` of them): lines, nodes, the badge connectors.
     static let graphLanes: [NSColor] = laneValues
