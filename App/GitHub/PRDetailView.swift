@@ -667,6 +667,7 @@ struct PRActionErrorCard: View {
                 .accessibilityLabel("Dismiss the error")
             }
         }
+        .modifier(NoticeTint(tone: Color(nsColor: Palette.diffRemovedSign)))
     }
 }
 

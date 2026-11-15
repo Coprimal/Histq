@@ -197,6 +197,7 @@ struct ActionErrorBanner: View {
                 .accessibilityLabel("Dismiss")
             }
         }
+        .modifier(NoticeTint(tone: Color(nsColor: Palette.graphLanes[6])))
     }
 
     /// What the hint's button does.

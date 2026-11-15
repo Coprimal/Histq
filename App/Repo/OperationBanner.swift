@@ -18,10 +18,12 @@ struct OperationBanner: View {
     private func card(_ state: RepoState) -> some View {
         let conflicts = session.status.value?.conflicted.count ?? state.conflictedPaths.count
         let isBusy = session.isOperationStepRunning
+        // Pink while files are conflicted (as their rows), the accent blue once it can continue.
+        let tone = conflicts == 0 ? Color.accentColor : Color(nsColor: Palette.conflictUnresolved)
         return SectionCard(nil, contentPadding: 10) {
             HStack(spacing: 10) {
                 Image(systemName: Self.systemImage(state.operation))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(tone)
                     .font(.system(size: 16))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
@@ -36,8 +38,7 @@ struct OperationBanner: View {
                         : conflicts == 1 ? "1 conflicted file left. Resolve it to continue."
                         : "\(conflicts) conflicted files left. Resolve them to continue.")
                         .font(.settingsCaption)
-                        .foregroundStyle(conflicts == 0 ? AnyShapeStyle(.secondary)
-                            : AnyShapeStyle(Color(nsColor: Palette.conflictUnresolved)))
+                        .foregroundStyle(conflicts == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(tone))
                         .lineLimit(1)
                 }
                 .accessibilityElement(children: .combine)
@@ -55,6 +56,7 @@ struct OperationBanner: View {
                     .help(conflicts == 0 ? "Finish this step" : "Resolve every conflicted file first")
             }
         }
+        .modifier(NoticeTint(tone: tone))
     }
 
     /// A banner button; a small spinner beside its title while its step runs.

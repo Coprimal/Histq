@@ -903,6 +903,21 @@ struct GlassCard: ViewModifier {
     }
 }
 
+/// A notice on a `SectionCard` (the operation banner, an error banner): the card's fill tinted with its tone and a
+/// faint edge in it, so it stands out from the cards around it and keeps their shape.
+struct NoticeTint: ViewModifier {
+    let tone: Color
+    @Environment(\.cardSurface) private var surface
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.cardSurface, surface.mix(with: tone, by: 0.12))
+            .overlay(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous)
+                .strokeBorder(tone.opacity(0.3), lineWidth: 1)
+                .allowsHitTesting(false))
+    }
+}
+
 /// On macOS 26+ (unless `--force-fallbacks`), scrolled content stops hard at the top edge instead of fading under
 /// the transparent title bar.
 struct HardTopScrollEdge: ViewModifier {
