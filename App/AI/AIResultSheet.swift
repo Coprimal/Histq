@@ -35,16 +35,6 @@ enum AIJob: Equatable, Sendable {
         }
     }
 
-    /// What the card says while the job's content is read.
-    var preparing: String {
-        switch self {
-        case .commitMessage: "Reading the staged changes…"
-        case .explainCommit: "Reading the commit…"
-        case .explainWorkingChanges: "Reading the uncommitted changes…"
-        case .resolution: "Preparing the conflict…"
-        }
-    }
-
     /// Whether the answer can be applied (an explanation is only shown and copied).
     var canApply: Bool {
         switch self {
@@ -199,10 +189,9 @@ struct AIResultSheet: View {
     var body: some View {
         ModalCard(title: run.job.title, subtitle: "\(run.provider.displayName) · \(run.model)", systemImage: "sparkles",
                   width: 560, takesFocus: true) {
-            ModalSection(spacing: 8) {
-                previewBox
-                statusLine
-            }
+            // Inset like the footer's buttons: 16 pt from the modal's edges.
+            previewBox
+                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             Button(run.isRunning ? "Cancel" : "Close", action: onClose)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -259,7 +248,7 @@ struct AIResultSheet: View {
     private var previewBox: some View {
         let text = run.answer ?? run.preview
         Group {
-            if text.isEmpty {
+            if text.isEmpty && error == nil {
                 VStack(alignment: .leading, spacing: 10) {
                     SkeletonLine(fraction: 0.7, height: 12)
                     SkeletonLine(fraction: 0.9, height: 12)
@@ -275,10 +264,14 @@ struct AIResultSheet: View {
                 .accessibilityLabel("Waiting for the answer")
             } else {
                 ScrollView {
-                    previewText(text)
-                        .frame(maxWidth: .infinity, minHeight: AIResultMetrics.previewHeight - 16, alignment: .topLeading)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 8)
+                    // An error shows under what came of the answer, in the same box.
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !text.isEmpty { previewText(text) }
+                        ErrorText(message: error)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: AIResultMetrics.previewHeight - 16, alignment: .topLeading)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 8)
                 }
                 .defaultScrollAnchor(.bottom)
             }
@@ -305,28 +298,10 @@ struct AIResultSheet: View {
         }
     }
 
-    @ViewBuilder
-    private var statusLine: some View {
-        switch run.phase {
-        case .preparing:
-            statusText(run.job.preparing)
-        case .streaming:
-            statusText(run.preview.isEmpty ? "Waiting for \(run.provider.displayName)…" : "Writing…")
-        case .finished:
-            if let applyError {
-                ErrorText(message: applyError)
-            } else {
-                statusText(run.job.canApply ? "Review the answer, then apply it." : "Done.")
-            }
-        case .failed(let message):
-            ErrorText(message: message)
-        }
-    }
-
-    private func statusText(_ text: String) -> some View {
-        Text(text)
-            .font(.settingsCaption)
-            .foregroundStyle(.secondary)
+    /// The job's failure, or Apply's.
+    private var error: String? {
+        if case .failed(let message) = run.phase { return message }
+        return applyError
     }
 
     /// Inline markdown (bold, italic, code) with the line breaks kept; links are shown as plain text, never opened.
