@@ -76,6 +76,9 @@ enum SidebarMetrics {
     /// indent) lies outside, so the hover and selection capsules start where the row is indented, not at the card's
     /// edge.
     static let capsuleLeading: CGFloat = 10
+    /// The "…" menu buttons in the section headers: their label's square, so the hover circle (5 pt around it) is
+    /// 24 pt, as big as the tab row's New Tab and tab list buttons (`TabStripMetrics.buttonHeight`).
+    static let menuIconSide: CGFloat = TabStripMetrics.buttonHeight - 10
     /// A row's icon slot (glyphs leading-aligned in it, under the section's icon) and the gap from it to the name:
     /// tight, so the name sits close to a narrow branch glyph (user, 2026-11-13).
     static let iconSlot: CGFloat = 20
@@ -198,6 +201,8 @@ private struct BranchSections: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
+                    // Square, so the hover circle (sized on the label's shorter side) clears the wide glyph.
+                    .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
             }
             .menuStyle(.button)
             .buttonStyle(RowIconButtonStyle())
@@ -246,6 +251,8 @@ private struct WorktreeSection: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
+                    // Square, so the hover circle (sized on the label's shorter side) clears the wide glyph.
+                    .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
             }
             .menuStyle(.button)
             .buttonStyle(RowIconButtonStyle())

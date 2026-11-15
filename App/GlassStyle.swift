@@ -641,8 +641,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
         .modifier(SurfaceTrack(compact: compact, fillsWidth: fillsWidth))
     }
 
-    /// The gap between a `fillsWidth` track's edge and its tabs, on every side.
-    static var fillInset: CGFloat { 4 }
+    /// The gap between a `fillsWidth` (or `compact`) track's edge and its tabs, on every side.
+    static var fillInset: CGFloat { 6 }
 
     /// The `fillsWidth` row (user, 2026-11-13): each tab as wide as its label plus the same padding, then an equal share
     /// of the spare width, so a longer label (Branches) gets a wider tab and the track still fills its width. When the

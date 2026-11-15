@@ -13,8 +13,8 @@ enum TabStripMetrics {
     /// Above the row inside its scroll view, so the hover fill's edge is not clipped. None below: the tabs' bottom is
     /// the sheet's top.
     static let rowInset: CGFloat = 1
-    /// The selected tab's top corners.
-    static let tabRadius: CGFloat = 9
+    /// The selected tab's top corners: half its height, so its top reads as a capsule's.
+    static let tabRadius: CGFloat = tabHeight / 2
     /// The concave curve at each bottom corner of the selected tab, into the sheet's top edge. The row has this much
     /// room on each side inside its scroll view, so the first and last tab's flares are not clipped.
     static let flare: CGFloat = 9
@@ -257,12 +257,12 @@ struct TabItem: View {
                     .padding(.horizontal, -TabStripMetrics.flare)
                     .matchedGeometryEffect(id: "selectedTab", in: namespace)
             } else {
-                RoundedRectangle(cornerRadius: TabStripMetrics.tabRadius, style: .continuous)
+                Capsule(style: .circular)
                     .fill(hovered || dragged ? Palette.tabFill : .clear)
                     .padding(.bottom, 3)
             }
         }
-        .contentShape(RoundedRectangle(cornerRadius: TabStripMetrics.tabRadius, style: .continuous))
+        .contentShape(Capsule(style: .circular))
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .help(help)
