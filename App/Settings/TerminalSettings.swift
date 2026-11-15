@@ -1,6 +1,7 @@
-// Settings › Terminal (task 13.2): the integrated terminal's font, cursor, scrollback and shell, and whether a new repo
-// tab opens it. Each change is saved at once in `Preferences.defaults`. Open terminals apply the font, cursor and
-// scrollback at once (`RepoTerminal` watches the keys); the shell only applies to terminals started afterwards.
+// Settings › Terminal (task 13.2): the integrated terminal's font, cursor, scrollback, bold text and shell, and whether
+// a new repo tab opens it. Each change is saved at once in `Preferences.defaults`. Open terminals apply the font,
+// cursor, scrollback and bold text at once (`RepoTerminal` watches the keys; bold text for the output that comes next);
+// the shell only applies to terminals started afterwards.
 import CoreText
 import SwiftUI
 
@@ -9,6 +10,7 @@ struct TerminalSettings: View {
     @AppStorage(PrefKey.terminalFontSize.rawValue, store: Preferences.defaults) private var fontSize = 12.0
     @AppStorage(PrefKey.terminalCursor.rawValue, store: Preferences.defaults) private var cursor = "block"
     @AppStorage(PrefKey.terminalScrollback.rawValue, store: Preferences.defaults) private var scrollback = 10_000
+    @AppStorage(PrefKey.terminalBoldText.rawValue, store: Preferences.defaults) private var boldText = false
     @AppStorage(PrefKey.terminalShell.rawValue, store: Preferences.defaults) private var shell = ""
     @AppStorage(PrefKey.terminalOpenWithNewTab.rawValue, store: Preferences.defaults) private var openWithNewTab = false
     /// The installed monospaced fonts, listed off the main thread; `.loading` shows a skeleton in the font row.
@@ -54,6 +56,11 @@ struct TerminalSettings: View {
                     Text("Scrollback")
                     SettingsHint("Lines kept above the screen. A smaller value drops the oldest at once.")
                 }
+                SettingsDivider()
+                SettingsSwitchRow(title: "Bold text",
+                                  hint: "Off shows bold output in the normal weight. Text already on screen keeps "
+                                      + "its weight.",
+                                  isOn: $boldText)
             }
             shellGroup
             SettingsGroup("New tabs") {

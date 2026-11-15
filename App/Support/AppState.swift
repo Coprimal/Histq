@@ -132,6 +132,8 @@ enum PrefKey: String, CaseIterable {
     case terminalScrollback
     /// Terminal cursor: "block", "underline" or "bar".
     case terminalCursor
+    /// Terminal output keeps its bold text; off draws it in the normal weight (`SGRBoldFilter`).
+    case terminalBoldText
     /// Open the terminal drawer with each new tab.
     case terminalOpenWithNewTab
     /// The Welcome page's recent repositories: folder paths, most recent first (`RecentRepos`).
@@ -171,6 +173,7 @@ enum PrefKey: String, CaseIterable {
         case .terminalShell: ""
         case .terminalScrollback: 10_000
         case .terminalCursor: "block"
+        case .terminalBoldText: false
         case .terminalOpenWithNewTab: false
         case .recentRepos: [String]()
         case .fileListMode: "path"

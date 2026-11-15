@@ -37,7 +37,7 @@ enum TerminalDrawerMetrics {
 /// moves between drawer hosts as the tab is shown again; it is never rebuilt.
 @MainActor
 final class RepoTerminal: NSObject {
-    let view: LocalProcessTerminalView
+    let view: BoldFilteringTerminalView
     /// Called once when the shell exits on its own (`exit`, ⌃D); not after `end()`.
     var onExit: () -> Void = {}
     /// Set by an open from the toolbar or ⌃`: the next time the view is in a window it takes the keyboard focus.
@@ -61,9 +61,10 @@ final class RepoTerminal: NSObject {
         appliedCursor = cursor
         // A first frame about the drawer's size, so the shell's first prompt is laid out for a real width; the drawer
         // resizes it (and the shell gets SIGWINCH) as soon as it is shown.
-        view = LocalProcessTerminalView(
+        view = BoldFilteringTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: TerminalDrawerMetrics.defaultHeight), font: Self.font(),
             options: options)
+        view.keepsBold = Self.preferredBold()
         super.init()
         view.processDelegate = self
         view.nativeBackgroundColor = Palette.terminalBackground
@@ -193,8 +194,10 @@ final class RepoTerminal: NSObject {
 
     /// Settings › Terminal changed a key: the font, the cursor and the scrollback follow at once (a new font resizes
     /// the grid and the shell gets SIGWINCH). Each only when its own value changed: setting the font clears the
-    /// selection. The shell is never restarted; the shell setting applies to the next terminal.
+    /// selection. Bold text applies to the output that comes next; what is on screen keeps its weight. The shell is
+    /// never restarted; the shell setting applies to the next terminal.
     private func applyPreferences() {
+        view.keepsBold = Self.preferredBold()
         let font = Self.font()
         if font.fontName != view.font.fontName || font.pointSize != view.font.pointSize { view.font = font }
         let terminal = view.getTerminal()
@@ -225,6 +228,11 @@ final class RepoTerminal: NSObject {
         case "bar": .steadyBar
         default: .steadyBlock
         }
+    }
+
+    /// `PrefKey.terminalBoldText`: output keeps its bold text.
+    private static func preferredBold() -> Bool {
+        Preferences.defaults.bool(forKey: PrefKey.terminalBoldText.rawValue)
     }
 
     /// `PrefKey.terminalScrollback`: the lines kept above the screen; 0 for a negative hand-written value.
@@ -259,6 +267,29 @@ final class RepoTerminal: NSObject {
         return text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
     #endif
+}
+
+/// The terminal view, with Settings › Terminal "Bold text" off (`keepsBold` false) taking the bold attribute out of
+/// the shell's output before SwiftTerm reads it, so bold text is drawn in the normal weight: SwiftTerm's bold font is
+/// internal and cannot be replaced by the regular one.
+final class BoldFilteringTerminalView: LocalProcessTerminalView {
+    var keepsBold = false {
+        didSet {
+            // A sequence held back while filtering goes out as it came.
+            guard keepsBold, !oldValue else { return }
+            let pending = boldFilter.flush()
+            if !pending.isEmpty { feed(byteArray: pending[...]) }
+        }
+    }
+
+    private var boldFilter = SGRBoldFilter()
+
+    /// The shell's output, on the main queue (`LocalProcess`'s default).
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        guard !keepsBold else { return super.dataReceived(slice: slice) }
+        let filtered = boldFilter.filter(slice)
+        if !filtered.isEmpty { super.dataReceived(slice: filtered[...]) }
+    }
 }
 
 extension RepoTerminal: @preconcurrency LocalProcessTerminalViewDelegate {
