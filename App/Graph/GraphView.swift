@@ -96,6 +96,9 @@ struct GraphView: NSViewRepresentable {
     var onOpenWorktree: @MainActor (String) -> Void = { _ in }
     /// The open pull requests by remote branch (`GitHubStore.branchPullRequests`): their chips on the branch badges.
     var pullRequests: [String: RefBadge.PullRequest] = [:]
+    /// The repo's remote names (`RepoSession.remotes`): with one remote, a remote branch's badge drops the remote
+    /// from its name (`RefBadge.remoteLabel`).
+    var remotes: [String] = []
     /// A click on a pull request chip, with its number.
     var onOpenPullRequest: @MainActor (Int) -> Void = { _ in }
     /// The branch each commit is on (`RepoSession.branchMap`): a lone selected commit without a branch badge of its own
@@ -347,6 +350,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var log = LogSnapshot()
     private var refs: Refs?
     private var pullRequests: [String: RefBadge.PullRequest] = [:]
+    private var remotes: [String] = []
     private var badges: [String: [RefBadge]] = [:]
     private var branchMap = BranchMap()
     /// The faded badge on the selected row (`RefBadge.isGhost`), with the row and commit it was made for.
@@ -549,10 +553,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             formatter.dateFormat = view.dateFormat
             reloadVisible = true
         }
-        if view.refs != refs || view.pullRequests != pullRequests {
+        if view.refs != refs || view.pullRequests != pullRequests || view.remotes != remotes {
             refs = view.refs
             pullRequests = view.pullRequests
-            badges = view.refs.map { RefBadge.badges(for: $0, pullRequests: pullRequests) } ?? [:]
+            remotes = view.remotes
+            badges = view.refs.map { RefBadge.badges(for: $0, pullRequests: pullRequests, remotes: remotes) } ?? [:]
             reloadVisible = true
         }
         if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
@@ -940,7 +945,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// The ghost the selection calls for: exactly one commit row selected, without a branch badge of its own (a tag or
     /// a detached HEAD may be there), on a branch of the map. Its icon is the branch's kind: the laptop for a local
-    /// branch, the cloud for a remote one.
+    /// branch, the cloud for a remote one (named as a remote branch's own badge is).
     private func wantedGhost() -> Ghost? {
         guard let table, table.selectedRowIndexes.count == 1, let row = table.selectedRowIndexes.first else { return nil }
         let index = row - log.syntheticRows.count
@@ -949,8 +954,13 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let hasBranch = badges[hash]?.contains { if case .branch = $0.kind { true } else { false } } ?? false
         guard !hasBranch, let name = branchMap.branch(at: index, in: log) else { return nil }
         let isLocal = refs?.localBranches.contains { $0.name == name } ?? false
+        var label: String?
+        if !isLocal, let refs, let remote = refs.remoteBranches.first(where: { $0.name == name }) {
+            label = RefBadge.remoteLabel(of: remote, singleRemote: RefBadge.singleRemote(refs, remotes: remotes))
+        }
         return Ghost(row: row, hash: hash, badge: RefBadge(
-            kind: .branch(isLocal: isLocal, isRemote: !isLocal, isHead: false), name: name, isGhost: true))
+            kind: .branch(isLocal: isLocal, isRemote: !isLocal, isHead: false), name: name, label: label,
+            isGhost: true))
     }
 
     /// Moves the ghost to the selection's: reloads only the refs and graph cells of the row it leaves and the row it

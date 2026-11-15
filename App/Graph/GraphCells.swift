@@ -27,7 +27,10 @@ struct RefBadge: Hashable {
     }
 
     let kind: Kind
+    /// The full ref name (`origin/feature`): the tooltip, the menus, the drag and the drop use it.
     let name: String
+    /// The name drawn when it differs from `name`: a remote branch without its remote (`remoteLabel`).
+    var label: String?
     /// Commits ahead of / behind the upstream (local branches).
     var ahead = 0
     var behind = 0
@@ -36,12 +39,18 @@ struct RefBadge: Hashable {
     /// `Palette.graphGhostAlpha`; not a menu, drag or drop target.
     var isGhost = false
 
+    /// The name drawn in the badge.
+    var shownName: String { label ?? name }
+
     /// The badges of every labeled commit, in row order: HEAD's branch (or a detached HEAD) first, then local
     /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read (and per
     /// change of `pullRequests`, the store's `branchPullRequests`: a remote branch's pull request by its name, which a
-    /// local branch gets through its upstream).
-    static func badges(for refs: Refs, pullRequests: [String: PullRequest] = [:]) -> [String: [RefBadge]] {
+    /// local branch gets through its upstream; and per change of `remotes`, the repo's remote names).
+    static func badges(for refs: Refs, pullRequests: [String: PullRequest] = [:], remotes: [String] = [])
+        -> [String: [RefBadge]]
+    {
         var byCommit: [String: [RefBadge]] = [:]
+        let single = singleRemote(refs, remotes: remotes)
         let remoteCommits = Dictionary(refs.remoteBranches.map { ($0.name, $0.commit) }, uniquingKeysWith: { a, _ in a })
         var mergedRemotes = Set<String>()
         if case .detached(let commit) = refs.head {
@@ -60,12 +69,29 @@ struct RefBadge: Hashable {
         for remote in refs.remoteBranches where !mergedRemotes.contains(remote.name) {
             byCommit[remote.commit, default: []].append(RefBadge(
                 kind: .branch(isLocal: false, isRemote: true, isHead: false), name: remote.name,
-                pullRequest: pullRequests[remote.name]))
+                label: remoteLabel(of: remote, singleRemote: single), pullRequest: pullRequests[remote.name]))
         }
         for tag in refs.tags {
             byCommit[tag.commit ?? tag.target, default: []].append(RefBadge(kind: .tag, name: tag.name))
         }
         return byCommit
+    }
+
+    /// The repo's only remote, nil when it has several (or none): from `git remote` once it is read (a remote's name
+    /// may hold a "/", which the remote branches' own `remote` cuts at), else from the remote branches.
+    static func singleRemote(_ refs: Refs, remotes: [String]) -> String? {
+        let names = remotes.isEmpty ? Array(Set(refs.remoteBranches.map(\.remote))) : remotes
+        return names.count == 1 ? names[0] : nil
+    }
+
+    /// A remote branch's badge text when the repo has a single remote: its name without the remote (`feature` for
+    /// `origin/feature`, the cloud icon telling it is remote), as GitKraken shows it. Nil (the full name) when there
+    /// are several remotes.
+    static func remoteLabel(of branch: RemoteBranch, singleRemote: String?) -> String? {
+        guard let singleRemote else { return nil }
+        let prefix = singleRemote + "/"
+        guard branch.name.hasPrefix(prefix), branch.name.count > prefix.count else { return nil }
+        return String(branch.name.dropFirst(prefix.count))
     }
 }
 
@@ -226,9 +252,10 @@ final class RefBadgeCellView: NSView {
     /// The least of a name shown: its first 3 characters and "…" (with a point to spare, so AppKit keeps 3), or all
     /// of a shorter name.
     private static func minimumName(_ badge: RefBadge) -> CGFloat {
-        let name = ceil((badge.name as NSString).size(withAttributes: Style.text).width)
-        guard badge.name.count > 3 else { return name }
-        let cut = ceil((String(badge.name.prefix(3)) + "…" as NSString).size(withAttributes: Style.text).width) + 1
+        let name = ceil((badge.shownName as NSString).size(withAttributes: Style.text).width)
+        guard badge.shownName.count > 3 else { return name }
+        let cut = ceil((String(badge.shownName.prefix(3)) + "…" as NSString).size(withAttributes: Style.text).width)
+            + 1
         return min(name, cut)
     }
 
@@ -243,7 +270,7 @@ final class RefBadgeCellView: NSView {
         if let pull = badge.pullRequest.map(PullRequestChip.init) {
             chrome += Style.iconGap + pullChipWidth(pull) + Style.chipInset - Style.padding
         }
-        let name = ceil((badge.name as NSString).size(withAttributes: Style.text).width)
+        let name = ceil((badge.shownName as NSString).size(withAttributes: Style.text).width)
         return (chrome, name)
     }
 
@@ -445,8 +472,8 @@ final class RefBadgeCellView: NSView {
         let textRect = CGRect(x: x, y: rect.midY - lineHeight / 2, width: max(0, trailingX - x), height: lineHeight)
         guard textRect.width > 0 else { return }
         context.clip(to: textRect)
-        (badge.name as NSString).draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                                      attributes: Style.text)
+        (badge.shownName as NSString).draw(
+            with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: Style.text)
     }
 
     /// The pull icon and "#N" on GitHub's open green (or draft grey).

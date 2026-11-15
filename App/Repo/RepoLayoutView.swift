@@ -254,6 +254,7 @@ private struct CommitListPanel: View {
                           onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
                           onOpenWorktree: { [session] path in session.openWorktree(path) },
                           pullRequests: session.github.branchPullRequests,
+                          remotes: session.remotes.map(\.name),
                           onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },
                           branchMap: session.branchMap,
                           dimming: session.graphSearch.dimming,
