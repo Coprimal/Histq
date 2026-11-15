@@ -260,6 +260,9 @@ final class GraphTableView: NSTableView {
 
     override func tile() {
         super.tile()
+        // AppKit tiles on every step of a live column drag, but tells `tableViewColumnDidResize` only when it ends:
+        // the selected rows' highlight follows the graph column here, while the mouse is still down.
+        defer { (delegate as? GraphTableController)?.refreshHighlights() }
         guard let clip = enclosingScrollView?.contentView, let fill = fillColumn else { return }
         let others = tableColumns.reduce(0) { $0 + ($1 === fill || $1.isHidden ? 0 : $1.width) }
         let width = max(fill.minWidth, clip.bounds.width - others)
@@ -781,7 +784,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     /// Moves the highlight of the rows on screen (a column resize moved the graph column).
-    private func refreshHighlights() {
+    func refreshHighlights() {
         guard let table else { return }
         table.enumerateAvailableRowViews { rowView, row in
             guard let rowView = rowView as? GraphRowView else { return }
