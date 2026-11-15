@@ -59,22 +59,6 @@ struct GraphMetrics: Equatable {
     /// Where `lane` is drawn when only `visible` lanes show: a lane past them folds onto the last visible one, as in
     /// GitKraken (the rightmost lanes fold first as the column narrows, down to lane 0).
     func foldedLane(_ lane: Int, visible: Int) -> Int { min(lane, visible - 1) }
-
-    /// Half the drawn width of `node`'s shape with its stroke (`GraphRowDrawing.drawNode`), rounded out to a whole
-    /// point so an edge drawn there stays crisp.
-    func nodeRadius(_ node: GraphNodeStyle) -> CGFloat {
-        switch node {
-        case .commit: nodeDiameter / 2
-        case .merge: mergeDotDiameter / 2
-        // The dashed circle is inset by 1 pt and stroked 1.5 pt: it reaches 0.25 pt short of the node.
-        case .wip: nodeDiameter / 2
-        // The box is stroked 1.5 pt on its edge: 0.25 pt short of this.
-        case .stash: (stashSide / 2 + 0.75).rounded(.up)
-        }
-    }
-
-    /// The left edge of `node` on `lane`, from the graph column's left edge: where a selected row's highlight starts.
-    func nodeMinX(lane: Int, node: GraphNodeStyle) -> CGFloat { x(lane: lane) - nodeRadius(node) }
 }
 
 /// What a row's node stands for.

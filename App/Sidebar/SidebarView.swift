@@ -81,6 +81,8 @@ enum SidebarMetrics {
     /// The section and row icons (GitKraken's): Local is this Mac, Remote the cloud, each branch a branch.
     static let localImage = "lucide-laptop-minimal"
     static let remoteImage = "cloud"
+    /// The checked-out branch and the current worktree: a filled check in place of their own glyph.
+    static let currentImage = "checkmark.circle.fill"
     static let branchImage = "lucide-git-branch"
     /// The Worktrees card and each worktree's row: a folder, as GitKraken draws them.
     static let worktreeImage = "folder"
@@ -167,7 +169,7 @@ private struct BranchSections: View {
             ForEach(refs.localBranches, id: \.refName) { branch in
                 // As in GitKraken, the checked-out branch shows a check in place of the branch icon.
                 BranchRow(session: session, item: .local(branch.name), name: branch.name,
-                          systemImage: branch.isHead ? "checkmark.circle.fill" : SidebarMetrics.branchImage) {
+                          systemImage: branch.isHead ? SidebarMetrics.currentImage : SidebarMetrics.branchImage) {
                     AheadBehind(branch: branch)
                 }
             }
@@ -268,7 +270,8 @@ private struct WorktreeRow: View {
 
     var body: some View {
         HStack(spacing: SidebarMetrics.iconGap) {
-            Image(systemName: info.isCurrent ? "checkmark" : SidebarMetrics.worktreeImage)
+            Image(systemName: info.isCurrent ? SidebarMetrics.currentImage : SidebarMetrics.worktreeImage)
+                .imageScale(info.isCurrent ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(info.name)
@@ -426,6 +429,8 @@ private struct BranchRow<Trailing: View>: View {
         HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             IconImage(systemImage)
+                // The checked-out branch's check reads at a glance (a step bigger than the branch glyphs).
+                .imageScale(systemImage == SidebarMetrics.currentImage ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(name)

@@ -759,21 +759,17 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         return view
     }
 
-    /// The left edge of `row`'s node in the table (a row view spans the table's width): the graph column's left edge
-    /// plus the node's, within the graph column.
+    /// The center of `row`'s node in the table (a row view spans the table's width): the graph column's left edge plus
+    /// the node's center, within the graph column.
     private func highlightStartX(forRow row: Int, in table: NSTableView) -> CGFloat {
         let column = table.column(withIdentifier: GraphColumn.graph.identifier)
         guard column >= 0, row >= 0, row < rowCount else { return 0 }
         let rect = table.rect(ofColumn: column)
         let isSynthetic = row < log.syntheticRows.count
         let graphRow = isSynthetic ? log.syntheticRows[row] : log.rows[row - log.syntheticRows.count]
-        let node: GraphNodeStyle = if isSynthetic {
-            log.synthetic[row].kind == .stash ? .stash : .wip
-        } else {
-            log.commits[row - log.syntheticRows.count].isMerge ? .merge : .commit(initials: "")
-        }
         let lane = metrics.foldedLane(graphRow.lane, visible: metrics.visibleLanes(width: rect.width))
-        return min(max(rect.minX + metrics.nodeMinX(lane: lane, node: node), rect.minX), rect.maxX)
+        // From the node's center, as GitKraken: the node hides the highlight's left end (no corner beside it).
+        return min(max(rect.minX + metrics.x(lane: lane), rect.minX), rect.maxX)
     }
 
     /// Moves the highlight of the rows on screen (a column resize moved the graph column).
