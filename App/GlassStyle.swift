@@ -28,9 +28,8 @@ enum Palette {
     /// The selected sidebar row's capsule and its 1 pt edge: neutral, no accent.
     static let selectedFill = color(.white.withAlphaComponent(0.14))
     static let selectedBorder = color(.white.withAlphaComponent(0.12))
-    /// The header's tab pills: each unselected tab's fill, and the selected tab's (with a `selectedBorder` edge).
+    /// A hovered unselected tab's fill (the selected tab is the sheet's `sheet`), and other faint chips.
     static let tabFill = color(.white.withAlphaComponent(0.06))
-    static let selectedTabFill = color(.white.withAlphaComponent(0.14))
     /// The capsule bars of a loading placeholder (`SkeletonLine`), on a `surface` card.
     static let skeletonFill = color(.white.withAlphaComponent(0.10))
     /// Darkens a pressed button over its own fill.
@@ -55,10 +54,19 @@ enum Palette {
     static let knobShadow = Color.black.opacity(0.2)
     /// Cards and panels, a step above the window. #2C2C2E
     static let surface = color(srgb(0x2C2C2E))
-    /// bg_card: the outer container of each repo panel and of the tab row (`PanelContainer`), between the window and
-    /// the cards on it, so the three read as separate calm levels (EchoDiar's panels on the window glass). Opaque like
-    /// `surface`: one `WindowGlass` per window, no second translucent layer on it. #252527
+    /// bg_card: the outer container of the modals, the palette and the vertical tabs (`PanelContainer`), between the
+    /// window and the cards on it, so the three read as separate calm levels (EchoDiar's panels on the window glass).
+    /// Opaque like `surface`: one `WindowGlass` per window, no second translucent layer on it. #252527
     static let bgCard = color(srgb(0x252527))
+    /// The page's sheet: one container around the selected tab's page (MainView), joined to the selected tab
+    /// (`TabSheetShape`): glass like the toolbar's buttons, a light tint over the window glass (#343436 on it). The
+    /// tab and the sheet touch without overlapping, so the tint never doubles where they meet. White 0.09
+    static let sheet = color(.white.withAlphaComponent(0.09))
+    /// The cards on the sheet: a step darker, at 0.9 so the sheet's glass shows a little through them. #232325 at 0.9
+    static let sheetCard = color(srgb(0x232325).withAlphaComponent(0.9))
+    /// What a `sheetCard` looks like on the sheet, for AppKit views that must paint opaque inside a card (the graph's
+    /// header and hollow nodes, the terminal, a pull request's page). #252527
+    static let sheetCardOpaque = srgb(0x252527)
     /// Controls on a card, a step above `surface`. #3A3A3C
     static let inputSurface = color(srgb(0x3A3A3C))
     /// The 1 pt edge of cards and panels.
@@ -112,8 +120,8 @@ enum Palette {
     static let graphGhostAlpha: CGFloat = 0.4
     /// Initials on a node, dark on the bright lanes. #1C1C1E
     static let graphNodeText = srgb(0x1C1C1E)
-    /// The inside of a hollow node (WIP, stash), so the lines under it do not show: the card's `surface`. #2C2C2E
-    static let graphSurface = srgb(0x2C2C2E)
+    /// The inside of a hollow node (WIP, stash), so the lines under it do not show: `sheetCardOpaque`. #252527
+    static let graphSurface = sheetCardOpaque
     /// The selected rows: a neutral fill (graph and diff rows) and its 1 pt edge (diff rows), like `selectedFill` /
     /// `selectedBorder`.
     /// White 0.11 / white 0.10
@@ -172,8 +180,8 @@ enum Palette {
 
     // MARK: Terminal (AppKit: SwiftTerm draws its own cells)
 
-    /// The terminal's background: its card's `surface`, so the cells and the card's padding read as one. #2C2C2E
-    static let terminalBackground = srgb(0x2C2C2E)
+    /// The terminal's background: `sheetCardOpaque`, so the cells and the card's padding read as one. #252527
+    static let terminalBackground = sheetCardOpaque
     /// Text without a color of its own, like the diff's code. White 0.86
     static let terminalForeground = NSColor.white.withAlphaComponent(0.86)
     /// The caret: the accent (`AccentColor` #2F86FB).
@@ -277,6 +285,14 @@ struct RaisedButtonStyle: ButtonStyle {
 extension EnvironmentValues {
     /// Inside a `ModalCard`'s footer: its `formRow` buttons take the footer's larger size (`ModalFooterMetrics`).
     @Entry var isModalFooter = false
+    /// The fill of the cards (`GlassCard`) and capsule tracks: `Palette.sheetCard` on the page's sheet, `surface` in
+    /// the modals and the vertical tabs.
+    @Entry var cardSurface = Palette.surface
+    /// Added to a `SectionCard`'s padding around its header and its body (not to a body without padding, such as the
+    /// graph's table): roomier cards on the page's sheet, the modals' cards as they were. Left and right, then top and
+    /// bottom.
+    @Entry var cardExtraPadding: CGFloat = 0
+    @Entry var cardExtraVerticalPadding: CGFloat = 0
 }
 
 /// The buttons of a modal's footer (user, 2026-11-13): roomier and a bit bigger than a form row's.
@@ -663,6 +679,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
     private struct SurfaceTrack: ViewModifier {
         let compact: Bool
         let fillsWidth: Bool
+        @Environment(\.cardSurface) private var surface
 
         func body(content: Content) -> some View {
             if #available(macOS 26, *), PlatformFeatures.liquidGlass, !compact {
@@ -670,7 +687,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
             } else {
                 content
                     .padding(fillsWidth || compact ? CapsuleTabs.fillInset : 3)
-                    .background(Capsule(style: .circular).fill(Palette.surface))
+                    .background(Capsule(style: .circular).fill(surface))
                     .overlay(Capsule(style: .circular).strokeBorder(Palette.surfaceBorder, lineWidth: 1)
                         .allowsHitTesting(false))
             }
@@ -864,20 +881,21 @@ struct WindowGlass: NSViewRepresentable {
 struct GlassCard: ViewModifier {
     var cornerRadius: CGFloat = 14
     var raised = false
+    @Environment(\.cardSurface) private var surface
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         if raised {
             content
                 .background {
-                    shape.fill(Palette.surface)
+                    shape.fill(surface)
                         .overlay(shape.fill(Palette.cardSheen))
                         .shadow(color: Palette.cardShadow, radius: 6, y: 3)
                 }
                 .overlay(shape.strokeBorder(Palette.raisedRim, lineWidth: 1).allowsHitTesting(false))
         } else {
             content
-                .background(shape.fill(Palette.surface))
+                .background(shape.fill(surface))
                 .overlay(shape.strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
         }
     }

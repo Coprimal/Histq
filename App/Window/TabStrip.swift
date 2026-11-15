@@ -1,16 +1,25 @@
-// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab
-// and the tab list (the command palette is the toolbar's Search), all inside the tab row's `PanelContainer` (MainView).
+// The tab strip under the toolbar: the window's tabs, then New tab and the tab list (the command palette is the
+// toolbar's Search), on the window glass. The selected tab is a tab of the page's sheet under it (`TabSheetShape`).
 import AppKit
 import SwiftUI
 
 /// Sizes of the tab strip. The tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the row
 /// scrolls. The vertical tabs (`VerticalTabsPanel`) use the same drag threshold, slot and dot.
 enum TabStripMetrics {
-    static let tabHeight: CGFloat = 28
+    /// Tall enough that New Tab and the tab list sit inside the row, clear of the sheet under it.
+    static let tabHeight: CGFloat = 34
     /// Between two tabs.
     static let gap: CGFloat = 5
-    /// Around the row inside its scroll view, so the pills' edges are not clipped.
+    /// Above the row inside its scroll view, so the hover fill's edge is not clipped. None below: the tabs' bottom is
+    /// the sheet's top.
     static let rowInset: CGFloat = 1
+    /// The selected tab's top corners.
+    static let tabRadius: CGFloat = 9
+    /// The concave curve at each bottom corner of the selected tab, into the sheet's top edge. The row has this much
+    /// room on each side inside its scroll view, so the first and last tab's flares are not clipped.
+    static let flare: CGFloat = 9
+    /// New Tab and the tab list beside the tabs: smaller than the tabs, so they float above the sheet.
+    static let buttonHeight: CGFloat = 24
     static let minTabWidth: CGFloat = 96
     static let maxTabWidth: CGFloat = 200
     /// The close button's square, and the matching slot before the title (the profile color dot).
@@ -29,7 +38,7 @@ struct TabStrip: View {
     var body: some View {
         HStack(spacing: 12) {
             TabTrack(model: model)
-            TabStripButtons(model: model, popoverEdge: .bottom)
+            TabStripButtons(model: model, popoverEdge: .bottom, buttonHeight: TabStripMetrics.buttonHeight)
         }
     }
 }
@@ -40,6 +49,8 @@ struct TabStripButtons: View {
     let model: WindowModel
     /// Where the tab list's popover opens from the chevron.
     let popoverEdge: Edge
+    /// The vertical tabs' default: as tall as their rows.
+    var buttonHeight = SidebarItemStyle.height
     @State private var showingTabList = false
 
     var body: some View {
@@ -57,14 +68,14 @@ struct TabStripButtons: View {
             }
         }
         .labelStyle(.iconOnly)
-        .buttonStyle(BottomBarButtonStyle(height: TabStripMetrics.tabHeight, horizontalPadding: 0))
+        .buttonStyle(BottomBarButtonStyle(height: buttonHeight, horizontalPadding: 0))
         .padding(TabStripMetrics.rowInset)
         .background(WindowDragBlocker())
     }
 }
 
-/// The tabs as standalone pills with a small gap: equal widths, a subtle fill for each, a stronger one for the
-/// selected tab that slides to the next selection.
+/// The tabs with a small gap: equal widths, no fill (a subtle one on hover), and the selected tab's sheet-colored
+/// shape that slides to the next selection.
 private struct TabTrack: View {
     let model: WindowModel
     @Namespace private var namespace
@@ -82,7 +93,7 @@ private struct TabTrack: View {
     var body: some View {
         GeometryReader { proxy in
             let count = model.tabs.count
-            let gaps = TabStripMetrics.gap * CGFloat(max(count - 1, 0)) + 2 * TabStripMetrics.rowInset
+            let gaps = TabStripMetrics.gap * CGFloat(max(count - 1, 0)) + 2 * TabStripMetrics.flare
             let tabWidth = min(TabStripMetrics.maxTabWidth,
                                max(TabStripMetrics.minTabWidth, (proxy.size.width - gaps) / CGFloat(max(count, 1))))
             let rowWidth = tabWidth * CGFloat(count) + gaps
@@ -101,13 +112,15 @@ private struct TabTrack: View {
             // Only the tabs take clicks: the empty space after them drags the window.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
-        .frame(height: TabStripMetrics.tabHeight + 2 * TabStripMetrics.rowInset)
+        .frame(height: TabStripMetrics.tabHeight + TabStripMetrics.rowInset)
     }
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
 
     private func row(tabWidth: CGFloat) -> some View {
-        HStack(spacing: TabStripMetrics.gap) {
+        // Each tab carries its flares' room on both sides (overlapping its neighbors' by the negative spacing), so
+        // scrolling to a tab at an edge keeps its flares in view; the tabs still sit `gap` apart.
+        HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
             ForEach(Array(model.tabs.enumerated()), id: \.element.id) { index, tab in
                 let selected = tab.id == model.selectedTabID
                 let dragged = tab.id == draggedID
@@ -118,16 +131,18 @@ private struct TabTrack: View {
                         onSelect: { model.selectTab(id: tab.id) },
                         onClose: { close(tab.id) })
                     .frame(width: tabWidth, height: TabStripMetrics.tabHeight)
+                    .padding(.horizontal, TabStripMetrics.flare)
                     .offset(x: offset(of: index, id: tab.id, step: tabWidth + TabStripMetrics.gap))
                     // Neighbors slide aside; the dragged tab tracks the pointer without lag.
                     .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
-                    .zIndex(dragged ? 1 : 0)
+                    // The selected tab's flares lie over its neighbors' edges.
+                    .zIndex(dragged ? 2 : selected ? 1 : 0)
                     .gesture(press(tab.id, index: index, step: tabWidth + TabStripMetrics.gap))
                     .id(tab.id)
             }
         }
-        .padding(TabStripMetrics.rowInset)
-        // The selected capsule slides, also for a selection made elsewhere (a menu, the tab list).
+        .padding(.top, TabStripMetrics.rowInset)
+        // The selected tab's shape slides, also for a selection made elsewhere (a menu, the tab list).
         .animation(animation, value: model.selectedTabID)
     }
 
@@ -185,7 +200,7 @@ private struct TabTrack: View {
     }
 }
 
-/// One tab, a standalone pill: its profile's color dot, its name, centered (leading in the vertical tabs) and cut with
+/// One tab: its profile's color dot, its name, centered (leading in the vertical tabs) and cut with
 /// "…", and a close button while hovered.
 struct TabItem: View {
     let title: String
@@ -235,18 +250,19 @@ struct TabItem: View {
         .frame(maxHeight: .infinity)
         .background {
             if selected {
-                // A flat fill on every version: Liquid Glass over the window's glass reads too close to `tabFill`.
-                Capsule(style: .circular)
-                    .fill(Palette.selectedTabFill)
-                    .overlay(Capsule(style: .circular).strokeBorder(Palette.selectedBorder, lineWidth: 1))
+                // The sheet's opaque fill, flares included (outside the tab's frame): the tab and the sheet read as
+                // one shape. No edge, which would draw a line where they meet.
+                TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare)
+                    .fill(Palette.sheet)
+                    .padding(.horizontal, -TabStripMetrics.flare)
                     .matchedGeometryEffect(id: "selectedTab", in: namespace)
             } else {
-                Capsule(style: .circular)
-                    .fill(Palette.tabFill)
-                    .overlay(Capsule(style: .circular).fill(hovered || dragged ? Palette.hoverFill : .clear))
+                RoundedRectangle(cornerRadius: TabStripMetrics.tabRadius, style: .continuous)
+                    .fill(hovered || dragged ? Palette.tabFill : .clear)
+                    .padding(.bottom, 3)
             }
         }
-        .contentShape(Capsule(style: .circular))
+        .contentShape(RoundedRectangle(cornerRadius: TabStripMetrics.tabRadius, style: .continuous))
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .help(help)
@@ -277,6 +293,31 @@ struct TabItem: View {
                     .onHover { hovered = $0 }
             }
         }
+    }
+}
+
+/// The selected tab joined to the page's sheet under it: rounded top corners, and at each bottom corner a concave
+/// flare that runs out into the sheet's top edge. `rect` includes the flares, `flare` wide on each side.
+struct TabSheetShape: Shape {
+    let radius: CGFloat
+    let flare: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let left = rect.minX + flare
+        let right = rect.maxX - flare
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addArc(tangent1End: CGPoint(x: left, y: rect.maxY), tangent2End: CGPoint(x: left, y: rect.minY),
+                    radius: flare)
+        path.addArc(tangent1End: CGPoint(x: left, y: rect.minY), tangent2End: CGPoint(x: right, y: rect.minY),
+                    radius: radius)
+        path.addArc(tangent1End: CGPoint(x: right, y: rect.minY), tangent2End: CGPoint(x: right, y: rect.maxY),
+                    radius: radius)
+        path.addArc(tangent1End: CGPoint(x: right, y: rect.maxY), tangent2End: CGPoint(x: rect.maxX, y: rect.maxY),
+                    radius: flare)
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
 

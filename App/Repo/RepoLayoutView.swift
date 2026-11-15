@@ -1,4 +1,4 @@
-// A repo tab's three panels (Rex style: each a `PanelContainer` of solid cards, with a small gap): the sidebar,
+// A repo tab's three panels (columns of cards on the page's sheet, with a small gap): the sidebar,
 // the commit graph (or the open file's diff, or a conflicted file's conflict editor) under the operation banner while
 // a merge, rebase, cherry-pick or revert is in progress, with the tab's terminal drawer under it when open, and the
 // detail. The two gaps are draggable dividers; the side panels' widths are saved in `PrefKey.panelWidths`.
@@ -10,20 +10,22 @@ import SwiftUI
 enum RepoLayoutMetrics {
     /// Between two panels: the divider's grab area.
     static let gap: CGFloat = 8
-    /// From the window's edges (the header row is above).
+    /// From the page sheet's edges to the cards, and from the window's edges to the sheet.
     static let inset: CGFloat = 8
     static let sidebar: ClosedRange<CGFloat> = 200...420
     static let detail: ClosedRange<CGFloat> = 320...640
     static let graphMin: CGFloat = 360
-    /// The panels' row: both insets and both gaps.
+    /// The panels' row in the sheet: both insets and both gaps.
     static let chrome: CGFloat = 2 * inset + 2 * gap
-    /// 200 + 360 + 320 + 32 = 912 wide; with the vertical tabs, their 150 and their own leading inset (the page's
-    /// inset is the gap after them): 1070. 520 tall: the header row and about 15 list rows.
+    /// 200 + 360 + 320 + 32, and the sheet's 16 from the window's edges = 928 wide; with the vertical tabs, their 150
+    /// and their own leading inset (the sheet's inset is the gap after them): 1086. 520 tall: the header row and about
+    /// 15 list rows.
     static func minimumWindowSize(tabPosition: TabPosition) -> CGSize {
         let tabs = tabPosition == .left ? VerticalTabsMetrics.width + inset : 0
-        return CGSize(width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome + tabs, height: 520)
+        return CGSize(width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome + 2 * inset + tabs,
+                      height: 520)
     }
-    /// The sidebar's default includes its container's padding, so its tab picker keeps the titles beside the icons.
+    /// The sidebar's default keeps its tab picker's titles beside the icons.
     fileprivate static let defaults = PanelWidths(sidebar: 252, detail: 360)
 }
 
@@ -97,7 +99,7 @@ struct RepoLayoutView: View {
                 }
                 panels(widths: widths, available: available, height: proxy.size.height)
             }
-            .padding([.horizontal, .bottom], RepoLayoutMetrics.inset)
+            .padding(RepoLayoutMetrics.inset)
         }
         // The tab's GitHub lists, for the PRs tab and the graph's PR badges.
         .background(GitHubDriver(session: session))
@@ -107,36 +109,30 @@ struct RepoLayoutView: View {
     /// own height is measured.
     private func panels(widths: PanelWidths, available: CGFloat, height: CGFloat) -> some View {
         HStack(spacing: 0) {
-            // Each panel's cards sit in its own `PanelContainer` (bg_card), a level between the window glass and
+            // The panels' cards sit right on the page's sheet (MainView), a level between the window glass and
             // the cards.
-            PanelContainer {
-                SidebarView(session: session)
-            }
-            .frame(width: widths.sidebar)
+            SidebarView(session: session)
+                .frame(width: widths.sidebar)
             divider(.sidebar, widths: widths, available: available)
-            PanelContainer {
-                VStack(spacing: SectionCardMetrics.spacing) {
-                    // Reads the operation itself, so a status read redraws the banner and not the panels.
-                    OperationBanner(session: session)
-                    VStack(spacing: 0) {
-                        panel2
-                        // The tab's terminal under the graph (and under an open file); its handle is the gap above
-                        // it. Without a terminal yet (shown with a new tab) it shows its placeholder.
-                        if session.isTerminalOpen {
-                            TerminalDrawer(
-                                session: session, terminal: session.terminal,
-                                available: graphAndDrawerHeight ?? height)
-                        }
+            VStack(spacing: SectionCardMetrics.spacing) {
+                // Reads the operation itself, so a status read redraws the banner and not the panels.
+                OperationBanner(session: session)
+                VStack(spacing: 0) {
+                    panel2
+                    // The tab's terminal under the graph (and under an open file); its handle is the gap above
+                    // it. Without a terminal yet (shown with a new tab) it shows its placeholder.
+                    if session.isTerminalOpen {
+                        TerminalDrawer(
+                            session: session, terminal: session.terminal,
+                            available: graphAndDrawerHeight ?? height)
                     }
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
             }
             .frame(maxWidth: .infinity)
             divider(.detail, widths: widths, available: available)
-            PanelContainer {
-                DetailPanel(session: session)
-            }
-            .frame(width: widths.detail)
+            DetailPanel(session: session)
+                .frame(width: widths.detail)
         }
     }
 

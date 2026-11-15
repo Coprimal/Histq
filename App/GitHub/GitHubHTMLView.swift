@@ -208,7 +208,7 @@ enum GitHubHTML {
     }
 
     /// The card's fill: the page is drawn on it.
-    static var background: NSColor { NSColor(Palette.surface) }
+    static var background: NSColor { Palette.sheetCardOpaque }
 
     /// `body` in a full document whose first element is the policy, before anything the body could add.
     static func document(body: String) -> String {

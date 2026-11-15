@@ -26,6 +26,8 @@ struct SectionCard<Content: View, Accessory: View>: View {
     @ViewBuilder let content: () -> Content
     @ViewBuilder let accessory: () -> Accessory
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
 
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
@@ -43,6 +45,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
     }
 
     var body: some View {
+        let bodyShown = isExpanded?.wrappedValue ?? true
         VStack(alignment: .leading, spacing: 0) {
             if let title {
                 HStack(spacing: 0) {
@@ -61,15 +64,18 @@ struct SectionCard<Content: View, Accessory: View>: View {
                             .accessibilityAddTraits(.isHeader)
                     }
                     accessory()
-                        .padding(.trailing, SettingsMetrics.cardPadding)
+                        .padding(.trailing, SettingsMetrics.cardPadding + extraPadding)
+                        .padding(headerInsets(bodyShown: bodyShown))
                 }
             }
-            if isExpanded?.wrappedValue ?? true {
+            if bodyShown {
                 VStack(alignment: .leading, spacing: 0) {
                     content()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(title == nil ? .all : [.horizontal, .bottom], contentPadding)
+                .padding(.horizontal, contentPadding == 0 ? 0 : contentPadding + extraPadding)
+                .padding(title == nil ? .vertical : .bottom,
+                         contentPadding == 0 ? 0 : contentPadding + extraVerticalPadding)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -103,9 +109,17 @@ struct SectionCard<Content: View, Accessory: View>: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, isExpanded == nil ? SettingsMetrics.cardPadding : 10)
+        .padding(.horizontal, (isExpanded == nil ? SettingsMetrics.cardPadding : 10) + extraPadding)
         .frame(height: SectionCardMetrics.headerHeight)
+        .padding(headerInsets(bodyShown: expanded ?? true))
         .contentShape(Rectangle())
+    }
+
+    /// On the page's sheet (`extraVerticalPadding`), more room above the header, and below it while the body is hidden; the
+    /// header and its accessory get the same, so they stay level.
+    private func headerInsets(bodyShown: Bool) -> EdgeInsets {
+        let inset = extraVerticalPadding * 2 / 3
+        return EdgeInsets(top: inset, leading: 0, bottom: bodyShown ? 0 : inset, trailing: 0)
     }
 }
 
@@ -120,7 +134,8 @@ extension SectionCard where Accessory == EmptyView {
     }
 }
 
-/// The outer container of a repo panel (sidebar, graph / diff / conflict editor, detail) and of the tab row: a
+/// The outer container of a modal, the command palette and the vertical tabs (the page's cards sit on `Palette.sheet`
+/// instead, MainView): a
 /// rounded `Palette.bgCard` fill with a 1 pt `surfaceBorder` edge, `padding` inside it. Its cards sit one step above
 /// it, so the window, the container and the cards read as three levels. A flat fill on purpose: no material, glass
 /// effect or shadow, which would add work to every redraw of the click's frame. The default radius keeps the corners

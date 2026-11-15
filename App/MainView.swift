@@ -27,14 +27,25 @@ final class Navigation {
 /// The rows under the toolbar. The tab strip starts at the top of the safe area, so it sits under the toolbar, and
 /// under the native window tab bar when one shows (Phase 8).
 enum HeaderMetrics {
-    /// The tab row's container from the window's edges: the panels' inset.
+    /// The tab row and the page's sheet from the window's edges: the panels' inset.
     static let tabStripInset: CGFloat = RepoLayoutMetrics.inset
-    /// Between the tab row's container and its tab pills.
-    static let tabRowPadding: CGFloat = 4
-    /// Concentric with the tab pills: their radius (28 pt capsules), the strip's 1 pt row inset, then the padding.
-    static let tabRowRadius: CGFloat = 14 + 1 + tabRowPadding
-    /// Between the tab strip and the top of every page (the repo panels, Welcome, About): the 8 pt gap of the cards.
-    static let contentGap: CGFloat = SectionCardMetrics.spacing
+    /// Above the tabs, under the toolbar. The tabs' bottom is the sheet's top: the selected tab joins it.
+    static let tabRowTop: CGFloat = 0
+    /// Before the first tab: the sheet's corner, so the selected tab's flare sits on its straight top edge.
+    static let tabRowLeading: CGFloat = PageSheetMetrics.cornerRadius
+    /// After New Tab and the tab list.
+    static let tabRowTrailing: CGFloat = 4
+}
+
+/// The one container around the selected tab's page (the repo panels' cards, Welcome, About), joined to the selected
+/// tab when the tabs are on top.
+enum PageSheetMetrics {
+    /// Concentric with the cards inside it, `RepoLayoutMetrics.inset` from its edge.
+    static let cornerRadius: CGFloat = SettingsMetrics.cardRadius + RepoLayoutMetrics.inset
+    /// Added around the content of the cards on it (`cardExtraPadding`, `cardExtraVerticalPadding`), so it sits clear
+    /// of their edges: a little on the sides, more above and below.
+    static let cardExtraPadding: CGFloat = 2
+    static let cardExtraVerticalPadding: CGFloat = 6
 }
 
 struct MainView: View {
@@ -58,7 +69,8 @@ struct MainView: View {
                     VerticalTabsPanel()
                         .padding([.leading, .bottom], HeaderMetrics.tabStripInset)
                 }
-                // Rendered from `shownPage`, so the leaving page keeps its content while it slides out.
+                // Rendered from `shownPage`, so the leaving page keeps its content while it slides out. All of it on
+                // one sheet (`Palette.sheet`, the selected tab's fill), its cards a step darker.
                 ZStack {
                     switch shownPage {
                     case .home: TabContent().transition(pageTransition)
@@ -66,10 +78,13 @@ struct MainView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
+                .environment(\.cardSurface, Palette.sheetCard)
+                .environment(\.cardExtraPadding, PageSheetMetrics.cardExtraPadding)
+                .environment(\.cardExtraVerticalPadding, PageSheetMetrics.cardExtraVerticalPadding)
+                .background(Palette.sheet)
+                .clipShape(RoundedRectangle(cornerRadius: PageSheetMetrics.cornerRadius, style: .continuous))
+                .padding([.horizontal, .bottom], HeaderMetrics.tabStripInset)
             }
-            // Panel 0 and the page start at the top of the safe area, where the tab row does.
-            .padding(.top, tabsOnLeft ? 0 : HeaderMetrics.contentGap)
         }
         // Blurred and disabled behind a modal or the palette; its own view reads that, so this body never reruns.
         .modifier(WindowBackdrop(model: model))
@@ -101,18 +116,18 @@ struct MainView: View {
         .modifier(HardTopScrollEdge())
     }
 
-    /// The tab strip, full width under the toolbar, then the menus' running operation, in one `PanelContainer` like
-    /// the panels below. Empty space in the row drags the window, like the toolbar's: the drag area lies over the
-    /// container's fill (padding 0, inset inside), so the whole container drags, not only the gaps around it.
+    /// The tab strip, full width under the toolbar, then the menus' running operation, on the window glass: no
+    /// container, the selected tab joins the page's sheet under it. Empty space in the row drags the window, like the
+    /// toolbar's.
     private var tabRow: some View {
-        PanelContainer(padding: 0, cornerRadius: HeaderMetrics.tabRowRadius) {
-            HStack(spacing: 0) {
-                TabStrip()
-                TabRowStatus(model: model)
-            }
-            .padding(HeaderMetrics.tabRowPadding)
-            .background(WindowDragArea())
+        HStack(spacing: 0) {
+            TabStrip()
+            TabRowStatus(model: model)
         }
+        .padding(.top, HeaderMetrics.tabRowTop)
+        .padding(.leading, HeaderMetrics.tabRowLeading)
+        .padding(.trailing, HeaderMetrics.tabRowTrailing)
+        .background(WindowDragArea())
         .padding(.horizontal, HeaderMetrics.tabStripInset)
     }
 
