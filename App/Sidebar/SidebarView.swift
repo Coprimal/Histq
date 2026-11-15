@@ -72,6 +72,10 @@ enum SidebarMetrics {
     /// (12) and a gap (6), 28 pt into the card; a row starts at the card padding (6) plus this, so the rows' icons
     /// line up with the section's own icon.
     static let rowLeading: CGFloat = 28 - cardPadding
+    /// Of `rowLeading`, the part inside a selectable row's capsule, before its icon: the rest (and a nested row's
+    /// indent) lies outside, so the hover and selection capsules start where the row is indented, not at the card's
+    /// edge.
+    static let capsuleLeading: CGFloat = 10
     /// A row's icon slot (glyphs leading-aligned in it, under the section's icon) and the gap from it to the name:
     /// tight, so the name sits close to a narrow branch glyph (user, 2026-11-13).
     static let iconSlot: CGFloat = 20
@@ -290,12 +294,13 @@ private struct WorktreeRow: View {
             }
         }
         .foregroundStyle(.secondary)
-        .padding(.leading, SidebarMetrics.rowLeading)
+        .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
         .frame(minHeight: SidebarItemStyle.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(hovered ? Palette.hoverFill : .clear))
         .contentShape(Capsule())
+        .padding(.leading, SidebarMetrics.rowLeading - SidebarMetrics.capsuleLeading)
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .onTapGesture { showHead() }
@@ -442,13 +447,14 @@ private struct BranchRow<Trailing: View>: View {
         }
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
-        .padding(.leading, SidebarMetrics.rowLeading + indent)
+        .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
         .frame(minHeight: SidebarItemStyle.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
         .contentShape(Capsule())
+        .padding(.leading, SidebarMetrics.rowLeading - SidebarMetrics.capsuleLeading + indent)
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .onTapGesture { session.selectRef(item) }

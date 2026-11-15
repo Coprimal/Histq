@@ -225,13 +225,14 @@ private struct HostedRowView: View {
         }
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         // `BranchRow`'s look: a neutral capsule when selected, a hover capsule otherwise.
-        .padding(.leading, SidebarMetrics.rowLeading)
+        .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
         .frame(minHeight: SidebarItemStyle.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
         .contentShape(Capsule())
+        .padding(.leading, SidebarMetrics.rowLeading - SidebarMetrics.capsuleLeading)
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .onTapGesture { session.selectHosted(row.item) }
