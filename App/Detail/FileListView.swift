@@ -160,7 +160,8 @@ struct FileListView<Trailing: View>: View {
                 ForEach(FileTree.rows(for: files)) { row in
                     switch row.content {
                     case .folder(let name, let path):
-                        FolderRow(name: name, depth: row.depth, size: folderSize(path), sizeInset: sizeInset) {
+                        FolderRow(name: name, path: path, repoURL: repoURL, depth: row.depth, size: folderSize(path),
+                                  sizeInset: sizeInset) {
                             folderMenuEntries(path, files.filter { $0.path.hasPrefix(path + "/") })
                         }
                     case .file(let file):
@@ -273,7 +274,7 @@ private struct FileRow<Trailing: View>: View {
                 Divider()
             }
             Button("Copy Path") { Self.copy(file.path) }
-            Button("Reveal in Finder") { Self.reveal(file, in: repoURL) }
+            Button("Reveal in Finder") { revealInFinder(file.path, in: repoURL) }
         }
     }
 
@@ -281,24 +282,27 @@ private struct FileRow<Trailing: View>: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
+}
 
-    /// The file in Finder; its nearest existing folder when it is gone (a deleted file).
-    private static func reveal(_ file: FileChange, in repoURL: URL) {
-        var url = repoURL.appending(path: file.path, directoryHint: .notDirectory)
-        while !FileManager.default.fileExists(atPath: url.path), url.path.count > repoURL.path.count {
-            url = url.deletingLastPathComponent()
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+/// The root-relative `path` (a file or a folder) in Finder; its nearest existing folder when it is gone (deleted).
+private func revealInFinder(_ path: String, in repoURL: URL) {
+    var url = repoURL.appending(path: path)
+    while !FileManager.default.fileExists(atPath: url.path), url.path.count > repoURL.path.count {
+        url = url.deletingLastPathComponent()
     }
+    NSWorkspace.shared.activateFileViewerSelecting([url])
 }
 
 private struct FolderRow: View {
     let name: String
+    /// Root-relative.
+    let path: String
+    let repoURL: URL
     let depth: Int
     let size: Int64?
     /// The file rows' button width, so this size sits in the files' size column.
     let sizeInset: CGFloat
-    /// The caller's context menu entries; no menu when empty.
+    /// The caller's context menu entries, above Reveal in Finder.
     let menu: () -> [MenuEntry]
 
     var body: some View {
@@ -321,7 +325,12 @@ private struct FolderRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .contextMenu {
-            MenuEntriesView(entries: menu())
+            let entries = menu()
+            if !entries.isEmpty {
+                MenuEntriesView(entries: entries)
+                Divider()
+            }
+            Button("Reveal in Finder") { revealInFinder(path, in: repoURL) }
         }
     }
 }
