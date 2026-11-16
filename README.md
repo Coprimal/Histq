@@ -12,6 +12,8 @@
 
 [Website](https://histq.dinhanhthi.com) · [Download](https://github.com/dinhanhthi/Histq/releases/latest) · [Changelog](CHANGELOG.md)
 
+<img src="assets/screenshot.png" alt="Histq window: commit graph, branch and worktree sidebar, unstaged changes, commit form and terminal drawer">
+
 </div>
 
 Histq is written in SwiftUI and AppKit. It runs the `git` command line tool on your Mac, so it works with your
