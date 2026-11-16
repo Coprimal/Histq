@@ -167,6 +167,16 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         try await get(url(["user"]))
     }
 
+    /// `GET /user/repos?sort=full_name`: the token's user's repositories by name. GitHub's defaults
+    /// (`affiliation=owner,collaborator,organization_member`, `visibility=all`) already include personal,
+    /// collaborator and organization repositories. Up to 30 pages (3000 repositories) rather than `maxPages`: a clone
+    /// picker must list all of an account's repositories.
+    public func userRepositories() async throws -> [GitHubRepository] {
+        var client = self
+        client.maxPages = 30
+        return try await client.list(url(["user", "repos"], query: ["sort": "full_name"]))
+    }
+
     public func pullRequests(in repo: HostedRepository, state: HostedListState) async throws -> [GitHubPullRequest] {
         try await list(url(try repoPath(repo) + ["pulls"], query: ["state": state.rawValue]))
     }

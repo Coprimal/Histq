@@ -51,6 +51,43 @@ struct GitHubClientTests {
         }
     }
 
+    @Test("the user's repositories come sorted by name from every page, with the token only in the header")
+    func userRepositoriesFollowPages() async throws {
+        @Sendable func repoJSON(_ id: Int, owner: String, name: String, isPrivate: Bool) -> String {
+            """
+            {"id": \(id), "name": "\(name)", "full_name": "\(owner)/\(name)", "private": \(isPrivate), "fork": false,
+             "owner": {"id": \(id * 10), "login": "\(owner)"}, "clone_url": "https://github.com/\(owner)/\(name).git"}
+            """
+        }
+        let stub = StubServer { request in
+            let page2 = "https://api.github.com/user/repos?sort=full_name&per_page=100&page=2"
+            if request.url?.query()?.contains("page=2") == true {
+                return .init(body: "[\(repoJSON(2, owner: "acme", name: "tools", isPrivate: true))]")
+            }
+            return .init(
+                headers: ["Link": "<\(page2)>; rel=\"next\", <\(page2)>; rel=\"last\""],
+                body: "[\(repoJSON(1, owner: "octo", name: "hello", isPrivate: false))]")
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+
+        let repos = try await client.userRepositories()
+
+        #expect(repos.map(\.fullName) == ["octo/hello", "acme/tools"])
+        #expect(repos.map(\.owner.login) == ["octo", "acme"])
+        #expect(repos.map(\.cloneURL) == ["https://github.com/octo/hello.git", "https://github.com/acme/tools.git"])
+        #expect(repos.map(\.isPrivate) == [false, true])
+        let requests = stub.requests
+        #expect(requests.count == 2)
+        #expect(requests.first?.url?.path() == "/user/repos")
+        #expect(requests.first?.url?.query()?.contains("sort=full_name") == true)
+        #expect(requests.first?.url?.query()?.contains("per_page=100") == true)
+        for request in requests {
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+            #expect(request.url?.host() == "api.github.com")
+            #expect(request.url?.absoluteString.contains(Self.token) == false)
+        }
+    }
+
     @Test("a next-page link to another host is refused, so the token never goes there")
     func paginationRefusesOtherOrigin() async throws {
         let stub = StubServer { _ in

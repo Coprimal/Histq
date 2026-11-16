@@ -7,8 +7,8 @@
 // 404 for anything else, so a stub run never reaches the network. The data: user `stub`, open pull request #1 "Add
 // feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 1 comment, 1 check run) by `stub`, open issue
 // #2 assigned to `stub` with 1 comment, the repository's labels, assignable users and collaborators (`stub`,
-// `reviewer`), and default branch `main`. The JSON has GitHub's shapes (search results are issue-shaped), so the stub
-// exercises the same decoding as the real API.
+// `reviewer`), default branch `main`, and the Welcome clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has
+// GitHub's shapes (search results are issue-shaped), so the stub exercises the same decoding as the real API.
 import Foundation
 import HistqCore
 
@@ -64,6 +64,7 @@ enum GitHubStub {
         }
         switch url.path() {
         case "/user": return (200, user)
+        case "/user/repos": return (200, userRepos)
         case repo: return (200, #"{"full_name": "stub/stub", "default_branch": "main"}"#)
         case "\(repo)/labels": return (200, "[\(labels)]")
         case "\(repo)/assignees", "\(repo)/collaborators": return (200, "[\(user), \(reviewer)]")
@@ -102,6 +103,19 @@ enum GitHubStub {
         {"id": 1001, "login": "stub", "name": "Stub User", "html_url": "https://github.com/stub",
          "avatar_url": "https://avatars.githubusercontent.com/u/1001"}
         """
+
+    /// The Welcome page's clone picker: `stub`'s own repositories and an organization's, sorted by full name.
+    private static let userRepos = "[" + [
+        ("acme", "api-gateway", true), ("acme", "design-system", false), ("acme", "infra", true),
+        ("stub", "dotfiles", false), ("stub", "stub", false),
+    ].enumerated().map { index, repo in
+        let (owner, name, isPrivate) = repo
+        return """
+            {"id": \(5000 + index), "name": "\(name)", "full_name": "\(owner)/\(name)", "private": \(isPrivate),
+             "fork": false, "clone_url": "https://github.com/\(owner)/\(name).git",
+             "owner": {"id": \(owner == "stub" ? 1001 : 2001), "login": "\(owner)"}}
+            """
+    }.joined(separator: ", ") + "]"
 
     private static let reviewer = """
         {"id": 1002, "login": "reviewer", "html_url": "https://github.com/reviewer",

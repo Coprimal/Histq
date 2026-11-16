@@ -24,6 +24,43 @@ final class WelcomeModel {
         case failed(String)
     }
 
+    /// The page's three ways to get a repository; the options card selects one.
+    enum Option: String, CaseIterable {
+        case open, clone, initialize
+
+        var title: String {
+            switch self {
+            case .open: "Open"
+            case .clone: "Clone"
+            case .initialize: "Init"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .open: "folder"
+            case .clone: "arrow.down.circle"
+            case .initialize: "plus.rectangle.on.folder"
+            }
+        }
+    }
+
+    /// Where the clone URL comes from: typed, or picked from the connected GitHub account's repositories.
+    enum CloneSource {
+        case url, github
+    }
+
+    /// The default profile's GitHub repositories, for the clone picker.
+    enum RepoList: Equatable {
+        case idle
+        case loading
+        case loaded(account: Profile.GitHubAccount, repos: [GitHubRepository])
+        /// No default profile or GitHub account on it, or (`account` set) its token is not in the Keychain.
+        case notConnected(account: Profile.GitHubAccount?)
+        /// `reconnect` when GitHub refused the token.
+        case failed(message: String, reconnect: Bool)
+    }
+
     private(set) var gitCheck = GitCheck.checking
     /// "Install Command Line Tools" was clicked: the card says to come back once the installer is done.
     private(set) var installStarted = false
@@ -32,23 +69,46 @@ final class WelcomeModel {
     private(set) var cloneParent: URL
     private(set) var clone = CloneState.idle
     private(set) var initError: String?
+    var option = Option.clone
+    /// Switching to `.github` loads the repositories in the background (never blocks the switch).
+    var cloneSource = CloneSource.url {
+        didSet { if cloneSource == .github { loadRepositoriesIfNeeded() } }
+    }
+    private(set) var repoList = RepoList.idle
+    /// A refresh runs while the last loaded repositories stay listed.
+    private(set) var isRefreshing = false
+    /// The default profile's GitHub account, known after a load: the Source picker's "GitHub (login)".
+    private(set) var githubAccount: Profile.GitHubAccount?
+    /// The repository picked in the GitHub list; its URL is in `cloneURL`.
+    private(set) var selectedRepoID: Int?
 
     @ObservationIgnored private let open: (URL) -> Void
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var cloneTask: Task<Void, Never>?
     /// Changes with every clone start or cancel, so a stale clone's progress or end is dropped.
     @ObservationIgnored private var cloneToken = 0
+    @ObservationIgnored private var reposTask: Task<Void, Never>?
+    /// Changes with every repository load or cancel, so a stale answer is dropped.
+    @ObservationIgnored private var reposToken = 0
 
     init(open: @escaping (URL) -> Void) {
         self.open = open
         cloneParent = RecentRepos.shared.urls.first?.deletingLastPathComponent()
             ?? FileManager.default.homeDirectoryForCurrentUser
+        #if DEBUG
+        // QA: `-HistqWelcomeSource github` opens the Clone form on the GitHub list (with `-HistqGitHubStub YES`).
+        if AppState.launchFlag("-HistqWelcomeSource") == "github" {
+            cloneSource = .github
+            loadRepositoriesIfNeeded()
+        }
+        #endif
     }
 
     deinit {
         // A window closing drops its Welcome models without `cancel()`: stop the clone (git with it).
         cloneTask?.cancel()
         checkTask?.cancel()
+        reposTask?.cancel()
     }
 
     /// The folder name a clone of `cloneURL` gets: its last path component without `.git`.
@@ -67,6 +127,18 @@ final class WelcomeModel {
     var isCloning: Bool {
         if case .running = clone { return true }
         return false
+    }
+
+    /// The picked repository while it is still listed and `cloneURL` is still its URL.
+    var selectedRepository: GitHubRepository? {
+        guard case .loaded(_, let repos) = repoList else { return nil }
+        return repos.first { $0.id == selectedRepoID && $0.cloneURL == cloneURL }
+    }
+
+    /// A clone can start: a destination, and in GitHub mode a listed repository (never a hidden typed URL).
+    var canClone: Bool {
+        guard cloneDestination != nil else { return false }
+        return cloneSource == .url || selectedRepository != nil
     }
 
     /// A git path is set in the preferences (not auto-detected).
@@ -213,7 +285,7 @@ final class WelcomeModel {
 
     /// Clones `cloneURL` into `cloneDestination`, streaming git's progress; opens the clone in this tab when done.
     func startClone() {
-        guard !isCloning, let destination = cloneDestination else { return }
+        guard !isCloning, canClone, let destination = cloneDestination else { return }
         let url = cloneURL.trimmingCharacters(in: .whitespacesAndNewlines)
         cloneToken &+= 1
         let token = cloneToken
@@ -248,6 +320,10 @@ final class WelcomeModel {
     func cancel() {
         cancelClone()
         checkTask?.cancel()
+        reposTask?.cancel()
+        reposTask = nil
+        reposToken &+= 1
+        isRefreshing = false
     }
 
     private func progress(_ line: String, token: Int) {
@@ -273,6 +349,102 @@ final class WelcomeModel {
         try await GitOperations.clone(url: url, into: destination, runner: runner, env: cloneEnv, progress: progress)
     }
 
+    // MARK: GitHub repositories
+
+    /// The loaded repositories grouped by owner: the account's own login first, then the others alphabetically.
+    var repoGroups: [(owner: String, repos: [GitHubRepository])] {
+        guard case .loaded(let account, let repos) = repoList else { return [] }
+        let groups = Dictionary(grouping: repos, by: \.owner.login)
+        let owners = groups.keys.sorted { lhs, rhs in
+            let lhsOwn = lhs.caseInsensitiveCompare(account.login) == .orderedSame
+            if lhsOwn != (rhs.caseInsensitiveCompare(account.login) == .orderedSame) { return lhsOwn }
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+        return owners.map { (owner: $0, repos: groups[$0] ?? []) }
+    }
+
+    /// Loads the repositories unless they are loading or loaded already.
+    func loadRepositoriesIfNeeded() {
+        switch repoList {
+        case .idle, .notConnected, .failed(_, reconnect: true): loadRepositories()
+        case .loading, .loaded, .failed: break
+        }
+    }
+
+    /// Loads the repositories again: the refresh button.
+    func refreshRepositories() {
+        loadRepositories()
+    }
+
+    /// Clones `repo` next: its URL goes into `cloneURL`, so the destination and the clone work as for a typed URL.
+    func selectRepository(_ repo: GitHubRepository) {
+        cloneURL = repo.cloneURL
+        selectedRepoID = repo.id
+    }
+
+    private func loadRepositories() {
+        reposTask?.cancel()
+        reposToken &+= 1
+        let token = reposToken
+        if case .loaded = repoList { isRefreshing = true } else { repoList = .loading }
+        reposTask = Task { [weak self] in
+            let (account, result) = await Self.fetchRepositories()
+            guard !Task.isCancelled, let self, token == reposToken else { return }
+            isRefreshing = false
+            githubAccount = account
+            repoList = result
+            switch result {
+            case .loaded(_, let repos): UITiming.content("welcome repos \(repos.count)")
+            case .notConnected: UITiming.content("welcome repos not-connected")
+            default: UITiming.content("welcome repos error")
+            }
+        }
+    }
+
+    /// The default profile's account and its repositories, read off the main actor; the token stays inside the
+    /// client.
+    @concurrent
+    private nonisolated static func fetchRepositories() async -> (Profile.GitHubAccount?, RepoList) {
+        #if DEBUG
+        if GitHubStub.isEnabled {
+            // No Keychain, no network: the stub session answers.
+            let account = Profile.GitHubAccount(host: "github.com", login: "stub")
+            return (account, await repoList(account, client: GitHubStub.client))
+        }
+        #endif
+        guard let profile = await ProfileLibrary.shared.loaded()?.defaultProfile, let account = profile.github else {
+            return (nil, .notConnected(account: nil))
+        }
+        guard let token = await GitHubTokens.token(for: profile) else {
+            return (account, .notConnected(account: account))
+        }
+        return (account, await repoList(account) { try GitHubClient(host: account.host, token: token) })
+    }
+
+    @concurrent
+    private nonisolated static func repoList(
+        _ account: Profile.GitHubAccount, client makeClient: () throws -> GitHubClient?
+    ) async -> RepoList {
+        do {
+            guard let client = try makeClient() else { return .failed(message: "No GitHub client.", reconnect: false) }
+            return .loaded(account: account, repos: try await client.userRepositories())
+        } catch {
+            return repoListError(error)
+        }
+    }
+
+    private nonisolated static func repoListError(_ error: any Error) -> RepoList {
+        switch error {
+        case GitHubError.unauthorized:
+            .failed(message: "GitHub refused the token (revoked or expired). Reconnect the account in Settings › "
+                + "Integrations.", reconnect: true)
+        case let error as GitHubError:
+            .failed(message: String(describing: error), reconnect: false)
+        default:
+            .failed(message: error.localizedDescription, reconnect: false)
+        }
+    }
+
     /// A short message for a failed clone or init: git's last error line.
     private nonisolated static func message(for error: Error) -> String {
         switch error {
@@ -289,41 +461,78 @@ final class WelcomeModel {
     }
 }
 
-/// Sizes of the Welcome page.
-private enum WelcomeMetrics {
-    static let maxWidth: CGFloat = 560
-}
-
-/// The page of a tab with no repository.
+/// The page of a tab with no repository: three panels of cards on the page's sheet, as a repo tab's. The options
+/// (Open, Clone, Init), the selected option's form, and the recent repositories.
 struct WelcomeView: View {
     let model: WelcomeModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: SectionCardMetrics.spacing) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Welcome to Histq")
-                        .font(.title2.weight(.semibold))
-                    Text("Open, clone or create a git repository.")
-                        .foregroundStyle(.secondary)
+        HStack(spacing: RepoLayoutMetrics.gap) {
+            OptionsCard(model: model)
+                .frame(width: RepoLayoutMetrics.sidebar.lowerBound)
+            ScrollView {
+                VStack(alignment: .leading, spacing: SectionCardMetrics.spacing) {
+                    if case .problem(let error) = model.gitCheck {
+                        GitProblemCard(model: model, error: error)
+                    }
+                    switch model.option {
+                    case .open: OpenCard(model: model)
+                    case .clone: CloneCard(model: model)
+                    case .initialize: InitCard(model: model)
+                    }
                 }
-                .padding(.horizontal, SettingsMetrics.cardPadding)
-                .padding(.bottom, 8)
-                if case .problem(let error) = model.gitCheck {
-                    GitProblemCard(model: model, error: error)
-                }
-                OpenCard(model: model)
-                CloneCard(model: model)
-                InitCard(model: model)
-                RecentCard(model: model)
             }
-            .frame(maxWidth: WelcomeMetrics.maxWidth)
-            .padding(SettingsMetrics.pagePadding)
-            .padding(.top, SettingsMetrics.contentTopOffset)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            RecentCard(model: model)
+                .frame(width: RepoLayoutMetrics.detail.lowerBound)
         }
+        .frame(maxHeight: .infinity)
+        .padding(RepoLayoutMetrics.inset)
         .labeledContentStyle(.settingsRow)
         .onAppear { model.checkGitIfNeeded() }
+    }
+}
+
+/// The page's options as sidebar rows: a click shows the option's form at once. Up/Down move the selection while the
+/// card has the focus.
+private struct OptionsCard: View {
+    let model: WelcomeModel
+
+    var body: some View {
+        SectionCard("Welcome", systemImage: "sparkles", contentPadding: 6) {
+            VStack(alignment: .leading, spacing: SidebarItemStyle.spacing) {
+                ForEach(WelcomeModel.Option.allCases, id: \.self) { option in
+                    Button { select(option) } label: {
+                        Label(option.title, systemImage: option.systemImage)
+                    }
+                    .buttonStyle(SidebarItemStyle(selected: option == model.option))
+                    .accessibilityAddTraits(option == model.option ? .isSelected : [])
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .frame(maxHeight: .infinity)
+        .focusable()
+        .focusEffectDisabled()
+        .onMoveCommand(perform: move)
+    }
+
+    private func select(_ option: WelcomeModel.Option) {
+        guard option != model.option else { return }
+        UITiming.select("welcome \(option.rawValue)")
+        model.option = option
+    }
+
+    /// Up/Down: the previous or next option, stopping at the ends.
+    private func move(_ direction: MoveCommandDirection) {
+        let all = WelcomeModel.Option.allCases
+        guard let index = all.firstIndex(of: model.option) else { return }
+        switch direction {
+        case .up where index > all.startIndex: select(all[index - 1])
+        case .down where index < all.count - 1: select(all[index + 1])
+        default: break
+        }
     }
 }
 
@@ -441,21 +650,40 @@ private struct InitCard: View {
     }
 }
 
-/// The clone form: URL, destination, then the Clone button, or git's progress with Cancel while it runs.
+/// The clone form: the source (a typed URL, or the connected GitHub account's repositories), destination, then the
+/// Clone button, or git's progress with Cancel while it runs.
 private struct CloneCard: View {
     @Bindable var model: WelcomeModel
+    @Environment(WindowModel.self) private var windowModel
 
     var body: some View {
         SectionCard("Clone", systemImage: "arrow.down.circle") {
             LabeledContent {
-                TextField("Repository URL", text: $model.cloneURL, prompt: Text(verbatim: "https://github.com/owner/repo.git"))
-                    .textFieldStyle(.settings)
-                    .labelsHidden()
-                    .frame(maxWidth: 300)
-                    .disabled(model.isCloning)
-                    .onSubmit(model.startClone)
+                CapsuleMenuPicker(label: "Source", selection: source, title: Text(sourceTitle(model.cloneSource))) {
+                    Text(sourceTitle(.url)).tag(WelcomeModel.CloneSource.url)
+                    Text(sourceTitle(.github)).tag(WelcomeModel.CloneSource.github)
+                }
+                .disabled(model.isCloning)
             } label: {
-                Text("URL")
+                Text("Source")
+            }
+            SettingsDivider()
+            switch model.cloneSource {
+            case .url:
+                LabeledContent {
+                    TextField("Repository URL", text: $model.cloneURL, prompt: Text(verbatim: "https://github.com/owner/repo.git"))
+                        .textFieldStyle(.settings)
+                        .labelsHidden()
+                        .frame(maxWidth: 300)
+                        .disabled(model.isCloning)
+                        .onSubmit(model.startClone)
+                } label: {
+                    Text("URL")
+                }
+            case .github:
+                // Its own view, so git's progress lines (which redraw this card) never rebuild the repository menu.
+                RepositoryRow(model: model)
+                    .disabled(model.isCloning)
             }
             SettingsDivider()
             LabeledContent {
@@ -472,6 +700,27 @@ private struct CloneCard: View {
             }
             SettingsDivider()
             status
+        }
+        .onChange(of: windowModel.isSettingsOpen) { _, open in
+            // Back from Settings › Integrations: a list that was not connected or refused loads again.
+            if !open, model.cloneSource == .github { model.loadRepositoriesIfNeeded() }
+        }
+    }
+
+    /// The Source picker's selection; a switch logs its select line (switching to GitHub shows the list's placeholder
+    /// in the same frame).
+    private var source: Binding<WelcomeModel.CloneSource> {
+        Binding(get: { model.cloneSource }, set: { new in
+            guard new != model.cloneSource else { return }
+            UITiming.select("welcome source \(new == .github ? "github" : "url")")
+            model.cloneSource = new
+        })
+    }
+
+    private func sourceTitle(_ source: WelcomeModel.CloneSource) -> String {
+        switch source {
+        case .url: "URL"
+        case .github: model.githubAccount.map { "GitHub · \($0.login)" } ?? "GitHub"
         }
     }
 
@@ -507,7 +756,7 @@ private struct CloneCard: View {
                 Spacer(minLength: 0)
                 Button("Clone") { model.startClone() }
                     .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
-                    .disabled(model.cloneDestination == nil || isGitMissing)
+                    .disabled(!model.canClone || isGitMissing)
             }
         }
     }
@@ -515,6 +764,130 @@ private struct CloneCard: View {
     private var isGitMissing: Bool {
         if case .problem = model.gitCheck { return true }
         return false
+    }
+}
+
+/// The connected GitHub account's repositories, grouped by owner in a dropdown, with a refresh button; a capsule
+/// skeleton while they load, or why they cannot be listed with a way to Settings › Integrations.
+private struct RepositoryRow: View {
+    let model: WelcomeModel
+    @Environment(WindowModel.self) private var windowModel
+
+    var body: some View {
+        switch model.repoList {
+        case .idle, .loading:
+            LabeledContent {
+                HStack(spacing: 8) {
+                    SkeletonLine(width: 200, height: 12)
+                    DelayedSpinner(detail: "welcome repos")
+                        .frame(width: 24, height: 24)
+                }
+                .frame(minHeight: 24)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Loading")
+                .onAppear { UITiming.placeholder("welcome repos") }
+            } label: {
+                Text("Repository")
+            }
+        case .loaded(_, let repos):
+            loaded(groups: model.repoGroups, count: repos.count)
+        case .notConnected(let account):
+            LabeledContent {
+                settingsButton
+            } label: {
+                Text("Repository")
+                Text(account.map { "The token for \($0.login) is missing. Reconnect in Settings › Integrations." }
+                    ?? "Connect a GitHub account in Settings › Integrations.")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        case .failed(let message, let reconnect):
+            LabeledContent {
+                HStack(spacing: 8) {
+                    Button("Try Again") { model.refreshRepositories() }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                    if reconnect { settingsButton }
+                }
+            } label: {
+                Text("Repository")
+                Text(message)
+                    .font(.settingsCaption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func loaded(groups: [(owner: String, repos: [GitHubRepository])], count: Int) -> some View {
+        let selected = model.selectedRepository
+        return LabeledContent {
+            HStack(spacing: 8) {
+                Menu {
+                    Picker("Repository", selection: Binding(get: { selected?.id }, set: { id in
+                        guard let repo = groups.lazy.flatMap(\.repos).first(where: { $0.id == id }) else { return }
+                        model.selectRepository(repo)
+                    })) {
+                        ForEach(groups, id: \.owner) { group in
+                            Section(group.owner) {
+                                ForEach(group.repos) { repo in
+                                    Label(repo.name, systemImage: repo.isPrivate ? "lock" : "book.closed")
+                                        .tag(repo.id as Int?)
+                                }
+                            }
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    HStack(spacing: MenuChevron.gap) {
+                        Text(selected?.fullName ?? "Choose a repository")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        MenuChevron()
+                    }
+                }
+                .menuStyle(.button)
+                .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 12, menu: true))
+                .menuIndicator(.hidden)
+                .frame(maxWidth: 300, alignment: .trailing)
+                .accessibilityLabel("Repository")
+                .accessibilityValue(selected?.fullName ?? "None")
+                refreshButton
+            }
+        } label: {
+            Text("Repository")
+            Text(count == 1 ? "1 repository" : "\(count) repositories")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+            Text("Organization repositories appear when the organization allows Histq's GitHub access.")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Loads the list again; a small spinner in its place while it does.
+    @ViewBuilder
+    private var refreshButton: some View {
+        if model.isRefreshing {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 24, height: 24)
+        } else {
+            Button { model.refreshRepositories() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 0))
+            .help("Reload the repositories")
+            .accessibilityLabel("Reload the repositories")
+        }
+    }
+
+    private var settingsButton: some View {
+        Button("Open Settings") { windowModel.selectSettings(.integrations) }
+            .buttonStyle(RowTextButtonStyle(formRow: true))
     }
 }
 
@@ -530,31 +903,37 @@ private struct RecentCard: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(recents.urls, id: \.path) { url in
-                        Button { model.openRecent(url) } label: {
-                            Label {
-                                HStack(spacing: 8) {
-                                    Text(url.lastPathComponent)
-                                        .lineLimit(1)
-                                    Text(url.deletingLastPathComponent().path)
-                                        .font(.settingsCaption)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                // The panel's whole height, scrolling inside when the rows don't fit.
+                CardScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(recents.urls, id: \.path) { url in
+                            Button { model.openRecent(url) } label: {
+                                Label {
+                                    HStack(spacing: 8) {
+                                        Text(url.lastPathComponent)
+                                            .lineLimit(1)
+                                        Text(url.deletingLastPathComponent().path)
+                                            .font(.settingsCaption)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                } icon: {
+                                    Image(systemName: "folder")
                                 }
-                            } icon: {
-                                Image(systemName: "folder")
                             }
-                        }
-                        .buttonStyle(SidebarItemStyle(selected: false))
-                        .help(url.path)
-                        .contextMenu {
-                            Button("Remove from Recent") { recents.remove(url) }
+                            .buttonStyle(SidebarItemStyle(selected: false))
+                            .help(url.path)
+                            .contextMenu {
+                                Button("Remove from Recent") { recents.remove(url) }
+                            }
                         }
                     }
                 }
+                .frame(maxHeight: .infinity)
             }
         }
+        .frame(maxHeight: .infinity)
     }
 }

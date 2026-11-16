@@ -37,6 +37,39 @@ public struct GitHubRepositoryInfo: Codable, Sendable, Equatable {
     }
 }
 
+/// A repository as `GET /user/repos` lists it: what the Welcome page's clone picker needs.
+public struct GitHubRepository: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var name: String
+    /// `owner/name`.
+    public var fullName: String
+    public var owner: GitHubUser
+    /// The https URL `git clone` takes.
+    public var cloneURL: String
+    public var isPrivate: Bool
+    public var fork: Bool?
+
+    public init(
+        id: Int, name: String, fullName: String, owner: GitHubUser, cloneURL: String, isPrivate: Bool,
+        fork: Bool? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.fullName = fullName
+        self.owner = owner
+        self.cloneURL = cloneURL
+        self.isPrivate = isPrivate
+        self.fork = fork
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, owner, fork
+        case fullName = "full_name"
+        case cloneURL = "clone_url"
+        case isPrivate = "private"
+    }
+}
+
 public struct GitHubLabel: Codable, Sendable, Equatable {
     public var name: String
     /// `RRGGBB` without `#`.
