@@ -1,8 +1,9 @@
-// Settings › Appearance: the commit graph's avatars, date format, row height and text columns. No theme choice:
-// Histq is dark only. The graph and `AvatarStore` read these keys and update open tabs at once.
+// Settings › Appearance: where the tabs show, the commit graph's avatars, date format, row height and text columns.
+// No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
 struct AppearanceSettings: View {
+    @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
     @AppStorage(PrefKey.avatarMode.rawValue, store: Preferences.defaults) private var avatarMode = "generated"
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
@@ -19,6 +20,16 @@ struct AppearanceSettings: View {
 
     var body: some View {
         SettingsPageGate(section: .appearance, isLoaded: true) {
+            SettingsGroup("Tabs") {
+                LabeledContent {
+                    CapsuleTabs(selection: $tabPosition, tabs: [TabPosition.top.rawValue, TabPosition.left.rawValue],
+                                title: { $0 == TabPosition.left.rawValue ? Text("Left") : Text("Top") }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Tab position")
+                    SettingsHint("Top: a strip under the toolbar. Left: a column beside the panels.")
+                }
+            }
             SettingsGroup("Avatars") {
                 LabeledContent {
                     CapsuleTabs(selection: $avatarMode, tabs: ["generated", "real", "initials"],

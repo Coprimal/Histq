@@ -1,10 +1,9 @@
-// Settings › General: where the tabs show, the default profile of new tabs, pulling and fetching, the external merge tool and the git
+// Settings › General: the default profile of new tabs, pulling and fetching, the external merge tool and the git
 // executable. Each change is saved at once in `Preferences.defaults` (the default profile in the profile store).
 import HistqCore
 import SwiftUI
 
 struct GeneralSettings: View {
-    @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
     @AppStorage(PrefKey.pullMode.rawValue, store: Preferences.defaults) private var pullMode = "fastForward"
     @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 0
     @AppStorage(PrefKey.pruneOnFetch.rawValue, store: Preferences.defaults) private var pruneOnFetch = false
@@ -24,16 +23,6 @@ struct GeneralSettings: View {
 
     var body: some View {
         SettingsPageGate(section: .general, isLoaded: true) {
-            SettingsGroup("Tabs") {
-                LabeledContent {
-                    CapsuleTabs(selection: $tabPosition, tabs: [TabPosition.top.rawValue, TabPosition.left.rawValue],
-                                title: { $0 == TabPosition.left.rawValue ? Text("Left") : Text("Top") }, compact: true)
-                        .fixedSize()
-                } label: {
-                    Text("Tab position")
-                    SettingsHint("Top: a strip under the toolbar. Left: a column beside the panels.")
-                }
-            }
             SettingsGroup("New tabs") {
                 defaultProfileRow
             }
