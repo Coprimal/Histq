@@ -322,7 +322,11 @@ private struct VerticalTabRow: View {
                         .fill(ProfileColors.color(profileColor))
                         .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
                         .overlay(Circle().strokeBorder(Palette.bgCard, lineWidth: 1.5))
-                        .offset(x: 2, y: 2)
+                        // A 3 pt margin to hover for the profile's name; the offset keeps the dot where it was.
+                        .padding(3)
+                        .contentShape(Rectangle())
+                        .help("Profile \(profileName ?? "")")
+                        .offset(x: 5, y: 5)
                         .accessibilityHidden(true)
                 }
             }

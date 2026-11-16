@@ -374,6 +374,10 @@ struct TabItem: View {
                     Circle()
                         .fill(ProfileColors.color(profileColor))
                         .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
+                        // The whole slot shows the profile's name, not just the 8 pt dot.
+                        .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+                        .contentShape(Rectangle())
+                        .help("Profile \(profileName ?? "")")
                 } else {
                     Color.clear
                 }
