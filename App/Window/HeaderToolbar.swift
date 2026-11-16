@@ -44,7 +44,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let terminalItem = NSToolbarItem(itemIdentifier: ID.terminal)
     private let searchItem = NSToolbarItem(itemIdentifier: ID.search)
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
-    private var groups: [NSToolbarItem.Identifier: NSToolbarItemGroup] = [:]
+    private var groups: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
+    /// On macOS 26, the button showing each plain button item (`hoverButton`), by the item.
+    private var hoverButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
 
     /// The repo actions' buttons, by the operation each shows.
     private var actionItems: [(item: NSToolbarItem, action: ToolbarAction)] {
@@ -118,10 +120,23 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         configureButton(settingsItem, label: "Settings", systemImage: "gearshape")
         settingsItem.action = #selector(toggleSettings(_:))
 
-        groups[ID.historyGroup] = group(ID.historyGroup, [undoItem, redoItem])
-        groups[ID.syncGroup] = group(ID.syncGroup, [pullItem, pushItem, fetchItem])
-        groups[ID.branchGroup] = group(ID.branchGroup, [createBranchItem, stashItem, popItem])
-        groups[ID.toolsGroup] = group(ID.toolsGroup, [terminalItem, searchItem, settingsItem])
+        if PlatformFeatures.liquidGlass {
+            // On macOS 26 the plain buttons draw their own hover (`ToolbarHoverButton`); Pull and Push keep AppKit's
+            // menu button. Each item with a view gets a capsule of its own, so a capsule of several buttons is one
+            // item whose view is the row of them, never a group of view items.
+            let fetch = hoverButton(fetchItem, width: ToolbarHoverButton.loneWidth)
+            fetchItem.view = fetch
+            fetchItem.menuFormRepresentation = fetch.menuForm
+            groups[ID.historyGroup] = row(ID.historyGroup, title: "History", [undoItem, redoItem])
+            groups[ID.syncGroup] = group(ID.syncGroup, [pullItem, pushItem, fetchItem])
+            groups[ID.branchGroup] = row(ID.branchGroup, title: "Branch", [createBranchItem, stashItem, popItem])
+            groups[ID.toolsGroup] = row(ID.toolsGroup, title: "Tools", [terminalItem, searchItem, settingsItem])
+        } else {
+            groups[ID.historyGroup] = group(ID.historyGroup, [undoItem, redoItem])
+            groups[ID.syncGroup] = group(ID.syncGroup, [pullItem, pushItem, fetchItem])
+            groups[ID.branchGroup] = group(ID.branchGroup, [createBranchItem, stashItem, popItem])
+            groups[ID.toolsGroup] = group(ID.toolsGroup, [terminalItem, searchItem, settingsItem])
+        }
     }
 
     /// A menu whose items are built when it opens (`menuNeedsUpdate`), never on a model change.
@@ -141,6 +156,37 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         item.target = self
         // Its state is set from the model, never validated by AppKit.
         item.autovalidates = false
+    }
+
+    /// The button standing for a configured button item (its image, action, label, tooltip and state), which `set`
+    /// keeps in step with the item from then on.
+    private func hoverButton(_ item: NSToolbarItem, width: CGFloat) -> ToolbarHoverButton {
+        let button = ToolbarHoverButton(target: self, action: item.action, label: item.label, width: width)
+        button.image = item.image
+        button.toolTip = item.toolTip
+        button.isEnabled = item.isEnabled
+        hoverButtons[ObjectIdentifier(item)] = button
+        return button
+    }
+
+    /// One bordered item, so one capsule, showing `subitems` as a row of `ToolbarHoverButton`s; in the overflow menu,
+    /// `title` with a submenu of them.
+    private func row(_ id: NSToolbarItem.Identifier, title: String, _ subitems: [NSToolbarItem]) -> NSToolbarItem {
+        let buttons = subitems.map { hoverButton($0, width: ToolbarHoverButton.rowWidth) }
+        let stack = NSStackView(views: buttons)
+        stack.spacing = 0
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.view = stack
+        item.isBordered = true
+        item.label = ""
+        item.paletteLabel = title
+        item.autovalidates = false
+        let form = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        form.submenu = NSMenu()
+        form.submenu?.autoenablesItems = false
+        form.submenu?.items = buttons.map(\.menuForm)
+        item.menuFormRepresentation = form
+        return item
     }
 
     private func group(_ id: NSToolbarItem.Identifier, _ subitems: [NSToolbarItem]) -> NSToolbarItemGroup {
@@ -268,11 +314,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     private func set(_ item: NSToolbarItem, enabled: Bool) {
-        if item.isEnabled != enabled { item.isEnabled = enabled }
+        guard item.isEnabled != enabled else { return }
+        item.isEnabled = enabled
+        hoverButtons[ObjectIdentifier(item)]?.isEnabled = enabled
     }
 
     private func set(_ item: NSToolbarItem, toolTip: String) {
-        if item.toolTip != toolTip { item.toolTip = toolTip }
+        guard item.toolTip != toolTip else { return }
+        item.toolTip = toolTip
+        hoverButtons[ObjectIdentifier(item)]?.toolTip = toolTip
     }
 
     private func set(_ item: NSToolbarItem, hidden: Bool) {
@@ -285,7 +335,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         guard symbols[ObjectIdentifier(item)] != systemImage else { return }
         symbols[ObjectIdentifier(item)] = systemImage
         // A symbol this system lacks keeps the current icon rather than an empty button.
-        if let image = NSImage.icon(systemImage, accessibilityDescription: label, size: 20) { item.image = image }
+        guard let image = NSImage.icon(systemImage, accessibilityDescription: label, size: 20) else { return }
+        item.image = image
+        hoverButtons[ObjectIdentifier(item)]?.image = image
     }
 
     /// In place of a running action's icon (there is no spinner in a toolbar button without a custom view).
@@ -593,7 +645,7 @@ private final class ToolbarDropdown {
 /// the button is disabled or its window is not the main one of the active app.
 final class ToolbarChevron: NSImageView {
     /// Its opacity when dimmed: measured to match the title of an inactive window over the button's fill.
-    private static let dimmedAlpha: CGFloat = 0.4
+    static let dimmedAlpha: CGFloat = 0.4
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -617,23 +669,152 @@ final class ToolbarChevron: NSImageView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observers.forEach(NotificationCenter.default.removeObserver)
-        // A nil object would observe every window.
-        guard let window else { observers = []; return }
-        let names: [(Notification.Name, AnyObject)] = [
-            (NSWindow.didBecomeMainNotification, window), (NSWindow.didResignMainNotification, window),
-            (NSApplication.didBecomeActiveNotification, NSApp), (NSApplication.didResignActiveNotification, NSApp),
-        ]
-        observers = names.map { name, object in
-            NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.updateDimming() }
-            }
-        }
+        observers = observeMainState(of: window) { [weak self] in self?.updateDimming() }
         updateDimming()
     }
 
     private func updateDimming() {
-        let isActive = NSApp.isActive && window?.isMainWindow ?? true
-        alphaValue = isEnabled && isActive ? 1 : Self.dimmedAlpha
+        alphaValue = isEnabled && isMainState(window) ? 1 : Self.dimmedAlpha
+    }
+}
+
+/// Whether `window` shows as active: the main window of the active app (true before the view is in one).
+@MainActor private func isMainState(_ window: NSWindow?) -> Bool {
+    NSApp.isActive && window?.isMainWindow ?? true
+}
+
+/// Calls `update` each time `window` becomes or stops being the main window, or the app active; the previous
+/// observers, if any, are to be removed first. None without a window (a nil object would observe every window).
+@MainActor private func observeMainState(of window: NSWindow?, _ update: @escaping @MainActor () -> Void)
+    -> [NSObjectProtocol]
+{
+    guard let window else { return [] }
+    let names: [(Notification.Name, AnyObject)] = [
+        (NSWindow.didBecomeMainNotification, window), (NSWindow.didResignMainNotification, window),
+        (NSApplication.didBecomeActiveNotification, NSApp), (NSApplication.didResignActiveNotification, NSApp),
+    ]
+    return names.map { name, object in
+        NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { _ in
+            MainActor.assumeIsolated { update() }
+        }
+    }
+}
+
+/// A toolbar icon button with its own hover, on macOS 26: a circle inside the capsule, as EchoDiar's toolbar buttons.
+/// AppKit's own highlight fills the whole capsule of an item alone in it (Fetch), and in a group its size differs from
+/// button to button, some nearly as big as the capsule. It stands for a button item (`HeaderToolbar.hoverButton`), which sets its image,
+/// state and tooltip; `menuForm` is its entry in the overflow menu.
+private final class ToolbarHoverButton: NSView {
+    /// AppKit pads an item view less on the sides than above and below: 36 by 24 makes a lone item's capsule round.
+    static let loneWidth: CGFloat = 36
+    /// A button's width in a row of them (`HeaderToolbar.row`): about the spacing of AppKit's group buttons.
+    static let rowWidth: CGFloat = 42
+    private static let height: CGFloat = 24
+    private static let highlightDiameter: CGFloat = 28
+
+    private let button = PressReportingButton()
+    let menuForm: NSMenuItem
+    private let highlight = NSView()
+    private var isHovered = false { didSet { updateHighlight() } }
+    private var observers: [NSObjectProtocol] = []
+
+    init(target: AnyObject, action: Selector?, label: String, width: CGFloat) {
+        menuForm = NSMenuItem(title: label, action: action, keyEquivalent: "")
+        menuForm.target = target
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height))
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: width),
+            heightAnchor.constraint(equalToConstant: Self.height),
+        ])
+
+        highlight.wantsLayer = true
+        highlight.layer?.cornerRadius = Self.highlightDiameter / 2
+        let diameter = Self.highlightDiameter
+        highlight.frame = NSRect(x: (width - diameter) / 2, y: (Self.height - diameter) / 2,
+                                 width: diameter, height: diameter)
+        addSubview(highlight)
+
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.target = target
+        button.action = action
+        button.setAccessibilityLabel(label)
+        button.frame = bounds
+        button.autoresizingMask = [.width, .height]
+        button.didChangePress = { [weak self] in self?.updateHighlight() }
+        addSubview(button)
+        updateHighlight()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// The 28 pt circle overflows the 24 pt high view, inside the capsule.
+    override var wantsDefaultClipping: Bool { false }
+
+    var image: NSImage? {
+        get { button.image }
+        set {
+            button.image = newValue.map { $0.withSymbolConfiguration(Self.symbolConfiguration) ?? $0 }
+            menuForm.image = newValue
+        }
+    }
+
+    var isEnabled: Bool {
+        get { button.isEnabled }
+        set {
+            button.isEnabled = newValue
+            menuForm.isEnabled = newValue
+            updateHighlight()
+        }
+    }
+
+    /// The scale AppKit draws a bordered toolbar item's symbol at.
+    private static let symbolConfiguration = NSImage.SymbolConfiguration(scale: .large)
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { isHovered = false }
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = observeMainState(of: window) { [weak self] in self?.updateHighlight() }
+        updateHighlight()
+    }
+
+    private func updateHighlight() {
+        let color: NSColor? = !button.isEnabled ? nil
+            : button.isPressed ? .white.withAlphaComponent(0.2)
+            : isHovered ? .white.withAlphaComponent(0.1) : nil
+        highlight.layer?.backgroundColor = color?.cgColor
+        // A borderless button draws its template image in a secondary gray; the toolbar's icons are the label color,
+        // dimmed in an inactive window as AppKit's buttons beside it (and the dropdowns' `ToolbarChevron`).
+        button.contentTintColor = button.isEnabled ? .labelColor : .tertiaryLabelColor
+        button.alphaValue = !button.isEnabled || isMainState(window) ? 1 : ToolbarChevron.dimmedAlpha
+    }
+}
+
+/// A borderless button that reports while it is pressed (its tracking loop runs inside `mouseDown`).
+private final class PressReportingButton: NSButton {
+    var didChangePress: (() -> Void)?
+    private(set) var isPressed = false
+
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+        didChangePress?()
+        super.mouseDown(with: event)
+        isPressed = false
+        didChangePress?()
     }
 }
 
