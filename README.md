@@ -55,4 +55,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-© 2026 Anh-Thi Dinh. [GPL-3.0](LICENSE).
+© 2026 Coprimal. [GPL-3.0](LICENSE).
