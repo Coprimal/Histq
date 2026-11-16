@@ -433,7 +433,7 @@ private struct FilesScroll<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        ScrollView {
+        CardScrollView {
             content()
         }
         .frame(maxHeight: .infinity)

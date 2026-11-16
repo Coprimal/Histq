@@ -73,6 +73,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
                     content()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .environment(\.cardTrailingInset, contentPadding == 0 ? 0 : contentPadding + extraPadding)
                 .padding(.horizontal, contentPadding == 0 ? 0 : contentPadding + extraPadding)
                 .padding(title == nil ? .vertical : .bottom,
                          contentPadding == 0 ? 0 : contentPadding + extraVerticalPadding)
@@ -131,6 +132,27 @@ extension SectionCard where Accessory == EmptyView {
     ) {
         self.init(title, systemImage: systemImage, count: count, countIsLoading: countIsLoading, isExpanded: isExpanded,
                   contentPadding: contentPadding, content: content, accessory: { EmptyView() })
+    }
+}
+
+extension EnvironmentValues {
+    /// The horizontal padding of the `SectionCard` body around this view, for `CardScrollView`.
+    @Entry var cardTrailingInset: CGFloat = 0
+}
+
+/// A scroll view in a `SectionCard`'s body with its scroller on the card's trailing edge: it reaches across the card's
+/// trailing padding and gives that padding back to its content, so the content keeps the same gap from the card's
+/// edge with no scroller, or from a scroller that takes room.
+struct CardScrollView<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    @Environment(\.cardTrailingInset) private var inset
+
+    var body: some View {
+        ScrollView {
+            content()
+                .padding(.trailing, inset)
+        }
+        .padding(.trailing, -inset)
     }
 }
 

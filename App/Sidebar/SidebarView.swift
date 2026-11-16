@@ -96,7 +96,8 @@ enum SidebarMetrics {
 }
 
 /// The sidebar of a repo tab: the tab picker across its width (icon and short name; the full name is the tooltip),
-/// then its sections as cards in the panel's container, in a scroll view. The cards wait for the refs (capsule skeleton
+/// then its sections as cards in the panel's container: the expanded cards share its height and scroll inside (the PRs
+/// tab's cards scroll together). The cards wait for the refs (capsule skeleton
 /// rows in the same cards until then); the tab capsules and the cards' chevrons work at once.
 struct SidebarView: View {
     @Bindable var session: RepoSession
@@ -111,15 +112,26 @@ struct SidebarView: View {
                 help: \.title,
                 fillsWidth: true,
                 systemImage: \.systemImage)
-            ScrollView {
-                VStack(alignment: .leading, spacing: SidebarMetrics.cardSpacing) {
-                    sections
+            if session.sidebarTab == .prs {
+                ScrollView {
+                    cards
                 }
-                // The panel's container pads the bottom.
-                .padding(.top, SidebarMetrics.cardSpacing)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                // As the WIP panel's cards: the expanded cards share the sidebar's height and scroll inside; the
+                // collapsed ones keep their header.
+                cards
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+
+    private var cards: some View {
+        VStack(alignment: .leading, spacing: SidebarMetrics.cardSpacing) {
+            sections
+        }
+        // The panel's container pads the bottom.
+        .padding(.top, SidebarMetrics.cardSpacing)
     }
 
     @ViewBuilder
@@ -367,9 +379,13 @@ private struct SidebarSection<Content: View, Accessory: View>: View {
     var body: some View {
         SectionCard(title, systemImage: systemImage, count: count, countIsLoading: count == nil,
                     isExpanded: $isExpanded, contentPadding: SidebarMetrics.cardPadding) {
-            VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
-                content()
+            // Its share of the sidebar's height, scrolling inside when the rows don't fit.
+            CardScrollView {
+                VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
+                    content()
+                }
             }
+            .frame(maxHeight: .infinity)
         } accessory: {
             accessory()
         }

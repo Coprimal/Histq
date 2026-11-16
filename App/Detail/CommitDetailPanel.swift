@@ -38,7 +38,7 @@ struct CommitDetailPanel: View {
                     .padding(.horizontal, 6)
                     .frame(height: FileListView<EmptyView>.rowHeight)
             } else {
-                ScrollView {
+                CardScrollView {
                     FileListView(files: files, repoURL: session.url)
                         .fileMenu { [session, commit] file in
                             // A stash's untracked files are not in its commit: no checkout from a stash.
@@ -224,7 +224,7 @@ private struct CommitInfoCard: View {
                 // As tall as the message up to its cap, then a scroll view of that height.
                 ViewThatFits(in: .vertical) {
                     message
-                    ScrollView {
+                    CardScrollView {
                         message
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
