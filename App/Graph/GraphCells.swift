@@ -405,6 +405,11 @@ final class RefBadgeCellView: NSView {
         context.scaleBy(x: 1, y: -1)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        // The badge's fill is see-through: on the graph's surface first, so the badge under the drag does not show
+        // through it.
+        Palette.graphSurface.setFill()
+        context.addPath(CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil))
+        context.fillPath()
         drawBadge(badge, in: rect, level: .full, context: context)
         NSGraphicsContext.restoreGraphicsState()
         image.addRepresentation(bitmap)

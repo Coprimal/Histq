@@ -179,7 +179,7 @@ struct GraphView: NSViewRepresentable {
 /// The graph's table: the fill column (the message column, or the last visible one when the message is hidden) takes
 /// the width the other visible columns leave (at least its minimum), so the columns always fill the card and the last
 /// one stays on screen. A right-click asks the controller for the row's
-/// (or the badge's) menu; the mouse-down point tells a badge drag from a row drag.
+/// (or the badge's) menu; the mouse-down point tells a badge drag from a row drag. A branch badge shows a hand cursor.
 final class GraphTableView: NSTableView {
     /// Where the last mouse down was, in the table: the drag source checks it is on a branch badge.
     private(set) var mouseDownPoint: NSPoint?
@@ -190,7 +190,45 @@ final class GraphTableView: NSTableView {
         // left alone (a row select would close the pull request again).
         if event.clickCount == 1, (delegate as? GraphTableController)?.openPullRequest(at: point) == true { return }
         mouseDownPoint = point
+        if showsOpenHand { NSCursor.closedHand.set() }
         super.mouseDown(with: event)
+        updateCursor(at: convert(window?.mouseLocationOutsideOfEventStream ?? event.locationInWindow, from: nil))
+    }
+
+    // A branch badge shows the open hand under the pointer (it drags, as in GitKraken), the closed hand while held.
+
+    /// The hand is the cursor this table set (the arrow is set back only then).
+    private var showsOpenHand = false
+    private var cursorArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorArea { removeTrackingArea(cursorArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                  owner: self)
+        addTrackingArea(area)
+        cursorArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        updateCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        updateCursor(at: nil)
+    }
+
+    private func updateCursor(at point: NSPoint?) {
+        let hand = point.map { (delegate as? GraphTableController)?.canDragBadge(at: $0) == true } ?? false
+        if hand {
+            NSCursor.openHand.set()
+        } else if showsOpenHand {
+            NSCursor.arrow.set()
+        }
+        showsOpenHand = hand
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -1082,6 +1120,13 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         else { return false }
         view.onOpenPullRequest(pull.number)
         return true
+    }
+
+    /// True when a drag at `point` (in the table) drags a branch badge: on one, but not on its pull request chip.
+    func canDragBadge(at point: NSPoint) -> Bool {
+        guard let table, let cell = cell(at: point), cell.pullRequest(at: cell.convert(point, from: table)) == nil
+        else { return false }
+        return badge(at: point)?.sidebarItem?.branchName != nil
     }
 
     /// The badge drawn at `point` (in the table).
