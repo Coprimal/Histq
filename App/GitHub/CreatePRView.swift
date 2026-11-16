@@ -295,7 +295,7 @@ struct CreatePRView: View {
                             }))
                     }
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: MenuChevron.gap) {
                         Text("Edit")
                         MenuChevron()
                     }

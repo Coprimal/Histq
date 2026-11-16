@@ -27,9 +27,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let branchItem = ToolbarDropdown(
         ID.branch, label: "Branch", width: 160 + ToolbarDropdown.iconGap,
         image: NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch"))
-    private let profileItem = NSMenuToolbarItem(itemIdentifier: ID.profile)
+    /// As wide as its title (already cut at 24 characters), after its color dot.
+    private let profileItem = ToolbarDropdown(ID.profile, label: "Profile", width: nil, image: nil)
     /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
     private var profileDot: String?
+    /// The space between the profile chip's dot and its title.
+    private static let profileDotGap: CGFloat = 5
     private let undoItem = NSToolbarItem(itemIdentifier: ID.undo)
     private let redoItem = NSToolbarItem(itemIdentifier: ID.redo)
     private let pullItem = NSMenuToolbarItem(itemIdentifier: ID.pull)
@@ -83,13 +86,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: Items
 
     private func configureItems() {
-        for dropdown in [repoItem, branchItem] {
+        for dropdown in [repoItem, branchItem, profileItem] {
             dropdown.menu.delegate = self
             dropdown.overflowMenu.delegate = self
         }
-        configureMenu(profileItem, label: "Profile")
-        // Kept out of the overflow menu longer than the buttons.
-        profileItem.visibilityPriority = .high
 
         // Undo and Redo move through the tab's operation journal (enabled and named from it in `apply`); Terminal
         // shows or hides the tab's terminal drawer. Search opens the command palette.
@@ -132,16 +132,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         return menu
     }
 
-    private func configureMenu(_ item: NSMenuToolbarItem, label: String) {
-        item.label = label
-        item.paletteLabel = label
-        item.menu = makeMenu()
-        item.showsIndicator = true
-        item.isBordered = true
-        // Its state is set from the model, never validated by AppKit.
-        item.autovalidates = false
-    }
-
     private func configureButton(_ item: NSToolbarItem, label: String, systemImage: String) {
         item.label = label
         item.paletteLabel = label
@@ -180,7 +170,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         switch itemIdentifier {
         case ID.repo: repoItem.item
         case ID.branch: branchItem.item
-        case ID.profile: profileItem
+        case ID.profile: profileItem.item
         default: groups[itemIdentifier]
         }
     }
@@ -226,15 +216,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         }
 
         // Hidden, like the branch menu, where no repo tab shows (Welcome, About).
-        set(profileItem, hidden: session == nil)
+        set(profileItem.item, hidden: session == nil)
         if let session {
             let profile = session.profile
-            set(profileItem, title: Self.truncated(ProfilePicker.title(profile), 24))
-            set(profileItem, toolTip: ProfilePicker.toolTip(profile))
+            profileItem.title = Self.truncated(ProfilePicker.title(profile), 24)
+            profileItem.toolTip = ProfilePicker.toolTip(profile)
             let dot = profile?.color ?? ""
             if profileDot != dot {
                 profileDot = dot
-                profileItem.image = ProfilePicker.dot(hex: profile?.color)
+                profileItem.image = ProfilePicker.dot(hex: profile?.color, gap: Self.profileDotGap)
             }
         }
 
@@ -392,12 +382,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let entries: [MenuEntry] = switch menu {
         case repoItem.menu, repoItem.overflowMenu: repoEntries()
         case branchItem.menu, branchItem.overflowMenu: model.actionSession.map(RepoMenus.branchPicker) ?? []
-        case profileItem.menu: model.actionSession.map { ProfilePicker.entries(session: $0, model: model) } ?? []
+        case profileItem.menu, profileItem.overflowMenu:
+            model.actionSession.map { ProfilePicker.entries(session: $0, model: model) } ?? []
         case pullItem.menu: model.actionSession.map(RepoMenus.pull) ?? []
         case pushItem.menu: model.actionSession.map(RepoMenus.push) ?? []
         default: []
         }
         let built = MenuBuilder.menu(entries)
+        // Before the title item is put first: it pairs the menu's first items with the profiles.
+        if menu === profileItem.menu || menu === profileItem.overflowMenu { ProfilePicker.decorate(built) }
         var items = built.items
         built.removeAllItems()
         if menu === repoItem.menu || menu === repoItem.overflowMenu,
@@ -406,12 +399,11 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             // The recent repos under a section header.
             items[index] = NSMenuItem.sectionHeader(title: "Recent")
         }
-        if let dropdown = [repoItem, branchItem].first(where: { $0.menu === menu }) {
+        if let dropdown = [repoItem, branchItem, profileItem].first(where: { $0.menu === menu }) {
             menu.items = [dropdown.titleItem] + items
         } else {
             menu.items = items
         }
-        if menu === profileItem.menu { ProfilePicker.decorate(menu) }
     }
 
     /// Stands for the "Recent" section header in `repoEntries`, which `MenuEntry` cannot express.
@@ -448,6 +440,11 @@ private final class ToolbarDropdown {
     /// The space between the icon and the title: transparent room at the icon's trailing side, so the button's own
     /// layout (and the `chrome` measured from it) includes it.
     static let iconGap: CGFloat = 4
+    /// The arrow's point size, its space from the button's trailing edge, and the least space between it and the
+    /// title. AppKit's own arrow is smaller and has no gap or size to set, so it is hidden and this one is drawn.
+    static let chevronSize: CGFloat = 11
+    static let chevronInset: CGFloat = 11
+    static let chevronGap: CGFloat = 8
 
     let item: NSToolbarItem
     let button = WindowAwarePopUpButton(frame: .zero, pullsDown: true)
@@ -457,11 +454,13 @@ private final class ToolbarDropdown {
     let titleItem = NSMenuItem()
     /// The submenu of the item's overflow form.
     let overflowMenu = NSMenu()
-    private let width: CGFloat
+    /// nil: as wide as the title, never cut.
+    private let width: CGFloat?
     /// The button's width beside its title (icon, chevron, insets), measured once it is in the toolbar.
     private var chrome: CGFloat?
+    private let chevron = ToolbarChevron()
 
-    init(_ id: NSToolbarItem.Identifier, label: String, width: CGFloat, image: NSImage?) {
+    init(_ id: NSToolbarItem.Identifier, label: String, width: CGFloat?, image: NSImage?) {
         self.width = width
         item = NSToolbarItem(itemIdentifier: id)
         item.label = label
@@ -477,11 +476,18 @@ private final class ToolbarDropdown {
         menu.items = [titleItem]
         button.menu = menu
         button.bezelStyle = .toolbar
+        (button.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        button.addSubview(chevron)
+        NSLayoutConstraint.activate([
+            chevron.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -Self.chevronInset),
+            chevron.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
         button.imagePosition = .imageLeading
         button.usesSingleLineMode = true
         button.lineBreakMode = .byTruncatingTail
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        if let width { button.widthAnchor.constraint(equalToConstant: width).isActive = true }
+        button.trailingRoom = Self.chevronGap + chevron.intrinsicContentSize.width
         button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         button.setAccessibilityLabel(label)
         button.didMoveToWindow = { [weak self] in self?.fitTitle() }
@@ -509,11 +515,23 @@ private final class ToolbarDropdown {
         set { if button.toolTip != newValue { button.toolTip = newValue } }
     }
 
+    /// An image drawn as given before the title (the profile chip's color dot), unlike the template icon of `init`.
+    var image: NSImage? {
+        get { titleItem.image }
+        set {
+            titleItem.image = newValue
+            item.menuFormRepresentation?.image = newValue
+            button.synchronizeTitleAndSelectedItem()
+            if width == nil { button.invalidateIntrinsicContentSize() }
+        }
+    }
+
     var isEnabled: Bool {
         get { button.isEnabled }
         set {
             guard button.isEnabled != newValue else { return }
             button.isEnabled = newValue
+            chevron.isEnabled = newValue
             item.isEnabled = newValue
             item.menuFormRepresentation?.isEnabled = newValue
         }
@@ -527,17 +545,20 @@ private final class ToolbarDropdown {
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         func textWidth(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: attributes).width }
         var shown = title
-        if button.window != nil {
+        if button.window != nil, let width {
             // Measured while the menu holds only the title item (it is filled on open), which a pull-down's size
             // also follows.
             if chrome == nil, menu.items.count == 1 {
                 chrome = (button.cell?.cellSize.width ?? 0) - textWidth(titleItem.title)
+                    + Self.chevronGap + chevron.intrinsicContentSize.width
             }
             if let chrome { shown = Self.cut(title, toWidth: width - chrome, measure: textWidth) }
         }
         guard titleItem.title != shown else { return }
         titleItem.title = shown
         button.synchronizeTitleAndSelectedItem()
+        // Without a fixed width, the toolbar sizes the button to its new title.
+        if width == nil { button.invalidateIntrinsicContentSize() }
     }
 
     /// `image` with `iconGap` of transparent space after it, still a template. A symbol is drawn at the large scale
@@ -567,9 +588,66 @@ private final class ToolbarDropdown {
     }
 }
 
+/// The arrow of a toolbar pull-down, drawn over its button: clicks go through it to the button. The toolbar draws it
+/// in its own label color whatever its tint, so it is dimmed by its opacity instead, to the dimmed title's gray, when
+/// the button is disabled or its window is not the main one of the active app.
+final class ToolbarChevron: NSImageView {
+    /// Its opacity when dimmed: measured to match the title of an inactive window over the button's fill.
+    private static let dimmedAlpha: CGFloat = 0.4
+    private var observers: [NSObjectProtocol] = []
+
+    init() {
+        super.init(frame: .zero)
+        let configuration = NSImage.SymbolConfiguration(pointSize: ToolbarDropdown.chevronSize, weight: .semibold)
+        image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration)
+        translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isEnabled: Bool {
+        didSet { updateDimming() }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        // A nil object would observe every window.
+        guard let window else { observers = []; return }
+        let names: [(Notification.Name, AnyObject)] = [
+            (NSWindow.didBecomeMainNotification, window), (NSWindow.didResignMainNotification, window),
+            (NSApplication.didBecomeActiveNotification, NSApp), (NSApplication.didResignActiveNotification, NSApp),
+        ]
+        observers = names.map { name, object in
+            NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateDimming() }
+            }
+        }
+        updateDimming()
+    }
+
+    private func updateDimming() {
+        let isActive = NSApp.isActive && window?.isMainWindow ?? true
+        alphaValue = isEnabled && isActive ? 1 : Self.dimmedAlpha
+    }
+}
+
 /// A pull-down that reports its move into a window, where the toolbar has set its control size.
 final class WindowAwarePopUpButton: NSPopUpButton {
     var didMoveToWindow: (() -> Void)?
+    /// Room after the title for the arrow drawn over the button (`ToolbarChevron`), which AppKit does not count.
+    var trailingRoom: CGFloat = 0
+
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        size.width += trailingRoom
+        return size
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()

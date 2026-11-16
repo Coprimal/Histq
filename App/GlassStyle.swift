@@ -561,9 +561,12 @@ struct ToolbarIconButton: View {
 
 /// The arrow of a menu button.
 struct MenuChevron: View {
+    /// The space between a menu button's title and its arrow.
+    static let gap: CGFloat = 8
+
     var body: some View {
         Image(systemName: "chevron.down")
-            .font(.system(size: 9, weight: .bold))
+            .font(.system(size: 11, weight: .bold))
             .accessibilityHidden(true)
     }
 }
@@ -585,7 +588,7 @@ struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
                 .pickerStyle(.inline)
                 .labelsHidden()
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: MenuChevron.gap) {
                 title.lineLimit(1)
                 MenuChevron()
             }

@@ -24,12 +24,12 @@ enum ProfilePicker {
         return "Commits in this tab are made as \(profile.identity.name)\(email). Click to switch profiles."
     }
 
-    /// A dot in the profile color (`#RRGGBB`), or a hollow ring for no profile. Not a template image, so the toolbar
-    /// keeps its color.
-    static func dot(hex: String?) -> NSImage {
-        let size = NSSize(width: 10, height: 10)
+    /// A dot in the profile color (`#RRGGBB`), or a hollow ring for no profile, with `gap` of transparent space
+    /// after it. Not a template image, so the toolbar keeps its color.
+    static func dot(hex: String?, gap: CGFloat = 0) -> NSImage {
+        let size = NSSize(width: 10 + gap, height: 10)
         let image = NSImage(size: size, flipped: false) { rect in
-            let circle = rect.insetBy(dx: 1, dy: 1)
+            let circle = NSRect(x: 0, y: 0, width: 10, height: 10).insetBy(dx: 1, dy: 1)
             if let hex {
                 NSColor(ProfileColors.color(hex)).setFill()
                 NSBezierPath(ovalIn: circle).fill()
