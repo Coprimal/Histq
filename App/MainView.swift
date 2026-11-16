@@ -159,12 +159,16 @@ private struct TabContent: View {
     @Environment(WindowModel.self) private var model
 
     var body: some View {
-        if let session = model.selectedSession {
-            RepoLayoutView(session: session).id(session.id)
-        } else if let index = model.selectedIndex, model.tabs[index].isMissing, let url = model.tabs[index].repoURL {
-            RepoNotFoundView(model: model, tabID: model.tabs[index].id, url: url).id(model.tabs[index].id)
-        } else if let id = model.selectedTabID {
-            WelcomeView(model: model.welcome(for: id)).id(id)
+        // In a container, so the page's slide (`MainView.pageTransition`) applies to this page as a whole and not to
+        // each tab's view: a tab switch swaps them in one frame, the old tab never slides out over the new one.
+        ZStack {
+            if let session = model.selectedSession {
+                RepoLayoutView(session: session).id(session.id)
+            } else if let index = model.selectedIndex, model.tabs[index].isMissing, let url = model.tabs[index].repoURL {
+                RepoNotFoundView(model: model, tabID: model.tabs[index].id, url: url).id(model.tabs[index].id)
+            } else if let id = model.selectedTabID {
+                WelcomeView(model: model.welcome(for: id)).id(id)
+            }
         }
     }
 }
