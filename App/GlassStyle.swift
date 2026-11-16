@@ -1113,7 +1113,7 @@ private struct SettingsTextEditorStyle: ViewModifier {
 }
 
 /// The rounded fill, the edge (accent while focused) and the disabled dimming shared by both input styles.
-private struct SettingsInputChrome: ViewModifier {
+struct SettingsInputChrome: ViewModifier {
     let focused: Bool
     @Environment(\.isEnabled) private var isEnabled
 

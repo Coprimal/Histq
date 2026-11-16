@@ -72,7 +72,10 @@ final class WelcomeModel {
     var option = Option.clone
     /// Switching to `.github` loads the repositories in the background (never blocks the switch).
     var cloneSource = CloneSource.url {
-        didSet { if cloneSource == .github { loadRepositoriesIfNeeded() } }
+        didSet {
+            sourceChosen = true
+            if cloneSource == .github { loadRepositoriesIfNeeded() }
+        }
     }
     private(set) var repoList = RepoList.idle
     /// A refresh runs while the last loaded repositories stay listed.
@@ -87,6 +90,8 @@ final class WelcomeModel {
     @ObservationIgnored private var cloneTask: Task<Void, Never>?
     /// Changes with every clone start or cancel, so a stale clone's progress or end is dropped.
     @ObservationIgnored private var cloneToken = 0
+    /// The source was set (by the user, or once to GitHub for a connected account): the default no longer applies.
+    @ObservationIgnored private var sourceChosen = false
     @ObservationIgnored private var reposTask: Task<Void, Never>?
     /// Changes with every repository load or cancel, so a stale answer is dropped.
     @ObservationIgnored private var reposToken = 0
@@ -102,6 +107,12 @@ final class WelcomeModel {
             loadRepositoriesIfNeeded()
         }
         #endif
+        // A connected GitHub account makes GitHub the default source (the Keychain is read off the main actor, and
+        // cached); not when the user has picked a source or typed a URL meanwhile.
+        Task { [weak self] in
+            guard await Self.isGitHubConnected(), let self, !sourceChosen, cloneURL.isEmpty else { return }
+            cloneSource = .github
+        }
     }
 
     deinit {
@@ -421,6 +432,16 @@ final class WelcomeModel {
         return (account, await repoList(account) { try GitHubClient(host: account.host, token: token) })
     }
 
+    /// The default profile has a GitHub account with its token in the Keychain (always under the DEBUG stub).
+    @concurrent
+    private nonisolated static func isGitHubConnected() async -> Bool {
+        #if DEBUG
+        if GitHubStub.isEnabled { return true }
+        #endif
+        guard let profile = await ProfileLibrary.shared.loaded()?.defaultProfile, profile.github != nil else { return false }
+        return await GitHubTokens.token(for: profile) != nil
+    }
+
     @concurrent
     private nonisolated static func repoList(
         _ account: Profile.GitHubAccount, client makeClient: () throws -> GitHubClient?
@@ -461,6 +482,12 @@ final class WelcomeModel {
     }
 }
 
+/// Sizes of the Welcome page.
+private enum WelcomeMetrics {
+    /// The three panels together; a wider window centers them.
+    static let maxWidth: CGFloat = 1200
+}
+
 /// The page of a tab with no repository: three panels of cards on the page's sheet, as a repo tab's. The options
 /// (Open, Clone, Init), the selected option's form, and the recent repositories.
 struct WelcomeView: View {
@@ -486,8 +513,10 @@ struct WelcomeView: View {
             RecentCard(model: model)
                 .frame(width: RepoLayoutMetrics.detail.lowerBound)
         }
-        .frame(maxHeight: .infinity)
+        .frame(maxWidth: WelcomeMetrics.maxWidth, maxHeight: .infinity)
         .padding(RepoLayoutMetrics.inset)
+        // Centered on a wide window: the form's labels and controls never drift far apart.
+        .frame(maxWidth: .infinity)
         .labeledContentStyle(.settingsRow)
         .onAppear { model.checkGitIfNeeded() }
     }
@@ -790,7 +819,7 @@ private struct RepositoryRow: View {
                 Text("Repository")
             }
         case .loaded(_, let repos):
-            loaded(groups: model.repoGroups, count: repos.count)
+            RepositoryPicker(model: model, repos: repos)
         case .notConnected(let account):
             LabeledContent {
                 settingsButton
@@ -819,60 +848,177 @@ private struct RepositoryRow: View {
         }
     }
 
-    private func loaded(groups: [(owner: String, repos: [GitHubRepository])], count: Int) -> some View {
-        let selected = model.selectedRepository
-        return LabeledContent {
-            HStack(spacing: 8) {
-                Menu {
-                    Picker("Repository", selection: Binding(get: { selected?.id }, set: { id in
-                        guard let repo = groups.lazy.flatMap(\.repos).first(where: { $0.id == id }) else { return }
-                        model.selectRepository(repo)
-                    })) {
-                        ForEach(groups, id: \.owner) { group in
-                            Section(group.owner) {
-                                ForEach(group.repos) { repo in
-                                    Label(repo.name, systemImage: repo.isPrivate ? "lock" : "book.closed")
-                                        .tag(repo.id as Int?)
-                                }
-                            }
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                } label: {
-                    HStack(spacing: MenuChevron.gap) {
-                        Text(selected?.fullName ?? "Choose a repository")
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        MenuChevron()
-                    }
+    private var settingsButton: some View {
+        Button("Open Settings") { windowModel.selectSettings(.integrations) }
+            .buttonStyle(RowTextButtonStyle(formRow: true))
+    }
+}
+
+/// The GitHub repositories as a search field, as GitKraken's clone picker: typing fuzzy-filters them (`FuzzyRank` on the
+/// name and `owner/name`, off the main actor) in a list under the field, grouped by owner. Up/Down move the highlight,
+/// Return picks it, Escape closes the list, the chevron opens or closes it. A pick fills the field with `owner/name`;
+/// that text lists every repository again.
+private struct RepositoryPicker: View {
+    typealias Groups = [(owner: String, repos: [GitHubRepository])]
+
+    let model: WelcomeModel
+    let repos: [GitHubRepository]
+    @State private var query = ""
+    @State private var isOpen = false
+    /// The groups the list shows: `repos` filtered by the query.
+    @State private var shown: Groups = []
+    @State private var highlighted: Int?
+    @FocusState private var focused: Bool
+
+    /// What the list is filtered for: changes rerun the filter.
+    private struct FilterKey: Equatable {
+        let query: String
+        let repos: [GitHubRepository]
+    }
+
+    /// The query the list is filtered by: none while the field shows the picked repository.
+    private var filterQuery: String {
+        query == model.selectedRepository?.fullName ? "" : query
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent {
+                HStack(spacing: 8) {
+                    field
+                    refreshButton
                 }
-                .menuStyle(.button)
-                .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 12, menu: true))
-                .menuIndicator(.hidden)
-                .frame(maxWidth: 300, alignment: .trailing)
-                .accessibilityLabel("Repository")
-                .accessibilityValue(selected?.fullName ?? "None")
-                refreshButton
+            } label: {
+                Text("Repository")
+                Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                Text("Organization repositories appear when the organization allows Histq's GitHub access.")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        } label: {
-            Text("Repository")
-            Text(count == 1 ? "1 repository" : "\(count) repositories")
-                .font(.settingsCaption)
-                .foregroundStyle(.secondary)
-            Text("Organization repositories appear when the organization allows Histq's GitHub access.")
-                .font(.settingsCaption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if isOpen { list }
+        }
+        .onAppear {
+            query = model.selectedRepository?.fullName ?? ""
+            #if DEBUG
+            // QA: `-HistqWelcomeRepoQuery <text>` opens the list filtered for it (with `-HistqWelcomeSource github`).
+            if let text = AppState.launchFlag("-HistqWelcomeRepoQuery") {
+                query = text
+                isOpen = true
+            }
+            #endif
+        }
+        .task(id: FilterKey(query: filterQuery, repos: repos)) {
+            let query = filterQuery
+            let result = await Self.filter(model.repoGroups, query: query)
+            guard !Task.isCancelled else { return }
+            shown = result
+            let ids = result.flatMap { $0.repos.map(\.id) }
+            if highlighted.map({ !ids.contains($0) }) ?? true {
+                let selected = model.selectedRepository?.id
+                highlighted = selected.flatMap { ids.contains($0) ? $0 : nil } ?? ids.first
+            }
+            if !query.isEmpty { UITiming.content("welcome repos filter \(ids.count)") }
         }
     }
+
+    /// The field with a search icon and the chevron, in the card's input look.
+    private var field: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextField("Repository", text: $query, prompt: Text("Search repositories"))
+                .textFieldStyle(.plain)
+                .labelsHidden()
+                .focused($focused)
+                .onSubmit(pickHighlighted)
+                .onKeyPress(.downArrow) { move(by: 1) }
+                .onKeyPress(.upArrow) { move(by: -1) }
+                .onKeyPress(.escape) {
+                    guard isOpen else { return .ignored }
+                    isOpen = false
+                    return .handled
+                }
+            Button {
+                isOpen.toggle()
+                if isOpen { focused = true }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .rotationEffect(.degrees(isOpen ? 180 : 0))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(isOpen ? "Hide the repositories" : "Show the repositories")
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .frame(minHeight: SettingsInputMetrics.minHeight)
+        .modifier(SettingsInputChrome(focused: focused))
+        .frame(maxWidth: 360)
+        .onChange(of: focused) { _, focused in
+            if focused { isOpen = true }
+        }
+        .onChange(of: query) { _, query in
+            // Typing opens the list; the text a pick wrote does not.
+            if focused, query != model.selectedRepository?.fullName { isOpen = true }
+        }
+    }
+
+    /// The filtered repositories under the field, grouped by owner, at most `maxHeight` tall.
+    private var list: some View {
+        let rows = shown.reduce(0) { $0 + $1.repos.count }
+        let height = min(Self.maxHeight, CGFloat(rows) * (SidebarItemStyle.height + 2) + CGFloat(shown.count) * 26 + 12)
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(shown, id: \.owner) { group in
+                        Text(group.owner.uppercased())
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 6)
+                            .padding(.bottom, 2)
+                        ForEach(group.repos) { repo in
+                            Button { pick(repo) } label: {
+                                Label(repo.name, systemImage: repo.isPrivate ? "lock" : "book.closed")
+                            }
+                            .buttonStyle(SidebarItemStyle(selected: repo.id == highlighted))
+                            .help(repo.fullName)
+                            .id(repo.id)
+                        }
+                    }
+                }
+                .padding(6)
+            }
+            .frame(height: rows == 0 ? nil : height)
+            .overlay {
+                if rows == 0 {
+                    Text("No repository matches \"\(query)\".")
+                        .foregroundStyle(.secondary)
+                        .padding(12)
+                }
+            }
+            .onChange(of: highlighted) { _, id in
+                if let id { proxy.scrollTo(id) }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: rows == 0 ? 40 : nil)
+        .modifier(SettingsInputChrome(focused: false))
+    }
+
+    private static let maxHeight: CGFloat = 280
 
     /// Loads the list again; a small spinner in its place while it does.
     @ViewBuilder
     private var refreshButton: some View {
         if model.isRefreshing {
-            ProgressView()
-                .controlSize(.small)
+            DelayedSpinner(detail: "welcome repos refresh")
                 .frame(width: 24, height: 24)
         } else {
             Button { model.refreshRepositories() } label: {
@@ -885,9 +1031,50 @@ private struct RepositoryRow: View {
         }
     }
 
-    private var settingsButton: some View {
-        Button("Open Settings") { windowModel.selectSettings(.integrations) }
-            .buttonStyle(RowTextButtonStyle(formRow: true))
+    private func pick(_ repo: GitHubRepository) {
+        UITiming.select("welcome repo")
+        model.selectRepository(repo)
+        query = repo.fullName
+        highlighted = repo.id
+        isOpen = false
+    }
+
+    private func pickHighlighted() {
+        let repos = shown.flatMap(\.repos)
+        guard let repo = repos.first(where: { $0.id == highlighted }) ?? repos.first else { return }
+        pick(repo)
+    }
+
+    /// Up/Down: opens the list, or moves the highlight, stopping at the ends.
+    private func move(by step: Int) -> KeyPress.Result {
+        guard isOpen else {
+            isOpen = true
+            return .handled
+        }
+        let ids = shown.flatMap { $0.repos.map(\.id) }
+        guard !ids.isEmpty else { return .handled }
+        let index = highlighted.flatMap(ids.firstIndex(of:)).map { $0 + step } ?? (step > 0 ? 0 : ids.count - 1)
+        highlighted = ids[min(max(index, 0), ids.count - 1)]
+        return .handled
+    }
+
+    /// `groups` with the repositories that every keyword of `query` hits, best first, grouped by owner in the order of
+    /// each owner's best hit; all of `groups` for an empty query.
+    @concurrent
+    private nonisolated static func filter(_ groups: Groups, query: String) async -> Groups {
+        guard !FuzzyRank.keywords(in: query).isEmpty else { return groups }
+        let repos = groups.flatMap(\.repos)
+        let texts = repos.map { [$0.name.lowercased(), $0.fullName.lowercased()] }
+        var result: Groups = []
+        for index in FuzzyRank.rank(texts, query: query, limit: repos.count) {
+            let repo = repos[index]
+            if let group = result.firstIndex(where: { $0.owner == repo.owner.login }) {
+                result[group].repos.append(repo)
+            } else {
+                result.append((owner: repo.owner.login, repos: [repo]))
+            }
+        }
+        return result
     }
 }
 
