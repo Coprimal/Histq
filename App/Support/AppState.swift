@@ -140,6 +140,8 @@ enum PrefKey: String, CaseIterable {
     case recentRepos
     /// The detail panel's file lists: "path" (one row per file) or "tree" (rows under their folders).
     case fileListMode
+    /// The Unstaged card shows each file's size (and a folder's total in the tree).
+    case showFileSizes
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
     case aiProvider
     /// The model of each AI provider, by `AIProvider` raw value; a missing or empty one = the provider's default.
@@ -177,6 +179,7 @@ enum PrefKey: String, CaseIterable {
         case .terminalOpenWithNewTab: false
         case .recentRepos: [String]()
         case .fileListMode: "path"
+        case .showFileSizes: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
         case .aiCustomBaseURL: ""

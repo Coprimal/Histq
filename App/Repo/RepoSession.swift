@@ -461,6 +461,9 @@ final class RepoSession: Identifiable {
     /// The WIP panel's commit box, kept while other rows are selected.
     var commitDraft = CommitDraft()
     private(set) var status: Loadable<WorkingStatus> = .idle
+    /// Counts the status reads, even those that found the same status (an edit to a file already modified): the WIP
+    /// panel reads its files' sizes again on each.
+    private(set) var statusReads = 0
     private(set) var refs: Loadable<Refs> = .idle
     private(set) var log: Loadable<LogSnapshot> = .idle {
         didSet { graphSearch.logDidChange() }
@@ -1330,6 +1333,7 @@ final class RepoSession: Identifiable {
         if newState != nil { removeRebaseFilesIfDone() }
         if let newStatus {
             status = .loaded(newStatus)
+            statusReads &+= 1
             if let target = openFile, target.source == .wip {
                 if target.isConflict {
                     // The conflict editor keeps its ticks and edits; it closes once the path is resolved (its Save, the

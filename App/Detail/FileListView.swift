@@ -108,10 +108,16 @@ struct FileListView<Trailing: View>: View {
     @ViewBuilder let trailing: (FileChange) -> Trailing
     /// The caller's context menu entries of a row, above Copy Path and Reveal in Finder.
     var menu: (FileChange) -> [MenuEntry] = { _ in [] }
+    /// The caller's context menu of a folder row (the tree), given its path and the files under it; none when empty.
+    var folderMenuEntries: (String, [FileChange]) -> [MenuEntry] = { _, _ in [] }
     /// The path of the row drawn as selected (the file whose diff is open).
     var selectedPath: String?
     /// A click on a row; nil leaves rows unclickable.
     var onSelect: ((FileChange) -> Void)?
+    /// Each file's size on disk by path, shown left of its buttons; nil shows no sizes.
+    var sizes: [String: Int64]?
+    /// The width of a file row's trailing buttons, so a folder's size lines up with its files' sizes.
+    var sizeInset: CGFloat = 0
     @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.path.rawValue
 
     static var rowHeight: CGFloat { 26 }
@@ -120,6 +126,13 @@ struct FileListView<Trailing: View>: View {
     func fileMenu(_ menu: @escaping (FileChange) -> [MenuEntry]) -> Self {
         var list = self
         list.menu = menu
+        return list
+    }
+
+    /// The list with `menu`'s entries as each folder row's context menu (the tree).
+    func folderMenu(_ menu: @escaping (_ folder: String, _ files: [FileChange]) -> [MenuEntry]) -> Self {
+        var list = self
+        list.folderMenuEntries = menu
         return list
     }
 
@@ -132,25 +145,45 @@ struct FileListView<Trailing: View>: View {
         return list
     }
 
+    /// The list with each file's size (and a folder's total in the tree) left of the buttons; `inset` is the
+    /// buttons' width.
+    func fileSizes(_ sizes: [String: Int64], inset: CGFloat) -> Self {
+        var list = self
+        list.sizes = sizes
+        list.sizeInset = inset
+        return list
+    }
+
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
             if mode == FileListMode.tree.rawValue {
                 ForEach(FileTree.rows(for: files)) { row in
                     switch row.content {
-                    case .folder(let name):
-                        FolderRow(name: name, depth: row.depth)
+                    case .folder(let name, let path):
+                        FolderRow(name: name, depth: row.depth, size: folderSize(path), sizeInset: sizeInset) {
+                            folderMenuEntries(path, files.filter { $0.path.hasPrefix(path + "/") })
+                        }
                     case .file(let file):
                         FileRow(file: file, repoURL: repoURL, depth: row.depth, showsFolder: false, trailing: trailing,
-                                menu: menu, isSelected: file.path == selectedPath, onSelect: onSelect)
+                                menu: menu, isSelected: file.path == selectedPath, onSelect: onSelect,
+                                size: sizes?[file.path])
                     }
                 }
             } else {
                 ForEach(files) { file in
                     FileRow(file: file, repoURL: repoURL, depth: 0, showsFolder: true, trailing: trailing, menu: menu,
-                            isSelected: file.path == selectedPath, onSelect: onSelect)
+                            isSelected: file.path == selectedPath, onSelect: onSelect, size: sizes?[file.path])
                 }
             }
         }
+    }
+
+    /// The total size of the files under `folder`; nil when none has a size (all deleted) or sizes are off.
+    private func folderSize(_ folder: String) -> Int64? {
+        guard let sizes else { return nil }
+        let prefix = folder + "/"
+        let matching = sizes.filter { $0.key.hasPrefix(prefix) }
+        return matching.isEmpty ? nil : matching.values.reduce(0, +)
     }
 }
 
@@ -189,6 +222,7 @@ private struct FileRow<Trailing: View>: View {
     let menu: (FileChange) -> [MenuEntry]
     let isSelected: Bool
     let onSelect: ((FileChange) -> Void)?
+    let size: Int64?
     @State private var hovered = false
 
     var body: some View {
@@ -209,9 +243,16 @@ private struct FileRow<Trailing: View>: View {
                         .lineLimit(1)
                         .truncationMode(.head)
                 }
+                Spacer(minLength: 4)
             }
             .truncationMode(.middle)
-            Spacer(minLength: 4)
+            // The path's tooltip on the name part only: on the whole row it would hide the icon's and the buttons'.
+            .contentShape(Rectangle())
+            .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
+            if let size {
+                FileSizeText(size: size, warnsWhenLarge: true)
+                    .padding(.trailing, 4)
+            }
             trailing(file)
         }
         .padding(.leading, 6 + CGFloat(depth) * 14)
@@ -225,7 +266,6 @@ private struct FileRow<Trailing: View>: View {
         // buttons keep their own clicks.
         .onTapGesture { onSelect?(file) }
         .accessibilityAddTraits(onSelect == nil ? [] : .isButton)
-        .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
         .contextMenu {
             let entries = menu(file)
             if !entries.isEmpty {
@@ -255,6 +295,11 @@ private struct FileRow<Trailing: View>: View {
 private struct FolderRow: View {
     let name: String
     let depth: Int
+    let size: Int64?
+    /// The file rows' button width, so this size sits in the files' size column.
+    let sizeInset: CGFloat
+    /// The caller's context menu entries; no menu when empty.
+    let menu: () -> [MenuEntry]
 
     var body: some View {
         HStack(spacing: 6) {
@@ -265,10 +310,44 @@ private struct FolderRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
+            if let size {
+                // A file row's trailing padding (6), the gap before its buttons (4 + 6) and the buttons.
+                FileSizeText(size: size)
+                    .padding(.trailing, 16 + sizeInset)
+            }
         }
         .padding(.leading, 6 + CGFloat(depth) * 14)
         .frame(height: FileListView<EmptyView>.rowHeight)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+        .contextMenu {
+            MenuEntriesView(entries: menu())
+        }
+    }
+}
+
+/// A file's or a folder's size in a row ("12 KB"), dimmed, digits of the same width. A heavy file's is yellow from
+/// 1 MB and red from 10 MB (`warnsWhenLarge`; a folder's total stays dimmed).
+private struct FileSizeText: View {
+    let size: Int64
+    var warnsWhenLarge = false
+
+    var body: some View {
+        Text(size.formatted(.byteCount(style: .file, spellsOutZero: false)))
+            .font(.settingsCaption)
+            .monospacedDigit()
+            .foregroundStyle(style)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    private var style: AnyShapeStyle {
+        guard warnsWhenLarge else { return AnyShapeStyle(.secondary) }
+        switch size {
+        case 10_000_000...: return AnyShapeStyle(Color(nsColor: Palette.graphLanes[7]))
+        case 1_000_000...: return AnyShapeStyle(Color(nsColor: Palette.graphLanes[5]))
+        default: return AnyShapeStyle(.secondary)
+        }
     }
 }
 
@@ -279,7 +358,8 @@ private struct FolderRow: View {
 private enum FileTree {
     struct Row: Identifiable {
         enum Content {
-            case folder(String)
+            /// Its label (single-child folders joined) and its root-relative path.
+            case folder(name: String, path: String)
             case file(FileChange)
         }
 
@@ -323,7 +403,7 @@ private enum FileTree {
                 child = grandchild
             }
             let folderPath = path.isEmpty ? label : path + "/" + label
-            rows.append(Row(id: "dir:" + folderPath, depth: depth, content: .folder(label)))
+            rows.append(Row(id: "dir:" + folderPath, depth: depth, content: .folder(name: label, path: folderPath)))
             append(child, path: folderPath, depth: depth + 1, to: &rows)
         }
         let files = node.files.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }

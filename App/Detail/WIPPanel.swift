@@ -21,6 +21,9 @@ struct WIPPanel: View {
     /// The controls whose write is running.
     @State private var busy: Set<Busy> = []
     @State private var errors: [Part: String] = [:]
+    /// The unstaged files' sizes on disk, by path (read off the main actor).
+    @State private var sizes: [String: Int64] = [:]
+    @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showsSizes = true
     /// The window's modal (`ModalHost`) asks before a discard.
     @Environment(WindowModel.self) private var model
 
@@ -69,6 +72,16 @@ struct WIPPanel: View {
                             run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
                         }
                     }
+                    .fileMenu { file in
+                        [menuAction("Mark as Resolved (Stage File)", busy: [.stage(file.path)]) {
+                            run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
+                        }]
+                    }
+                    .folderMenu { folder, files in
+                        [menuAction("Mark Folder as Resolved (Stage Files)", busy: files.map { .stage($0.path) }) {
+                            run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: .conflicted)
+                        }]
+                    }
                     .onSelectFile(selected: openWIPPath) { file in
                         session.selectFile(FileTarget(source: .wip, file: file))
                     }
@@ -96,6 +109,26 @@ struct WIPPanel: View {
                             }
                         }
                     }
+                    // The two 16-point buttons, 10 apart.
+                    .fileSizes(sizes, inset: 42)
+                    .fileMenu { file in
+                        [
+                            menuAction("Stage File", busy: [.stage(file.path)]) {
+                                run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
+                            },
+                            menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
+                                       busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
+                        ]
+                    }
+                    .folderMenu { folder, files in
+                        [
+                            menuAction("Stage Folder", busy: files.map { .stage($0.path) }) {
+                                run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: .unstaged)
+                            },
+                            menuAction("Discard Changes in Folder…", busy: files.map { .discard($0.path) },
+                                       destructive: true) { confirmDiscard(folder: folder, files) },
+                        ]
+                    }
                     .onSelectFile(selected: openWIPPath) { file in
                         session.selectFile(FileTarget(source: .wip, file: file))
                     }
@@ -110,6 +143,10 @@ struct WIPPanel: View {
                 }
             }
         }
+        // Off: no sizes and nothing read from disk (-1 never matches a read count, so turning it on reads again).
+        .task(id: showsSizes ? session.statusReads : -1) {
+            sizes = showsSizes ? await Self.sizes(of: files, in: session.url) : [:]
+        }
     }
 
     private func stagedCard(_ files: [FileChange]) -> some View {
@@ -120,10 +157,19 @@ struct WIPPanel: View {
                 FilesScroll {
                     FileListView(files: files, repoURL: session.url) { file in
                         rowButton("minus.circle", help: "Unstage File", busy: .unstage(file.path)) {
-                            // A rename's old path too, or its deletion stays staged.
-                            let paths = [file.originalPath, file.path].compactMap { $0 }
-                            run(.unstage(paths), busy: .unstage(file.path), part: .staged)
+                            run(.unstage(Self.unstagePaths(file)), busy: .unstage(file.path), part: .staged)
                         }
+                    }
+                    .fileMenu { file in
+                        [menuAction("Unstage File", busy: [.unstage(file.path)]) {
+                            run([.unstage(Self.unstagePaths(file))], busy: [.unstage(file.path)], part: .staged)
+                        }]
+                    }
+                    .folderMenu { folder, files in
+                        [menuAction("Unstage Folder", busy: files.map { .unstage($0.path) }) {
+                            run([.unstage(files.flatMap(Self.unstagePaths))], busy: files.map { .unstage($0.path) },
+                                part: .staged)
+                        }]
                     }
                     .onSelectFile(selected: openWIPPath) { file in
                         session.selectFile(FileTarget(source: .wip, file: file))
@@ -183,16 +229,48 @@ struct WIPPanel: View {
 
     /// Shows `key` busy now (the click's frame), then runs the write; its error goes to `part`'s card.
     private func run(_ write: RepoSession.Write, busy key: Busy, part: Part) {
-        busy.insert(key)
+        run([write], busy: [key], part: part)
+    }
+
+    /// Shows `keys` busy now, then runs the writes in order (stopping at the first error, which goes to `part`'s card).
+    private func run(_ writes: [RepoSession.Write], busy keys: [Busy], part: Part) {
+        busy.formUnion(keys)
         errors[part] = nil
         Task {
             do {
-                try await session.perform(write)
+                for write in writes { try await session.perform(write) }
             } catch {
                 errors[part] = RepoSession.writeMessage(for: error)
             }
-            busy.remove(key)
+            busy.subtract(keys)
         }
+    }
+
+    /// A context menu entry doing what a row's button does; disabled while one of `keys` runs.
+    private func menuAction(_ title: String, busy keys: [Busy], destructive: Bool = false,
+                            _ perform: @escaping @MainActor () -> Void) -> MenuEntry
+    {
+        .action(title, enabled: !keys.contains(where: busy.contains), destructive: destructive, perform)
+    }
+
+    /// A rename's old path too, or its deletion stays staged.
+    private static func unstagePaths(_ file: FileChange) -> [String] {
+        [file.originalPath, file.path].compactMap { $0 }
+    }
+
+    /// Asks, then discards the tracked files under `folder` and deletes its untracked ones.
+    private func confirmDiscard(folder: String, _ files: [FileChange]) {
+        let untracked = files.filter { $0.kind == .untracked }.map(\.path)
+        let tracked = files.filter { $0.kind != .untracked }.map(\.path)
+        let count = files.count == 1 ? "1 file" : "\(files.count) files"
+        let message = (untracked.isEmpty ? "" : "Its untracked files are deleted. ") + "This cannot be undone."
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Discard the changes to \(count) in \((folder as NSString).lastPathComponent)?", message: message,
+            button: "Discard", isDestructive: true) {
+            let writes: [RepoSession.Write] = (tracked.isEmpty ? [] : [.discard(tracked)])
+                + (untracked.isEmpty ? [] : [.removeUntracked(untracked)])
+            run(writes, busy: files.map { .discard($0.path) }, part: .unstaged)
+        }))
     }
 
     private func discard(_ file: FileChange) {
@@ -215,6 +293,21 @@ struct WIPPanel: View {
     }
 
     // MARK: Files
+
+    /// The size on disk of each of `files`; none for a deleted file or a folder (a submodule).
+    private static func sizes(of files: [FileChange], in root: URL) async -> [String: Int64] {
+        await Task.detached(priority: .utility) {
+            var sizes: [String: Int64] = [:]
+            for file in files where file.kind != .deleted {
+                let path = root.appending(path: file.path, directoryHint: .notDirectory).path
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                      attributes[.type] as? FileAttributeType != .typeDirectory,
+                      let size = attributes[.size] as? NSNumber else { continue }
+                sizes[file.path] = size.int64Value
+            }
+            return sizes
+        }.value
+    }
 
     /// Paths with unmerged index entries, in status order.
     private static func conflicted(_ status: WorkingStatus) -> [FileChange] {

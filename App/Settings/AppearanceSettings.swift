@@ -1,4 +1,5 @@
-// Settings › Appearance: where the tabs show, the commit graph's avatars, date format, row height and text columns.
+// Settings › Appearance: where the tabs show, the commit graph's avatars, date format, row height and text columns,
+// and the file sizes of the Unstaged card.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -10,6 +11,7 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
+    @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showFileSizes = true
 
     /// The date formats offered, the shortest (the default, 24 h) first; a format set by hand (`defaults write`) is
     /// listed too.
@@ -78,6 +80,11 @@ struct AppearanceSettings: View {
                 SettingsSwitchRow(title: "Author", isOn: $showAuthor)
                 SettingsDivider()
                 SettingsSwitchRow(title: "Commit date", isOn: $showDate)
+            }
+            SettingsGroup("File lists") {
+                SettingsSwitchRow(title: "File sizes",
+                                  hint: "In the Unstaged card: yellow from 1 MB, red from 10 MB.",
+                                  isOn: $showFileSizes)
             }
         } skeleton: {
             EmptyView()
