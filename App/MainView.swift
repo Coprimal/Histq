@@ -4,9 +4,9 @@
 import AppKit
 import SwiftUI
 
-/// A page of the window, left to right in the slide order: the selected tab, About.
+/// A page of the window, left to right in the slide order: the selected tab.
 enum Page: String, CaseIterable, Hashable {
-    case home, about
+    case home
 
     /// Its place in the order, for the slide direction.
     fileprivate var order: Int { Self.allCases.firstIndex(of: self) ?? 0 }
@@ -37,7 +37,7 @@ enum HeaderMetrics {
     static let tabRowTrailing: CGFloat = 4
 }
 
-/// The one container around the selected tab's page (the repo panels' cards, Welcome, About), joined to the selected
+/// The one container around the selected tab's page (the repo panels' cards, Welcome), joined to the selected
 /// tab when the tabs are on top.
 enum PageSheetMetrics {
     /// Concentric with the cards inside it, `RepoLayoutMetrics.inset` from its edge.
@@ -74,7 +74,6 @@ struct MainView: View {
                 ZStack {
                     switch shownPage {
                     case .home: TabContent().transition(pageTransition)
-                    case .about: AboutPage().transition(pageTransition)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -88,7 +87,7 @@ struct MainView: View {
         }
         // Blurred and disabled behind a modal or the palette; its own view reads that, so this body never reruns.
         .modifier(WindowBackdrop(model: model))
-        // Whoever switches the page (a tab, About, a menu), it slides the same way.
+        // Whoever switches the page (a tab, a menu), it slides the same way.
         .onChange(of: navigation.page, initial: true) { old, new in
             guard old != new else {
                 shownPage = new
@@ -184,35 +183,5 @@ private struct TabRowStatus: View {
                 .frame(maxWidth: 240, alignment: .trailing)
                 .padding(.trailing, 8)
         }
-    }
-}
-
-/// The app's name and version from the bundle.
-private struct AboutPage: View {
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 56))
-                .foregroundStyle(.tint)
-                .accessibilityHidden(true)
-            Text(Self.name).font(.title2.weight(.semibold))
-            Text("Version \(Self.version)")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private static var name: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
-            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
-            ?? "Histq"
-    }
-
-    /// "0.1.0 (1)".
-    private static var version: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String
-        return build.map { "\(short) (\($0))" } ?? short
     }
 }

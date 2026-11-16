@@ -45,6 +45,7 @@ targets:
         HISTQ_GITHUB_CLIENT_ID: "Ov23ct3if1iFB6cEigym"
         INFOPLIST_KEY_LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
         INFOPLIST_KEY_CFBundleDisplayName: "Histq"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Coprimal"
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1
         ENABLE_HARDENED_RUNTIME: YES

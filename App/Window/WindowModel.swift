@@ -55,7 +55,7 @@ final class WindowModel {
     /// Session restore: the saved profile and commit of restored tabs that have no session yet (sessions are made on
     /// first select), applied when it is made; until then the next save keeps them as they were.
     @ObservationIgnored private var restored: [Tab.ID: SavedTab] = [:]
-    /// The page the window shows: the selected tab (`.home`) or About.
+    /// The page the window shows: the selected tab (`.home`).
     let navigation = Navigation()
     /// The Settings modal shows over the page (task 9.7). Read only by `ModalHost`, the toolbar and the backdrop
     /// modifier, so opening it never re-evaluates `MainView`.
@@ -97,7 +97,7 @@ final class WindowModel {
         return saved.profileID.flatMap { store.profile(id: $0) ?? store.defaultProfile }
     }
 
-    /// The selected tab's session while the tab shows (not About, where its dialogs have no presenter); nil for a
+    /// The selected tab's session while the tab shows; nil for a
     /// Welcome tab. The toolbar's repo actions are disabled without it. Settings is a modal over the tab, so a
     /// toolbar action taken meanwhile opens its form or confirmation above the Settings modal.
     var actionSession: RepoSession? { navigation.page == .home ? selectedSession : nil }
@@ -165,7 +165,7 @@ final class WindowModel {
         resolveRepoKeys([id])
     }
 
-    /// Selects the tab at `index` and shows it (leaving About, closing Settings): the path a click on a tab takes.
+    /// Selects the tab at `index` and shows it (closing Settings): the path a click on a tab takes.
     /// The tab already selected is only shown again (its loaded detail stays); no `select` timing line then.
     func selectTab(at index: Int) {
         guard tabs.indices.contains(index) else { return }

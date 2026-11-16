@@ -517,7 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             NSApp.keyWindow?.performClose(sender)
             return
         }
-        // Settings or About hides the tab: ⌘W closes Settings or leaves the page first, never closing a tab out of
+        // Settings hides the tab: ⌘W closes Settings or leaves the page first, never closing a tab out of
         // sight.
         if entry.model.isSettingsOpen {
             entry.model.closeSettings()
@@ -550,12 +550,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         show(entry)
     }
 
-    /// Opens the About page in the key window, closing Settings over it.
+    /// The standard About panel: the app icon, name, version and copyright from the Info.plist, then the credits.
     @objc func showAbout() {
-        let entry = target() ?? newWindow()
-        entry.model.closeSettings()
-        entry.model.navigation.page = .about
-        show(entry)
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: Self.aboutCredits])
+    }
+
+    /// The description, the license and the website link, centered under the version.
+    private static var aboutCredits: NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .paragraphStyle: paragraph,
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let credits = NSMutableAttributedString(
+            string: "A native macOS git client that drives the git you already have.\n\nLicensed under GPL-3.0\n",
+            attributes: attributes)
+        var link = attributes
+        link[.link] = URL(string: "https://histq.coprimal.dev")!
+        credits.append(NSAttributedString(string: "histq.coprimal.dev", attributes: link))
+        return credits
     }
 
     /// ⌃`: shows or hides the selected repo tab's terminal drawer. A main menu item, so it works with the focus in the

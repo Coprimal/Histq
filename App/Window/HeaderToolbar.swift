@@ -1,7 +1,7 @@
 // The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the repo
 // menu (the window's repo tabs, recent repos, Open…), the branch menu (checks out the picked branch), as in GitKraken,
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
-// Terminal / Search / Settings. The set of items never changes: on a Welcome tab or About the repo actions are
+// Terminal / Search / Settings. The set of items never changes: on a Welcome tab the repo actions are
 // disabled, not removed. Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it.
 //
 // An AppKit `NSToolbar`, not a SwiftUI `.toolbar`: a bridged SwiftUI toolbar takes part in every SwiftUI update pass of
@@ -261,7 +261,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             branchItem.toolTip = isBusy ? "Checking out…" : "\(title): check out another branch"
         }
 
-        // Hidden, like the branch menu, where no repo tab shows (Welcome, About).
+        // Hidden, like the branch menu, where no repo tab shows (Welcome).
         set(profileItem.item, hidden: session == nil)
         if let session {
             let profile = session.profile

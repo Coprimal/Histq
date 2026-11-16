@@ -77,7 +77,6 @@ struct ModalHost: View {
 
     private var shown: Shown? {
         if let modal = model.modal { return .window(modal) }
-        // Only on the tab's page: About has no repo modal.
         guard let session = model.actionSession else { return nil }
         if let confirmation = session.confirmation { return .confirmation(session, confirmation) }
         if let check = session.hostKeyCheck { return .hostKey(session, check) }

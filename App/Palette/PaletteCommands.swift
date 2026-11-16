@@ -69,8 +69,7 @@ struct PaletteSnapshot {
 
 @MainActor
 enum PaletteCommands {
-    /// The window's rows now. Repo rows only while a repo tab shows (`actionSession`, as the toolbar's buttons):
-    /// on About their confirmations and forms would have no presenter.
+    /// The window's rows now. Repo rows only while a repo tab shows (`actionSession`, as the toolbar's buttons).
     static func snapshot(for model: WindowModel) -> PaletteSnapshot {
         var snapshot = PaletteSnapshot()
         let session = model.actionSession
