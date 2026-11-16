@@ -189,6 +189,22 @@ struct IntegrationsSettings: View {
                     : "Connected to GitHub Enterprise at \(account.host)")
                 tokenStatus
             }
+            // Histq's OAuth App exists on github.com only. An organization that restricts OAuth Apps (a new one does by
+            // default) hides its repositories until an owner grants Histq access there; no reconnect needed.
+            if account.host == "github.com", !Self.clientID.isEmpty,
+               let url = URL(string: "https://github.com/settings/connections/applications/\(Self.clientID)")
+            {
+                SettingsDivider()
+                LabeledContent {
+                    Button("Manage on GitHub…") { NSWorkspace.shared.open(url) }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                } label: {
+                    Text("Organization access")
+                    SettingsHint("Signed in with GitHub: grant Histq access to an organization, or request it from its "
+                        + "owners, then reload the repositories. A personal access token or the GitHub CLI's token "
+                        + "gets its access from that token's own settings.")
+                }
+            }
             if case .failed(let message) = activity {
                 failureText(message)
             }
