@@ -77,9 +77,13 @@ struct WIPPanel: View {
                             run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
                         }]
                     }
-                    .folderMenu { folder, files in
+                    .folderButtons { _, files in
+                        rowButton("checkmark.circle", help: "Mark Folder as Resolved (Stage Files)",
+                                  busy: files.map { .stage($0.path) }) { stage(files, part: .conflicted) }
+                    }
+                    .folderMenu { _, files in
                         [menuAction("Mark Folder as Resolved (Stage Files)", busy: files.map { .stage($0.path) }) {
-                            run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: .conflicted)
+                            stage(files, part: .conflicted)
                         }]
                     }
                     .onSelectFile(selected: openWIPPath) { file in
@@ -109,8 +113,16 @@ struct WIPPanel: View {
                             }
                         }
                     }
-                    // The two 16-point buttons, 10 apart.
-                    .fileSizes(sizes, inset: 42)
+                    .fileSizes(sizes)
+                    .folderButtons { folder, files in
+                        HStack(spacing: 10) {
+                            rowButton("arrow.uturn.backward", help: "Discard Changes in Folder…",
+                                      busy: files.map { .discard($0.path) }) { confirmDiscard(folder: folder, files) }
+                            rowButton("plus.circle", help: "Stage Folder", busy: files.map { .stage($0.path) }) {
+                                stage(files, part: .unstaged)
+                            }
+                        }
+                    }
                     .fileMenu { file in
                         [
                             menuAction("Stage File", busy: [.stage(file.path)]) {
@@ -123,7 +135,7 @@ struct WIPPanel: View {
                     .folderMenu { folder, files in
                         [
                             menuAction("Stage Folder", busy: files.map { .stage($0.path) }) {
-                                run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: .unstaged)
+                                stage(files, part: .unstaged)
                             },
                             menuAction("Discard Changes in Folder…", busy: files.map { .discard($0.path) },
                                        destructive: true) { confirmDiscard(folder: folder, files) },
@@ -165,11 +177,13 @@ struct WIPPanel: View {
                             run([.unstage(Self.unstagePaths(file))], busy: [.unstage(file.path)], part: .staged)
                         }]
                     }
-                    .folderMenu { folder, files in
-                        [menuAction("Unstage Folder", busy: files.map { .unstage($0.path) }) {
-                            run([.unstage(files.flatMap(Self.unstagePaths))], busy: files.map { .unstage($0.path) },
-                                part: .staged)
-                        }]
+                    .folderButtons { _, files in
+                        rowButton("minus.circle", help: "Unstage Folder", busy: files.map { .unstage($0.path) }) {
+                            unstage(files)
+                        }
+                    }
+                    .folderMenu { _, files in
+                        [menuAction("Unstage Folder", busy: files.map { .unstage($0.path) }) { unstage(files) }]
                     }
                     .onSelectFile(selected: openWIPPath) { file in
                         session.selectFile(FileTarget(source: .wip, file: file))
@@ -191,8 +205,15 @@ struct WIPPanel: View {
     private func rowButton(_ systemImage: String, help: String, busy key: Busy, action: @escaping () -> Void)
         -> some View
     {
+        rowButton(systemImage, help: help, busy: [key], action: action)
+    }
+
+    /// A row's icon button for several files (a folder's); a spinner while one of `keys` runs.
+    private func rowButton(_ systemImage: String, help: String, busy keys: [Busy], action: @escaping () -> Void)
+        -> some View
+    {
         ZStack {
-            if busy.contains(key) {
+            if keys.contains(where: busy.contains) {
                 ProgressView().controlSize(.mini)
             } else {
                 Button(action: action) {
@@ -251,6 +272,16 @@ struct WIPPanel: View {
                             _ perform: @escaping @MainActor () -> Void) -> MenuEntry
     {
         .action(title, enabled: !keys.contains(where: busy.contains), destructive: destructive, perform)
+    }
+
+    /// Stages `files` (a folder's), each showing busy.
+    private func stage(_ files: [FileChange], part: Part) {
+        run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: part)
+    }
+
+    /// Unstages `files` (a folder's), each showing busy.
+    private func unstage(_ files: [FileChange]) {
+        run([.unstage(files.flatMap(Self.unstagePaths))], busy: files.map { .unstage($0.path) }, part: .staged)
     }
 
     /// A rename's old path too, or its deletion stays staged.

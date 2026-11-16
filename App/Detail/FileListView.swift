@@ -84,7 +84,7 @@ enum FileListMode: String {
 
 /// The path / tree switch of a files card's header; every file list follows it.
 struct FileListModeToggle: View {
-    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.path.rawValue
+    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.tree.rawValue
 
     var body: some View {
         let isTree = mode == FileListMode.tree.rawValue
@@ -116,9 +116,9 @@ struct FileListView<Trailing: View>: View {
     var onSelect: ((FileChange) -> Void)?
     /// Each file's size on disk by path, shown left of its buttons; nil shows no sizes.
     var sizes: [String: Int64]?
-    /// The width of a file row's trailing buttons, so a folder's size lines up with its files' sizes.
-    var sizeInset: CGFloat = 0
-    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.path.rawValue
+    /// A folder row's buttons (the tree), given its path and the files under it; nil gives it none.
+    var folderTrailing: ((String, [FileChange]) -> AnyView)?
+    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.tree.rawValue
 
     static var rowHeight: CGFloat { 26 }
 
@@ -145,12 +145,20 @@ struct FileListView<Trailing: View>: View {
         return list
     }
 
-    /// The list with each file's size (and a folder's total in the tree) left of the buttons; `inset` is the
-    /// buttons' width.
-    func fileSizes(_ sizes: [String: Int64], inset: CGFloat) -> Self {
+    /// The list with each file's size (and a folder's total in the tree) left of the buttons.
+    func fileSizes(_ sizes: [String: Int64]) -> Self {
         var list = self
         list.sizes = sizes
-        list.sizeInset = inset
+        return list
+    }
+
+    /// The list with `buttons` at each folder row's trailing edge (the tree), like a file row's `trailing`; they act
+    /// on the files under it. Give them a file row's buttons' width, so the sizes line up.
+    func folderButtons<Buttons: View>(
+        _ buttons: @escaping (_ folder: String, _ files: [FileChange]) -> Buttons
+    ) -> Self {
+        var list = self
+        list.folderTrailing = { AnyView(buttons($0, $1)) }
         return list
     }
 
@@ -160,9 +168,10 @@ struct FileListView<Trailing: View>: View {
                 ForEach(FileTree.rows(for: files)) { row in
                     switch row.content {
                     case .folder(let name, let path):
+                        let under = files.filter { $0.path.hasPrefix(path + "/") }
                         FolderRow(name: name, path: path, repoURL: repoURL, depth: row.depth, size: folderSize(path),
-                                  sizeInset: sizeInset) {
-                            folderMenuEntries(path, files.filter { $0.path.hasPrefix(path + "/") })
+                                  trailing: folderTrailing.map { $0(path, under) }) {
+                            folderMenuEntries(path, under)
                         }
                     case .file(let file):
                         FileRow(file: file, repoURL: repoURL, depth: row.depth, showsFolder: false, trailing: trailing,
@@ -300,30 +309,33 @@ private struct FolderRow: View {
     let repoURL: URL
     let depth: Int
     let size: Int64?
-    /// The file rows' button width, so this size sits in the files' size column.
-    let sizeInset: CGFloat
+    /// The caller's buttons, laid out as a file row's, so the sizes and buttons line up.
+    let trailing: AnyView?
     /// The caller's context menu entries, above Reveal in Finder.
     let menu: () -> [MenuEntry]
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "folder.fill")
-                .foregroundStyle(.secondary)
-            Text(name)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            HStack(spacing: 6) {
+                Image(systemName: "folder.fill")
+                    .foregroundStyle(.secondary)
+                Text(name)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
             if let size {
-                // A file row's trailing padding (6), the gap before its buttons (4 + 6) and the buttons.
                 FileSizeText(size: size)
-                    .padding(.trailing, 16 + sizeInset)
+                    .padding(.trailing, 4)
             }
+            trailing
         }
         .padding(.leading, 6 + CGFloat(depth) * 14)
+        .padding(.trailing, 6)
         .frame(height: FileListView<EmptyView>.rowHeight)
         .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
         .contextMenu {
             let entries = menu()
             if !entries.isEmpty {

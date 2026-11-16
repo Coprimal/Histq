@@ -1,5 +1,5 @@
 // Settings › Appearance: where the tabs show, the commit graph's avatars, date format, row height and text columns,
-// and the file sizes of the Unstaged card.
+// and the file lists' layout and file sizes.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -12,6 +12,8 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
     @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showFileSizes = true
+    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var fileListMode =
+        FileListMode.tree.rawValue
 
     /// The date formats offered, the shortest (the default, 24 h) first; a format set by hand (`defaults write`) is
     /// listed too.
@@ -82,6 +84,18 @@ struct AppearanceSettings: View {
                 SettingsSwitchRow(title: "Commit date", isOn: $showDate)
             }
             SettingsGroup("File lists") {
+                LabeledContent {
+                    CapsuleTabs(selection: $fileListMode,
+                                tabs: [FileListMode.tree.rawValue, FileListMode.path.rawValue],
+                                title: { $0 == FileListMode.path.rawValue ? Text("Flat") : Text("Tree") },
+                                compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Layout")
+                    SettingsHint("Tree: files under their folders. Flat: one row per file. Also switched from each "
+                        + "list's header.")
+                }
+                SettingsDivider()
                 SettingsSwitchRow(title: "File sizes",
                                   hint: "In the Unstaged card: yellow from 1 MB, red from 10 MB.",
                                   isOn: $showFileSizes)

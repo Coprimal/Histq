@@ -138,7 +138,8 @@ enum PrefKey: String, CaseIterable {
     case terminalOpenWithNewTab
     /// The Welcome page's recent repositories: folder paths, most recent first (`RecentRepos`).
     case recentRepos
-    /// The detail panel's file lists: "path" (one row per file) or "tree" (rows under their folders).
+    /// The detail panel's file lists: "tree" (rows under their folders) or "path" (one row per file). Settings ›
+    /// Appearance and each files card's header switch it.
     case fileListMode
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
@@ -178,7 +179,7 @@ enum PrefKey: String, CaseIterable {
         case .terminalBoldText: false
         case .terminalOpenWithNewTab: false
         case .recentRepos: [String]()
-        case .fileListMode: "path"
+        case .fileListMode: "tree"
         case .showFileSizes: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
