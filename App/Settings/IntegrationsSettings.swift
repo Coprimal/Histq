@@ -23,6 +23,20 @@ struct IntegrationsSettings: View {
     /// and the Settings modal closing.
     @State private var connectTask: Task<Void, Never>?
     @State private var copied = false
+    /// The way to connect picked at the top of the account group; each shows only its own rows.
+    @State private var method: ConnectMethod = .signIn
+
+    private enum ConnectMethod: Hashable, CaseIterable {
+        case signIn, token, cli
+
+        var title: String {
+            switch self {
+            case .signIn: "Sign in with GitHub"
+            case .token: "Personal access token"
+            case .cli: "GitHub CLI"
+            }
+        }
+    }
 
     private enum Activity: Equatable {
         case idle
@@ -53,7 +67,7 @@ struct IntegrationsSettings: View {
             }
         } skeleton: {
             SettingsSkeletonGroup(rows: 1)
-            SettingsSkeletonGroup(rows: 4)
+            SettingsSkeletonGroup(rows: 2)
         }
         .onDisappear { cancelConnection() }
         #if DEBUG
@@ -239,53 +253,80 @@ struct IntegrationsSettings: View {
         SettingsGroup("GitHub account", description: "Fetch, pull, push and clone over HTTPS use the token for this "
             + "host; nothing else gets it. It is checked with GitHub, then kept in your login Keychain.") {
             LabeledContent {
-                TextField("Host", text: $hostDraft, prompt: Text(verbatim: "github.com"))
-                    .textFieldStyle(.settings)
-                    .frame(maxWidth: 240)
-                    .labelsHidden()
-                    .disabled(isBusy)
-            } label: {
-                Text("Host")
-                if draftHost == nil {
-                    Text("Enter a host name such as github.example.com, without https://.")
-                        .font(.settingsCaption)
-                        .foregroundStyle(.red)
-                } else {
-                    SettingsHint("github.com, or your GitHub Enterprise Server host.")
-                }
-            }
-            SettingsDivider()
-            signInRow(profile: profile, host: draftHost)
-            SettingsDivider()
-            LabeledContent {
-                HStack(spacing: 8) {
-                    SecureField("Token", text: $pastedToken, prompt: Text(verbatim: "ghp_…"))
-                        .textFieldStyle(.settings)
-                        .frame(maxWidth: 240)
-                        .labelsHidden()
-                        .onSubmit { savePasted(profile) }
-                    Button("Save") { savePasted(profile) }
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                        .disabled(draftHost == nil || pastedToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty)
+                CapsuleMenuPicker(label: "Method", selection: $method, title: Text(method.title)) {
+                    ForEach(ConnectMethod.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .disabled(isBusy)
             } label: {
-                Text("Personal access token")
-                SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
-                    + "read and write.")
+                Text("Method")
             }
             SettingsDivider()
-            LabeledContent {
-                Button("Import") { importFromCLI(profile) }
-                    .buttonStyle(RowTextButtonStyle(formRow: true))
-                    .disabled(draftHost == nil || isBusy)
-            } label: {
-                Text("GitHub CLI")
-                SettingsHint("Uses the token of gh auth login for this host (gh auth token --hostname "
-                    + "\(draftHost ?? "<host>")).")
+            switch method {
+            case .signIn:
+                // The OAuth App exists on github.com only; Enterprise hosts connect with a token or the GitHub CLI.
+                signInRow(profile: profile, host: "github.com")
+            case .token:
+                hostRow
+                SettingsDivider()
+                tokenRow(profile)
+            case .cli:
+                hostRow
+                SettingsDivider()
+                cliRow(profile)
             }
             activityLine
+        }
+    }
+
+    private var hostRow: some View {
+        LabeledContent {
+            TextField("Host", text: $hostDraft, prompt: Text(verbatim: "github.com"))
+                .textFieldStyle(.settings)
+                .frame(maxWidth: 240)
+                .labelsHidden()
+                .disabled(isBusy)
+        } label: {
+            Text("Host")
+            if draftHost == nil {
+                Text("Enter a host name such as github.example.com, without https://.")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.red)
+            } else {
+                SettingsHint("github.com, or your GitHub Enterprise Server host.")
+            }
+        }
+    }
+
+    private func tokenRow(_ profile: Profile) -> some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                SecureField("Token", text: $pastedToken, prompt: Text(verbatim: "ghp_…"))
+                    .textFieldStyle(.settings)
+                    .frame(maxWidth: 240)
+                    .labelsHidden()
+                    .onSubmit { savePasted(profile) }
+                Button("Save") { savePasted(profile) }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .disabled(draftHost == nil || pastedToken.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty)
+            }
+            .disabled(isBusy)
+        } label: {
+            Text("Personal access token")
+            SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
+                + "read and write.")
+        }
+    }
+
+    private func cliRow(_ profile: Profile) -> some View {
+        LabeledContent {
+            Button("Import") { importFromCLI(profile) }
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .disabled(draftHost == nil || isBusy)
+        } label: {
+            Text("GitHub CLI")
+            SettingsHint("Uses the token of gh auth login for this host (gh auth token --hostname "
+                + "\(draftHost ?? "<host>")).")
         }
     }
 
@@ -339,10 +380,11 @@ struct IntegrationsSettings: View {
             .padding(.top, 8)
     }
 
-    /// The device flow's code, big, with Copy and Open GitHub, while the app polls for the approval.
+    /// The device flow's code, big, with Copy and Open GitHub (both already done once when the code came), while the
+    /// app polls for the approval.
     private func deviceCodeGroup(_ code: GitHubDeviceFlow.DeviceCode, host: String) -> some View {
-        SettingsGroup("Sign in with GitHub", description: "Enter this code on GitHub. Histq connects as soon as you "
-            + "approve it.") {
+        SettingsGroup("Sign in with GitHub", description: "The code is copied and GitHub is open in your browser: paste it "
+            + "there. Histq connects as soon as you approve it.") {
             HStack(spacing: 12) {
                 Text(code.userCode)
                     .font(.system(size: 28, weight: .semibold, design: .monospaced))
@@ -415,6 +457,11 @@ struct IntegrationsSettings: View {
                 let code = try await flow.start()
                 try Task.checkCancellation()
                 activity = .deviceCode(code, host: host)
+                // As `gh auth login --web`: the code goes to the clipboard and the browser opens, ready to paste.
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(code.userCode, forType: .string)
+                copied = true
+                NSWorkspace.shared.open(Self.verificationURL(code, host: host))
                 let token = try await flow.waitForToken(code)
                 try Task.checkCancellation()
                 activity = .working("Checking the token with GitHub…")
