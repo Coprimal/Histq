@@ -6,13 +6,13 @@ Histq works with your existing repositories, git config, SSH keys and hooks. It 
 
 ## Pages
 
-- [Home](https://histq.dinhanhthi.com/): what Histq is and how to get it
-- [Docs](https://histq.dinhanhthi.com/docs.html): how to use Histq
-- [Privacy](https://histq.dinhanhthi.com/privacy.html): what Histq collects, stores and sends
+- [Home](https://histq.coprimal.dev/): what Histq is and how to get it
+- [Docs](https://histq.coprimal.dev/docs.html): how to use Histq
+- [Privacy](https://histq.coprimal.dev/privacy.html): what Histq collects, stores and sends
 
 ## Links
 
-- [Source code](https://github.com/dinhanhthi/Histq)
-- [Releases](https://github.com/dinhanhthi/Histq/releases)
+- [Source code](https://github.com/Coprimal/Histq)
+- [Releases](https://github.com/Coprimal/Histq/releases)
 - [Changelog](https://github.com/dinhanhthi/Histq/blob/main/CHANGELOG.md)
 
