@@ -10,7 +10,7 @@
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
 
-[Download](https://github.com/dinhanhthi/Histq/releases/latest) · [Changelog](CHANGELOG.md)
+[Website](https://histq.dinhanhthi.com) · [Download](https://github.com/dinhanhthi/Histq/releases/latest) · [Changelog](CHANGELOG.md)
 
 </div>
 

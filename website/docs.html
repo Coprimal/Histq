@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Docs · Histq</title>
+    <meta name="description" content="Histq docs: commit graph, staging, conflicts, interactive rebase, undo, worktrees, profiles, GitHub, AI and terminal." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Docs · Histq" />
+    <meta property="og:description" content="Histq docs: commit graph, staging, conflicts, interactive rebase, undo, worktrees, profiles, GitHub, AI and terminal." />
+    <meta property="og:image" content="https://histq.dinhanhthi.com/poster.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="logo.png" type="image/png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      try {
+        const stored = localStorage.getItem("histq.theme");
+        if (stored) document.documentElement.dataset.theme = stored;
+      } catch {
+        // Private mode: follow the system theme.
+      }
+    </script>
+  </head>
+  <body>
+    <div class="page">
+      <header class="site-header">
+        <div class="brand-group">
+          <a class="brand" href="./">
+            <img src="logo.png" alt="" width="32" height="32" />
+            <span>Histq</span>
+          </a>
+          <a
+            class="version-badge"
+            id="version-badge"
+            data-source="github"
+            data-repo="dinhanhthi/Histq"
+            href="https://github.com/dinhanhthi/Histq/releases/tag/v0.1.0"
+            target="_blank"
+            rel="noopener noreferrer"
+            >v0.1.0</a
+          >
+        </div>
+        <nav aria-label="Primary navigation">
+          <a class="nav-link active" href="docs.html" aria-current="page">Docs</a>
+          <button type="button" class="nav-link" id="theme-toggle" aria-label="Switch theme" title="Switch theme">
+            <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+            </svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" />
+            </svg>
+          </button>
+          <a
+            class="nav-link"
+            href="https://github.com/dinhanhthi/Histq"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Histq on GitHub"
+            title="Histq on GitHub"
+          >
+            <svg class="fill" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 .5a12 12 0 0 0-3.79 23.4c.6.11.82-.26.82-.58v-2.2c-3.34.73-4.04-1.43-4.04-1.43-.55-1.4-1.34-1.77-1.34-1.77-1.09-.75.08-.73.08-.73 1.21.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.25 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.83.58A12 12 0 0 0 12 .5Z" />
+            </svg>
+          </a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero">
+          <h1>Docs</h1>
+          <p>Short guides to everything in Histq.</p>
+        </section>
+
+        <div class="docs-layout">
+          <nav class="toc" aria-label="Documentation">
+            <ul>
+              <li><a href="#install">Install &amp; updates</a></li>
+              <li><a href="#open">Open &amp; clone</a></li>
+              <li><a href="#graph">Commit graph &amp; search</a></li>
+              <li><a href="#details">Commit details</a></li>
+              <li><a href="#commit">Stage &amp; commit</a></li>
+              <li><a href="#rebase">Interactive rebase</a></li>
+              <li><a href="#conflicts">Conflicts</a></li>
+              <li><a href="#undo">Undo &amp; redo</a></li>
+              <li><a href="#worktrees">Worktrees</a></li>
+              <li><a href="#tabs">Tabs &amp; sessions</a></li>
+              <li><a href="#palette">Command palette</a></li>
+              <li><a href="#profiles">Profiles &amp; SSH</a></li>
+              <li><a href="#github">GitHub</a></li>
+              <li><a href="#ai">AI</a></li>
+              <li><a href="#terminal">Terminal</a></li>
+              <li><a href="#shortcuts">Keyboard shortcuts</a></li>
+              <li><a href="#settings">Settings</a></li>
+            </ul>
+          </nav>
+
+          <div class="docs-content">
+          <section id="install" class="doc">
+            <h2>Install &amp; updates</h2>
+<ul class="list">
+            <li>Download the DMG from <a href="https://github.com/dinhanhthi/Histq/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a>, drag Histq to Applications.</li>
+            <li><strong>Requirements:</strong> macOS 15 or later on Apple silicon, and git 2.36 or later. The git from the Command Line Tools or from Homebrew works.</li>
+            <li><strong>Git binary:</strong> Histq finds git on its own; pick another one in <strong>Settings › General</strong>.</li>
+            <li><strong>Updates:</strong> through Sparkle. Check by hand with <strong>Histq › Check for Updates…</strong></li>
+</ul>
+          </section>
+
+          <section id="open" class="doc">
+            <h2>Open &amp; clone</h2>
+<ul class="list">
+            <li><strong>Open:</strong> <kbd>⌘O</kbd>, or <strong>Open…</strong> on the welcome screen, then pick a repository folder.</li>
+            <li><strong>Clone:</strong> <strong>File › Clone…</strong> or the welcome screen's Clone card: a URL and a destination folder.</li>
+            <li><strong>Create:</strong> <strong>Init…</strong> on the welcome screen makes a new repository.</li>
+            <li><strong>Recent:</strong> recent repositories are on the welcome screen. Right-click one to remove it.</li>
+</ul>
+          </section>
+
+          <section id="graph" class="doc">
+            <h2>Commit graph &amp; search</h2>
+<ul class="list">
+            <li><strong>Graph:</strong> branches, tags, stashes, remotes and worktrees in one graph, fast on tens of thousands of commits.</li>
+            <li><strong>Search:</strong> <kbd>⌘F</kbd> slides a bar up at the bottom of the graph. It finds commits by subject or by part of the hash; the other rows are dimmed.</li>
+            <li><strong>Matches:</strong> <kbd>Return</kbd> and <kbd>Shift-Return</kbd> move between them, <kbd>Esc</kbd> closes the bar.</li>
+            <li><strong>Layout:</strong> row height (compact, regular, comfortable) and the message, author and date columns are in <strong>Settings › Appearance</strong>.</li>
+            <li><strong>Narrow graph:</strong> lanes fold into each other, and branch and tag labels shrink to "…", then to an icon.</li>
+            <li><strong>Faded label:</strong> a selected commit with no branch label of its own shows a faded label of its branch.</li>
+</ul>
+          </section>
+
+          <section id="details" class="doc">
+            <h2>Commit details</h2>
+<ul class="list">
+            <li>A click shows the commit's subject, body, author, committer and date at once, then its changed files.</li>
+            <li><strong>SHA:</strong> copy it with its button. Parents jump to their row in the graph.</li>
+            <li><strong>Diff:</strong> select a file to see its diff in place of the graph; <kbd>Esc</kbd> goes back.</li>
+            <li><strong>Explain:</strong> asks your AI provider to explain the commit (see <a href="#ai">AI</a>).</li>
+</ul>
+          </section>
+
+          <section id="commit" class="doc">
+            <h2>Stage &amp; commit</h2>
+<ul class="list">
+            <li><strong>Working tree:</strong> conflicted, unstaged and staged files, each in its own card.</li>
+            <li><strong>Diff:</strong> <strong>Diff</strong> or <strong>Full file</strong>, with syntax colors. <kbd>⌘C</kbd> copies the selected lines.</li>
+            <li><strong>Hunks and lines:</strong> stage, unstage or discard a hunk, or only its selected lines.</li>
+            <li><strong>Commit box:</strong> summary with a 72-character counter, description and <strong>Amend</strong>. Commit with <kbd>⌘↩</kbd>.</li>
+            <li><strong>Generate Message:</strong> writes a commit message from the staged diff with your AI provider.</li>
+</ul>
+          </section>
+
+          <section id="rebase" class="doc">
+            <h2>Interactive rebase</h2>
+<ul class="list">
+            <li>Right-click a commit, <strong>Interactive Rebase from Here…</strong>: it lists that commit and every later one of the current branch.</li>
+            <li><strong>Actions:</strong> pick, reword, edit, squash, fixup or drop. Drag rows to reorder them.</li>
+            <li><strong>Reword:</strong> edit the message in the row; no editor opens.</li>
+            <li><strong>Squash:</strong> select a run of commits, <strong>Squash N Commits…</strong>, and edit the combined message.</li>
+</ul>
+          </section>
+
+          <section id="conflicts" class="doc">
+            <h2>Conflicts</h2>
+<ul class="list">
+            <li><strong>Editor:</strong> panes A and B show both sides, Output shows the merge, with "conflict k of N".</li>
+            <li><strong>Resolve:</strong> tick lines (or a whole side) from A and B into Output, or edit Output by hand.</li>
+            <li><strong>Save:</strong> with conflicts left, it asks: <strong>Save Output</strong> (write it and mark the file resolved) or <strong>Create Conflict Chunks</strong> (write git's conflict markers, the file stays conflicted).</li>
+            <li><strong>Reset:</strong> clears your choices. Leaving the editor with unsaved choices asks first.</li>
+            <li><strong>Suggest Resolution:</strong> asks your AI provider for the current conflict. <strong>Open in external merge tool</strong> uses the tool set in <strong>Settings › General</strong>, else the one your git config names.</li>
+</ul>
+          </section>
+
+          <section id="undo" class="doc">
+            <h2>Undo &amp; redo</h2>
+<ul class="list">
+            <li><kbd>⌘Z</kbd> and <kbd>⇧⌘Z</kbd>, also in the command palette.</li>
+            <li><strong>Undoable:</strong> commit, amend, checkout, reset, merge, rebase, cherry-pick, revert, branch create, delete and rename, and discard.</li>
+            <li><strong>Not undoable:</strong> push, pull, fetch, and remote branch and tag changes.</li>
+            <li><strong>Safe:</strong> undo refuses when the repository changed since (for example, a commit made in a terminal), instead of overwriting work.</li>
+</ul>
+          </section>
+
+          <section id="worktrees" class="doc">
+            <h2>Worktrees</h2>
+<ul class="list">
+            <li>The <strong>Worktrees</strong> card in the sidebar lists linked worktrees.</li>
+            <li><strong>Add:</strong> <strong>Add Worktree…</strong>, or from a commit or a branch's menu.</li>
+            <li><strong>Open</strong> a worktree in a new tab, <strong>Remove</strong> it, or <strong>Prune Worktrees</strong>.</li>
+            <li>Tabs of one repository's worktrees sit side by side as a tab group.</li>
+</ul>
+          </section>
+
+          <section id="tabs" class="doc">
+            <h2>Tabs &amp; sessions</h2>
+<ul class="list">
+            <li><strong>Position:</strong> a tab strip under the toolbar, or vertical tabs on the left. Set it in <strong>Settings › Appearance › Tab position</strong>.</li>
+            <li>New tab <kbd>⌘T</kbd>, close <kbd>⌘W</kbd>, reopen the last closed tab <kbd>⇧⌘T</kbd>.</li>
+            <li><strong>Groups:</strong> the worktrees of one repository are grouped under its name and color. Click the name to collapse the group.</li>
+            <li><strong>Profiles:</strong> each tab has its own profile, picked from the profile menu in the toolbar, after the branch menu.</li>
+            <li><strong>Session:</strong> windows and tabs are restored at launch. A folder that is gone shows as "Repo not found".</li>
+</ul>
+          </section>
+
+          <section id="palette" class="doc">
+            <h2>Command palette</h2>
+<ul class="list">
+            <li>Open it with <kbd>⌘K</kbd>. Type to search, <kbd>Up</kbd> / <kbd>Down</kbd> to choose, <kbd>Return</kbd> to run, <kbd>Esc</kbd> to close.</li>
+            <li><strong>Sections:</strong> Repository, Checkout, Tabs, Histq and Operations.</li>
+            <li>Check out a local or remote branch, switch tabs, open a repository or a Settings page, or move the tabs.</li>
+            <li>Repository operations ask the same confirmations as the menus.</li>
+</ul>
+          </section>
+
+          <section id="profiles" class="doc">
+            <h2>Profiles &amp; SSH</h2>
+<ul class="list">
+            <li><strong>Profile:</strong> a name and color, a commit identity, signing, an SSH key and a GitHub account. Create profiles in <strong>Settings › Profiles</strong>.</li>
+            <li><strong>Signing:</strong> none, GPG or SSH, passed to git for the profile's tabs only. Your git config is not changed.</li>
+            <li><strong>SSH key:</strong> ssh-agent (with <code>~/.ssh/config</code>) or a key file, in <strong>Settings › SSH</strong>. <strong>Generate Key…</strong> makes an ed25519 key without a passphrase.</li>
+            <li><strong>Passphrase:</strong> Histq runs ssh in batch mode, so keys with a passphrase need ssh-agent.</li>
+            <li><strong>Trust Host:</strong> an unknown SSH host shows its fingerprint first; it is added to <code>known_hosts</code> only when you confirm.</li>
+            <li><strong>New tabs:</strong> use their repository's last profile, else the default profile.</li>
+</ul>
+          </section>
+
+          <section id="github" class="doc">
+            <h2>GitHub</h2>
+<ul class="list">
+            <li><strong>Token:</strong> in <strong>Settings › Integrations</strong>, per profile: paste a personal access token, or <strong>Import</strong> the GitHub CLI's token. github.com or a GitHub Enterprise Server host.</li>
+            <li><strong>Lists:</strong> My PRs, Review requested, All open and Issues assigned to me, in the sidebar's PRs tab.</li>
+            <li><strong>Pull request:</strong> Conversation, Commits, Files changed and Checks tabs.</li>
+            <li><strong>Writes:</strong> create a pull request, comment, review, merge, close or reopen, only when you click.</li>
+            <li>Bodies are shown with JavaScript off and no remote content. Links open in your browser.</li>
+</ul>
+          </section>
+
+          <section id="ai" class="doc">
+            <h2>AI</h2>
+<ul class="list">
+            <li><strong>Providers:</strong> OpenAI, Anthropic, Google Gemini, xAI, or a custom OpenAI-compatible server, with your own API key.</li>
+            <li><strong>Actions:</strong> <strong>Generate Message</strong> (commit box), <strong>Explain</strong> (a commit or your changes), <strong>Suggest Resolution</strong> (conflict editor).</li>
+            <li><strong>Preview:</strong> the answer changes nothing until you click <strong>Apply</strong>.</li>
+            <li><strong>Settings › AI:</strong> <strong>Test connection</strong> and <strong>Load models</strong>.</li>
+            <li><strong>Languages:</strong> explanations and commit messages each have their own response language.</li>
+</ul>
+          </section>
+
+          <section id="terminal" class="doc">
+            <h2>Terminal</h2>
+<ul class="list">
+            <li><kbd>⌃`</kbd> shows or hides a terminal drawer at the bottom of the repository tab.</li>
+            <li>One terminal per tab, started in the repository folder with the tab's profile (identity, signing, SSH key).</li>
+            <li>The shell keeps running until its tab or window closes.</li>
+            <li><strong>Settings › Terminal:</strong> font, size, cursor, scrollback, bold text, shell, and opening a terminal with each new tab.</li>
+</ul>
+          </section>
+
+          <section id="shortcuts" class="doc">
+            <h2>Keyboard shortcuts</h2>
+<ul class="list">
+            <li><strong>Windows and tabs:</strong> new window <kbd>⌘N</kbd>, new tab <kbd>⌘T</kbd>, close tab <kbd>⌘W</kbd>, reopen closed tab <kbd>⇧⌘T</kbd>, close window <kbd>⇧⌘W</kbd>.</li>
+            <li><strong>Repository:</strong> open <kbd>⌘O</kbd>, command palette <kbd>⌘K</kbd>, find commits <kbd>⌘F</kbd>, terminal <kbd>⌃`</kbd>.</li>
+            <li><strong>Edit:</strong> undo <kbd>⌘Z</kbd>, redo <kbd>⇧⌘Z</kbd>. <strong>Commit box:</strong> commit <kbd>⌘↩</kbd>.</li>
+            <li><strong>Settings:</strong> <kbd>⌘,</kbd>. The menus show the window, repository and edit keys next to their commands.</li>
+</ul>
+          </section>
+
+          <section id="settings" class="doc">
+            <h2>Settings</h2>
+<ul class="list">
+            <li>Open with <kbd>⌘,</kbd>. Histq is dark only.</li>
+            <li><strong>General:</strong> default profile, pull mode, automatic fetch, merge tool and git binary.</li>
+            <li><strong>Appearance:</strong> tab position, avatars, date format, row height and graph columns.</li>
+            <li><strong>Profiles</strong> and <strong>SSH:</strong> identity, signing and SSH keys of each profile.</li>
+            <li><strong>Integrations</strong> and <strong>AI:</strong> the GitHub token of each profile; the AI provider, key, model and languages.</li>
+            <li><strong>Terminal:</strong> font, cursor, scrollback and shell.</li>
+</ul>
+          </section>
+          </div>
+        </div>
+      </main>
+
+      <footer class="site-footer">
+        GPLv3 · by
+        <a href="https://dinhanhthi.com" target="_blank" rel="noopener noreferrer">Thi</a>
+        ·
+        <a href="https://github.com/dinhanhthi/Histq/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Changelog</a>
+        ·
+        <a href="privacy.html">Privacy</a>
+      </footer>
+    </div>
+    <script src="site.js"></script>
+  </body>
+</html>

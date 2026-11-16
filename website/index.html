@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Histq: a native macOS git client</title>
+    <meta name="description" content="Histq is a native macOS git client that runs the git you already have: a fast commit graph, line-by-line staging, a conflict editor, interactive rebase and undo for local operations." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Histq: a native macOS git client" />
+    <meta property="og:description" content="A native macOS git client that drives the git you already have." />
+    <meta property="og:image" content="https://histq.dinhanhthi.com/poster.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="logo.png" type="image/png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      try {
+        const stored = localStorage.getItem("histq.theme");
+        if (stored) document.documentElement.dataset.theme = stored;
+      } catch {
+        // Private mode: follow the system theme.
+      }
+    </script>
+  </head>
+  <body>
+    <div class="page">
+      <header class="site-header">
+        <div class="brand-group">
+          <a class="brand" href="./">
+            <img src="logo.png" alt="" width="32" height="32" />
+            <span>Histq</span>
+          </a>
+          <a
+            class="version-badge"
+            id="version-badge"
+            data-source="github"
+            data-repo="dinhanhthi/Histq"
+            href="https://github.com/dinhanhthi/Histq/releases/tag/v0.1.0"
+            target="_blank"
+            rel="noopener noreferrer"
+            >v0.1.0</a
+          >
+        </div>
+        <nav aria-label="Primary navigation">
+          <a class="nav-link" href="docs.html">Docs</a>
+          <button type="button" class="nav-link" id="theme-toggle" aria-label="Switch theme" title="Switch theme">
+            <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+            </svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" />
+            </svg>
+          </button>
+          <a
+            class="nav-link"
+            href="https://github.com/dinhanhthi/Histq"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Histq on GitHub"
+            title="Histq on GitHub"
+          >
+            <svg class="fill" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 .5a12 12 0 0 0-3.79 23.4c.6.11.82-.26.82-.58v-2.2c-3.34.73-4.04-1.43-4.04-1.43-.55-1.4-1.34-1.77-1.34-1.77-1.09-.75.08-.73.08-.73 1.21.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.25 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.83.58A12 12 0 0 0 12 .5Z" />
+            </svg>
+          </a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero">
+          <h1>Histq</h1>
+          <p>A native macOS git client that drives the git you already have.</p>
+          <div class="actions">
+            <a
+              class="button button--primary"
+              href="https://github.com/dinhanhthi/Histq/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Download</a
+            >
+            <a
+              class="button button--secondary"
+              href="https://github.com/dinhanhthi/Histq"
+              target="_blank"
+              rel="noopener noreferrer"
+              >GitHub</a
+            >
+          </div>
+          <p class="note">macOS 15+ · Apple silicon · Free &amp; open source (GPLv3)</p>
+        </section>
+
+        <button class="poster-button" type="button" data-zoom aria-label="View screenshot full screen">
+          <img
+            class="poster"
+            src="poster.png"
+            alt="Histq window: commit graph with colored branch lanes, branch and tag labels, a selected merge commit and its details and changed files"
+            width="1600"
+            height="900"
+            loading="eager"
+          />
+        </button>
+
+        <section id="features">
+          <h2>Features</h2>
+          <ul class="list">
+            <li><strong>Native and fast</strong>: SwiftUI and AppKit; the graph stays fast on histories of tens of thousands of commits.</li>
+            <li><strong>Your own git</strong>: runs the git on your Mac, with your config, SSH keys and hooks. Per-tab profiles (identity, signing, SSH key, GitHub account) are applied to each git process, not written to your config.</li>
+            <li><strong>Safe to try</strong>: undo and redo for local operations, a line-by-line conflict editor, interactive rebase without an editor.</li>
+            <li><strong>Worktrees and tabs</strong>: add, open and prune worktrees; tabs in a top strip or a vertical list; your session restored at launch.</li>
+            <li><strong>GitHub pull requests and issues</strong>: lists, details, reviews, merge, comments and new pull requests, once you add a token (a personal access token or the gh CLI's).</li>
+            <li><strong>AI help</strong>: optional commit messages, explanations and conflict suggestions, with your own provider key.</li>
+            <li><strong>Terminal drawer</strong>: a terminal per tab, started in the repository folder with the tab's profile.</li>
+            <li><strong>Command palette</strong>: ⌘K to check out a branch, switch tabs or run a repository action.</li>
+          </ul>
+        </section>
+
+        <section id="get-started">
+          <h2>Get started</h2>
+          <ol class="steps">
+            <li>Download the DMG from the <a href="https://github.com/dinhanhthi/Histq/releases/latest" target="_blank" rel="noopener noreferrer">releases page</a> and drag Histq to Applications. Needs macOS 15+ on Apple silicon and git 2.36 or later.</li>
+            <li>Open a repository with <code>⌘O</code>, or clone one from the welcome screen.</li>
+            <li>Stage files, hunks or single lines, commit with <code>⌘↩</code>, and undo with <code>⌘Z</code>.</li>
+          </ol>
+          <p class="note">More in the <a href="docs.html">docs</a>. Histq updates itself.</p>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        GPLv3 · by
+        <a href="https://dinhanhthi.com" target="_blank" rel="noopener noreferrer">Thi</a>
+        ·
+        <a href="https://github.com/dinhanhthi/Histq/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Changelog</a>
+        ·
+        <a href="privacy.html">Privacy</a>
+      </footer>
+    </div>
+    <script src="site.js"></script>
+  </body>
+</html>
