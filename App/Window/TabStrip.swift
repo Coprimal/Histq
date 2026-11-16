@@ -28,6 +28,30 @@ enum TabStripMetrics {
     static let dot: CGFloat = 8
     /// How far a press moves before it reorders the tab.
     static let dragThreshold: CGFloat = 5
+    /// A tab group's line: under its chip and tabs, around its selected tab (and the vertical tabs' bar).
+    static let groupLine: CGFloat = 1.5
+    /// A tab group's name chip, before its first tab: as tall as New Tab, at most `groupChipMaxWidth` wide.
+    static let groupChipHeight: CGFloat = 20
+    static let groupChipMaxWidth: CGFloat = 120
+    static let groupChipPadding: CGFloat = 8
+    static var groupChipFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
+
+    /// A group's chip width for its name.
+    static func groupChipWidth(_ name: String) -> CGFloat {
+        let text = (name as NSString).size(withAttributes: [.font: groupChipFont]).width
+        return min(groupChipMaxWidth, ceil(text) + 2 * groupChipPadding)
+    }
+}
+
+/// A tab group's color (`Palette.graphLanes`, by its repo) and its chip's fill (the graph badges' fill).
+enum TabGroupColors {
+    static func line(_ key: String) -> Color {
+        Color(nsColor: Palette.graphLanes[RepoGroupKey.colorIndex(of: key, count: Palette.graphLanes.count)])
+    }
+
+    static func chip(_ key: String) -> Color {
+        Color(nsColor: Palette.graphBadgeFills[RepoGroupKey.colorIndex(of: key, count: Palette.graphLanes.count)])
+    }
 }
 
 /// The window's tabs, then New Tab and the tab list. A press on a tab selects it at once (on mouse-down); a drag past a
@@ -75,7 +99,9 @@ struct TabStripButtons: View {
 }
 
 /// The tabs with a small gap: equal widths, no fill (a subtle one on hover), and the selected tab's sheet-colored
-/// shape that slides to the next selection.
+/// shape that slides to the next selection. A tab group (a repo's worktrees, `WindowModel.tabGroups`) has its name chip
+/// before its first tab, its color as one line under the chip and its tabs (`TabGroupLine`, open where the selected
+/// tab stands, live during a drag), and as the selected tab's outline.
 private struct TabTrack: View {
     let model: WindowModel
     @Namespace private var namespace
@@ -93,13 +119,19 @@ private struct TabTrack: View {
     var body: some View {
         GeometryReader { proxy in
             let count = model.tabs.count
-            let gaps = TabStripMetrics.gap * CGFloat(max(count - 1, 0)) + 2 * TabStripMetrics.flare
+            let groups = model.tabGroups
+            let chips = groups.reduce(0) { $0 + TabStripMetrics.groupChipWidth($1.name) }
+            let items = count + groups.count
+            let gaps = TabStripMetrics.gap * CGFloat(max(items - 1, 0)) + 2 * TabStripMetrics.flare
             let tabWidth = min(TabStripMetrics.maxTabWidth,
-                               max(TabStripMetrics.minTabWidth, (proxy.size.width - gaps) / CGFloat(max(count, 1))))
-            let rowWidth = tabWidth * CGFloat(count) + gaps
+                               max(TabStripMetrics.minTabWidth,
+                                   (proxy.size.width - gaps - chips) / CGFloat(max(count, 1))))
+            let rowWidth = tabWidth * CGFloat(count) + chips + gaps
             ScrollViewReader { scroller in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    row(tabWidth: tabWidth)
+                    row(layout: TabGroupLayout(tabs: model.tabs, groups: groups, tabExtent: tabWidth,
+                                               gap: TabStripMetrics.gap,
+                                               headerExtent: { TabStripMetrics.groupChipWidth($0.name) }))
                 }
                 .scrollDisabled(rowWidth <= proxy.size.width)
                 .frame(width: min(rowWidth, proxy.size.width))
@@ -117,28 +149,36 @@ private struct TabTrack: View {
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
 
-    private func row(tabWidth: CGFloat) -> some View {
-        // Each tab carries its flares' room on both sides (overlapping its neighbors' by the negative spacing), so
-        // scrolling to a tab at an edge keeps its flares in view; the tabs still sit `gap` apart.
-        HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
-            ForEach(Array(model.tabs.enumerated()), id: \.element.id) { index, tab in
-                let selected = tab.id == model.selectedTabID
-                let dragged = tab.id == draggedID
-                // A repo tab's profile; a tab not opened yet (filled in the background) has no session, so no dot.
-                let profile = model.sessions[tab.id]?.profile
-                TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
-                        profileName: profile?.name, selected: selected, dragged: dragged, namespace: namespace,
-                        onSelect: { model.selectTab(id: tab.id) },
-                        onClose: { close(tab.id) })
-                    .frame(width: tabWidth, height: TabStripMetrics.tabHeight)
-                    .padding(.horizontal, TabStripMetrics.flare)
-                    .offset(x: offset(of: index, id: tab.id, step: tabWidth + TabStripMetrics.gap))
-                    // Neighbors slide aside; the dragged tab tracks the pointer without lag.
-                    .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
-                    // The selected tab's flares lie over its neighbors' edges.
-                    .zIndex(dragged ? 2 : selected ? 1 : 0)
-                    .gesture(press(tab.id, index: index, step: tabWidth + TabStripMetrics.gap))
-                    .id(tab.id)
+    private func row(layout: TabGroupLayout) -> some View {
+        let current = layout.positions(order: Array(model.tabs.indices))
+        // While a tab is dragged, the others (and the chips) stand where they would with the tab dropped at its target.
+        let order = draggedID == nil ? Array(model.tabs.indices)
+            : TabGroupLayout.moved(model.tabs.count, dragFrom, dragTarget)
+        let target = draggedID == nil ? current : layout.positions(order: order)
+        // The selected tab's start as drawn: it follows the pointer while dragged (the dragged tab is the selected one,
+        // a press selects it), so each group's line opens right under it.
+        let selected = model.selectedIndex
+        let selectedX = selected.map { index in
+            (current.tabs[index] ?? 0) + (model.tabs[index].id == draggedID ? dragOffset : 0)
+        }
+        // Each item carries its flares' room on both sides (overlapping its neighbors' by the negative spacing), so
+        // scrolling to a tab at an edge keeps its flares in view; the items still sit `gap` apart.
+        return HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
+            ForEach(layout.items) { item in
+                switch item {
+                case .header(let group):
+                    let chipX = target.headers[group.key] ?? 0
+                    // The selected tab, flares included, along the line (outside it when no tab of the group is).
+                    let opening = selectedX.map { $0 - chipX - TabStripMetrics.flare } ?? -.greatestFiniteMagnitude
+                    TabGroupChip(group: group, width: layout.headerExtents[group.key] ?? 0,
+                                 span: layout.span(of: group.key), opening: opening,
+                                 openingWidth: layout.tabExtent + 2 * TabStripMetrics.flare)
+                        .padding(.horizontal, TabStripMetrics.flare)
+                        .offset(x: chipX - (current.headers[group.key] ?? 0))
+                        .animation(draggedID != nil ? animation : nil, value: dragTarget)
+                case .tab(let index, let tab):
+                    tabView(index: index, tab: tab, layout: layout, current: current, target: target)
+                }
             }
         }
         .padding(.top, TabStripMetrics.rowInset)
@@ -146,18 +186,34 @@ private struct TabTrack: View {
         .animation(animation, value: model.selectedTabID)
     }
 
-    /// The dragged tab follows the pointer; the tabs between its old and new place shift by one tab.
-    private func offset(of index: Int, id: WindowModel.Tab.ID, step: CGFloat) -> CGFloat {
-        guard let draggedID else { return 0 }
-        if id == draggedID { return dragOffset }
-        if dragFrom < dragTarget, index > dragFrom, index <= dragTarget { return -step }
-        if dragTarget < dragFrom, index >= dragTarget, index < dragFrom { return step }
-        return 0
+    private func tabView(index: Int, tab: WindowModel.Tab, layout: TabGroupLayout, current: TabGroupLayout.Positions,
+                         target: TabGroupLayout.Positions) -> some View {
+        let selected = tab.id == model.selectedTabID
+        let dragged = tab.id == draggedID
+        // A repo tab's profile; a tab not opened yet (filled in the background) has no session, so no dot.
+        let profile = model.sessions[tab.id]?.profile
+        let group = layout.groupKey[index]
+        let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
+        return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
+                       profileName: profile?.name, groupName: group.map(RepoGroupKey.name(of:)),
+                       groupColor: group.map(TabGroupColors.line),
+                       selected: selected, dragged: dragged, namespace: namespace,
+                       onSelect: { model.selectTab(id: tab.id) },
+                       onClose: { close(tab.id) })
+            .frame(width: layout.tabExtent, height: TabStripMetrics.tabHeight)
+            .padding(.horizontal, TabStripMetrics.flare)
+            .offset(x: offset)
+            // Neighbors slide aside; the dragged tab tracks the pointer without lag.
+            .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
+            // The selected tab's flares lie over its neighbors' edges.
+            .zIndex(dragged ? 2 : selected ? 1 : 0)
+            .gesture(press(tab.id, index: index, layout: layout))
+            .id(tab.id)
     }
 
     /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); past `dragThreshold` it
-    /// reorders.
-    private func press(_ id: WindowModel.Tab.ID, index: Int, step: CGFloat) -> some Gesture {
+    /// reorders, to the allowed place (`WindowModel.moveDestinations`) nearest the pointer.
+    private func press(_ id: WindowModel.Tab.ID, index: Int, layout: TabGroupLayout) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this tab.
@@ -173,7 +229,9 @@ private struct TabTrack: View {
                     dragTarget = index
                 }
                 dragOffset = translation
-                let target = min(max(dragFrom + Int((translation / step).rounded()), 0), model.tabs.count - 1)
+                let target = layout.nearestDestination(from: dragFrom, count: model.tabs.count,
+                                                       translation: translation,
+                                                       destinations: model.moveDestinations(from: dragFrom))
                 if target != dragTarget { dragTarget = target }
             }
             .onEnded { _ in
@@ -200,6 +258,62 @@ private struct TabTrack: View {
     }
 }
 
+/// A tab group's name before its first tab, in the group's color, with the group's line under it and its tabs
+/// (`span` long) open at `opening` for `openingWidth`: the selected tab, its flares included.
+private struct TabGroupChip: View {
+    let group: TabGroup
+    let width: CGFloat
+    let span: CGFloat
+    let opening: CGFloat
+    let openingWidth: CGFloat
+
+    var body: some View {
+        Text(group.name)
+            .font(Font(TabStripMetrics.groupChipFont))
+            .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, TabStripMetrics.groupChipPadding)
+            .frame(width: width, height: TabStripMetrics.groupChipHeight)
+            .background(Capsule().fill(TabGroupColors.chip(group.key)))
+            .frame(height: TabStripMetrics.tabHeight)
+            .overlay(alignment: .bottomLeading) {
+                TabGroupLine(opening: opening, openingEnd: opening + openingWidth)
+                    .fill(TabGroupColors.line(group.key))
+                    .frame(width: span, height: TabStripMetrics.groupLine)
+                    .allowsHitTesting(false)
+            }
+            .help("\(group.name): \(group.range.count) tabs of this repository")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Group \(group.name), \(group.range.count) tabs")
+    }
+}
+
+/// A group's line along the strip's bottom, open from `opening` to `openingEnd` (its own x), where the selected tab's
+/// outline takes over: its ends meet the outline's flares, with no spur. Animatable, so the opening slides with the
+/// selected tab's shape when the selection changes.
+private struct TabGroupLine: Shape {
+    var opening: CGFloat
+    var openingEnd: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(opening, openingEnd) }
+        set {
+            opening = newValue.first
+            openingEnd = newValue.second
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let start = min(max(opening, 0), rect.width)
+        let end = min(max(openingEnd, start), rect.width)
+        var path = Path()
+        if start > 0 { path.addRect(CGRect(x: 0, y: rect.minY, width: start, height: rect.height)) }
+        if end < rect.width { path.addRect(CGRect(x: end, y: rect.minY, width: rect.width - end, height: rect.height)) }
+        return path
+    }
+}
+
 /// One tab: its profile's color dot, its name, centered (leading in the vertical tabs) and cut with
 /// "…", and a close button while hovered.
 struct TabItem: View {
@@ -208,6 +322,10 @@ struct TabItem: View {
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
+    /// The tab's group (`WindowModel.tabGroups`): its name and color (the selected tab's outline); nil outside a
+    /// group.
+    let groupName: String?
+    let groupColor: Color?
     let selected: Bool
     let dragged: Bool
     let namespace: Namespace.ID
@@ -254,6 +372,15 @@ struct TabItem: View {
                 // one shape. No edge, which would draw a line where they meet.
                 TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare)
                     .fill(Palette.sheet)
+                    .overlay {
+                        // A grouped tab's outline in the group's color, its flares meeting the group's line
+                        // (`TabGroupLine`); inset half the line so the strip does not clip it.
+                        if let groupColor {
+                            TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare, closed: false)
+                                .stroke(groupColor, lineWidth: TabStripMetrics.groupLine)
+                                .padding(.vertical, TabStripMetrics.groupLine / 2)
+                        }
+                    }
                     .padding(.horizontal, -TabStripMetrics.flare)
                     .matchedGeometryEffect(id: "selectedTab", in: namespace)
             } else {
@@ -268,7 +395,8 @@ struct TabItem: View {
         .help(help)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
-        .accessibilityValue(profileName.map { "Profile \($0)" } ?? "")
+        .accessibilityValue([groupName.map { "Group \($0)" }, profileName.map { "Profile \($0)" }]
+            .compactMap(\.self).joined(separator: ", "))
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(.default, onSelect)
     }
@@ -301,6 +429,8 @@ struct TabItem: View {
 struct TabSheetShape: Shape {
     let radius: CGFloat
     let flare: CGFloat
+    /// False leaves out the bottom edge: the outline a grouped tab strokes.
+    var closed = true
 
     func path(in rect: CGRect) -> Path {
         let left = rect.minX + flare
@@ -316,7 +446,7 @@ struct TabSheetShape: Shape {
         path.addArc(tangent1End: CGPoint(x: right, y: rect.maxY), tangent2End: CGPoint(x: rect.maxX, y: rect.maxY),
                     radius: flare)
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.closeSubpath()
+        if closed { path.closeSubpath() }
         return path
     }
 }

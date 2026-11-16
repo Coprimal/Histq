@@ -65,7 +65,7 @@ struct MainView: View {
             // modal over it) never rebuilds the page on screen.
             HStack(spacing: 0) {
                 if tabsOnLeft {
-                    // The pages' own leading inset is the gap after it.
+                    // No gap after it: its selected row joins the sheet's left edge.
                     VerticalTabsPanel()
                         .padding([.leading, .bottom], HeaderMetrics.tabStripInset)
                 }
@@ -83,7 +83,7 @@ struct MainView: View {
                 .environment(\.cardExtraVerticalPadding, PageSheetMetrics.cardExtraVerticalPadding)
                 .background(Palette.sheet)
                 .clipShape(RoundedRectangle(cornerRadius: PageSheetMetrics.cornerRadius, style: .continuous))
-                .padding([.horizontal, .bottom], HeaderMetrics.tabStripInset)
+                .padding(tabsOnLeft ? [.trailing, .bottom] : [.horizontal, .bottom], HeaderMetrics.tabStripInset)
             }
         }
         // Blurred and disabled behind a modal or the palette; its own view reads that, so this body never reruns.

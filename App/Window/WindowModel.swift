@@ -18,6 +18,9 @@ final class WindowModel {
         /// A restored repo whose folder is gone or no longer a git repository: the tab shows "Repo not found" (Locate,
         /// Remove) and gets no session.
         var isMissing = false
+        /// The repository's git common dir (`RepoGroupKey`), shared by its worktrees' tabs; nil until read (off the main
+        /// thread) or for a Welcome tab. Tabs with the same key are kept side by side, as a group.
+        var repoKey: String?
 
         /// The repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { repoURL?.lastPathComponent ?? "New Tab" }
@@ -70,8 +73,10 @@ final class WindowModel {
     var actionSession: RepoSession? { navigation.page == .home ? selectedSession : nil }
 
     /// Opens a repo in a tab and selects it: the tab that already shows it, else the selected tab if it is a
-    /// Welcome tab, else a new tab. `nil` opens a new Welcome tab.
-    func openTab(_ url: URL?) {
+    /// Welcome tab, else a new tab. `nil` opens a new Welcome tab. A worktree opened from the tab `opener` (its graph
+    /// row, the sidebar) joins the opener's group at once: its new tab goes right after the group's last tab. Any other
+    /// new tab goes last, and moves beside its repo's tabs once its repo is read (`resolveRepoKeys`).
+    func openTab(_ url: URL?, opener: Tab.ID? = nil) {
         navigation.page = .home
         closeSettings()
         guard let url = url?.standardizedFileURL else {
@@ -84,14 +89,25 @@ final class WindowModel {
         RecentRepos.shared.add(url)
         if let existing = tabs.firstIndex(where: { $0.repoURL?.path == url.path }) {
             // A "Repo not found" tab whose folder is opened again (it is back) opens it.
-            if tabs[existing].isMissing { tabs[existing].isMissing = false }
+            if tabs[existing].isMissing {
+                tabs[existing].isMissing = false
+                resolveRepoKeys([tabs[existing].id])
+            }
             selectedTabID = tabs[existing].id
         } else if let index = selectedIndex, tabs[index].repoURL == nil {
             tabs[index].repoURL = url
+            resolveRepoKeys([tabs[index].id])
+        } else if let opener = opener.flatMap({ id in tabs.firstIndex { $0.id == id } }) {
+            var tab = Tab(repoURL: url)
+            tab.repoKey = tabs[opener].repoKey
+            tabs.insert(tab, at: groupEnd(of: opener) + 1)
+            selectedTabID = tab.id
+            if tab.repoKey == nil { resolveRepoKeys([tab.id]) }
         } else {
             let tab = Tab(repoURL: url)
             tabs.append(tab)
             selectedTabID = tab.id
+            resolveRepoKeys([tab.id])
         }
         activateSelectedTab()
     }
@@ -116,6 +132,7 @@ final class WindowModel {
         UITiming.open(url.path)
         RecentRepos.shared.add(url)
         tabs[index].repoURL = url
+        resolveRepoKeys([id])
     }
 
     /// Selects the tab at `index` and shows it (leaving About, closing Settings): the path a click on a tab takes.
@@ -146,8 +163,8 @@ final class WindowModel {
     /// A tab's session, with the profile and commit a restored tab had in the saved session.
     private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
         let session = RepoSession(url: url)
-        // A worktree's "Open in New Tab" and its graph row open it in this window.
-        session.openInTab = { [weak self] url in self?.openTab(url) }
+        // A worktree's "Open in New Tab" and its graph row open it in this window, beside this tab's group.
+        session.openInTab = { [weak self] url in self?.openTab(url, opener: id) }
         let saved = restored.removeValue(forKey: id)
         if let saved {
             if let profile = saved.profile { session.restoreProfile(profile.profileID) }
@@ -305,6 +322,7 @@ final class WindowModel {
                 isMissing: tab.path.map(missing.contains) ?? false)
         }
         restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), saved))
+        resolveRepoKeys(tabs.filter { !$0.isMissing }.map(\.id))
         let index = selected.flatMap { tabs.indices.contains($0) ? $0 : nil } ?? 0
         selectedTabID = tabs[index].id
         if let url = tabs[index].repoURL, !tabs[index].isMissing { UITiming.open(url.path) }
@@ -341,6 +359,8 @@ final class WindowModel {
         RecentRepos.shared.add(url)
         tabs[index].repoURL = url
         tabs[index].isMissing = false
+        tabs[index].repoKey = nil
+        resolveRepoKeys([id])
         if selectedTabID == id { activateSelectedTab() }
     }
 
@@ -371,11 +391,88 @@ final class WindowModel {
         return !tabs.isEmpty
     }
 
-    /// Moves the tab at `source` to `destination` (its index once moved); the selection stays on the same tab.
+    /// Moves the tab at `source` to `destination` (its index once moved), one of `moveDestinations(from:)`; the
+    /// selection stays on the same tab.
     func moveTab(from source: Int, to destination: Int) {
-        guard tabs.indices.contains(source), tabs.indices.contains(destination), source != destination else { return }
+        guard tabs.indices.contains(source), source != destination,
+              moveDestinations(from: source).contains(destination)
+        else { return }
         let tab = tabs.remove(at: source)
         tabs.insert(tab, at: destination)
+    }
+
+    // MARK: Tab groups
+
+    /// The runs of two or more neighboring tabs of one repository, in tab order.
+    var tabGroups: [TabGroup] {
+        var groups: [TabGroup] = []
+        var start = 0
+        while start < tabs.count {
+            var end = start
+            if let key = tabs[start].repoKey {
+                while end + 1 < tabs.count, tabs[end + 1].repoKey == key { end += 1 }
+                if end > start { groups.append(TabGroup(key: key, range: start...end)) }
+            }
+            start = end + 1
+        }
+        return groups
+    }
+
+    /// Where the tab at `source` may be dropped (indices once moved): a grouped tab only within its group, another
+    /// tab anywhere but between two tabs of a group, so a group is never split.
+    func moveDestinations(from source: Int) -> [Int] {
+        guard tabs.indices.contains(source) else { return [] }
+        if let group = tabGroups.first(where: { $0.range.contains(source) }) { return Array(group.range) }
+        var rest = tabs.map(\.repoKey)
+        rest.remove(at: source)
+        return (0...rest.count).filter { index in
+            index == 0 || index == rest.count || rest[index] == nil || rest[index - 1] != rest[index]
+        }
+    }
+
+    /// The last index of the group the tab at `index` is in; `index` itself when it is in none.
+    private func groupEnd(of index: Int) -> Int {
+        guard let key = tabs[index].repoKey else { return index }
+        var end = index
+        while end + 1 < tabs.count, tabs[end + 1].repoKey == key { end += 1 }
+        return end
+    }
+
+    /// Reads the repositories of the tabs `ids` off the main thread, then sets their `repoKey` and gathers each
+    /// repo's tabs side by side.
+    private func resolveRepoKeys(_ ids: [Tab.ID]) {
+        let targets = ids.compactMap { id in tabs.first { $0.id == id }?.repoURL.map { (id, $0) } }
+        guard !targets.isEmpty else { return }
+        Task { [weak self] in
+            let keys = await Task.detached { targets.map { ($0.0, $0.1, RepoGroupKey.of($0.1)) } }.value
+            self?.applyRepoKeys(keys)
+        }
+    }
+
+    private func applyRepoKeys(_ keys: [(Tab.ID, URL, String?)]) {
+        // A tab closed or pointed elsewhere (Locate) meanwhile keeps what it has.
+        for (id, url, key) in keys {
+            guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].repoURL == url,
+                  tabs[index].repoKey != key
+            else { continue }
+            tabs[index].repoKey = key
+        }
+        gatherGroups()
+    }
+
+    /// Moves each repo's tabs right after its first tab, the others keeping their order; the selection stays.
+    private func gatherGroups() {
+        var gathered: [Tab] = []
+        var placed = Set<String>()
+        for tab in tabs {
+            guard let key = tab.repoKey else {
+                gathered.append(tab)
+                continue
+            }
+            guard placed.insert(key).inserted else { continue }
+            gathered += tabs.filter { $0.repoKey == key }
+        }
+        if gathered.map(\.id) != tabs.map(\.id) { tabs = gathered }
     }
 
     /// The toolbar's Settings button: opens the Settings modal, or closes it when it shows.
