@@ -118,8 +118,10 @@ private struct TabTrack: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let count = model.tabs.count
             let groups = model.tabGroups
+            // A collapsed group's tabs take no room.
+            let hidden = groups.filter { model.collapsedGroups.contains($0.key) }.reduce(0) { $0 + $1.range.count }
+            let count = model.tabs.count - hidden
             let chips = groups.reduce(0) { $0 + TabStripMetrics.groupChipWidth($1.name) }
             let items = count + groups.count
             let gaps = TabStripMetrics.gap * CGFloat(max(items - 1, 0)) + 2 * TabStripMetrics.flare
@@ -129,7 +131,8 @@ private struct TabTrack: View {
             let rowWidth = tabWidth * CGFloat(count) + chips + gaps
             ScrollViewReader { scroller in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    row(layout: TabGroupLayout(tabs: model.tabs, groups: groups, tabExtent: tabWidth,
+                    row(layout: TabGroupLayout(tabs: model.tabs, groups: groups,
+                                               collapsed: model.collapsedGroups, tabExtent: tabWidth,
                                                gap: TabStripMetrics.gap,
                                                headerExtent: { TabStripMetrics.groupChipWidth($0.name) }))
                 }
@@ -170,9 +173,11 @@ private struct TabTrack: View {
                     let chipX = target.headers[group.key] ?? 0
                     // The selected tab, flares included, along the line (outside it when no tab of the group is).
                     let opening = selectedX.map { $0 - chipX - TabStripMetrics.flare } ?? -.greatestFiniteMagnitude
-                    TabGroupChip(group: group, width: layout.headerExtents[group.key] ?? 0,
+                    TabGroupChip(group: group, collapsed: layout.collapsed.contains(group.key),
+                                 width: layout.headerExtents[group.key] ?? 0,
                                  span: layout.span(of: group.key), opening: opening,
-                                 openingWidth: layout.tabExtent + 2 * TabStripMetrics.flare)
+                                 openingWidth: layout.tabExtent + 2 * TabStripMetrics.flare,
+                                 onToggle: { withAnimation(animation) { model.toggleGroup(group.key) } })
                         .padding(.horizontal, TabStripMetrics.flare)
                         .offset(x: chipX - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
@@ -293,33 +298,46 @@ enum TabMenu {
 }
 
 /// A tab group's name before its first tab, in the group's color, with the group's line under it and its tabs
-/// (`span` long) open at `opening` for `openingWidth`: the selected tab, its flares included.
+/// (`span` long) open at `opening` for `openingWidth`: the selected tab, its flares included. A click collapses the
+/// group to the chip alone, with no line, and shows its tabs again, as Chrome's.
 private struct TabGroupChip: View {
     let group: TabGroup
+    let collapsed: Bool
     let width: CGFloat
     let span: CGFloat
     let opening: CGFloat
     let openingWidth: CGFloat
+    let onToggle: () -> Void
 
     var body: some View {
-        Text(group.name)
-            .font(Font(TabStripMetrics.groupChipFont))
-            .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, TabStripMetrics.groupChipPadding)
-            .frame(width: width, height: TabStripMetrics.groupChipHeight)
-            .background(Capsule().fill(TabGroupColors.chip(group.key)))
-            .frame(height: TabStripMetrics.tabHeight)
-            .overlay(alignment: .bottomLeading) {
+        Button(action: onToggle) {
+            Text(group.name)
+                .font(Font(TabStripMetrics.groupChipFont))
+                .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, TabStripMetrics.groupChipPadding)
+                .frame(width: width, height: TabStripMetrics.groupChipHeight)
+                .background(Capsule().fill(TabGroupColors.chip(group.key)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .frame(height: TabStripMetrics.tabHeight)
+        .overlay(alignment: .bottomLeading) {
+            if !collapsed {
                 TabGroupLine(opening: opening, openingEnd: opening + openingWidth)
                     .fill(TabGroupColors.line(group.key))
                     .frame(width: span, height: TabStripMetrics.groupLine)
                     .allowsHitTesting(false)
             }
-            .help("\(group.name): \(group.range.count) tabs of this repository")
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Group \(group.name), \(group.range.count) tabs")
+        }
+        .help(help)
+        .accessibilityLabel("Group \(group.name), \(group.range.count) tabs")
+        .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
+    }
+
+    private var help: String {
+        "\(group.name): \(group.range.count) tabs of this repository. Click to \(collapsed ? "show" : "hide") them."
     }
 }
 

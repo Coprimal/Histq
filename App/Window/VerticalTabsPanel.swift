@@ -90,8 +90,8 @@ private struct VerticalTabList: View {
     }
 
     private var rows: some View {
-        let layout = TabGroupLayout(tabs: model.tabs, groups: model.tabGroups, tabExtent: SidebarItemStyle.height,
-                                    gap: SidebarItemStyle.spacing,
+        let layout = TabGroupLayout(tabs: model.tabs, groups: model.tabGroups, collapsed: model.collapsedGroups,
+                                    tabExtent: SidebarItemStyle.height, gap: SidebarItemStyle.spacing,
                                     headerExtent: { _ in VerticalTabsMetrics.groupHeaderHeight })
         let current = layout.positions(order: Array(model.tabs.indices))
         // While a tab is dragged, the others (and the group names) stand where they would with it dropped at its target.
@@ -102,8 +102,10 @@ private struct VerticalTabList: View {
                 switch item {
                 case .header(let group):
                     // The line runs from under the name to the group's last row's end.
-                    VerticalTabGroupHeader(group: group, lineLength: layout.span(of: group.key)
-                                           - VerticalTabsMetrics.groupHeaderHeight - 2 * SidebarItemStyle.spacing)
+                    VerticalTabGroupHeader(group: group, collapsed: layout.collapsed.contains(group.key),
+                                           lineLength: layout.span(of: group.key)
+                                               - VerticalTabsMetrics.groupHeaderHeight - 2 * SidebarItemStyle.spacing,
+                                           onToggle: { withAnimation(animation) { model.toggleGroup(group.key) } })
                         .offset(y: (target.headers[group.key] ?? 0) - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
                 case .tab(let index, let tab):
@@ -210,23 +212,32 @@ private struct VerticalTabsStatus: View {
 }
 
 /// A tab group's name above its rows, as Chrome's vertical tabs: white text on the group's color, then the group's
-/// line down the left of its rows (`lineLength` long, from under the name to the last row's end).
+/// line down the left of its rows (`lineLength` long, from under the name to the last row's end). A click collapses
+/// the group to its name alone, with no line, and shows its rows again.
 private struct VerticalTabGroupHeader: View {
     let group: TabGroup
+    let collapsed: Bool
     let lineLength: CGFloat
+    let onToggle: () -> Void
 
     var body: some View {
-        Text(group.name)
-            .font(VerticalTabsMetrics.groupHeaderFont)
-            .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: VerticalTabsMetrics.groupHeaderHeight)
-            .background(RoundedRectangle(cornerRadius: VerticalTabsMetrics.groupHeaderRadius, style: .continuous)
-                .fill(TabGroupColors.chip(group.key)))
-            .overlay(alignment: .topLeading) {
+        Button(action: onToggle) {
+            Text(group.name)
+                .font(VerticalTabsMetrics.groupHeaderFont)
+                .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: VerticalTabsMetrics.groupHeaderHeight)
+                .background(RoundedRectangle(cornerRadius: VerticalTabsMetrics.groupHeaderRadius, style: .continuous)
+                    .fill(TabGroupColors.chip(group.key)))
+                .contentShape(RoundedRectangle(cornerRadius: VerticalTabsMetrics.groupHeaderRadius,
+                                               style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .topLeading) {
+            if !collapsed {
                 Capsule()
                     .fill(TabGroupColors.line(group.key))
                     .frame(width: TabStripMetrics.groupLine, height: max(lineLength, 0))
@@ -234,10 +245,15 @@ private struct VerticalTabGroupHeader: View {
                             y: VerticalTabsMetrics.groupHeaderHeight + SidebarItemStyle.spacing)
                     .allowsHitTesting(false)
             }
-            .padding(.trailing, VerticalTabsMetrics.groupHeaderTrailing)
-            .help("\(group.name): \(group.range.count) tabs of this repository")
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Group \(group.name), \(group.range.count) tabs")
+        }
+        .padding(.trailing, VerticalTabsMetrics.groupHeaderTrailing)
+        .help(help)
+        .accessibilityLabel("Group \(group.name), \(group.range.count) tabs")
+        .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
+    }
+
+    private var help: String {
+        "\(group.name): \(group.range.count) tabs of this repository. Click to \(collapsed ? "show" : "hide") them."
     }
 }
 

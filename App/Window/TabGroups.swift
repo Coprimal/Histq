@@ -79,10 +79,12 @@ struct TabGroupLayout {
     let gap: CGFloat
     /// The group of each grouped tab, by index.
     let groupKey: [Int: String]
+    /// The collapsed groups (`WindowModel.collapsedGroups`): their header only, their tabs take no room.
+    let collapsed: Set<String>
     /// Each group's tab count, by key.
     private let groupSize: [String: Int]
 
-    init(tabs: [WindowModel.Tab], groups: [TabGroup], tabExtent: CGFloat, gap: CGFloat,
+    init(tabs: [WindowModel.Tab], groups: [TabGroup], collapsed: Set<String>, tabExtent: CGFloat, gap: CGFloat,
          headerExtent: (TabGroup) -> CGFloat) {
         var items: [Item] = []
         var groupKey: [Int: String] = [:]
@@ -90,6 +92,7 @@ struct TabGroupLayout {
             if let group = groups.first(where: { $0.range.contains(index) }) {
                 if group.range.lowerBound == index { items.append(.header(group)) }
                 groupKey[index] = group.key
+                if collapsed.contains(group.key) { continue }
             }
             items.append(.tab(index, tab))
         }
@@ -97,6 +100,7 @@ struct TabGroupLayout {
         self.tabExtent = tabExtent
         self.gap = gap
         self.groupKey = groupKey
+        self.collapsed = collapsed
         headerExtents = Dictionary(groups.map { ($0.key, headerExtent($0)) }, uniquingKeysWith: { first, _ in first })
         groupSize = Dictionary(groups.map { ($0.key, $0.range.count) }, uniquingKeysWith: { first, _ in first })
     }
@@ -122,14 +126,17 @@ struct TabGroupLayout {
             }
             previous = key
             positions.tabs[index] = x
+            // A collapsed group's tabs stand at its header's end, with no room.
+            if let key, collapsed.contains(key) { continue }
             x += tabExtent + gap
         }
         return positions
     }
 
-    /// From a group's header start to its last tab's end.
+    /// From a group's header start to its last tab's end (its header's end when collapsed).
     func span(of key: String) -> CGFloat {
-        (headerExtents[key] ?? 0) + CGFloat(groupSize[key] ?? 0) * (tabExtent + gap)
+        let tabs = collapsed.contains(key) ? 0 : CGFloat(groupSize[key] ?? 0) * (tabExtent + gap)
+        return (headerExtents[key] ?? 0) + tabs
     }
 
     /// The allowed drop index (`destinations`) where the tab at `from` would stand nearest `from`'s start moved by

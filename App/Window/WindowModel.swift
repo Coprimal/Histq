@@ -40,7 +40,12 @@ final class WindowModel {
     private static let closedTabsLimit = 25
 
     private(set) var tabs: [Tab] = [Tab()]
-    private(set) var selectedTabID: Tab.ID?
+    private(set) var selectedTabID: Tab.ID? {
+        didSet { expandSelectedGroup() }
+    }
+    /// The tab groups (by key) collapsed with a click on their name, as Chrome's: only the name shows. The selected
+    /// tab is never in one: a group opens again when one of its tabs is selected (the tab list, ⇧⌘T, a worktree).
+    private(set) var collapsedGroups: Set<String> = []
     /// The repo tabs' sessions, by tab.
     private(set) var sessions: [Tab.ID: RepoSession] = [:]
     /// The Welcome tabs' state (the clone in flight, the git check), by tab: it outlives the view across tab
@@ -399,7 +404,10 @@ final class WindowModel {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
         remove(at: index)
         if selectedTabID == id {
-            selectedTabID = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id
+            // The next shown tab, else the one before: a collapsed group stays collapsed unless nothing else is left.
+            let next = min(index, tabs.count - 1)
+            let shown = tabs.indices.filter { !isHidden($0) }
+            selectedTabID = tabs.isEmpty ? nil : tabs[shown.first { $0 >= next } ?? shown.last ?? next].id
             activateSelectedTab()
         }
         return !tabs.isEmpty
@@ -435,6 +443,10 @@ final class WindowModel {
             if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
         }
         tabs.remove(at: index)
+        // A group left with one tab is no group: it must not come back collapsed.
+        if let key = tab.repoKey, collapsedGroups.contains(key), !tabGroups.contains(where: { $0.key == key }) {
+            collapsedGroups.remove(key)
+        }
         restored.removeValue(forKey: tab.id)
         sessions.removeValue(forKey: tab.id)?.close()
         welcomes.removeValue(forKey: tab.id)?.cancel()
@@ -510,6 +522,36 @@ final class WindowModel {
         }
     }
 
+    /// A click on a group's name: collapses it to its name, or shows its tabs again. Collapsing the selected tab's
+    /// group selects the next shown tab after it, else before it, else a new tab, as Chrome does.
+    func toggleGroup(_ key: String) {
+        if collapsedGroups.contains(key) {
+            collapsedGroups.remove(key)
+            return
+        }
+        guard let group = tabGroups.first(where: { $0.key == key }) else { return }
+        if let selected = selectedIndex, group.range.contains(selected) {
+            let shown = tabs.indices.filter { !group.range.contains($0) && !isHidden($0) }
+            if let next = shown.first(where: { $0 > group.range.upperBound }) ?? shown.last {
+                selectTab(at: next)
+            } else {
+                openTab(nil)
+            }
+        }
+        collapsedGroups.insert(key)
+    }
+
+    /// The tab at `index` is in a collapsed group.
+    private func isHidden(_ index: Int) -> Bool {
+        tabs[index].repoKey.map(collapsedGroups.contains) ?? false
+    }
+
+    /// Opens the selected tab's group when it is collapsed (checked first, so a selection does not touch the set).
+    private func expandSelectedGroup() {
+        guard let key = selectedIndex.flatMap({ tabs[$0].repoKey }), collapsedGroups.contains(key) else { return }
+        collapsedGroups.remove(key)
+    }
+
     /// The last index of the group the tab at `index` is in; `index` itself when it is in none.
     private func groupEnd(of index: Int) -> Int {
         guard let key = tabs[index].repoKey else { return index }
@@ -553,6 +595,8 @@ final class WindowModel {
             gathered += tabs.filter { $0.repoKey == key }
         }
         if gathered.map(\.id) != tabs.map(\.id) { tabs = gathered }
+        // The selected tab may just have joined a collapsed group (a Welcome tab's repo read).
+        expandSelectedGroup()
     }
 
     /// The toolbar's Settings button: opens the Settings modal, or closes it when it shows.
