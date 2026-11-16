@@ -84,6 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Tooltips (`.help`) after 0.25 s instead of the system's 1.5 s, as in EchoDiar.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250])
         updater.start()
         // Folders given at launch (`open -a Histq <repo>`) arrive in `application(_:open:)` first and already made
         // the window: they are what this launch shows. Without any, the last session comes back once read.
