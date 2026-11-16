@@ -1,7 +1,7 @@
 // The graph's commit search (⌘F, Edit › Find…): a repo tab's `GraphSearch` (the query, its matches off the main actor,
-// the current match) and the capsule bar at the top of the graph card. Going to a match selects its row as a click
-// does and centres it when it is off screen; while a query has matches the other rows' text dims. No filtering: the
-// lanes stay whole.
+// the current match) and the bar that slides up over the bottom of the graph card. Going to a match selects its row as
+// a click does and centres it when it is off screen; while a query has matches the other rows' text dims. No
+// filtering: the lanes stay whole.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -241,14 +241,17 @@ final class GraphSearch {
     }
 }
 
-/// The search bar at the top of the graph card: a capsule field with the magnifying glass, the match count, the
-/// previous and next buttons and a close button. Enter goes to the next match, Shift-Enter to the previous one, Esc
-/// closes the bar.
+/// The search bar floating over the bottom of the graph card, in a raised card: a capsule field with the magnifying
+/// glass, the match count, the previous and next buttons and a close button. Enter goes to the next match, Shift-Enter
+/// to the previous one, Esc closes the bar.
 struct GraphSearchBar: View {
     @Bindable var search: GraphSearch
     @FocusState private var fieldFocused: Bool
+    @State private var anchor = FieldAnchor.Box()
 
     static let height: CGFloat = 26
+    /// The bar with its card and margins: what it covers of the graph's bottom (`GraphView.bottomInset`).
+    static let overlayHeight: CGFloat = height + 2 * 6 + 2 * 8
 
     var body: some View {
         HStack(spacing: 8) {
@@ -281,6 +284,10 @@ struct GraphSearchBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+        // A raised card floating over the graph's last rows: opaque, so the rows under it do not show through.
+        .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius, raised: true))
+        .environment(\.cardSurface, Palette.surface)
+        .padding(8)
         .onAppear { focusField() }
         .onChange(of: search.focusToken) { focusField() }
     }
@@ -295,6 +302,7 @@ struct GraphSearchBar: View {
                 .labelsHidden()
                 .autocorrectionDisabled()
                 .focused($fieldFocused)
+                .background(FieldAnchor(box: anchor))
                 .onKeyPress(keys: [.return, .escape]) { press in handleKey(press) }
                 .onExitCommand { search.close() }
             Text(search.summary)
@@ -314,11 +322,18 @@ struct GraphSearchBar: View {
 
     /// Focuses the field and selects its text, so ⌘F then typing replaces the query.
     private func focusField() {
-        fieldFocused = true
-        // The field editor takes the focus on the next turn.
+        // The bar is installed on this turn: ask for the focus on the next one, as the palette does.
         DispatchQueue.main.async {
-            guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isFieldEditor else { return }
-            editor.selectAll(nil)
+            fieldFocused = true
+            // SwiftUI can hold the request until its next update (the next key or mouse event, so the graph kept the
+            // focus after ⌘F): on the turn after, AppKit focuses the field itself when it still has not got it.
+            DispatchQueue.main.async {
+                guard let field = anchor.textField(), let window = field.window else { return }
+                if field.currentEditor() == nil || window.firstResponder !== field.currentEditor() {
+                    window.makeFirstResponder(field)
+                }
+                field.currentEditor()?.selectAll(nil)
+            }
         }
     }
 
@@ -335,5 +350,46 @@ struct GraphSearchBar: View {
             return .ignored
         }
         return .handled
+    }
+}
+
+/// An empty AppKit view behind the search field, at its frame: finds the field's `NSTextField` (the editable one under
+/// it in the window) for `GraphSearchBar.focusField`'s AppKit fallback. Clicks pass through it.
+private struct FieldAnchor: NSViewRepresentable {
+    let box: Box
+
+    final class Box {
+        weak var view: NSView?
+
+        /// The editable text field under the anchor, nil before the anchor is in a window.
+        func textField() -> NSTextField? {
+            guard let view, let content = view.window?.contentView else { return nil }
+            return Self.field(in: content, under: view.convert(view.bounds, to: nil))
+        }
+
+        private static func field(in view: NSView, under frame: NSRect) -> NSTextField? {
+            for subview in view.subviews {
+                if let field = subview as? NSTextField, field.isEditable,
+                   field.convert(field.bounds, to: nil).intersects(frame) {
+                    return field
+                }
+                if let match = field(in: subview, under: frame) { return match }
+            }
+            return nil
+        }
+    }
+
+    private final class PassThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = PassThroughView()
+        box.view = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        box.view = view
     }
 }

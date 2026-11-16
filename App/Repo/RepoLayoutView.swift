@@ -207,17 +207,21 @@ private struct CommitListPanel: View {
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         SectionCard(nil, contentPadding: 0) {
-            VStack(spacing: 0) {
-                // ⌘F (Edit › Find…): the search bar over the column titles; the graph below keeps its identity.
-                if session.graphSearch.isOpen {
-                    GraphSearchBar(search: session.graphSearch)
-                    Divider()
+            // ⌘F (Edit › Find…): the search bar slides up from the card's bottom edge over the graph, which neither
+            // moves nor resizes (it keeps its identity).
+            graph
+                .overlay(alignment: .bottom) {
+                    if session.graphSearch.isOpen {
+                        GraphSearchBar(search: session.graphSearch)
+                            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
-                graph
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous))
+                .animation(reduceMotion ? nil : Motion.sheet, value: session.graphSearch.isOpen)
         }
     }
 
@@ -255,6 +259,7 @@ private struct CommitListPanel: View {
                           branchMap: session.branchMap,
                           dimming: session.graphSearch.dimming,
                           revealToken: session.graphSearch.revealToken,
+                          bottomInset: session.graphSearch.isOpen ? GraphSearchBar.overlayHeight : 0,
                           onTable: { [search = session.graphSearch] table in search.table = table },
                           hiddenColumns: hiddenColumns,
                           onEscape: { [search = session.graphSearch] in

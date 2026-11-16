@@ -1,11 +1,11 @@
 // The graph's commit search (⌘F): which commits of the log a query finds, by subject (case- and diacritic-insensitive)
-// or, for a query of 4 or more hex characters, by hash prefix. Pure and synchronous, so the app runs it off the main
+// or, for a query of 4 or more hex characters, by any part of the hash. Pure and synchronous, so the app runs it off the main
 // actor. A per-commit Foundation compare costs about 1 µs (75 ms for 50,000 commits in a Debug build), so the subjects
 // are folded once into one byte buffer (`Index`, built once per log) and each query is a `memmem` scan of it.
 import Foundation
 
 public enum CommitSearch {
-    /// The shortest query that also matches hash prefixes: shorter hex strings hit too many subjects' words and hashes.
+    /// The shortest query that also matches part of a hash: shorter hex strings hit too many subjects' words and hashes.
     public static let minimumHashPrefix = 4
 
     /// A log's subjects folded (lowercase, no diacritics) and joined by newlines, which a subject never holds, with
@@ -57,7 +57,7 @@ public enum CommitSearch {
 
     /// The indices into `commits` of the commits `query` finds, in log order, each once: the subject contains the
     /// trimmed query (case- and diacritic-insensitive), or the query is at least `minimumHashPrefix` hex characters
-    /// and the hash starts with it. An empty or whitespace-only query finds nothing. A cancelled task gets an empty
+    /// and the hash contains it (anywhere, not only at its start). An empty or whitespace-only query finds nothing. A cancelled task gets an empty
     /// list. Searching a log more than once: build its `Index` once and use `matches(in:query:)`.
     public static func matches(_ commits: [Commit], query: String) -> [Int] {
         matches(in: Index(commits), query: query)
@@ -70,7 +70,7 @@ public enum CommitSearch {
         let bySubject = subjectMatches(in: index, needle: needle)
         let isHash = needle.count >= minimumHashPrefix && needle.allSatisfy(\.isHexDigit)
         guard isHash, !Task.isCancelled else { return Task.isCancelled ? [] : bySubject }
-        return merged(bySubject, hashMatches(in: index, prefix: Array(needle.lowercased().utf8)))
+        return merged(bySubject, hashMatches(in: index, part: Array(needle.lowercased().utf8)))
     }
 
     /// The commits whose folded subject contains the folded `needle`: one `memmem` per hit, the next search starting
@@ -101,14 +101,15 @@ public enum CommitSearch {
         return found
     }
 
-    /// The commits whose hash starts with `prefix` (lowercase bytes).
-    private static func hashMatches(in index: Index, prefix: [UInt8]) -> [Int] {
-        guard prefix.count <= index.hashWidth else { return [] }
+    /// The commits whose hash contains `part` (lowercase bytes): one `memmem` per hash, so a hit never spans two.
+    private static func hashMatches(in index: Index, part: [UInt8]) -> [Int] {
+        guard part.count <= index.hashWidth else { return [] }
         var found: [Int] = []
         index.hashes.withUnsafeBytes { hashes in
-            prefix.withUnsafeBytes { pattern in
+            part.withUnsafeBytes { pattern in
                 guard let base = hashes.baseAddress, let patternBase = pattern.baseAddress else { return }
-                for commit in 0..<index.count where memcmp(base + commit * index.hashWidth, patternBase, pattern.count) == 0 {
+                for commit in 0..<index.count
+                where memmem(base + commit * index.hashWidth, index.hashWidth, patternBase, pattern.count) != nil {
                     found.append(commit)
                 }
             }

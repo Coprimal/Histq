@@ -108,6 +108,9 @@ struct GraphView: NSViewRepresentable {
     var dimming = GraphDimming()
     /// New with each move to a search match: the selected row is centred when it is off screen.
     var revealToken = 0
+    /// The height of what floats over the bottom of the rows (the open search bar): the rows scroll clear of it, and a
+    /// row under it counts as hidden.
+    var bottomInset: CGFloat = 0
     /// The table, once made (the search gives it the focus back when it closes).
     var onTable: @MainActor (NSTableView) -> Void = { _ in }
     /// The text columns hidden (`PrefKey.graphShowMessage`, `graphShowAuthor`, `graphShowDate`); a change applies at
@@ -159,6 +162,8 @@ struct GraphView: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
+        // `bottomInset` sets the insets; the graph card sits below the title bar, so there is nothing to adjust for.
+        scroll.automaticallyAdjustsContentInsets = false
 
         context.coordinator.attach(table)
         onTable(table)
@@ -166,6 +171,7 @@ struct GraphView: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if scroll.contentInsets.bottom != bottomInset { scroll.contentInsets.bottom = bottomInset }
         context.coordinator.update(self)
     }
 }
@@ -691,17 +697,18 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
-    /// Scrolls `row` to the middle of the rows' area when it is not wholly in it (under the column titles counts as
-    /// hidden).
+    /// Scrolls `row` to the middle of the rows' area when it is not wholly in it (under the column titles or the
+    /// search bar counts as hidden).
     private func centerIfHidden(_ row: Int) {
         guard let table, let scroll = table.enclosingScrollView, row >= 0, row < table.numberOfRows else { return }
         let clip = scroll.contentView
         let top = clip.contentInsets.top
+        let bottom = clip.contentInsets.bottom
         let rect = table.rect(ofRow: row)
         let bounds = clip.bounds
-        guard rect.minY < bounds.minY + top || rect.maxY > bounds.maxY else { return }
+        guard rect.minY < bounds.minY + top || rect.maxY > bounds.maxY - bottom else { return }
         var origin = bounds.origin
-        origin.y = rect.midY - (bounds.height + top) / 2
+        origin.y = rect.midY - (bounds.height + top - bottom) / 2
         clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: bounds.size)).origin)
         scroll.reflectScrolledClipView(clip)
     }
