@@ -12,7 +12,7 @@
 
 [Website](https://histq.coprimal.dev) · [Docs](https://histq.coprimal.dev/docs.html) · [Download](https://github.com/dinhanhthi/Histq/releases/latest) · [Changelog](CHANGELOG.md)
 
-<img src="assets/screenshot.png" alt="Histq window: commit graph, branch and worktree sidebar, unstaged changes, commit form and terminal drawer">
+<img src="assets/screenshot.png" alt="Histq window: commit graph, branch and worktree sidebar, unstaged changes and commit form">
 
 </div>
 
