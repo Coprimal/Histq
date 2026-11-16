@@ -22,9 +22,9 @@ enum TabStripMetrics {
     static let buttonHeight: CGFloat = 24
     static let minTabWidth: CGFloat = 96
     static let maxTabWidth: CGFloat = 200
-    /// The close button's square, and the matching slot before the title (the profile color dot).
+    /// The close button's square, and the matching empty slot before the title that keeps it centered.
     static let slot: CGFloat = 16
-    /// The profile color dot in that slot.
+    /// The profile color dot before the tab's name.
     static let dot: CGFloat = 8
     /// How far a press moves before it reorders the tab.
     static let dragThreshold: CGFloat = 5
@@ -195,8 +195,7 @@ private struct TabTrack: View {
                          target: TabGroupLayout.Positions) -> some View {
         let selected = tab.id == model.selectedTabID
         let dragged = tab.id == draggedID
-        // A repo tab's profile; a tab not opened yet (filled in the background) has no session, so no dot.
-        let profile = model.sessions[tab.id]?.profile
+        let profile = model.profile(of: tab)
         let group = layout.groupKey[index]
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
         return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
@@ -366,8 +365,8 @@ private struct TabGroupLine: Shape {
     }
 }
 
-/// One tab: its profile's color dot, its name, centered (leading in the vertical tabs) and cut with
-/// "…", and a close button while hovered.
+/// One tab: its name with its profile's color dot right before it, centered and cut with "…", and a close button
+/// while hovered.
 struct TabItem: View {
     let title: String
     let help: String
@@ -387,26 +386,26 @@ struct TabItem: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Group {
+            // Balances the close button's slot, so the name stays centered.
+            Color.clear.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+            // The dot right before the name, centered with it.
+            HStack(spacing: 2) {
                 if let profileColor {
                     Circle()
                         .fill(ProfileColors.color(profileColor))
                         .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
-                        // The whole slot shows the profile's name, not just the 8 pt dot.
-                        .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+                        // A 3 pt margin to hover for the profile's name, not just the 8 pt dot.
+                        .padding(3)
                         .contentShape(Rectangle())
                         .help("Profile \(profileName ?? "")")
-                } else {
-                    Color.clear
                 }
+                Text(title)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(selected ? Color.primary : Color.secondary)
             }
-            .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
-            Text(title)
-                .font(.callout)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .foregroundStyle(selected ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity)
             if hovered && !dragged {
                 Button(action: onClose) {
                     Image(systemName: "xmark")

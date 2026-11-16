@@ -1,6 +1,7 @@
 // One window's tabs: each is a repo, or a Welcome tab (no repo), with the selection, the page the window shows and
 // the Settings modal over it.
 import Foundation
+import HistqCore
 import os
 
 /// One window's tabs: each is a repo, or a Welcome tab (no repo). The `TabStrip` under the toolbar draws them, the
@@ -84,6 +85,17 @@ final class WindowModel {
 
     /// The selected tab's session; nil for a Welcome tab.
     var selectedSession: RepoSession? { selectedTabID.flatMap { sessions[$0] } }
+
+    /// A tab's profile, for its dot: its session's; for a restored tab not selected yet (no session), the one its
+    /// session will start with: the saved one, else the repo's remembered one. nil for a Welcome or missing tab, no
+    /// profile, or while the store is not read.
+    func profile(of tab: Tab) -> Profile? {
+        if let session = sessions[tab.id] { return session.profile }
+        guard let url = tab.repoURL, !tab.isMissing, let store = ProfileLibrary.shared.store else { return nil }
+        guard let saved = restored[tab.id]?.profile else { return store.profile(forRepo: url) }
+        // As `RepoSession.profile`: a deleted profile falls back to the default.
+        return saved.profileID.flatMap { store.profile(id: $0) ?? store.defaultProfile }
+    }
 
     /// The selected tab's session while the tab shows (not About, where its dialogs have no presenter); nil for a
     /// Welcome tab. The toolbar's repo actions are disabled without it. Settings is a modal over the tab, so a

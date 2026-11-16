@@ -125,8 +125,7 @@ private struct VerticalTabList: View {
                      target: TabGroupLayout.Positions) -> some View {
         let dragged = tab.id == draggedID
         let selected = tab.id == model.selectedTabID
-        // A tab not opened yet (filled in the background) has no session, so no dot.
-        let profile = model.sessions[tab.id]?.profile
+        let profile = model.profile(of: tab)
         let group = layout.groupKey[index]
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
         return VerticalTabRow(title: tab.title, systemImage: Self.icon(of: tab), help: tab.repoURL?.path ?? tab.title,
