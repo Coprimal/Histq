@@ -52,6 +52,8 @@ struct SavedTab: Codable, Equatable, Sendable {
     /// The commit selected in the graph; nil reopens as a new tab does: the WIP when the working tree has changes,
     /// else HEAD. A selected WIP is saved as nil for that reason, and a stash or several rows are not kept.
     var commit: String?
+    /// The tab's alias (its menu's Set Alias…); nil shows the folder's name. Absent from files of older builds.
+    var alias: String?
 }
 
 /// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).

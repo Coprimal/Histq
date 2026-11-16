@@ -85,6 +85,54 @@ struct WindowDragBlocker: NSViewRepresentable {
     }
 }
 
+/// A middle click (the wheel's button) released on the view it backs runs `action`, as Chrome closes a tab with it.
+/// SwiftUI has no gesture for that button: a local `.otherMouseUp` monitor, live while the view is in a window, takes
+/// the click when it lands in the view's visible part; any other click goes on as before (the view takes no hits).
+struct MiddleClickCatcher: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> CatcherView { CatcherView(action: action) }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) { nsView.action = action }
+
+    final class CatcherView: NSView {
+        var action: () -> Void
+        private var monitor: Any?
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { [weak self] event in
+                let button = event.buttonNumber
+                let eventWindow = event.window
+                let point = event.locationInWindow
+                let taken = MainActor.assumeIsolated {
+                    guard let self, button == 2, eventWindow === self.window, !self.isHiddenOrHasHiddenAncestor
+                    else { return false }
+                    // Both: the visible rect alone can reach past the view's bounds (seen in the tab strip).
+                    let local = self.convert(point, from: nil)
+                    guard self.bounds.contains(local), self.visibleRect.contains(local) else { return false }
+                    self.action()
+                    return true
+                }
+                return taken ? nil : event
+            }
+        }
+
+        override nonisolated func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
 #if DEBUG
 // MARK: - Double-click probe (DEBUG)
 

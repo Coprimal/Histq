@@ -134,6 +134,7 @@ private struct VerticalTabList: View {
                               onSelect: { model.selectTab(id: tab.id) },
                               onClose: { close(tab.id) })
             .frame(height: SidebarItemStyle.height)
+            .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
             // A group's rows sit right of its line.
             .padding(.leading, group == nil ? 0 : VerticalTabsMetrics.groupIndent)
             .offset(y: offset)
@@ -142,6 +143,7 @@ private struct VerticalTabList: View {
             // The selected row's flares lie over its neighbors' edges.
             .zIndex(dragged ? 2 : selected ? 1 : 0)
             .gesture(press(tab.id, index: index, layout: layout))
+            .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: true)) }
             .id(tab.id)
     }
 
@@ -191,7 +193,7 @@ private struct VerticalTabList: View {
 
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
     private func close(_ id: WindowModel.Tab.ID) {
-        if !model.closeTab(id: id) { model.closeWindow() }
+        TabMenu.close(id, model)
     }
 }
 

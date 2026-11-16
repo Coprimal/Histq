@@ -527,6 +527,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !entry.model.closeSelectedTab() { entry.window.performClose(sender) }
     }
 
+    /// ⇧⌘T: reopens the key window's last closed tab; again for the one closed before it.
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard let entry = entry(for: NSApp.keyWindow) else { return }
+        entry.model.reopenClosedTab()
+    }
+
     /// ⌘K: opens the key window's command palette, or closes it. A main menu item, so it works wherever the focus is
     /// (the AppKit toolbar, a table, the palette's own field).
     @objc func toggleCommandPalette(_ sender: Any?) {
@@ -611,6 +617,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
+        if menuItem.action == #selector(reopenClosedTab(_:)) {
+            return entry(for: NSApp.keyWindow)?.model.canReopenClosedTab ?? false
+        }
         if menuItem.action == #selector(checkForUpdates(_:)) {
             // Disabled while the updater is off (no update signing key in this build yet).
             menuItem.toolTip = updater.canCheckForUpdates ? nil : "Updates are off: this build has no update signing key."
@@ -654,6 +663,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab(_:)), keyEquivalent: "w").target = self
+        fileMenu.addItem(withTitle: "Reopen Closed Tab", action: #selector(reopenClosedTab(_:)), keyEquivalent: "T")
+            .target = self
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
         let editMenu = NSMenu(title: "Edit")
         // Nil-targeted: the responder chain (text views, the window's undo manager, the graph) answers `undo:`/`redo:`.

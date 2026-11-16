@@ -19,11 +19,14 @@ enum WindowModal: Identifiable {
     case confirmation(ModalConfirmation)
     /// Settings › SSH › Generate Key… for a profile.
     case generateKey(profileID: UUID)
+    /// A tab's menu › Set Alias… for the tab `tabID`.
+    case tabAlias(tabID: UUID)
 
     var id: String {
         switch self {
         case .confirmation(let confirmation): "confirm \(confirmation.title)"
         case .generateKey(let id): "generate key \(id)"
+        case .tabAlias(let id): "tab alias \(id)"
         }
     }
 }
@@ -138,6 +141,8 @@ struct ModalHost: View {
             }
         case .window(.generateKey(let profileID)):
             GenerateKeyModal(profileID: profileID) { model.closeModal() }
+        case .window(.tabAlias(let tabID)):
+            TabAliasModal(model: model, tabID: tabID) { model.closeModal() }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
                               isDestructive: confirmation.isDestructive) {
@@ -178,6 +183,49 @@ struct ModalHost: View {
         case .conflictSave(let session): session.cancelConflictSave()
         case .conflictLeave(let session, _): session.cancelConflictLeave()
         }
+    }
+}
+
+/// A tab's menu › Set Alias…: the tab's name in one field, the folder's name as its placeholder. Return saves; an empty
+/// field gives the tab its folder's name back.
+private struct TabAliasModal: View {
+    let model: WindowModel
+    let tabID: UUID
+    let onClose: () -> Void
+    @State private var alias = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        let tab = model.tabs.first { $0.id == tabID }
+        ModalCard(title: "Set an alias for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
+                  subtitle: "The tab shows this name instead of the folder's. Leave it empty to show the folder's name.",
+                  width: 420) {
+            ModalSection {
+                TextField("Alias", text: $alias, prompt: Text(tab?.repoURL?.lastPathComponent ?? "Alias"))
+                    .textFieldStyle(.settings)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .onSubmit(save)
+            }
+        } actions: {
+            Button("Cancel", action: onClose)
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            Button("Save", action: save)
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .keyboardShortcut(.defaultAction)
+        }
+        .onAppear {
+            alias = tab?.alias ?? ""
+            // The card is installed on this turn; the field takes the focus on the next one.
+            DispatchQueue.main.async { fieldFocused = true }
+        }
+    }
+
+    private func save() {
+        model.setAlias(alias, for: tabID)
+        onClose()
     }
 }
 

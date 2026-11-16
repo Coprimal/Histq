@@ -21,10 +21,23 @@ final class WindowModel {
         /// The repository's git common dir (`RepoGroupKey`), shared by its worktrees' tabs; nil until read (off the main
         /// thread) or for a Welcome tab. Tabs with the same key are kept side by side, as a group.
         var repoKey: String?
+        /// The name the user gave the tab (its menu's Set Alias…); nil shows the folder's name.
+        var alias: String?
 
-        /// The repo folder's name, or "New Tab" for a Welcome tab.
-        var title: String { repoURL?.lastPathComponent ?? "New Tab" }
+        /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab.
+        var title: String { alias ?? repoURL?.lastPathComponent ?? "New Tab" }
     }
+
+    /// A closed repo tab that ⇧⌘T reopens: as the session saves it, its group, and its index when it closed.
+    private struct ClosedTab {
+        let saved: SavedTab
+        let repoKey: String?
+        let index: Int
+    }
+
+    /// The repo tabs closed in this window, last closed last; ⇧⌘T reopens them one by one.
+    @ObservationIgnored private var closedTabs: [ClosedTab] = []
+    private static let closedTabsLimit = 25
 
     private(set) var tabs: [Tab] = [Tab()]
     private(set) var selectedTabID: Tab.ID?
@@ -319,7 +332,7 @@ final class WindowModel {
         welcomes.removeAll()
         tabs = saved.map { tab in
             Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
-                isMissing: tab.path.map(missing.contains) ?? false)
+                isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias)
         }
         restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), saved))
         resolveRepoKeys(tabs.filter { !$0.isMissing }.map(\.id))
@@ -333,18 +346,22 @@ final class WindowModel {
     /// without keeps what it was restored with. Observable: reading it in `withObservationTracking` follows every
     /// change it depends on (tabs, their sessions' selection and profile).
     var savedTabs: [SavedTab] {
-        tabs.map { tab in
-            let path = tab.repoURL?.path
-            guard let session = sessions[tab.id] else {
-                var saved = restored[tab.id] ?? SavedTab()
-                saved.path = path
-                return saved
-            }
-            let commit: String? = if case .commit(let hash) = session.selection { hash } else { nil }
-            // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
-            let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
-            return SavedTab(path: path, profile: profile, commit: commit)
+        tabs.map(saved)
+    }
+
+    /// One tab as the session saves it (`savedTabs`), and as ⇧⌘T reopens it.
+    private func saved(_ tab: Tab) -> SavedTab {
+        let path = tab.repoURL?.path
+        guard let session = sessions[tab.id] else {
+            var saved = restored[tab.id] ?? SavedTab()
+            saved.path = path
+            saved.alias = tab.alias
+            return saved
         }
+        let commit: String? = if case .commit(let hash) = session.selection { hash } else { nil }
+        // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
+        let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
+        return SavedTab(path: path, profile: profile, commit: commit, alias: tab.alias)
     }
 
     /// "Repo not found" › Locate…: the tab opens `url` instead (the tab that already shows it when there is one).
@@ -380,15 +397,78 @@ final class WindowModel {
     /// caller closes the window).
     func closeTab(id: Tab.ID) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
-        tabs.remove(at: index)
-        restored.removeValue(forKey: id)
-        sessions.removeValue(forKey: id)?.close()
-        welcomes.removeValue(forKey: id)?.cancel()
+        remove(at: index)
         if selectedTabID == id {
             selectedTabID = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id
             activateSelectedTab()
         }
         return !tabs.isEmpty
+    }
+
+    /// A tab's menu › Close Other Tabs: every tab but `id`, which is selected.
+    func closeOtherTabs(_ id: Tab.ID) {
+        closeTabs(keeping: id) { $0 != id }
+    }
+
+    /// A tab's menu › Close Tabs to the Right (Below, in the vertical tabs): the tabs after `id`; `id` is selected when
+    /// the selected tab was one of them.
+    func closeTabs(after id: Tab.ID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let after = Set(tabs[(index + 1)...].map(\.id))
+        closeTabs(keeping: id) { after.contains($0) }
+    }
+
+    /// Closes the tabs `closes` picks, left to right (so ⇧⌘T, last closed first, puts each back at its index). The
+    /// selection moves to `keeping` once, first, when the selected tab is closed: no tab in between gets a session.
+    private func closeTabs(keeping: Tab.ID, where closes: (Tab.ID) -> Bool) {
+        if let selectedTabID, closes(selectedTabID) { selectTab(id: keeping) }
+        while let index = tabs.firstIndex(where: { closes($0.id) }) {
+            remove(at: index)
+        }
+    }
+
+    /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens.
+    private func remove(at index: Int) {
+        let tab = tabs[index]
+        if tab.repoURL != nil, !tab.isMissing {
+            closedTabs.append(ClosedTab(saved: saved(tab), repoKey: tab.repoKey, index: index))
+            if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
+        }
+        tabs.remove(at: index)
+        restored.removeValue(forKey: tab.id)
+        sessions.removeValue(forKey: tab.id)?.close()
+        welcomes.removeValue(forKey: tab.id)?.cancel()
+    }
+
+    /// A tab was closed in this window that ⇧⌘T can reopen.
+    var canReopenClosedTab: Bool { !closedTabs.isEmpty }
+
+    /// ⇧⌘T: reopens the last closed repo tab at its index, back in its worktree group (`gatherGroups`), with its
+    /// profile, commit and alias, and selects it. A repo open again in another tab meanwhile is selected instead.
+    func reopenClosedTab() {
+        guard let closed = closedTabs.popLast(), let path = closed.saved.path else { return }
+        navigation.page = .home
+        closeSettings()
+        if let existing = tabs.first(where: { $0.repoURL?.path == path }) { return selectTab(id: existing.id) }
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+        var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias)
+        tab.repoKey = closed.repoKey
+        tabs.insert(tab, at: min(closed.index, tabs.count))
+        restored[tab.id] = closed.saved
+        gatherGroups()
+        if exists, tab.repoKey == nil { resolveRepoKeys([tab.id]) }
+        UITiming.select("reopen tab")
+        selectedTabID = tab.id
+        activateSelectedTab()
+    }
+
+    /// A tab's menu › Set Alias…: `alias` names the tab; empty (or only spaces) gives it back its folder's name.
+    func setAlias(_ alias: String, for id: Tab.ID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        tabs[index].alias = trimmed.isEmpty ? nil : trimmed
     }
 
     /// Moves the tab at `source` to `destination` (its index once moved), one of `moveDestinations(from:)`; the

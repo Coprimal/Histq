@@ -201,6 +201,8 @@ private struct TabTrack: View {
                        onSelect: { model.selectTab(id: tab.id) },
                        onClose: { close(tab.id) })
             .frame(width: layout.tabExtent, height: TabStripMetrics.tabHeight)
+            // The tab itself, not its flares' room, which overlaps its neighbors'.
+            .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
             .padding(.horizontal, TabStripMetrics.flare)
             .offset(x: offset)
             // Neighbors slide aside; the dragged tab tracks the pointer without lag.
@@ -208,6 +210,7 @@ private struct TabTrack: View {
             // The selected tab's flares lie over its neighbors' edges.
             .zIndex(dragged ? 2 : selected ? 1 : 0)
             .gesture(press(tab.id, index: index, layout: layout))
+            .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: false)) }
             .id(tab.id)
     }
 
@@ -254,7 +257,38 @@ private struct TabTrack: View {
 
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
     private func close(_ id: WindowModel.Tab.ID) {
+        TabMenu.close(id, model)
+    }
+}
+
+/// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
+/// Tabs to the Right (Below), each off when it has no tab to close, and Set Alias…, off for a Welcome tab.
+@MainActor
+enum TabMenu {
+    static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
+        guard let index = model.tabs.firstIndex(where: { $0.id == id }) else { return [] }
+        let isRepo = model.tabs[index].repoURL != nil
+        return [
+            .action("Close Tab") { close(id, model) },
+            .action("Close Other Tabs", enabled: model.tabs.count > 1) { model.closeOtherTabs(id) },
+            .action(vertical ? "Close Tabs Below" : "Close Tabs to the Right",
+                    enabled: index < model.tabs.count - 1) { model.closeTabs(after: id) },
+            .separator,
+            .action("Set Alias…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to name.") {
+                model.presentModal(.tabAlias(tabID: id))
+            },
+        ]
+    }
+
+    /// Closes a tab; closing the last tab closes the window, like ⌘W.
+    static func close(_ id: WindowModel.Tab.ID, _ model: WindowModel) {
         if !model.closeTab(id: id) { model.closeWindow() }
+    }
+
+    /// A middle click on a tab closes it without selecting it, as Chrome's; not while a modal covers the window.
+    static func middleClick(_ id: WindowModel.Tab.ID, _ model: WindowModel) {
+        guard !model.isShowingModal else { return }
+        close(id, model)
     }
 }
 
