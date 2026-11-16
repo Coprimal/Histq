@@ -26,6 +26,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Settings › Appearance › Graph columns, to hide the message, author or date column.
 - Conflict editor: Save with unresolved conflicts asks whether to Save Output (write and stage it) or Create Conflict Chunks (write git's conflict markers, the file stays conflicted).
 - Conflict editor: a save prompt when you leave the editor with unsaved choices, and Reset in the Output pane.
+- Toasts at the bottom right after a push, pull, fetch, commit or other operation, saying whether it worked or failed, and what a push, pull or fetch changed (or that there was nothing to do). They close after a few seconds or with their x; Settings › General › Notifications shows all, errors only or none.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

@@ -491,6 +491,9 @@ final class RepoSession: Identifiable {
     /// Opens a folder in a tab of this tab's window, selecting the tab that already shows it (a worktree's "Open in
     /// New Tab", a click on its graph row). Set by `WindowModel` when it makes the session.
     @ObservationIgnored var openInTab: @MainActor (URL) -> Void = { _ in }
+    /// Shows an operation's outcome as a toast in the tab's window (`ToastHost`). Set by `WindowModel` when it makes
+    /// the session.
+    @ObservationIgnored var postToast: @MainActor (OperationToast) -> Void = { _ in }
 
     /// The repo's remotes and their fetch URLs (`git remote -v`), read with the refs: a remote with no fetched branch
     /// shows too.
@@ -2993,9 +2996,14 @@ final class RepoSession: Identifiable {
         await refreshAfterWrite()
     }
 
+    /// Waits for the reread to publish: the watcher may see the write's own changes and start a refresh that cancels
+    /// this one (and takes its scope over), so it waits for the newer one too, a few times at most.
     private func refreshAfterWrite() async {
         refresh(scope: [.status, .refs])
-        await refreshTask?.value
+        for _ in 0..<5 {
+            guard let task = refreshTask else { break }
+            await task.value
+        }
     }
 
     @concurrent
@@ -3120,7 +3128,7 @@ final class RepoSession: Identifiable {
 
     /// Runs a user operation (the action bar, a menu, a dialog) through `perform` without blocking: it is in `running`
     /// when this returns (with `key`, the action bar button that shows it), and a failure goes to `failure`, the
-    /// error banner. A new operation clears the banner.
+    /// error banner. A new operation clears the banner. Its outcome also shows as a toast (`postToast`).
     func run(_ write: Write, title: String, key: ActionBarAction? = nil) {
         nextOperationID &+= 1
         let operation = RunningOperation(id: nextOperationID, title: title, key: key)
@@ -3128,11 +3136,29 @@ final class RepoSession: Identifiable {
         failure = nil
         Task { [weak self] in
             guard let self else { return }
+            let wasInProgress = repoState?.isOperationInProgress == true
+            // What a push, pull or fetch changed is read from the refs before it and after it.
+            let refsBefore = refs.value
             do {
                 try await perform(write)
+                // Started one (a rebase at an `edit` step), or Continue / Skip went on to the next stop.
+                let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }
+                let stopped = repoState?.isOperationInProgress == true && (!wasInProgress || resumes)
+                if stopped {
+                    postToast(.stopped(title))
+                } else if case .applyPatch = write {
+                    // Lines staged, unstaged or discarded from a diff: no success toast, as the WIP panel's files.
+                } else {
+                    postToast(.success(title, detail: OperationToast.outcome(of: write, before: refsBefore,
+                                                                             after: refs.value)))
+                }
             } catch {
                 if !(error is CancellationError) {
-                    failure = OperationFailure(title: title, write: write, error: error, message: Self.message(for: error))
+                    let failure = OperationFailure(title: title, write: write, error: error,
+                                                   message: Self.message(for: error))
+                    self.failure = failure
+                    postToast(.failure(title, error: error, message: failure.message,
+                                       hint: ActionErrorBanner.hint(for: failure).text))
                 }
             }
             running.removeAll { $0.id == operation.id }

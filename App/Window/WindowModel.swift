@@ -74,6 +74,10 @@ final class WindowModel {
     @ObservationIgnored var closeWindow: () -> Void = {}
     /// The terminal drawer's height in this window's tabs (dragged with its handle); each tab has its own terminal.
     var terminalHeight: CGFloat = TerminalDrawerMetrics.defaultHeight
+    /// The operation toasts at the window's bottom right (`ToastHost`), oldest first. Read only by `ToastHost`.
+    private(set) var toasts: [OperationToast] = []
+    /// Each toast's timer, which closes it once its time is up.
+    @ObservationIgnored private var toastTimers: [OperationToast.ID: Task<Void, Never>] = [:]
 
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "window")
 
@@ -82,6 +86,33 @@ final class WindowModel {
     }
 
     var selectedIndex: Int? { tabs.firstIndex { $0.id == selectedTabID } }
+
+    // MARK: Toasts
+
+    /// Shows an operation's outcome from the tab `tabID` when Settings' level shows its kind, naming the tab when it is
+    /// not the one on screen. Past `ToastHost.limit` the oldest closes.
+    func showToast(_ toast: OperationToast, from tabID: Tab.ID) {
+        guard ToastLevel.current.shows(toast.kind) else { return }
+        var toast = toast
+        if tabID != selectedTabID { toast.repo = tabs.first { $0.id == tabID }?.title }
+        #if DEBUG
+        RepoMenus.debugLog("toast \(toast.title): \(toast.detail ?? "")")
+        #endif
+        toasts.append(toast)
+        while toasts.count > ToastHost.limit { dismissToast(toasts[0].id) }
+        let id = toast.id, duration = toast.duration
+        toastTimers[id] = Task { [weak self] in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            self?.dismissToast(id)
+        }
+    }
+
+    /// Closes a toast (its x, or its time is up).
+    func dismissToast(_ id: OperationToast.ID) {
+        toastTimers.removeValue(forKey: id)?.cancel()
+        toasts.removeAll { $0.id == id }
+    }
 
     /// The selected tab's session; nil for a Welcome tab.
     var selectedSession: RepoSession? { selectedTabID.flatMap { sessions[$0] } }
@@ -195,6 +226,7 @@ final class WindowModel {
         let session = RepoSession(url: url)
         // A worktree's "Open in New Tab" and its graph row open it in this window, beside this tab's group.
         session.openInTab = { [weak self] url in self?.openTab(url, opener: id) }
+        session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         let saved = restored.removeValue(forKey: id)
         if let saved {
             if let profile = saved.profile { session.restoreProfile(profile.profileID) }

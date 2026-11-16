@@ -738,6 +738,8 @@ enum RepoMenus {
         case "remote": return ref(.remote(value), session)
         case "tag": return ref(.tag(value), session)
         case "remotes": return remotes(session)
+        case "pull": return pull(session)
+        case "push": return push(session)
         case "branches": return branchPicker(session)
         case "worktrees": return worktrees(session)
         case "worktree":

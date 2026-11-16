@@ -108,6 +108,8 @@ struct MainView: View {
             }
             .allowsHitTesting(false)
         }
+        // The operations' outcomes at the bottom right, under the palette and the modals.
+        .overlay(alignment: .bottomTrailing) { ToastHost(model: model) }
         // ⌘K / the toolbar's Search: over the tabs and the page, under the toolbar.
         .overlay { CommandPaletteOverlay(model: model) }
         // Settings, the forms, confirmations and rebase cards, drawn like the palette (same place in the window).

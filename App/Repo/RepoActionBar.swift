@@ -64,6 +64,7 @@ extension RepoSession {
             failure = OperationFailure(title: "Push \(branch)", write: .push(branch: branch, remote: "", remoteBranch: nil,
                                        setUpstream: false, forceWithLease: nil),
                                        error: CocoaError(.featureUnsupported), message: "This repository has no remote. Add one first.")
+            if let failure { postToast(.failure(failure.title, error: failure.error, message: failure.message)) }
             return
         }
         let destination = "\(target.remote)/\(target.remoteBranch ?? branch)"

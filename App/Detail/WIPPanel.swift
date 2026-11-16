@@ -535,14 +535,18 @@ private struct CommitBox: View {
     private func commit() {
         guard canCommit else { return }
         let write: RepoSession.Write = session.commitDraft.amend ? .amend(message: message) : .commit(message: message)
+        let title = session.commitDraft.amend ? "Amend" : "Commit"
         busy.insert(.commit)
         error = nil
         Task {
             do {
                 try await session.perform(write)
                 session.commitDraft = CommitDraft()
+                session.postToast(.success(title))
             } catch {
-                self.error = RepoSession.writeMessage(for: error)
+                let message = RepoSession.writeMessage(for: error)
+                self.error = message
+                session.postToast(.failure(title, error: error, message: message))
             }
             busy.remove(.commit)
         }

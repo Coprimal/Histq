@@ -1,5 +1,6 @@
-// Settings › General: the default profile of new tabs, pulling and fetching, the external merge tool and the git
-// executable. Each change is saved at once in `Preferences.defaults` (the default profile in the profile store).
+// Settings › General: the default profile of new tabs, pulling and fetching, the operation toasts, the external merge
+// tool and the git executable. Each change is saved at once in `Preferences.defaults` (the default profile in the
+// profile store).
 import HistqCore
 import SwiftUI
 
@@ -9,6 +10,7 @@ struct GeneralSettings: View {
     @AppStorage(PrefKey.pruneOnFetch.rawValue, store: Preferences.defaults) private var pruneOnFetch = false
     @AppStorage(PrefKey.mergeTool.rawValue, store: Preferences.defaults) private var mergeTool = ""
     @AppStorage(PrefKey.gitPath.rawValue, store: Preferences.defaults) private var gitPath = ""
+    @AppStorage(PrefKey.toastLevel.rawValue, store: Preferences.defaults) private var toastLevel = ToastLevel.all
     /// The git the app runs now, resolved off the main thread; `.loading` shows a skeleton in its row.
     @State private var git: Loadable<GitExecutable> = .idle
     /// "Custom" picked while no custom path is saved yet: the path row shows, git is still auto-detected.
@@ -52,6 +54,17 @@ struct GeneralSettings: View {
                 SettingsSwitchRow(title: "Prune on fetch",
                                   hint: "Removes remote branches that no longer exist on their remote.",
                                   isOn: $pruneOnFetch)
+            }
+            SettingsGroup("Notifications") {
+                LabeledContent {
+                    CapsuleTabs(selection: $toastLevel, tabs: ToastLevel.allCases, title: { Text($0.title) },
+                                compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Operation toasts")
+                    SettingsHint("A short card at the bottom right after a push, pull, fetch, commit or other "
+                        + "operation. Errors only hides the successes.")
+                }
             }
             SettingsGroup("Merge tool") {
                 LabeledContent {

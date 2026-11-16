@@ -153,6 +153,8 @@ enum PrefKey: String, CaseIterable {
     case aiResponseLanguage
     /// The language of the AI commit messages (Generate Message): an `AIResponseLanguage` raw value.
     case aiCommitLanguage
+    /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
+    case toastLevel
 
     /// The value a key has until the user sets it.
     var defaultValue: Any {
@@ -186,6 +188,7 @@ enum PrefKey: String, CaseIterable {
         case .aiCustomBaseURL: ""
         case .aiResponseLanguage: "english"
         case .aiCommitLanguage: "english"
+        case .toastLevel: "all"
         }
     }
 }
