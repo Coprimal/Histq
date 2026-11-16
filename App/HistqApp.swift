@@ -380,9 +380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Puts `window` on screen, in front and key (or only in front). A DEBUG `-HistqBackground YES` launch (QA shots,
     /// the preview) orders it behind every other window instead and never makes it key: it must not take the user's
-    /// focus or cover their work. `screencapture -l` still captures it.
+    /// focus or cover their work. `screencapture -l` still captures it. Once the user works in it (the app is active,
+    /// e.g. ⌘, or ⌘N pressed in it), windows come to the front as usual.
     private func present(_ window: NSWindow, key: Bool = true) {
-        if AppState.isBackgroundLaunch {
+        if AppState.isBackgroundLaunch && !NSApp.isActive {
             window.orderBack(nil)
         } else if key {
             window.makeKeyAndOrderFront(nil)
