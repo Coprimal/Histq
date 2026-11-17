@@ -166,6 +166,8 @@ enum PrefKey: String, CaseIterable {
     case aiCommitInstructions
     /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
     case toastLevel
+    /// The refs hidden from the sidebar and the graph (`RepoSession.hiddenRefs`): full ref names by repo folder path.
+    case hiddenRefs
 
     /// The value a key has until the user sets it.
     var defaultValue: Any {
@@ -205,6 +207,7 @@ enum PrefKey: String, CaseIterable {
         case .aiCommitSummaryOnly: false
         case .aiCommitInstructions: ""
         case .toastLevel: "all"
+        case .hiddenRefs: [String: [String]]()
         }
     }
 }

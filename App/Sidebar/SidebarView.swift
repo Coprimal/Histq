@@ -58,6 +58,16 @@ enum SidebarItem: Hashable, Sendable {
         case .tag(let name): "tag \(name)"
         }
     }
+
+    /// The full ref name, a tag's too (`refName` is a branch's only): `refs/heads/main`, `refs/remotes/origin/main`,
+    /// `refs/tags/v1.0`.
+    var fullRefName: String {
+        switch self {
+        case .local(let name): "refs/heads/\(name)"
+        case .remote(let name): "refs/remotes/\(name)"
+        case .tag(let name): "refs/tags/\(name)"
+        }
+    }
 }
 
 /// Sizes of the sidebar (the PRs tab's rows use them too).
@@ -143,9 +153,13 @@ struct SidebarView: View {
             BranchSections(session: session, refs: refs)
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.tags, .loaded(let refs)):
-            SidebarSection(title: "Tags", systemImage: "tag", count: refs.tags.count,
+            let hidden = refs.tags.count { session.isHidden(.tag($0.name)) }
+            SidebarSection(title: "Tags", systemImage: "tag",
+                           count: refs.tags.count - (session.tagsShowHidden ? 0 : hidden),
                            isExpanded: $session.tagsExpanded) { query in
                 TagRows(session: session, tags: refs.tags, query: query)
+            } accessory: {
+                HiddenRowsToggle(title: "Tags", count: hidden, isShowing: $session.tagsShowHidden)
             }
             .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.branches, .idle), (.branches, .loading):
@@ -182,11 +196,18 @@ private struct BranchSections: View {
     let refs: Refs
 
     var body: some View {
-        SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: refs.localBranches.count,
+        // The headers count the listed rows: the hidden ones only while their card lists them.
+        let hiddenLocal = refs.localBranches.count { session.isHidden(.local($0.name)) }
+        let hiddenRemote = refs.remoteBranches.count { session.isHidden(.remote($0.name)) }
+        SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage,
+                       count: refs.localBranches.count - (session.localShowsHidden ? 0 : hiddenLocal),
                        isExpanded: $session.localExpanded) { query in
-            let branches = refs.localBranches.filter { FileSearch.matches($0.name, query: query) }
+            let listed = refs.localBranches.filter { session.localShowsHidden || !session.isHidden(.local($0.name)) }
+            let branches = listed.filter { FileSearch.matches($0.name, query: query) }
             if refs.localBranches.isEmpty {
                 EmptyRow(text: "No local branches")
+            } else if listed.isEmpty {
+                EmptyRow(text: "All branches are hidden")
             } else if branches.isEmpty {
                 EmptyRow(text: "No matching branches")
             }
@@ -197,8 +218,11 @@ private struct BranchSections: View {
                     AheadBehind(branch: branch)
                 }
             }
+        } accessory: {
+            HiddenRowsToggle(title: "Local", count: hiddenLocal, isShowing: $session.localShowsHidden)
         }
-        SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: refs.remoteBranches.count,
+        SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage,
+                       count: refs.remoteBranches.count - (session.remoteShowsHidden ? 0 : hiddenRemote),
                        isExpanded: $session.remoteExpanded) { query in
             let shown = filteredRemotes(query)
             if remotes.isEmpty {
@@ -207,7 +231,7 @@ private struct BranchSections: View {
                 EmptyRow(text: "No matching branches")
             }
             ForEach(shown, id: \.name) { remote in
-                RemoteRow(name: remote.name)
+                RemoteRow(name: remote.name, url: session.remotes.first { $0.name == remote.name }?.url)
                     .contextMenu { MenuEntriesView(entries: RepoMenus.remote(named: remote.name, session)) }
                 ForEach(remote.branches, id: \.refName) { branch in
                     BranchRow(session: session, item: .remote(branch.name),
@@ -218,6 +242,7 @@ private struct BranchSections: View {
                 }
             }
         } accessory: {
+            HiddenRowsToggle(title: "Remote", count: hiddenRemote, isShowing: $session.remoteShowsHidden)
             Menu {
                 MenuEntriesView(entries: RepoMenus.remotes(session))
             } label: {
@@ -243,6 +268,7 @@ private struct BranchSections: View {
         var groups: [String: [RemoteBranch]] = Dictionary(order.map { ($0, []) }, uniquingKeysWith: { a, _ in a })
         for branch in refs.remoteBranches {
             if groups[branch.remote] == nil { order.append(branch.remote) }
+            guard session.remoteShowsHidden || !session.isHidden(.remote(branch.name)) else { continue }
             groups[branch.remote, default: []].append(branch)
         }
         return order.map { ($0, groups[$0] ?? []) }
@@ -382,9 +408,12 @@ private struct TagRows: View {
     let query: String
 
     var body: some View {
-        let shown = tags.filter { FileSearch.matches($0.name, query: query) }
+        let listed = tags.filter { session.tagsShowHidden || !session.isHidden(.tag($0.name)) }
+        let shown = listed.filter { FileSearch.matches($0.name, query: query) }
         if tags.isEmpty {
             EmptyRow(text: "No tags")
+        } else if listed.isEmpty {
+            EmptyRow(text: "All tags are hidden")
         } else if shown.isEmpty {
             EmptyRow(text: "No matching tags")
         }
@@ -472,6 +501,29 @@ struct CardSearchButton: View {
     }
 }
 
+/// A card header's eye button while some of its rows are hidden (`RepoSession.hiddenRefs`): lists them, dimmed, so
+/// their menu can show them again, or leaves them out again. The graph keeps them hidden either way.
+private struct HiddenRowsToggle: View {
+    let title: String
+    let count: Int
+    @Binding var isShowing: Bool
+
+    var body: some View {
+        if count > 0 {
+            Button {
+                isShowing.toggle()
+            } label: {
+                Image(systemName: isShowing ? "eye" : "eye.slash")
+                    .foregroundStyle(isShowing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
+            }
+            .buttonStyle(RowIconButtonStyle())
+            .help(isShowing ? "Leave Out Hidden \(title) Items" : "List \(count) Hidden \(title) Items")
+            .accessibilityLabel(isShowing ? "Leave out hidden \(title) items" : "List \(count) hidden \(title) items")
+        }
+    }
+}
+
 /// A sidebar card's search field, above its rows: it takes the focus as it opens, and Escape closes it and clears
 /// the query.
 struct CardSearchField: View {
@@ -509,15 +561,30 @@ struct EmptyRow: View {
     }
 }
 
-/// A remote's row in the Remote card ("origin"): a server icon and its name, its branches indented under it. Its
-/// context menu renames, removes or re-points the remote.
+/// A remote's row in the Remote card ("origin"): its owner's logo (in real avatar mode) or a server icon, and its
+/// name, its branches indented under it. Its context menu renames, removes or re-points the remote.
 private struct RemoteRow: View {
     let name: String
+    /// The remote's URL; nil for a remote only fetched branches name.
+    let url: String?
+    @State private var ownerAvatar: NSImage?
+    @Environment(\.displayScale) private var scale
+    private static let avatarSide: CGFloat = 16
 
     var body: some View {
         HStack(spacing: SidebarMetrics.iconGap) {
-            Image(systemName: "server.rack")
-                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+            Group {
+                if let ownerAvatar {
+                    Image(nsImage: ownerAvatar)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: Self.avatarSide, height: Self.avatarSide)
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                } else {
+                    Image(systemName: "server.rack")
+                }
+            }
+            .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             Text(name)
                 .font(.body.weight(.medium))
                 .lineLimit(1)
@@ -532,6 +599,23 @@ private struct RemoteRow: View {
         .help(name)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Remote \(name)")
+        .onAppear(perform: loadAvatar)
+        .onChange(of: url) { loadAvatar() }
+        .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
+            // No identity: the avatar mode changed.
+            let changed = note.userInfo?[AvatarStore.emailKey] as? String
+            if changed == nil || changed == repository.map(AvatarStore.ownerIdentity) { loadAvatar() }
+        }
+    }
+
+    private var repository: HostedRepository? {
+        url.flatMap(GitHubClient.repository(fromRemoteURL:))
+    }
+
+    private func loadAvatar() {
+        ownerAvatar = repository.flatMap {
+            AvatarStore.shared.ownerAvatar(of: $0, pixels: Int((Self.avatarSide * scale).rounded(.up)))
+        }
     }
 }
 
@@ -550,6 +634,8 @@ private struct BranchRow<Trailing: View>: View {
 
     var body: some View {
         let selected = session.sidebarSelection == item
+        // Listed only while its card shows the hidden rows: dimmed, with a slashed eye at the end.
+        let hidden = session.isHidden(item)
         HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             IconImage(systemImage)
@@ -562,8 +648,14 @@ private struct BranchRow<Trailing: View>: View {
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
                 trailing()
+                if hidden {
+                    Image(systemName: "eye.slash")
+                        .font(.settingsCaption)
+                        .accessibilityLabel("hidden")
+                }
             }
         }
+        .opacity(hidden ? 0.5 : 1)
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
         .padding(.leading, SidebarMetrics.capsuleLeading)

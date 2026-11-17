@@ -40,13 +40,17 @@ public enum LogReader {
     public static let defaultPageSize = 500
 
     /// `--exclude` must come before `--all` (git applies it to the next `--all`/`--branches`/...), so stash
-    /// internals (`stash@{n}` and its index and untracked commits) and notes never become rows. `-z` ends
+    /// internals (`stash@{n}` and its index and untracked commits) and notes never become rows. A remote's
+    /// HEAD (`refs/remotes/<remote>/HEAD`) is a symref to one of its branches, which `--all` reads anyway, so
+    /// leaving it out changes nothing until that branch is hidden (the user cannot hide the symref itself,
+    /// `RefReader` leaves it out), and then it cannot bring the hidden branch's commits back. `-z` ends
     /// every record with NUL, which git cannot emit inside a name or message (its formatter stops at a NUL,
     /// and the read environment pins UTF-8 output), so no commit text can start a record of its own. Fields
     /// are separated by `\x1f`, which git does not escape: the fixed-format fields come first and the body
     /// last, so a stray `\x1f` in a name or message cannot shift the hash, parents or dates (see `LogParser`).
     public static let arguments = [
-        "log", "-z", "--exclude=refs/stash", "--exclude=refs/notes/*", "--all", "--topo-order",
+        "log", "-z", "--exclude=refs/stash", "--exclude=refs/notes/*", "--exclude=refs/remotes/*/HEAD", "--all",
+        "--topo-order",
         "--format=%H%x1f%P%x1f%at%x1f%ct%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%b",
     ]
 
@@ -58,11 +62,20 @@ public enum LogReader {
     /// `alsoFrom`: commit hashes whose history is read too, e.g. the stashes' bases, so a stash made on a
     /// commit no branch holds any more still has its base in the log, as GitKraken shows it. Anything but a
     /// hex hash is left out, so it can never be read as an option.
+    ///
+    /// `excluding`: full ref names (`refs/heads/x`) the walk does not start from, the refs the user hid; their
+    /// commits stay when another ref (or HEAD) reaches them. Anything not under `refs/`, or with a glob character,
+    /// is left out, so each excludes exactly one ref.
     public static func pages(
         runner: GitRunner, cwd: URL, env: [String: String], pageSize: Int = defaultPageSize,
-        alsoFrom hashes: [String] = []
+        alsoFrom hashes: [String] = [], excluding refNames: [String] = []
     ) -> AsyncThrowingStream<[Commit], Error> {
-        let command = arguments + hashes.filter { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
+        var command = arguments
+        let excludes = refNames
+            .filter { $0.hasPrefix("refs/") && !$0.contains(where: { "*?[\\".contains($0) }) }
+            .map { "--exclude=" + $0 }
+        command.insert(contentsOf: excludes, at: command.firstIndex(of: "--all") ?? command.endIndex)
+        command += hashes.filter { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [Commit].self)
         let task = Task {
             do {

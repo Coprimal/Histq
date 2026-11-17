@@ -238,7 +238,7 @@ private struct CommitListPanel: View {
                 // checks out; a right-click opens the row's or the badge's menu; a badge dropped on another opens
                 // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
                 // pull request in the same frame.
-                GraphView(log: log, refs: session.refs.value, status: session.status.value,
+                GraphView(log: log, refs: session.visibleRefs, status: session.status.value,
                           dateFormat: dateFormat, rowDensity: rowDensity, selection: session.graphSelection,
                           onSelect: { [session] items in session.selectGraph(items) },
                           onActivate: { [session] item in RepoMenus.activate(item, session: session) },

@@ -5,8 +5,12 @@
 // (memory, then the disk cache under `StatePaths`, then the network, off the main thread), then posts `didChange` so
 // the graphs redraw the rows of that email. A 404 is remembered on disk for 7 days; an offline or failed load keeps
 // the generated avatar for the session. Only the hash or the GitHub login leaves the Mac, over https only.
+// `ownerAvatar(of:pixels:)` loads, in real mode only, the logo of the account or organization owning a remote's
+// repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows), the same way; only the owner's
+// name leaves the Mac, to its own host.
 import AppKit
 import CryptoKit
+import HistqCore
 import ImageIO
 import os
 
@@ -69,6 +73,8 @@ final class AvatarStore {
         case .generated:
             return generatedAvatar(identity: identity)
         case .real:
+            // An author email can spell an owner identity (`owner:<host>/<x>`): never a remote owner's logo or load.
+            if identity.hasPrefix("owner:") { return generatedAvatar(identity: identity) }
             let key = "\(identity)|\(pixels)" as String
             if let image = images.object(forKey: key as NSString) { return image }
             if !missing.contains(key), !email.isEmpty { load(identity: identity, key: key, pixels: pixels) }
@@ -105,6 +111,25 @@ final class AvatarStore {
         let size = NSSize(width: image.cgImage.width, height: image.cgImage.height)
         images.setObject(NSImage(cgImage: image.cgImage, size: size), forKey: key as NSString)
         NotificationCenter.default.post(name: Self.didChange, object: self, userInfo: [Self.emailKey: identity])
+    }
+
+    // MARK: Remote owners
+
+    /// The logo of the account or organization owning `repository` (`Coprimal` of `github.com/Coprimal/Histq`), at
+    /// `pixels` on its longer side. Never blocks: nil (the caller keeps its own icon) outside real mode, on another
+    /// host, until it is loaded, or when it cannot be; its arrival posts `didChange` with `ownerIdentity(_:)`.
+    func ownerAvatar(of repository: HostedRepository, pixels: Int) -> NSImage? {
+        guard mode == .real, AvatarLoader.ownerHosts.contains(repository.host) else { return nil }
+        let identity = Self.ownerIdentity(repository)
+        let key = "\(identity)|\(pixels)"
+        if let image = images.object(forKey: key as NSString) { return image }
+        if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
+        return nil
+    }
+
+    /// The identity `didChange` names when the owner logo of `repository` arrives.
+    static func ownerIdentity(_ repository: HostedRepository) -> String {
+        "owner:\(repository.host)/\(repository.owner.lowercased())"
     }
 
     /// Whether `email` is the identity `didChange` named (the graph compares its rows' emails with it).
@@ -219,7 +244,7 @@ private enum AvatarLoader {
         {
             return nil
         }
-        guard !identity.hasPrefix("name:"), let url = url(identity: identity, hash: hash, pixels: pixels) else {
+        guard !identity.hasPrefix("name:"), let url = await url(identity: identity, hash: hash, pixels: pixels) else {
             return nil
         }
 
@@ -242,9 +267,10 @@ private enum AvatarLoader {
         }
     }
 
-    /// Gravatar by hash, or the GitHub avatar for a noreply address (`<id>+<login>@` or `<login>@`). nil when a
-    /// GitHub address has neither a valid id nor a valid login.
-    static func url(identity: String, hash: String, pixels: Int) -> URL? {
+    /// Gravatar by hash, or the GitHub avatar for a noreply address (`<id>+<login>@` or `<login>@`), or a remote
+    /// owner's logo (`owner:<host>/<owner>`). nil when a GitHub address has neither a valid id nor a valid login.
+    static func url(identity: String, hash: String, pixels: Int) async -> URL? {
+        if identity.hasPrefix("owner:") { return await ownerURL(identity.dropFirst("owner:".count), pixels: pixels) }
         let suffix = "@users.noreply.github.com"
         guard identity.hasSuffix(suffix) else {
             return URL(string: "https://gravatar.com/avatar/\(hash)?s=\(pixels)&d=404")
@@ -261,6 +287,62 @@ private enum AvatarLoader {
         }
         guard isValidLogin(login) else { return nil }
         return URL(string: "https://avatars.githubusercontent.com/\(login)?s=\(pixels)")
+    }
+
+    /// The hosts whose owner logos load without an account.
+    static let ownerHosts: Set<String> = ["github.com", "gitlab.com", "bitbucket.org"]
+
+    /// `<host>/<owner>`: GitHub's avatar of the login, Bitbucket's workspace avatar (a redirect to the image), or the
+    /// `avatar_url` gitlab.com's API gives. The owner goes into the request URL, so it is checked again here as
+    /// `GitHubClient.repository(fromRemoteURL:)` checks it (ASCII letters, digits, `-`, `_`): nil when it fails.
+    private static func ownerURL(_ path: Substring, pixels: Int) async -> URL? {
+        let parts = path.split(separator: "/")
+        guard parts.count == 2, isSafeOwner(parts[1]) else { return nil }
+        let owner = parts[1]
+        switch parts[0] {
+        case "github.com":
+            guard isValidLogin(owner) else { return nil }
+            return URL(string: "https://avatars.githubusercontent.com/\(owner)?s=\(pixels)")
+        case "bitbucket.org":
+            return URL(string: "https://bitbucket.org/workspaces/\(owner)/avatar/")
+        case "gitlab.com":
+            return await gitLabAvatarURL(owner)
+        default:
+            return nil
+        }
+    }
+
+    /// The `avatar_url` of the gitlab.com group named `owner`, else of the user: an owner is one or the other. nil
+    /// when neither answers, has none, or it is not https.
+    private static func gitLabAvatarURL(_ owner: Substring) async -> URL? {
+        struct Entity: Decodable {
+            let avatarURL: String?
+            enum CodingKeys: String, CodingKey { case avatarURL = "avatar_url" }
+        }
+        let endpoints = [("groups/\(owner)?with_projects=false", false), ("users?username=\(owner)", true)]
+        for (endpoint, isList) in endpoints {
+            guard let url = URL(string: "https://gitlab.com/api/v4/\(endpoint)"),
+                  let result = try? await session.data(from: url),
+                  (result.1 as? HTTPURLResponse)?.statusCode == 200, result.0.count <= maxBytes
+            else { continue }
+            let decoder = JSONDecoder()
+            let entity = isList
+                ? (try? decoder.decode([Entity].self, from: result.0))?.first
+                : try? decoder.decode(Entity.self, from: result.0)
+            guard let entity else { continue }
+            guard let string = entity.avatarURL, let avatar = URL(string: string), avatar.scheme == "https" else {
+                return nil
+            }
+            return avatar
+        }
+        return nil
+    }
+
+    /// `[A-Za-z0-9_-]+`, the owner rule of `GitHubClient.repository(fromRemoteURL:)`.
+    private static func isSafeOwner(_ owner: Substring) -> Bool {
+        !owner.isEmpty && owner.unicodeScalars.allSatisfy {
+            $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_")
+        }
     }
 
     /// `[A-Za-z0-9-]{1,39}`.

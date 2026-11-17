@@ -288,6 +288,18 @@ struct RemoteInfo: Hashable, Sendable {
     let url: String
 }
 
+extension Refs {
+    /// These refs without the ones `hidden` names (full ref names); the checked-out branch always stays.
+    func hiding(_ hidden: Set<String>) -> Refs {
+        guard !hidden.isEmpty else { return self }
+        return Refs(
+            head: head,
+            localBranches: localBranches.filter { $0.isHead || !hidden.contains($0.refName) },
+            remoteBranches: remoteBranches.filter { !hidden.contains($0.refName) },
+            tags: tags.filter { !hidden.contains($0.refName) })
+    }
+}
+
 /// The undo journal's next entries (their titles, `Commit "Fix login"`), or that the journal cannot be read.
 struct UndoStatus: Equatable, Sendable {
     var undo: String?
@@ -541,6 +553,16 @@ final class RepoSession: Identifiable {
     var remoteExpanded = true
     var tagsExpanded = true
     var worktreesExpanded = true
+    /// The Local, Remote and Tags cards list their hidden rows too (dimmed), so they can be shown again: the card
+    /// header's eye button.
+    var localShowsHidden = false
+    var remoteShowsHidden = false
+    var tagsShowHidden = false
+
+    /// The refs the user hid (full names, `refs/heads/x`), kept per repo folder in `PrefKey.hiddenRefs`:
+    /// they leave the sidebar's lists and the graph's badges, and the log no longer starts from them (their
+    /// commits stay where another ref or HEAD reaches them). The checked-out branch is never hidden.
+    private(set) var hiddenRefs: Set<String> = []
 
     /// The repo's worktrees (the main one first) with the other worktrees' change counts: read after the first log
     /// page, so they never delay the tab's first content, then with every refs read and when the tab is shown again.
@@ -719,6 +741,7 @@ final class RepoSession: Identifiable {
 
     init(url: URL) {
         self.url = url
+        hiddenRefs = Set(Self.storedHiddenRefs[url.path] ?? [])
         graphSearch.session = self
         resolveProfile()
         scheduleAutoFetch()
@@ -728,6 +751,13 @@ final class RepoSession: Identifiable {
         // `-HistqOpenTerminal YES`: the drawer opens with the tab and starts its shell, as an explicit open does (QA
         // shots of the terminal).
         if AppState.launchFlag("-HistqOpenTerminal") == "YES" { openTerminal() }
+        // `-HistqShowHidden YES`: the Local, Remote and Tags cards list their hidden rows, as their eye button does (QA
+        // shots).
+        if AppState.launchFlag("-HistqShowHidden") == "YES" {
+            localShowsHidden = true
+            remoteShowsHidden = true
+            tagsShowHidden = true
+        }
         // `-HistqRun`: menu actions on a fixture copy, once the refs and the whole log are in.
         if let spec = AppState.launchFlag("-HistqRun") {
             Task { [weak self] in
@@ -1511,6 +1541,39 @@ final class RepoSession: Identifiable {
         return remotes
     }
 
+    // MARK: Hidden refs
+
+    private static var storedHiddenRefs: [String: [String]] {
+        Preferences.defaults.dictionary(forKey: PrefKey.hiddenRefs.rawValue) as? [String: [String]] ?? [:]
+    }
+
+    /// Whether the sidebar row or graph badge `item` is hidden. Never the checked-out branch, even when it was hidden
+    /// before it was checked out, so the Local card lists, counts and never dims it, and its menu offers no Show.
+    func isHidden(_ item: SidebarItem) -> Bool {
+        item != .local(currentBranch ?? "") && hiddenRefs.contains(item.fullRefName)
+    }
+
+    /// Hides `item` (or shows it again), saves the repo's hidden refs and reloads the log without (or with) it. A hidden
+    /// row that was selected is no longer.
+    func setHidden(_ item: SidebarItem, _ hidden: Bool) {
+        guard hidden != isHidden(item) else { return }
+        if hidden {
+            hiddenRefs.insert(item.fullRefName)
+            if sidebarSelection == item { sidebarSelection = nil }
+        } else {
+            hiddenRefs.remove(item.fullRefName)
+        }
+        var stored = Self.storedHiddenRefs
+        stored[url.path] = hiddenRefs.isEmpty ? nil : hiddenRefs.sorted()
+        Preferences.defaults.set(stored, forKey: PrefKey.hiddenRefs.rawValue)
+        refresh(scope: .log)
+    }
+
+    /// `refs` without the hidden refs (the checked-out branch always stays): what the graph labels.
+    var visibleRefs: Refs? {
+        refs.value.map { $0.hiding(hiddenRefs) }
+    }
+
     // MARK: Log
 
     /// (Re)loads the whole log and lays out its graph off the main actor. The first load publishes the first page
@@ -1525,10 +1588,11 @@ final class RepoSession: Identifiable {
         let generation = logGeneration
         // The rows of the other worktrees as last read (none before the first read, which waits for this first page).
         let worktrees = dirtyWorktrees
+        let hidden = hiddenRefs.sorted()
         logTask = Task { [weak self] in
             do {
                 let snapshot = try await Self.readLog(
-                    backend, cwd: cwd, generation: generation, worktrees: worktrees
+                    backend, cwd: cwd, generation: generation, worktrees: worktrees, hidden: hidden
                 ) { first in
                     guard isFirstLoad, !Task.isCancelled else { return }
                     await MainActor.run {
@@ -1566,7 +1630,7 @@ final class RepoSession: Identifiable {
     /// Throws `CancellationError` when cancelled (the stream itself ends without an error then).
     @concurrent
     private nonisolated static func readLog(
-        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
+        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo], hidden: [String],
         firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
@@ -1574,7 +1638,8 @@ final class RepoSession: Identifiable {
         var snapshot = LogSnapshot(generation: generation)
         // Read first: the log also reads the stashes' bases, which no branch may hold any more.
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
-        let pages = LogReader.pages(runner: backend.runner, cwd: cwd, env: env, alsoFrom: snapshot.stashes.map(\.base))
+        let pages = LogReader.pages(
+            runner: backend.runner, cwd: cwd, env: env, alsoFrom: snapshot.stashes.map(\.base), excluding: hidden)
         snapshot.worktrees = worktrees
         snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
         var (layout, top) = beginLayout(&snapshot)
@@ -1734,7 +1799,7 @@ final class RepoSession: Identifiable {
     /// Computes `branchMap` for the log and refs now, off the main actor; a newer run cancels this one. Nothing until
     /// both are read.
     private func updateBranchMap() {
-        guard let log = log.value, let refs = refs.value else { return }
+        guard let log = log.value, let refs = visibleRefs else { return }
         branchMapTask?.cancel()
         branchMapTask = Task { [weak self] in
             let (names, claims, ms) = await Self.attributeBranches(log, refs: refs)

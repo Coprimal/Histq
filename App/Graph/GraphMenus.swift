@@ -261,10 +261,26 @@ enum RepoMenus {
     // MARK: Refs
 
     static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
-        switch item {
+        let entries: [MenuEntry] = switch item {
         case .local(let name): local(name, session)
         case .remote(let name): remote(name, session)
         case .tag(let name): tag(name, session)
+        }
+        return entries + [.separator, hide(item, session)]
+    }
+
+    /// Hide (or Show) a ref in the sidebar and the graph; never the checked-out branch.
+    private static func hide(_ item: SidebarItem, _ session: RepoSession) -> MenuEntry {
+        let name = switch item {
+        case .local(let name), .remote(let name), .tag(let name): name
+        }
+        if session.isHidden(item) {
+            return .action("Show \(name)") { session.setHidden(item, false) }
+        }
+        let isCurrent = item == .local(session.currentBranch ?? "")
+        return .action("Hide \(name)", enabled: !isCurrent,
+                       toolTip: isCurrent ? "The checked-out branch cannot be hidden." : nil) {
+            session.setHidden(item, true)
         }
     }
 
