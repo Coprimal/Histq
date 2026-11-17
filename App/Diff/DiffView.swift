@@ -30,24 +30,40 @@ struct FileTarget: Hashable, Sendable {
 
 /// An image decoded off the main actor, with the size of its file.
 struct DiffImage: @unchecked Sendable {
-    /// Immutable, so safe to share across actors.
+    /// Immutable, so safe to share across actors. At most `maxDecodedSide` pixels on its long side.
     let image: CGImage
+    /// The image's own size in pixels, upright (what the label shows and the most a pane draws it at).
+    let pixelWidth: Int
+    let pixelHeight: Int
     let byteCount: Int
 
-    /// Full size, turned upright by its EXIF orientation (a phone photo). Nil for no data or data ImageIO cannot decode.
+    /// The longest side decoded: a small file can declare a huge image (a decompression bomb), and no pane is wider.
+    private static let maxDecodedSide = 4096
+    /// The formats decoded (sniffed from the bytes, not the extension): common web and photo formats only, so a
+    /// repo's file never reaches ImageIO's rarer parsers.
+    private static let decodedTypes: [UTType] = [.png, .jpeg, .gif, .webP, .bmp, .tiff, .heic, .heif, .ico]
+
+    /// Turned upright by its EXIF orientation (a phone photo). Nil for no data, another format, or data ImageIO cannot
+    /// decode.
     nonisolated init?(data: Data?) {
         guard let data, let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source).flatMap({ UTType($0 as String) }),
+              Self.decodedTypes.contains(where: { type.conforms(to: $0) }),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int, width > 0, height > 0,
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
                   kCGImageSourceCreateThumbnailWithTransform: true,
-                  kCGImageSourceThumbnailMaxPixelSize: max(width, height),
+                  kCGImageSourceThumbnailMaxPixelSize: min(max(width, height), Self.maxDecodedSide),
                   kCGImageSourceShouldCacheImmediately: true,
               ] as CFDictionary)
         else { return nil }
         self.image = image
+        // The decoded image is upright: scale its sides back to the file's size (a rotated photo swaps them).
+        let factor = Double(max(width, height)) / Double(max(image.width, image.height))
+        pixelWidth = Int((Double(image.width) * factor).rounded())
+        pixelHeight = Int((Double(image.height) * factor).rounded())
         byteCount = data.count
     }
 }
@@ -339,10 +355,10 @@ private struct ImageDiffCard: View {
     /// Whether Before and After show larger one above the other than side by side in `size`: the smaller of their two
     /// scales decides. A single image never stacks.
     private static func stacks(_ side: ImageDiffSide, in size: CGSize) -> Bool {
-        guard let before = side.before?.image, let after = side.after?.image else { return false }
+        guard let before = side.before, let after = side.after else { return false }
         func scale(_ width: CGFloat, _ height: CGFloat) -> CGFloat {
             [before, after].map { image in
-                min(1, max(0, width) / CGFloat(image.width), max(0, height - labelHeight) / CGFloat(image.height))
+                min(1, max(0, width) / CGFloat(image.pixelWidth), max(0, height - labelHeight) / CGFloat(image.pixelHeight))
             }.min() ?? 0
         }
         let sideBySide = scale((size.width - spacing) / 2, size.height)
@@ -358,8 +374,8 @@ private struct ImagePane: View {
     let image: DiffImage
 
     var body: some View {
-        let width = image.image.width
-        let height = image.image.height
+        let width = image.pixelWidth
+        let height = image.pixelHeight
         VStack(spacing: 8) {
             HStack(spacing: 6) {
                 Text(title)
