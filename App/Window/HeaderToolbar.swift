@@ -103,7 +103,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         redoItem.action = #selector(redo(_:))
         configureButton(terminalItem, label: "Terminal", systemImage: "terminal")
         terminalItem.action = #selector(toggleTerminal(_:))
-        configureButton(searchItem, label: "Search", systemImage: "magnifyingglass")
+        configureButton(searchItem, label: "Search", systemImage: "command")
         for item in [undoItem, redoItem, terminalItem] { item.isEnabled = false }
         searchItem.label = "Command Palette"
         searchItem.toolTip = "Command Palette (⌘K)"
