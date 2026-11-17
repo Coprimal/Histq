@@ -87,6 +87,58 @@ public enum LogReader {
         continuation.onTermination = { _ in task.cancel() }
         return stream
     }
+
+    /// The hashes of the commits of `commits` that no other commit of it lists as a parent, in `commits`' order: the
+    /// tips a history read from them reaches every commit of `commits` from. `index` is `commits`' index of each hash.
+    public static func tips(of commits: [Commit], index: [String: Int]) -> [String] {
+        var isParent = [Bool](repeating: false, count: commits.count)
+        for commit in commits {
+            for parent in commit.parents {
+                if let position = index[parent] { isParent[position] = true }
+            }
+        }
+        return commits.indices.filter { !isParent[$0] }.map { commits[$0].hash }
+    }
+
+    /// The commits a history read (`pages`) would list now that are not in a previous read whose tips were
+    /// `previousTips` (`tips(of:index:)`), in git's order (children before parents); `[]` when none. Nil when this
+    /// cannot be proven to be the whole difference, so the caller reads the whole history again: no previous tip,
+    /// a previous tip that is not a hex hash, or a commit of the previous read that the refs and `alsoFrom` no
+    /// longer reach (a branch deleted, a reset, a force-push, a stash dropped). `env` and `alsoFrom` are as in
+    /// `pages`; anything in `alsoFrom` but a hex hash is left out.
+    ///
+    /// The new commits followed by the previous ones are exactly the commits a fresh read lists, in a valid
+    /// topological order (a new commit is never an ancestor of an old one), but not always in the order git's
+    /// `--topo-order` gives a fresh read: after a commit on a branch other than the newest one, a fresh read lists
+    /// that branch's whole line first, while here the old commits keep their order and the new ones come on top.
+    /// Not valid across a change of the shallow boundary (a deepened clone gives old commits new parents): the caller
+    /// reads the whole history of a shallow repo.
+    public static func newCommits(
+        runner: GitRunner, cwd: URL, env: [String: String], previousTips: [String], alsoFrom hashes: [String] = []
+    ) async throws -> [Commit]? {
+        let isHex = { (text: String) in !text.isEmpty && text.allSatisfy(\.isHexDigit) }
+        guard !previousTips.isEmpty, previousTips.allSatisfy(isHex) else { return nil }
+        let extra = hashes.filter(isHex)
+        // Every previous commit must still be reachable. `--stdin` comes before `--not`, and git reads the
+        // revisions on stdin as given whatever `--not` says on the command line, so the previous tips count as
+        // positive and the refs (with the same exclusions as the log) and `extra` as negative.
+        let check = try await runner.run(
+            ["rev-list", "--count", "--stdin", "--not", "--exclude=refs/stash", "--exclude=refs/notes/*", "--all"]
+                + extra,
+            cwd: cwd, env: env, stdin: Data(previousTips.map { $0 + "\n" }.joined().utf8))
+        let count = check.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard count == "0" else { return nil }
+        var commits: [Commit] = []
+        let lines = await runner.stream(
+            arguments + extra + ["--stdin"], cwd: cwd, env: env,
+            stdin: Data(previousTips.map { "^" + $0 + "\n" }.joined().utf8), delimiter: 0)
+        for try await line in lines where line.source == .stdout {
+            guard let commit = LogParser.parse(Substring(line.text)) else { continue }
+            commits.append(commit)
+        }
+        try Task.checkCancellation()
+        return commits
+    }
 }
 
 /// Turns NUL-terminated records into commits, one record each.

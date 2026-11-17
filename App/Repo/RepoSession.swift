@@ -81,6 +81,9 @@ struct LogSnapshot: Sendable {
     var worktrees: [WorktreeInfo] = []
     /// Every page has been parsed and laid out; false while only the first pages are in.
     var isComplete = false
+    /// The repo was shallow when the log was read (`<common dir>/shallow`): a deepening fetch gives old commits new
+    /// parents, so a reload reads the whole history again rather than only the new commits.
+    var isShallow = false
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
     /// inserts the rows a snapshot of the same load adds and reloads for a new one.
     var generation = 0
@@ -1525,19 +1528,44 @@ final class RepoSession: Identifiable {
         let generation = logGeneration
         // The rows of the other worktrees as last read (none before the first read, which waits for this first page).
         let worktrees = dirtyWorktrees
+        // A complete log on screen: a reload first reads only the commits that are new since it.
+        let oldLog = log.value.flatMap { $0.isComplete ? $0 : nil }
         logTask = Task { [weak self] in
             do {
-                let snapshot = try await Self.readLog(
-                    backend, cwd: cwd, generation: generation, worktrees: worktrees
-                ) { first in
-                    guard isFirstLoad, !Task.isCancelled else { return }
-                    await MainActor.run {
-                        self?.log = .loaded(first)
-                        self?.updateBranchMap()
-                        self?.loadWorktrees(backend)
+                let start = DispatchTime.now().uptimeNanoseconds
+                var incremental: LogSnapshot?
+                if let oldLog {
+                    do {
+                        incremental = try await Self.readLogIncrementally(
+                            backend, previous: oldLog, cwd: cwd, generation: generation, worktrees: worktrees)
+                    } catch where !Self.isCancellation(error) {
+                        Self.logger.error("incremental log reload failed: \(error, privacy: .public)")
+                    }
+                }
+                let snapshot: LogSnapshot
+                if let incremental {
+                    snapshot = incremental
+                } else {
+                    snapshot = try await Self.readLog(
+                        backend, cwd: cwd, generation: generation, worktrees: worktrees
+                    ) { first in
+                        guard isFirstLoad, !Task.isCancelled else { return }
+                        await MainActor.run {
+                            self?.log = .loaded(first)
+                            self?.updateBranchMap()
+                            self?.loadWorktrees(backend)
+                        }
                     }
                 }
                 try Task.checkCancellation()
+                if !isFirstLoad {
+                    let ms = String(format: "%.1f", Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+                    if let incremental, let oldLog {
+                        UITiming.logReload("incremental \(incremental.commits.count - oldLog.commits.count) \(ms)")
+                    } else {
+                        UITiming.logReload("full \(ms)")
+                    }
+                }
                 guard let self else { return }
                 let previous = log.value
                 log = .loaded(snapshot)
@@ -1572,6 +1600,7 @@ final class RepoSession: Identifiable {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
         var snapshot = LogSnapshot(generation: generation)
+        snapshot.isShallow = isShallow(backend)
         // Read first: the log also reads the stashes' bases, which no branch may hold any more.
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
         let pages = LogReader.pages(runner: backend.runner, cwd: cwd, env: env, alsoFrom: snapshot.stashes.map(\.base))
@@ -1594,7 +1623,55 @@ final class RepoSession: Identifiable {
         try Task.checkCancellation()
         snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
         snapshot.isComplete = true
+        // Made shallow while git read the history: the next reload must not trust it.
+        snapshot.isShallow = snapshot.isShallow || isShallow(backend)
         return snapshot
+    }
+
+    /// The log after a reload, from `previous` (a complete snapshot) and only the commits that are new since it
+    /// (`LogReader.newCommits`), with the status and stashes read again, every row laid out again off the main actor.
+    /// Nil when the new commits cannot be proven to be the whole difference (a commit of `previous` no longer
+    /// reachable, a shallow repo): the caller reads the whole log. Throws `CancellationError` when cancelled.
+    ///
+    /// It has the same commits as a fresh read, in a valid topological order, but not always in the order of git's
+    /// `--topo-order`: the commits of `previous` keep their order and the new ones come on top, while a fresh read
+    /// after a commit on a branch other than the newest one would list that branch's whole line first.
+    @concurrent
+    private nonisolated static func readLogIncrementally(
+        _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo]
+    ) async throws -> LogSnapshot? {
+        guard previous.isComplete, !previous.isShallow, !isShallow(backend) else { return nil }
+        let env = try await backend.readEnvironment(cwd: cwd)
+        async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        var snapshot = LogSnapshot(generation: generation)
+        snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        let tips = LogReader.tips(of: previous.commits, index: previous.commitIndex)
+        guard let delta = try await LogReader.newCommits(
+            runner: backend.runner, cwd: cwd, env: env, previousTips: tips,
+            alsoFrom: snapshot.stashes.map(\.base)),
+            !delta.contains(where: { previous.commitIndex[$0.hash] != nil })
+        else { return nil }
+        snapshot.worktrees = worktrees
+        snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
+        try Task.checkCancellation()
+        if delta.isEmpty {
+            snapshot.commits = previous.commits
+            snapshot.commitIndex = previous.commitIndex
+        } else {
+            snapshot.commits = delta + previous.commits
+            snapshot.commitIndex.reserveCapacity(snapshot.commits.count)
+            for (index, commit) in snapshot.commits.enumerated() { snapshot.commitIndex[commit.hash] = index }
+        }
+        try Task.checkCancellation()
+        snapshot.isComplete = true
+        layOutAll(&snapshot)
+        try Task.checkCancellation()
+        return snapshot
+    }
+
+    /// Whether the repo is a shallow clone now (`<common dir>/shallow` exists).
+    nonisolated private static func isShallow(_ backend: Backend) -> Bool {
+        FileManager.default.fileExists(atPath: backend.directories.commonDir.appending(path: "shallow").path)
     }
 
     /// Lays out `snapshot.synthetic`'s WIP and worktree rows at the top and hangs its stashes above their bases. Returns
@@ -1606,6 +1683,17 @@ final class RepoSession: Identifiable {
         let top = layout
         layout.hang(snapshot.synthetic.filter { $0.kind == .stash })
         return (layout, top)
+    }
+
+    /// Lays out `snapshot`'s synthetic rows and all its commits in one go (`beginLayout`); once the log is complete,
+    /// the stashes whose base is not in it go at the top without a line.
+    nonisolated private static func layOutAll(_ snapshot: inout LogSnapshot) {
+        var (layout, top) = beginLayout(&snapshot)
+        snapshot.rows = layout.append(snapshot.commits)
+        snapshot.hung = layout.hung
+        if snapshot.isComplete {
+            snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
+        }
     }
 
     // MARK: Worktrees
@@ -1766,12 +1854,7 @@ final class RepoSession: Identifiable {
         snapshot.worktrees = worktrees
         snapshot.synthetic = log.synthetic.filter { $0.kind == .wip } + worktreeRows(worktrees)
             + log.synthetic.filter { $0.kind == .stash }
-        var (layout, top) = beginLayout(&snapshot)
-        snapshot.rows = layout.append(log.commits)
-        snapshot.hung = layout.hung
-        if log.isComplete {
-            snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
-        }
+        layOutAll(&snapshot)
         return snapshot
     }
 

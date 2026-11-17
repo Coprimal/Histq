@@ -256,6 +256,9 @@ enum UITiming {
     static func layout(_ detail: String) { record("layout", detail) }
     /// A repo's whole log has been parsed and laid out: `content log-complete <commit count>`.
     static func logComplete(commitCount: Int) { record("content", "log-complete \(commitCount)") }
+    /// A repo's log was read again after a change: `content log-reload incremental <new commits> <ms>` when only the
+    /// new commits were read, `content log-reload full <ms>` when the whole history was.
+    static func logReload(_ detail: String) { record("content", "log-reload \(detail)") }
     /// The graph's branch attribution (`BranchAttribution`) is computed: `content branch-map <commits> <ms>`.
     static func branchMap(count: Int, ms: Double) {
         record("content", "branch-map \(count) " + String(format: "%.1f", ms))

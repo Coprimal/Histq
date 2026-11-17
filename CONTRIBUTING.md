@@ -82,7 +82,8 @@ timings. In a state-dir run, Debug builds append `<ms since launch> <event> <det
 
 - `open`, `select`, `placeholder`, `spinner` (only when a load takes over about 150 ms) and `content` (for every
   select; `content log-complete <n>` when the whole history is laid out; `content branch-map <commits> <ms>` when the
-  faded branch labels are computed).
+  faded branch labels are computed; `content log-reload incremental <new commits> <ms>` or `content log-reload full
+  <ms>` when a change reloads the log).
 - `content-info` (a commit's info card is on screen; its files may still load) and `layout <detail> <state>
   filesTop=<y> filesBottom=<y> panelBottom=<y>` (the Files card edges, for `placeholder`, `pending` or `loaded`).
 - `find <query> matches=<m> current=<n> commit=<sha>` (Cmd-F search), `graph-col` (the graph column fitted to its
