@@ -1,20 +1,20 @@
-// The graph's commit search (⌘F): which commits of the log a query finds, by subject (case- and diacritic-insensitive,
-// spaces, "-", "_" and "/" alike)
+// The graph's commit search (⌘F): which commits of the log a query finds, by message, subject and body (every word of
+// the query, in any order; case- and diacritic-insensitive; spaces, line breaks, "-", "_" and "/" alike)
 // or, for a query of 4 or more hex characters, by any part of the hash. Pure and synchronous, so the app runs it off the main
-// actor. A per-commit Foundation compare costs about 1 µs (75 ms for 50,000 commits in a Debug build), so the subjects
+// actor. A per-commit Foundation compare costs about 1 µs (75 ms for 50,000 commits in a Debug build), so the messages
 // are folded once into one byte buffer (`Index`, built once per log) and each query is a `memmem` scan of it.
 import Foundation
 
 public enum CommitSearch {
-    /// The shortest query that also matches part of a hash: shorter hex strings hit too many subjects' words and hashes.
+    /// The shortest query that also matches part of a hash: shorter hex strings hit too many messages' words and hashes.
     public static let minimumHashPrefix = 4
 
-    /// A log's subjects folded (lowercase, no diacritics) and joined by newlines, which a subject never holds, with
-    /// where each starts; and the hashes, fixed width. Build it once per log snapshot, off the main actor.
+    /// A log's messages (subject and body) folded (lowercase, no diacritics, line breaks made spaces) and joined by
+    /// newlines, with where each starts; and the hashes, fixed width. Build it once per log snapshot, off the main actor.
     public struct Index: Sendable {
-        /// The folded subjects, each followed by a newline.
-        fileprivate let subjects: [UInt8]
-        /// `subjects`' offset of each commit's subject, in log order.
+        /// The folded messages, each followed by a newline.
+        fileprivate let messages: [UInt8]
+        /// `messages`' offset of each commit's message, in log order.
         fileprivate let starts: [Int]
         /// Every hash, lowercase, `hashWidth` bytes each (a shorter one is padded with NUL).
         fileprivate let hashes: [UInt8]
@@ -25,8 +25,8 @@ public enum CommitSearch {
 
         /// Indexes `commits`. A cancelled task gets an empty index.
         public init(_ commits: [Commit]) {
-            var subjects: [UInt8] = []
-            subjects.reserveCapacity(commits.count * 48)
+            var messages: [UInt8] = []
+            messages.reserveCapacity(commits.count * 64)
             var starts: [Int] = []
             starts.reserveCapacity(commits.count)
             let hashWidth = commits.first?.hash.utf8.count ?? 40
@@ -34,30 +34,34 @@ public enum CommitSearch {
             hashes.reserveCapacity(commits.count * hashWidth)
             for (index, commit) in commits.enumerated() {
                 if index.isMultiple(of: 1024), Task.isCancelled {
-                    self.init(subjects: [], starts: [], hashes: [], hashWidth: hashWidth)
+                    self.init(messages: [], starts: [], hashes: [], hashWidth: hashWidth)
                     return
                 }
-                starts.append(subjects.count)
-                CommitSearch.appendFolded(commit.subject, to: &subjects)
-                subjects.append(0x0A)
+                starts.append(messages.count)
+                CommitSearch.appendFolded(commit.subject, to: &messages)
+                if !commit.body.isEmpty {
+                    messages.append(0x20)
+                    CommitSearch.appendFolded(commit.body, to: &messages)
+                }
+                messages.append(0x0A)
                 // git writes hashes in lowercase; every hash of a repo has the same width (SHA-1 or SHA-256).
                 let hash = commit.hash.utf8.prefix(hashWidth)
                 hashes.append(contentsOf: hash)
                 if hash.count < hashWidth { hashes.append(contentsOf: repeatElement(0, count: hashWidth - hash.count)) }
             }
-            self.init(subjects: subjects, starts: starts, hashes: hashes, hashWidth: hashWidth)
+            self.init(messages: messages, starts: starts, hashes: hashes, hashWidth: hashWidth)
         }
 
-        private init(subjects: [UInt8], starts: [Int], hashes: [UInt8], hashWidth: Int) {
-            self.subjects = subjects
+        private init(messages: [UInt8], starts: [Int], hashes: [UInt8], hashWidth: Int) {
+            self.messages = messages
             self.starts = starts
             self.hashes = hashes
             self.hashWidth = hashWidth
         }
     }
 
-    /// The indices into `commits` of the commits `query` finds, in log order, each once: the subject contains the
-    /// trimmed query (case- and diacritic-insensitive), or the query is at least `minimumHashPrefix` hex characters
+    /// The indices into `commits` of the commits `query` finds, in log order, each once: the message (subject and
+    /// body) contains every word of the trimmed query, in any order (case- and diacritic-insensitive), or the query is at least `minimumHashPrefix` hex characters
     /// and the hash contains it (anywhere, not only at its start). An empty or whitespace-only query finds nothing. A cancelled task gets an empty
     /// list. Searching a log more than once: build its `Index` once and use `matches(in:query:)`.
     public static func matches(_ commits: [Commit], query: String) -> [Int] {
@@ -68,22 +72,33 @@ public enum CommitSearch {
     public static func matches(in index: Index, query: String) -> [Int] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return [] }
-        let bySubject = subjectMatches(in: index, needle: needle)
+        let byMessage = messageMatches(in: index, needle: needle)
         let isHash = needle.count >= minimumHashPrefix && needle.allSatisfy(\.isHexDigit)
-        guard isHash, !Task.isCancelled else { return Task.isCancelled ? [] : bySubject }
-        return merged(bySubject, hashMatches(in: index, part: Array(needle.lowercased().utf8)))
+        guard isHash, !Task.isCancelled else { return Task.isCancelled ? [] : byMessage }
+        return merged(byMessage, hashMatches(in: index, part: Array(needle.lowercased().utf8)))
     }
 
-    /// The commits whose folded subject contains the folded `needle`: one `memmem` per hit, the next search starting
-    /// at the next subject, so a subject counts once.
-    private static func subjectMatches(in index: Index, needle: String) -> [Int] {
+    /// The commits whose folded message contains every word of the folded `needle`, in any order and each anywhere
+    /// (also inside a longer word), as GitKraken: "update lib" finds "Refactored imports from lib updates".
+    private static func messageMatches(in index: Index, needle: String) -> [Int] {
         var folded: [UInt8] = []
         appendFolded(needle, to: &folded)
-        // A subject has no newline: a query with one finds no subject (and must not match across two).
-        guard !folded.isEmpty, !folded.contains(0x0A) else { return [] }
+        let words = folded.split(separator: 0x20)
+        guard let first = words.first else { return [] }
+        var found = wordMatches(in: index, word: Array(first))
+        for word in words.dropFirst() where !found.isEmpty {
+            let hits = Set(wordMatches(in: index, word: Array(word)))
+            found = found.filter(hits.contains)
+        }
+        return Task.isCancelled ? [] : found
+    }
+
+    /// The commits whose folded message contains `word` (which holds no newline, so a hit never spans two messages):
+    /// one `memmem` per hit, the next search starting at the next message, so a message counts once.
+    private static func wordMatches(in index: Index, word: [UInt8]) -> [Int] {
         var found: [Int] = []
-        index.subjects.withUnsafeBytes { haystack in
-            folded.withUnsafeBytes { pattern in
+        index.messages.withUnsafeBytes { haystack in
+            word.withUnsafeBytes { pattern in
                 guard let base = haystack.baseAddress, let patternBase = pattern.baseAddress else { return }
                 var offset = 0
                 while offset < haystack.count {
@@ -118,7 +133,7 @@ public enum CommitSearch {
         return found
     }
 
-    /// The commit whose subject holds byte `position`: the last start at or before it.
+    /// The commit whose message holds byte `position`: the last start at or before it.
     private static func commitIndex(at position: Int, starts: [Int]) -> Int {
         var low = 0
         var high = starts.count
@@ -150,8 +165,8 @@ public enum CommitSearch {
         return result
     }
 
-    /// Appends `text` lowercased and without diacritics, as UTF-8: an ASCII text byte by byte (most subjects), any
-    /// other through Foundation's folding. Each run of word separators (spaces, tabs, `-`, `_`, `/`) becomes one
+    /// Appends `text` lowercased and without diacritics, as UTF-8: an ASCII text byte by byte (most messages), any
+    /// other through Foundation's folding. Each run of word separators (spaces, tabs, line breaks, `-`, `_`, `/`) becomes one
     /// space, so "urgent fix", "urgent-fix" and "URGENT_fix" find each other, as in GitKraken.
     fileprivate static func appendFolded(_ text: String, to bytes: inout [UInt8]) {
         let start = bytes.count
@@ -177,8 +192,9 @@ public enum CommitSearch {
                 let byte = read.pointee
                 read += 1
                 if byte >= 0x80, asciiOnly { return nil }
-                // Space, tab, "-", "_", "/".
-                if byte == 0x20 || byte == 0x09 || byte == 0x2D || byte == 0x5F || byte == 0x2F {
+                // Space, tab, line feed, carriage return, "-", "_", "/".
+                if byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D || byte == 0x2D || byte == 0x5F
+                    || byte == 0x2F {
                     if afterSeparator { continue }
                     afterSeparator = true
                     write.pointee = 0x20
