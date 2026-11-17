@@ -37,6 +37,11 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Pin to Left: a pinned branch keeps the graph's leftmost lane.
 - Hide Stale Branches (no commit for 90 days), from the Local and Remote cards' menus or the command palette.
 - An "N hidden · Show All" chip over the graph while branches are hidden or soloed.
+- Auto-stash: a checkout or pull with uncommitted changes asks Stash & Checkout, Carry Changes or Cancel (Stash & Pull or Cancel for a pull), with "Always do this"; Settings › General › Uncommitted changes sets Ask, Always stash or Never stash.
+- When stashed changes cannot all come back, they stay in the stash and a toast names it ("Changes kept in stash 1a2b3c4"); a pull stopped on conflicts brings them back on continue or abort.
+- Stash Changes in a file or folder from the WIP file menus; other staged files stay staged but are also saved in that stash.
+- Apply This File from a stash's file menu, which asks first when the file has local changes.
+- Undo of a Stash & Checkout whose stash held staged changes refuses, because bringing the stash back stages them again.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

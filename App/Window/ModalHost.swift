@@ -40,6 +40,8 @@ struct ModalHost: View {
     let model: WindowModel
     /// The modal layer's height, once laid out.
     @State private var layerHeight: CGFloat?
+    /// The auto-stash confirmation's "Always do this", unticked for each new one.
+    @State private var alwaysDo = false
 
     /// One modal at a time; a window modal first, then the shown tab's (only one of those is set in practice).
     private enum Shown {
@@ -120,6 +122,7 @@ struct ModalHost: View {
         }
         // The toolbar stays live above the scrim: the modal acts on the tab and page it opened on, so a change of
         // either cancels it.
+        .onChange(of: shown?.id) { alwaysDo = false }
         .onChange(of: model.selectedTabID) { old, _ in
             if let old, let session = model.sessions[old], session.hasModal { session.closeModals() }
             if model.modal != nil { model.closeModal() }
@@ -149,11 +152,15 @@ struct ModalHost: View {
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
-                              isDestructive: confirmation.isDestructive) {
-                session.confirmation = nil
-                session.run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+                              isDestructive: confirmation.isDestructive, secondary: confirmation.secondary?.button,
+                              always: confirmation.asksAlways ? $alwaysDo : nil) {
+                accept(confirmation, session, write: confirmation.write, remember: "always")
             } onCancel: {
                 session.confirmation = nil
+            } onSecondary: {
+                if let secondary = confirmation.secondary {
+                    accept(confirmation, session, write: secondary.write, remember: "never")
+                }
             }
         case .hostKey(let session, let check):
             HostKeySheet(session: session, check: check) { session.hostKeyCheck = nil }
@@ -172,6 +179,17 @@ struct ModalHost: View {
         case .conflictLeave(let session, let name):
             ConflictLeaveModal(session: session, fileName: name)
         }
+    }
+
+    /// Runs a confirmation's `write`; with "Always do this" ticked, stores `remember` as `PrefKey.autoStash` first.
+    private func accept(_ confirmation: OperationConfirmation, _ session: RepoSession, write: RepoSession.Write,
+                        remember: String)
+    {
+        if confirmation.asksAlways, alwaysDo {
+            Preferences.defaults.set(remember, forKey: PrefKey.autoStash.rawValue)
+        }
+        session.confirmation = nil
+        session.run(write, title: confirmation.operation, key: confirmation.key)
     }
 
     private func cancel(_ shown: Shown) {

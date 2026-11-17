@@ -100,6 +100,9 @@ enum PrefKey: String, CaseIterable {
     case avatarMode
     /// Pull button: a `GitOperations.PullMode` case name, "fastForward" (merge if needed), "fastForwardOnly" or "rebase".
     case pullMode
+    /// A checkout or pull with local changes: "ask" (the dialog), "always" (stash them first and put them back) or
+    /// "never" (a checkout carries them, a pull runs without `--autostash`).
+    case autoStash
     /// Auto-fetch interval in minutes; 0 = off.
     case autoFetchMinutes
     /// `fetch --prune` on every fetch.
@@ -174,6 +177,7 @@ enum PrefKey: String, CaseIterable {
         case .rowDensity: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"
+        case .autoStash: "ask"
         case .autoFetchMinutes: 3
         case .pruneOnFetch: false
         case .mergeTool: ""

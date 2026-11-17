@@ -130,7 +130,7 @@ struct WIPPanel: View {
                             },
                             menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                        busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
-                        ] + fileTools(file)
+                        ] + wipExtras(file) + fileTools(file)
                     }
                     .folderMenu { folder, files in
                         [
@@ -139,7 +139,7 @@ struct WIPPanel: View {
                             },
                             menuAction("Discard Changes in Folder…", busy: files.map { .discard($0.path) },
                                        destructive: true) { confirmDiscard(folder: folder, files) },
-                        ]
+                        ] + wipExtras(folder: folder, files)
                     }
                     .onSelectFile(selected: openWIPPath) { file in
                         session.selectFile(FileTarget(source: .wip, file: file))
@@ -175,15 +175,16 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [menuAction("Unstage File", busy: [.unstage(file.path)]) {
                             run([.unstage(Self.unstagePaths(file))], busy: [.unstage(file.path)], part: .staged)
-                        }] + fileTools(file)
+                        }] + wipExtras(file) + fileTools(file)
                     }
                     .folderButtons { _, files in
                         rowButton("minus.circle", help: "Unstage Folder", busy: files.map { .unstage($0.path) }) {
                             unstage(files)
                         }
                     }
-                    .folderMenu { _, files in
+                    .folderMenu { folder, files in
                         [menuAction("Unstage Folder", busy: files.map { .unstage($0.path) }) { unstage(files) }]
+                            + wipExtras(folder: folder, files)
                     }
                     .onSelectFile(selected: openWIPPath) { file in
                         session.selectFile(FileTarget(source: .wip, file: file))
@@ -280,6 +281,17 @@ struct WIPPanel: View {
         guard file.kind != .untracked else { return [] }
         return [.separator]
             + RepoMenus.fileTools(path: file.path, rev: nil, blame: file.kind != .deleted, session: session)
+    }
+
+    /// `RepoMenus.wipExtras` of a file row (not the conflicted card's: git cannot stash with unmerged files).
+    private func wipExtras(_ file: FileChange) -> [MenuEntry] {
+        RepoMenus.wipExtras(file, untracked: file.kind == .untracked, session: session)
+    }
+
+    /// `RepoMenus.wipExtras` of a folder row, for every change under `folder`.
+    private func wipExtras(folder: String, _ files: [FileChange]) -> [MenuEntry] {
+        RepoMenus.wipExtras(FileChange(kind: .modified, path: folder),
+                            untracked: files.allSatisfy { $0.kind == .untracked }, session: session)
     }
 
     /// Stages `files` (a folder's), each showing busy.

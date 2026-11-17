@@ -432,9 +432,9 @@ final class RepoSession: Identifiable {
         /// Selected lines of a diff (`PatchBuilder.patch`): staged, unstaged or discarded with `git apply`.
         case applyPatch(Data, PatchBuilder.Action)
 
-        case checkoutBranch(String)
+        case checkoutBranch(String, autostash: Bool = false)
         /// A local branch `localName` tracking the remote branch (`origin/x`), checked out.
-        case checkoutTracking(remoteBranch: String, as: String)
+        case checkoutTracking(remoteBranch: String, as: String, autostash: Bool = false)
         /// A detached HEAD.
         case checkoutCommit(String)
         case checkoutFiles([String], from: String)
@@ -443,7 +443,8 @@ final class RepoSession: Identifiable {
         case checkoutPullRequest(number: Int, remote: String)
 
         case fetchAll(prune: Bool)
-        case pull(GitOperations.PullMode)
+        /// `autostash`: `--autostash` (git stashes the local changes and puts them back after the pull).
+        case pull(GitOperations.PullMode, autostash: Bool = false)
         case push(branch: String, remote: String, remoteBranch: String?, setUpstream: Bool, forceWithLease: String?)
         case pushTag(String, remote: String)
         case pushMirror(remote: String)
@@ -477,11 +478,15 @@ final class RepoSession: Identifiable {
         case reset(to: String, mode: GitOperations.ResetMode)
 
         case stashPush(message: String?)
+        /// Only these paths (a WIP file or folder, untracked ones too); the whole index is recorded in the stash.
+        case stashPaths([String])
         /// By the stash's commit hash: its `stash@{n}` is looked up when it runs, so a stale index never hits
         /// another stash.
         case stashApply(hash: String)
         case stashPop(hash: String)
         case stashDrop(hash: String)
+        /// One file of a stash written to the working tree; `untracked`: from its untracked-files commit.
+        case stashRestoreFile(hash: String, path: String, untracked: Bool)
 
         /// Annotated when `message` is given.
         case createTag(String, at: String, message: String?)
@@ -3655,8 +3660,10 @@ final class RepoSession: Identifiable {
 
     /// Runs a user-initiated write of the WIP panel with the write environment (the login shell's PATH, for hooks
     /// and signing tools), off the main actor, then rereads the status and the refs (also when it failed: it may have
-    /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel.
-    func perform(_ write: Write) async throws {
+    /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel. Returns a pull's
+    /// outcome (`.autostashPending`: it stopped on conflicts with git holding the local changes).
+    @discardableResult
+    func perform(_ write: Write) async throws -> GitOperations.PullOutcome {
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
@@ -3674,14 +3681,24 @@ final class RepoSession: Identifiable {
                 removeRebaseFilesIfDone()
             }
         }
+        let outcome: GitOperations.PullOutcome
         do {
-            try await Self.run(write, profile: profile, backend: backend, cwd: url)
+            outcome = try await Self.run(write, profile: profile, backend: backend, cwd: url)
+        } catch GitError.autostashKept(let hash) where { if case .commit = write { true } else { false } }() {
+            // A commit that concluded a stopped pull is made (the WIP panel calls `perform`, not `run`).
+            postToast(.warning("Commit", detail: "Changes kept in stash \(hash.prefix(7))."))
+            outcome = .done
         } catch {
+            // A pull whose local changes stayed in a stash still pulled.
+            if case GitError.autostashKept = error, case .pull = write, lastNotUndoable != write.notUndoable {
+                lastNotUndoable = write.notUndoable
+            }
             await refreshAfterWrite()
             throw error
         }
         if lastNotUndoable != write.notUndoable { lastNotUndoable = write.notUndoable }
         await refreshAfterWrite()
+        return outcome
     }
 
     /// Waits for the reread to publish: the watcher may see the write's own changes and start a refresh that cancels
@@ -3694,8 +3711,12 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// Returns the pull's outcome (`.done` for every other write).
     @concurrent
-    private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws {
+    private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws
+        -> GitOperations.PullOutcome
+    {
+        var outcome = GitOperations.PullOutcome.done
         let base = await GitToolchain.writeBase()
         // The profile's GitHub token, from the Keychain off the main actor (cached), for network writes alone: their
         // operations hand it to git only when the gate lets them (`GitInvocation.networkToken`).
@@ -3719,9 +3740,9 @@ final class RepoSession: Identifiable {
             // `apply` takes the runner's write lane itself, like the operations.
             try await PatchBuilder.apply(patch, action: action, runner: backend.runner, cwd: cwd, env: environment)
 
-        case .checkoutBranch(let name): try await ops.checkout(branch: name)
-        case .checkoutTracking(let remoteBranch, let localName):
-            try await ops.checkoutTracking(remoteBranch: remoteBranch, as: localName)
+        case .checkoutBranch(let name, let autostash): try await ops.checkout(branch: name, autostash: autostash)
+        case .checkoutTracking(let remoteBranch, let localName, let autostash):
+            try await ops.checkoutTracking(remoteBranch: remoteBranch, as: localName, autostash: autostash)
         case .checkoutCommit(let revision): try await ops.checkout(commit: revision)
         case .checkoutFiles(let paths, let revision): try await ops.checkoutFiles(paths, from: revision)
         case .checkoutPullRequest(let number, let remote):
@@ -3729,7 +3750,7 @@ final class RepoSession: Identifiable {
             try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
-        case .pull(let mode): try await ops.pull(mode)
+        case .pull(let mode, let autostash): outcome = try await ops.pull(mode, autostash: autostash)
         case .push(let branch, let remote, let remoteBranch, let setUpstream, let lease):
             try await ops.push(
                 branch: branch, to: remote, as: remoteBranch, setUpstream: setUpstream, forceWithLease: lease)
@@ -3766,9 +3787,12 @@ final class RepoSession: Identifiable {
         case .reset(let revision, let mode): try await ops.reset(to: revision, mode: mode)
 
         case .stashPush(let message): try await ops.stashPush(message: message, includeUntracked: true)
-        case .stashApply(let hash): try await ops.stashApply(try await stashIndex(hash, backend: backend, cwd: cwd))
-        case .stashPop(let hash): try await ops.stashPop(try await stashIndex(hash, backend: backend, cwd: cwd))
-        case .stashDrop(let hash): try await ops.stashDrop(try await stashIndex(hash, backend: backend, cwd: cwd))
+        case .stashApply(let hash): try await ops.stashApply(hash)
+        case .stashPop(let hash): try await ops.stashPop(hash)
+        case .stashDrop(let hash): try await ops.stashDrop(hash)
+        case .stashPaths(let paths): try await ops.stashPush(message: nil, includeUntracked: true, paths: paths)
+        case .stashRestoreFile(let hash, let path, let untracked):
+            try await ops.stashRestoreFile(hash, path: path, untracked: untracked)
 
         case .createTag(let name, let revision, let message):
             try await ops.createTag(name, at: revision, message: message)
@@ -3802,14 +3826,7 @@ final class RepoSession: Identifiable {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try await ops.interactiveRebase(todo, files: folder)
         }
-    }
-
-    /// The current `stash@{n}` of the stash whose commit is `hash` (read environment); fails when it is gone.
-    private nonisolated static func stashIndex(_ hash: String, backend: Backend, cwd: URL) async throws -> Int {
-        let env = try await backend.readEnvironment(cwd: cwd)
-        let stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
-        guard let stash = stashes.first(where: { $0.hash == hash }) else { throw OperationError.stashGone }
-        return stash.index
+        return outcome
     }
 
     // MARK: Operations
@@ -3828,11 +3845,14 @@ final class RepoSession: Identifiable {
             // What a push, pull or fetch changed is read from the refs before it and after it.
             let refsBefore = refs.value
             do {
-                try await perform(write)
+                let outcome = try await perform(write)
                 // Started one (a rebase at an `edit` step), or Continue / Skip went on to the next stop.
                 let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }
                 let stopped = repoState?.isOperationInProgress == true && (!wasInProgress || resumes)
-                if stopped {
+                if outcome == .autostashPending {
+                    postToast(.warning("\(title) stopped on conflicts",
+                                       detail: "Changes come back after continue or abort."))
+                } else if stopped {
                     postToast(.stopped(title))
                 } else if case .applyPatch = write {
                     // Lines staged, unstaged or discarded from a diff: no success toast, as the WIP panel's files.
@@ -3840,6 +3860,9 @@ final class RepoSession: Identifiable {
                     postToast(.success(title, detail: OperationToast.outcome(of: write, before: refsBefore,
                                                                              after: refs.value)))
                 }
+            } catch GitError.autostashKept(let hash) {
+                // Not the error banner, and before any cancellation check: the changes may be only in that stash.
+                postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))
             } catch {
                 if !(error is CancellationError) {
                     let failure = OperationFailure(title: title, write: write, error: error,
@@ -3859,13 +3882,15 @@ final class RepoSession: Identifiable {
     }
 
     /// Asks for a confirmation before `write` (a destructive operation); `OperationDialogs` shows it, naming the
-    /// target, and runs the write on confirm.
+    /// target, and runs the write on confirm. `secondary`: a second button and its write; `asksAlways`: the auto-stash
+    /// dialog's "Always do this" (`OperationConfirmation.asksAlways`).
     func confirm(_ title: String, message: String, button: String, write: Write, operation: String,
-                 key: ActionBarAction? = nil, isDestructive: Bool = true)
+                 key: ActionBarAction? = nil, isDestructive: Bool = true,
+                 secondary: (button: String, write: Write)? = nil, asksAlways: Bool = false)
     {
         confirmation = OperationConfirmation(
             title: title, message: message, button: button, write: write, operation: operation, key: key,
-            isDestructive: isDestructive)
+            isDestructive: isDestructive, secondary: secondary, asksAlways: asksAlways)
     }
 
     /// The checked-out branch; nil on a detached HEAD or before the refs are read.
@@ -3975,16 +4000,6 @@ final class RepoSession: Identifiable {
         try HostKeyTrust(environment: await GitToolchain.writeBase()).trust(scan)
     }
 
-    private enum OperationError: LocalizedError {
-        case stashGone
-
-        var errorDescription: String? {
-            switch self {
-            case .stashGone: "That stash no longer exists."
-            }
-        }
-    }
-
     /// A short message for a failed write, shown in the card that started it.
     static func writeMessage(for error: Error) -> String {
         message(for: error)
@@ -4069,7 +4084,7 @@ final class RepoSession: Identifiable {
             case .invalidObjectID(let text): "\(text) is not a commit id."
             case .noPaths: "No files were given."
             case .invalidRefspec(let refspec): "\"\(refspec)\" is not a ref and a new branch name."
-            case .invalidStashIndex: "That stash no longer exists."
+            case .stashNotFound: "That stash no longer exists."
             case .invalidMainline(let parent): "A merge has no parent \(parent)."
             case .noOperationInProgress: "No merge, rebase, cherry-pick or revert is in progress."
             case .unsupported(let what): "Not supported: \(what)."

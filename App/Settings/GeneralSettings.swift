@@ -1,11 +1,12 @@
-// Settings › General: the default profile of new tabs, pulling and fetching, the operation toasts, the external merge
-// tool and the git executable. Each change is saved at once in `Preferences.defaults` (the default profile in the
-// profile store).
+// Settings › General: the default profile of new tabs, pulling and fetching (and auto-stash), the operation toasts,
+// the external merge tool and the git executable. Each change is saved at once in `Preferences.defaults` (the default
+// profile in the profile store).
 import HistqCore
 import SwiftUI
 
 struct GeneralSettings: View {
     @AppStorage(PrefKey.pullMode.rawValue, store: Preferences.defaults) private var pullMode = "fastForward"
+    @AppStorage(PrefKey.autoStash.rawValue, store: Preferences.defaults) private var autoStash = "ask"
     @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 3
     @AppStorage(PrefKey.pruneOnFetch.rawValue, store: Preferences.defaults) private var pruneOnFetch = false
     @AppStorage(PrefKey.mergeTool.rawValue, store: Preferences.defaults) private var mergeTool = ""
@@ -38,6 +39,16 @@ struct GeneralSettings: View {
                 } label: {
                     Text("Pull")
                     SettingsHint("What the toolbar's Pull button does.")
+                }
+                SettingsDivider()
+                LabeledContent {
+                    CapsuleTabs(selection: $autoStash, tabs: ["ask", "always", "never"],
+                                title: { Text(Self.autoStashTitle($0)) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Uncommitted changes")
+                    SettingsHint("On a checkout or pull. Always stash puts them in a stash first and brings them "
+                        + "back after. Never stash carries them to the other branch, and pulls as git does.")
                 }
                 SettingsDivider()
                 LabeledContent {
@@ -93,6 +104,14 @@ struct GeneralSettings: View {
         case "fastForwardOnly": "Fast-forward only"
         case "rebase": "Rebase"
         default: "Fast-forward if possible, else merge"
+        }
+    }
+
+    private static func autoStashTitle(_ value: String) -> String {
+        switch value {
+        case "always": "Always stash"
+        case "never": "Never stash"
+        default: "Ask"
         }
     }
 

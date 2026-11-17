@@ -4,8 +4,8 @@
 // the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…; hide, solo and pin in the
 // graph), the Local and Remote cards' Hide Stale Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
-// (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, and what a double-click
-// checks out.
+// (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, stash one WIP file or
+// folder, apply one file of a stash, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -171,6 +171,21 @@ enum RepoMenus {
                                 message: "Every staged and unstaged change is lost, and untracked files are deleted. This cannot be undone.",
                                 button: "Discard All", write: .discardAll(includingUntracked: true),
                                 operation: "Discard all changes")
+            },
+        ]
+    }
+
+    /// The WIP file and folder menus' entries `WIPPanel` does not build itself, after a separator: "Stash Changes in
+    /// <name>" (a folder: `file.path` is its path). `untracked`: the row's files are all untracked.
+    static func wipExtras(_ file: FileChange, untracked: Bool, session: RepoSession) -> [MenuEntry] {
+        // git cannot stash a path the index deletes (a staged deletion, a staged rename's old path): it saves the
+        // stash, then fails. So a rename is stashed by its new path and its old path's deletion stays staged.
+        let deletedInIndex = session.status.value?.entries.contains { $0.path == file.path && $0.index == .deleted }
+        guard deletedInIndex != true else { return [] }
+        return [
+            .separator,
+            .action("Stash Changes in \(file.name)") {
+                session.run(.stashPaths([file.path]), title: "Stash \(file.name)", key: .stash)
             },
         ]
     }
@@ -669,7 +684,7 @@ enum RepoMenus {
         switch item {
         case .local(let name):
             guard name != session.currentBranch else { return }
-            checkoutAskingIfDirty(.checkoutBranch(name), name: name, session)
+            checkoutAskingIfDirty(name: name, session) { .checkoutBranch(name, autostash: $0) }
         case .remote(let name):
             guard let branch = refs?.remoteBranches.first(where: { $0.name == name }) else { return }
             let localName = localName(of: branch)
@@ -678,7 +693,9 @@ enum RepoMenus {
             {
                 checkout(.local(local.name), session)
             } else {
-                checkoutAskingIfDirty(.checkoutTracking(remoteBranch: name, as: localName), name: localName, session)
+                checkoutAskingIfDirty(name: localName, session) {
+                    .checkoutTracking(remoteBranch: name, as: localName, autostash: $0)
+                }
             }
         case .tag(let name):
             guard let tag = refs?.tags.first(where: { $0.name == name }) else { return }
@@ -686,18 +703,25 @@ enum RepoMenus {
         }
     }
 
-    /// A checkout carries uncommitted changes to the other branch, or stops when they conflict with it, so a dirty
-    /// working tree asks first; a clean one checks out at once.
-    private static func checkoutAskingIfDirty(_ write: RepoSession.Write, name: String, _ session: RepoSession) {
+    /// A clean working tree checks out at once. With changes, `PrefKey.autoStash` picks: "always" stashes them first
+    /// and puts them back on the branch (`write(true)`), "never" carries them (`write(false)`: git stops when they
+    /// conflict and nothing changes), "ask" asks: Stash & Checkout, Carry Changes or Cancel, with "Always do this".
+    private static func checkoutAskingIfDirty(
+        name: String, _ session: RepoSession, _ write: (_ autostash: Bool) -> RepoSession.Write
+    ) {
         let title = "Checkout \(name)"
-        guard session.status.value?.entries.isEmpty == false else {
-            session.run(write, title: title, key: .checkout)
+        let preference = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue)
+        guard session.status.value?.entries.isEmpty == false, preference != "never" else {
+            session.run(write(false), title: title, key: .checkout)
             return
         }
+        if preference == "always" { return session.run(write(true), title: title, key: .checkout) }
         session.confirm("Checkout \(name) with uncommitted changes?",
-                        message: "Your changes are carried to \(name). If they conflict with it, the checkout stops "
-                            + "and nothing changes.",
-                        button: "Checkout", write: write, operation: title, key: .checkout, isDestructive: false)
+                        message: "Stash & Checkout puts your changes in a stash and brings them back on \(name). "
+                            + "Carry Changes takes them along as they are; if they conflict with \(name), the "
+                            + "checkout stops and nothing changes.",
+                        button: "Stash & Checkout", write: write(true), operation: title, key: .checkout,
+                        isDestructive: false, secondary: ("Carry Changes", write(false)), asksAlways: true)
     }
 
     /// The toolbar's branch menu: the local branches (the current one checked), then a Remote Branches submenu, each
@@ -768,6 +792,31 @@ enum RepoMenus {
         ] + tools
     }
 
+    /// A stash's file: "Apply This File" (confirmed when the file has local changes), then its File History and Blame
+    /// at the stash. Its untracked files come from the stash's untracked-files commit and have no history or blame.
+    static func stashFile(_ file: FileChange, stash hash: String, session: RepoSession) -> [MenuEntry] {
+        // "View all files" lists the files the stash did not change: nothing of the stash to apply.
+        guard file.kind != .unchanged else {
+            return fileTools(path: file.path, rev: hash, blame: true, session: session)
+        }
+        let untracked = file.kind == .untracked
+        let write = RepoSession.Write.stashRestoreFile(hash: hash, path: file.path, untracked: untracked)
+        let operation = "Apply \(file.name) from stash"
+        let apply = MenuEntry.action("Apply This File") {
+            let isChanged = session.status.value?.entries.contains { $0.path == file.path } ?? false
+            if isChanged {
+                session.confirm("Replace \(file.name) with its version from the stash?",
+                                message: "Its unstaged changes are lost.", button: "Apply File",
+                                write: write, operation: operation)
+            } else {
+                session.run(write, title: operation)
+            }
+        }
+        guard !untracked else { return [apply] }
+        return [apply, .separator]
+            + fileTools(path: file.path, rev: hash, blame: file.kind != .deleted, session: session)
+    }
+
     /// "File History" and "Blame" of a tracked file at `rev` (nil: HEAD's history, the working tree's blame), shown in
     /// panel2. `blame` false leaves Blame out (a deleted file has no lines to blame).
     static func fileTools(path: String, rev: String?, blame: Bool = true, session: RepoSession) -> [MenuEntry] {
@@ -789,6 +838,7 @@ enum RepoMenus {
     /// DEBUG `-HistqRun "<menu>|<title>[|<title>…][;;<next>…]"`: picks menu items by title and runs them, one step after
     /// the other, as a click would (a confirmation is accepted; forms are not supported). `<menu>` is `wip`,
     /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `remotes`, `file:<sha>:<path>`,
+    /// `wipfile:<path>` (a WIP file's `wipExtras`), `stashfile:<sha>:<path>` (a tracked file of a stash),
     /// `drop:<local|remote>:<name>><local|remote>:<name>` or `branches` (the toolbar's branch menu). Each step's
     /// outcome goes to `operations.txt` in the state folder. For QA on fixture copies only.
     static func debugRun(_ spec: String, session: RepoSession) async {
@@ -854,6 +904,15 @@ enum RepoMenus {
             let file = value.split(separator: ":", maxSplits: 1).map(String.init)
             guard file.count == 2 else { return [] }
             return checkoutFile(FileChange(kind: .modified, path: file[1]), commit: file[0], session: session)
+        case "wipfile":
+            let entry = session.status.value?.entries.first { $0.path == value }
+            let untracked = entry?.kind == .untracked
+            let file = FileChange(kind: untracked ? .untracked : .modified, path: value, originalPath: entry?.originalPath)
+            return wipExtras(file, untracked: untracked, session: session)
+        case "stashfile":
+            let file = value.split(separator: ":", maxSplits: 1).map(String.init)
+            guard file.count == 2 else { return [] }
+            return stashFile(FileChange(kind: .modified, path: file[1]), stash: file[0], session: session)
         case "drop":
             let ends = value.components(separatedBy: ">").map(debugItem)
             guard ends.count == 2, let source = ends[0], let target = ends[1] else { return [] }
