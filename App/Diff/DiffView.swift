@@ -1,9 +1,12 @@
 // A file's diff in panel2, in place of the graph (Esc or the back button returns to it), each part in its own card:
 // the header (back, the file, its status, +N −M, Diff / Full file), then one card per side of the change (a WIP file's
 // Unstaged and Staged changes, a commit's changes), or a card that says why there are no lines (binary, too large, no
-// change). The diff loads off the main actor; until then the cards are skeletons.
+// change). An image whose diff is binary shows its versions before and after the change instead of lines. The diff
+// loads off the main actor; until then the cards are skeletons.
 import HistqCore
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A file whose diff panel2 shows: a WIP file (its unstaged and staged changes) or a file of a commit or a stash.
 struct FileTarget: Hashable, Sendable {
@@ -17,6 +20,46 @@ struct FileTarget: Hashable, Sendable {
     let file: FileChange
 
     var path: String { file.path }
+
+    /// A raster image by its extension (SVG is text: it keeps its line diff). Its binary diff shows as images.
+    var isImage: Bool {
+        guard let type = UTType(filenameExtension: (path as NSString).pathExtension) else { return false }
+        return type.conforms(to: .image) && !type.conforms(to: .svg)
+    }
+}
+
+/// An image decoded off the main actor, with the size of its file.
+struct DiffImage: @unchecked Sendable {
+    /// Immutable, so safe to share across actors.
+    let image: CGImage
+    let byteCount: Int
+
+    /// Full size, turned upright by its EXIF orientation (a phone photo). Nil for no data or data ImageIO cannot decode.
+    nonisolated init?(data: Data?) {
+        guard let data, let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: max(width, height),
+                  kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary)
+        else { return nil }
+        self.image = image
+        byteCount = data.count
+    }
+}
+
+/// One card of an image's diff: the image before and after the change on one side (nil where that side has no file,
+/// such as an added or deleted image, or where it does not decode).
+struct ImageDiffSide: Sendable, Identifiable {
+    let side: DiffSide
+    let before: DiffImage?
+    let after: DiffImage?
+
+    var id: DiffSide { side }
 }
 
 /// Hunks with git's context, or the whole file with its changes marked.
@@ -36,6 +79,8 @@ struct FileDiffDetail: Sendable {
     enum Content: Sendable {
         /// One card per side with changes.
         case sections([DiffSection])
+        /// An image's versions, one card per side with changes.
+        case images([ImageDiffSide])
         case binary
         /// Over `RepoSession.fileSizeLimit`: the largest side's size in bytes.
         case tooLarge(Int)
@@ -82,7 +127,7 @@ struct DiffView: View {
                         token: session.fileToken, detail: session.fileDetail,
                         isCurrent: { [model, session] in model.selectedSession === session && session.openFile != nil }
                     ) {
-                        DiffPlaceholder()
+                        if target.isImage { ImageDiffPlaceholder() } else { DiffPlaceholder() }
                     }
                 case .loaded(let detail):
                     DiffContent(session: session, detail: detail)
@@ -150,9 +195,12 @@ private struct DiffHeaderCard: View {
                         .help("Replace the file in the working tree with this commit's version")
                 }
                 counts(detail)
-                CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
-                            compact: true)
-                    .fixedSize()
+                // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
+                if !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true {
+                    CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
+                                compact: true)
+                        .fixedSize()
+                }
             }
             // As tall as the compact tabs' padded track (24 pt pills inset 4 pt), the sidebar's look.
             .frame(height: 32)
@@ -194,6 +242,12 @@ private struct DiffContent: View {
                 }
                 if sections.allSatisfy({ $0.rows(session.diffMode).isEmpty }) {
                     Spacer(minLength: 0)
+                }
+            }
+        case .images(let sides):
+            VStack(spacing: SectionCardMetrics.spacing) {
+                ForEach(sides) { side in
+                    ImageDiffCard(side: side)
                 }
             }
         case .binary:
@@ -249,6 +303,103 @@ private struct DiffContent: View {
             return "Mode changed from \(old) to \(new)."
         }
         return section.side == .file ? "Empty file." : "No line changes."
+    }
+}
+
+/// One side of an image's diff: Before and After next to each other, or one above the other when that shows them
+/// larger (a narrow, tall panel2), one pane when the file exists on one side only. Each image is scaled down to fit,
+/// never up, over a checkerboard that shows transparency.
+private struct ImageDiffCard: View {
+    let side: ImageDiffSide
+
+    private static let spacing: CGFloat = 12
+    /// A pane's label row and the gap under it.
+    private static let labelHeight: CGFloat = 24
+
+    var body: some View {
+        SectionCard(side.side.title, systemImage: side.side.systemImage) {
+            GeometryReader { proxy in
+                let layout = Self.stacks(side, in: proxy.size)
+                    ? AnyLayout(VStackLayout(spacing: Self.spacing))
+                    : AnyLayout(HStackLayout(alignment: .top, spacing: Self.spacing))
+                layout {
+                    if let before = side.before {
+                        ImagePane(title: "Before", tint: Color(nsColor: Palette.diffRemovedSign), image: before)
+                    }
+                    if let after = side.after {
+                        ImagePane(title: side.side == .file ? "This version" : "After",
+                                  tint: side.side == .file ? nil : Color(nsColor: Palette.diffAddedSign), image: after)
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
+        }
+    }
+
+    /// Whether Before and After show larger one above the other than side by side in `size`: the smaller of their two
+    /// scales decides. A single image never stacks.
+    private static func stacks(_ side: ImageDiffSide, in size: CGSize) -> Bool {
+        guard let before = side.before?.image, let after = side.after?.image else { return false }
+        func scale(_ width: CGFloat, _ height: CGFloat) -> CGFloat {
+            [before, after].map { image in
+                min(1, max(0, width) / CGFloat(image.width), max(0, height - labelHeight) / CGFloat(image.height))
+            }.min() ?? 0
+        }
+        let sideBySide = scale((size.width - spacing) / 2, size.height)
+        let stacked = scale(size.width, (size.height - spacing) / 2)
+        return stacked > sideBySide
+    }
+}
+
+/// A label (Before or After, the pixel size and the file size) centered above the image.
+private struct ImagePane: View {
+    let title: String
+    let tint: Color?
+    let image: DiffImage
+
+    var body: some View {
+        let width = image.image.width
+        let height = image.image.height
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.settingsCaption.weight(.semibold))
+                    .foregroundStyle(tint ?? .secondary)
+                Text("\(width) × \(height) · "
+                     + ByteCountFormatter.string(fromByteCount: Int64(image.byteCount), countStyle: .file))
+                    .font(.settingsCaption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            // One image pixel per point, as a browser shows it; smaller when the pane is.
+            Image(decorative: image.image, scale: 1)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .background(Checkerboard())
+                .overlay { Rectangle().strokeBorder((tint ?? Color.secondary).opacity(0.6), lineWidth: 1) }
+                .frame(maxWidth: CGFloat(width), maxHeight: CGFloat(height), alignment: .top)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title): \(width) by \(height) pixels")
+    }
+}
+
+/// Grey squares behind an image, so its transparent parts show.
+private struct Checkerboard: View {
+    var body: some View {
+        Canvas { context, size in
+            let cell: CGFloat = 8
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.4)))
+            var squares = Path()
+            for row in 0 ..< Int((size.height / cell).rounded(.up)) {
+                for column in stride(from: row % 2, to: Int((size.width / cell).rounded(.up)), by: 2) {
+                    squares.addRect(CGRect(x: CGFloat(column) * cell, y: CGFloat(row) * cell, width: cell, height: cell))
+                }
+            }
+            context.fill(squares, with: .color(Color(white: 0.55)))
+        }
     }
 }
 
@@ -309,6 +460,25 @@ private struct DiffPlaceholder: View {
                 // The loaded cards fill panel2: so does their skeleton.
                 .frame(maxHeight: .infinity, alignment: .top)
             }
+        }
+    }
+}
+
+/// An image diff's skeleton: one card with two image boxes side by side.
+private struct ImageDiffPlaceholder: View {
+    var body: some View {
+        SectionCard("Changes", systemImage: "photo", countIsLoading: true) {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(0 ..< 2, id: \.self) { _ in
+                    VStack(alignment: .leading, spacing: 8) {
+                        SkeletonLine(width: 120, height: 10)
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Palette.skeletonFill)
+                            .frame(maxWidth: .infinity, maxHeight: 240)
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
         }
     }
 }

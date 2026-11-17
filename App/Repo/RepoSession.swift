@@ -2018,12 +2018,31 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// The diff of `target` (`readLineDiff`), off the main actor; an image git calls binary, or whose diff has no lines
+    /// (a pure rename, a mode change), shows its versions instead.
+    @concurrent
+    private nonisolated static func readFileDiff(
+        _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, loadID: Int
+    ) async throws -> FileDiffDetail {
+        let detail = try await readLineDiff(
+            backend, cwd: cwd, target: target, ignoresSizeLimit: ignoresSizeLimit, loadID: loadID)
+        let hasNoLines = switch detail.content {
+        case .binary: true
+        case .sections(let sections): sections.allSatisfy { $0.rows.isEmpty }
+        default: false
+        }
+        guard hasNoLines, target.isImage else { return detail }
+        let env = try await backend.readEnvironment(cwd: cwd)
+        guard let images = await imageSides(of: target, runner: backend.runner, cwd: cwd, env: env) else { return detail }
+        return FileDiffDetail(loadID: loadID, content: .images(images))
+    }
+
     /// The diff of `target` with the read environment (no textconv, no external diff, no filters), off the main actor:
     /// a WIP file's unstaged and staged changes, or a commit's changes against its first parent. Each comes twice, with
     /// git's context (Diff mode) and with the whole file as context (Full file mode, and the syntax state of every
     /// line). Untracked files are read from disk.
     @concurrent
-    private nonisolated static func readFileDiff(
+    private nonisolated static func readLineDiff(
         _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, loadID: Int
     ) async throws -> FileDiffDetail {
         if case .commit(let hash) = target.source, !GitOperations.isObjectID(hash) {
@@ -2112,25 +2131,68 @@ final class RepoSession: Identifiable {
         return size
     }
 
-    /// An untracked file has no git diff: its lines read from disk, all added (display only). The entry is opened
-    /// without following a symlink and without blocking, and only a regular file is read, so a planted link or FIFO
-    /// cannot point the read at a device; a symlink shows its target, which is what git would stage.
-    private nonisolated static func untrackedContent(_ path: String, cwd: URL, language: Language?) throws
-        -> FileDiffDetail.Content
-    {
+    /// The versions of an image on each side with changes, decoded: a WIP file's unstaged side (index → working tree)
+    /// and staged side (HEAD → index), each when its two versions differ; a commit's change against its first parent
+    /// (a stash's untracked file has no before); an untracked file, or a file the commit did not change, alone. A side
+    /// without the file (added, deleted, a root commit) has no image there. Nil when nothing decodes.
+    private nonisolated static func imageSides(
+        of target: FileTarget, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async -> [ImageDiffSide]? {
+        let file = target.file
+        let oldPath = file.originalPath ?? file.path
+        // A missing object (exit 128) or a missing working-tree file reads as no version.
+        func blob(_ revision: String, _ path: String) async -> Data? {
+            try? await DiffReader.file(at: revision, path: path, runner: runner, cwd: cwd, env: env)
+        }
+        func worktree() -> Data? { (try? worktreeData(file.path, cwd: cwd)) ?? nil }
+        var versions: [(side: DiffSide, before: Data?, after: Data?)] = []
+        switch target.source {
+        case .wip where file.kind == .untracked:
+            versions = [(.untracked, nil, worktree())]
+        case .wip:
+            let head = await blob("HEAD", oldPath)
+            let index = await blob("", file.path)
+            let work = worktree()
+            if index != work { versions.append((.unstaged, index, work)) }
+            if head != index { versions.append((.staged, head, index)) }
+        case .commit(let hash) where file.kind == .unchanged:
+            versions = [(.file, nil, await blob(hash, file.path))]
+        case .commit(let hash) where file.kind == .untracked:
+            versions = [(.commit, nil, await blob("\(hash)^3", file.path))]
+        case .commit(let hash):
+            let before = file.kind == .added ? nil : await blob("\(hash)^", oldPath)
+            let after = file.kind == .deleted ? nil : await blob(hash, file.path)
+            versions = [(.commit, before, after)]
+        }
+        let sides = versions
+            .map { ImageDiffSide(side: $0.side, before: DiffImage(data: $0.before), after: DiffImage(data: $0.after)) }
+            .filter { $0.before != nil || $0.after != nil }
+        return sides.isEmpty ? nil : sides
+    }
+
+    /// A working-tree file's bytes, read without following a symlink and without blocking, and only from a regular
+    /// file, so a planted link or FIFO cannot point the read at a device; a symlink gives its target, which is what git
+    /// would stage. Nil for anything else (a FIFO, a directory).
+    private nonisolated static func worktreeData(_ path: String, cwd: URL) throws -> Data? {
         let fullPath = cwd.appending(path: path, directoryHint: .notDirectory).path
-        let data: Data
         let fd = open(fullPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         if fd >= 0 {
             let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             var info = stat()
-            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .unchanged }
-            data = try handle.readToEnd() ?? Data()
+            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return nil }
+            return try handle.readToEnd() ?? Data()
         } else if errno == ELOOP {
-            data = Data(try FileManager.default.destinationOfSymbolicLink(atPath: fullPath).utf8)
+            return Data(try FileManager.default.destinationOfSymbolicLink(atPath: fullPath).utf8)
         } else {
             throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: fullPath])
         }
+    }
+
+    /// An untracked file has no git diff: its lines read from disk (`worktreeData`), all added (display only).
+    private nonisolated static func untrackedContent(_ path: String, cwd: URL, language: Language?) throws
+        -> FileDiffDetail.Content
+    {
+        guard let data = try worktreeData(path, cwd: cwd) else { return .unchanged }
         // git's own test: a NUL in the first 8000 bytes makes a file binary.
         if data.prefix(8000).contains(0) { return .binary }
         return .sections([DiffSection(untracked: data, language: language)])
