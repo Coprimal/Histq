@@ -473,7 +473,8 @@ private struct CommitBox: View {
                 AIHookButton(title: "Generate Message", systemImage: "sparkles",
                              help: "Write a commit message for the staged changes with AI",
                              unavailable: stagedCount == 0 ? "Stage changes first" : nil, seam: "generate") {
-                    session.startAI(.commitMessage)
+                    let summaryOnly = Preferences.defaults.bool(forKey: PrefKey.aiCommitSummaryOnly.rawValue)
+                    session.startAI(.commitMessage(summaryOnly: summaryOnly))
                 }
             }
         }

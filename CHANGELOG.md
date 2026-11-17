@@ -27,6 +27,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Conflict editor: Save with unresolved conflicts asks whether to Save Output (write and stage it) or Create Conflict Chunks (write git's conflict markers, the file stays conflicted).
 - Conflict editor: a save prompt when you leave the editor with unsaved choices, and Reset in the Output pane.
 - Toasts at the bottom right after a push, pull, fetch, commit or other operation, saying whether it worked or failed, and what a push, pull or fetch changed (or that there was nothing to do). They close after a few seconds or with their x; Settings › General › Notifications shows all, errors only or none.
+- Settings › AI › Commit messages: Summary only (Generate Message writes the summary line and keeps your description) and Custom instructions, added to the prompt and followed over its default style.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

@@ -10,7 +10,8 @@ import SwiftUI
 
 /// What an AI button asks for.
 enum AIJob: Equatable, Sendable {
-    case commitMessage
+    /// `summaryOnly`: Settings › AI › Summary only, taken at the click (Apply then keeps the description).
+    case commitMessage(summaryOnly: Bool)
     /// `message`: the commit's subject and body.
     case explainCommit(hash: String, message: String)
     case explainWorkingChanges
@@ -230,7 +231,8 @@ struct AIResultSheet: View {
 
     private var applyHelp: String {
         switch run.job {
-        case .commitMessage: "Fill the commit box's summary and description"
+        case .commitMessage(let summaryOnly):
+            summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
         default: ""
         }
@@ -328,8 +330,8 @@ struct AIResultSheet: View {
     private func apply() {
         guard let answer = run.answer else { return }
         switch run.job {
-        case .commitMessage:
-            session.applyAICommitMessage(answer)
+        case .commitMessage(let summaryOnly):
+            session.applyAICommitMessage(answer, summaryOnly: summaryOnly)
             onClose()
         case .resolution(let target):
             if let error = session.applyAIResolution(answer, to: target) {

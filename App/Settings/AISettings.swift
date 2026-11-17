@@ -199,6 +199,10 @@ struct AISettings: View {
     private var responseLanguage = "english"
     @AppStorage(PrefKey.aiCommitLanguage.rawValue, store: Preferences.defaults)
     private var commitLanguage = "english"
+    @AppStorage(PrefKey.aiCommitSummaryOnly.rawValue, store: Preferences.defaults)
+    private var commitSummaryOnly = false
+    @AppStorage(PrefKey.aiCommitInstructions.rawValue, store: Preferences.defaults)
+    private var commitInstructions = ""
 
     private enum TestState: Equatable {
         case idle
@@ -219,13 +223,15 @@ struct AISettings: View {
 
     var body: some View {
         SettingsPageGate(section: .ai, isLoaded: setup.keysLoaded) {
+            languageGroup
+            commitMessageGroup
             providerGroup
             providerDetailsGroup
-            languageGroup
         } skeleton: {
             SettingsSkeletonGroup(rows: 2)
-            SettingsSkeletonGroup(rows: 4)
             SettingsSkeletonGroup(rows: 2)
+            SettingsSkeletonGroup(rows: 2)
+            SettingsSkeletonGroup(rows: 4)
         }
         .onChange(of: model.settingsToken, initial: true) {
             if model.settingsSection == .ai { setup.reloadKeys() }
@@ -494,7 +500,39 @@ struct AISettings: View {
         }
     }
 
-    /// The fixed language list (no free text goes into the prompt); an unknown stored value shows as English.
+    // MARK: Commit messages
+
+    private var commitMessageGroup: some View {
+        SettingsGroup("Commit messages") {
+            SettingsSwitchRow(title: "Summary only",
+                              hint: "Generate Message writes the summary line only and keeps your description.",
+                              isOn: $commitSummaryOnly)
+            SettingsDivider()
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Custom instructions")
+                    SettingsHint("Added to Histq's prompt for Generate Message and followed over its default style. "
+                        + "Sent to the provider with the staged diff.")
+                }
+                TextEditor(text: $commitInstructions)
+                    .font(.body)
+                    .settingsTextEditor()
+                    .frame(height: 88)
+                    .overlay(alignment: .topLeading) {
+                        if commitInstructions.isEmpty {
+                            Text(verbatim: "Use Conventional Commits: type(scope): summary")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 8)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .accessibilityLabel("Custom instructions")
+            }
+        }
+    }
+
+    /// The fixed language list; an unknown stored value shows as English.
     private func languagePicker(_ label: String, selection: Binding<String>) -> some View {
         let current = AIResponseLanguage(rawValue: selection.wrappedValue) ?? .english
         return CapsuleMenuPicker(label: label,

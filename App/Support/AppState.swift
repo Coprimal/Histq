@@ -153,6 +153,10 @@ enum PrefKey: String, CaseIterable {
     case aiResponseLanguage
     /// The language of the AI commit messages (Generate Message): an `AIResponseLanguage` raw value.
     case aiCommitLanguage
+    /// Generate Message writes the summary line only, no description.
+    case aiCommitSummaryOnly
+    /// The user's own instructions added to the Generate Message prompt (empty: none).
+    case aiCommitInstructions
     /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
     case toastLevel
 
@@ -188,6 +192,8 @@ enum PrefKey: String, CaseIterable {
         case .aiCustomBaseURL: ""
         case .aiResponseLanguage: "english"
         case .aiCommitLanguage: "english"
+        case .aiCommitSummaryOnly: false
+        case .aiCommitInstructions: ""
         case .toastLevel: "all"
         }
     }

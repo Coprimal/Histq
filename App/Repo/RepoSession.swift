@@ -2295,9 +2295,11 @@ final class RepoSession: Identifiable {
         aiRun = run
         let url = url
         let languages = Self.aiLanguages()
+        let instructions = Preferences.defaults.string(forKey: PrefKey.aiCommitInstructions.rawValue) ?? ""
         run.start { [weak self] in
             guard let backend = try await self?.backend() else { throw CancellationError() }
-            return try await Self.aiPrompt(job, backend: backend, cwd: url, languages: languages)
+            return try await Self.aiPrompt(job, backend: backend, cwd: url, languages: languages,
+                                           instructions: instructions)
         }
     }
 
@@ -2317,18 +2319,20 @@ final class RepoSession: Identifiable {
     }
 
     /// The job's prompt: the staged, WIP or commit diff read with the read environment (never a profile), cut to the
-    /// prompt's budget. A resolution's text was taken at the click; it is never translated.
+    /// prompt's budget. `instructions` (Settings › AI) go only into a commit message's prompt. A resolution's text
+    /// was taken at the click; it is never translated.
     @concurrent
     private nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
-        languages: (response: AIResponseLanguage, commit: AIResponseLanguage)
+        languages: (response: AIResponseLanguage, commit: AIResponseLanguage), instructions: String
     ) async throws -> AIPrompt {
         switch job {
-        case .commitMessage:
+        case .commitMessage(let summaryOnly):
             let env = try await backend.readEnvironment(cwd: cwd)
             let diff = try await DiffReader.patchText(.staged, runner: backend.runner, cwd: cwd, env: env)
             guard !diff.isEmpty else { throw AIJobError.nothingStaged }
-            return AIPrompts.commitMessage(stagedDiff: diff, language: languages.commit)
+            return AIPrompts.commitMessage(stagedDiff: diff, language: languages.commit, summaryOnly: summaryOnly,
+                                           instructions: instructions)
         case .explainCommit(let hash, let message):
             guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
             let env = try await backend.readEnvironment(cwd: cwd)
@@ -2348,13 +2352,15 @@ final class RepoSession: Identifiable {
     }
 
     /// Apply of a commit message: its first line is the summary, the rest (after the blank line) the description.
-    func applyAICommitMessage(_ message: String) {
+    /// With `summaryOnly`, only the summary is filled and the description the user typed stays.
+    func applyAICommitMessage(_ message: String, summaryOnly: Bool) {
         var lines = message.split(separator: "\n", omittingEmptySubsequences: false).map {
             $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
         }
         let summary = lines.isEmpty ? "" : lines.removeFirst().trimmingCharacters(in: .whitespaces)
         while lines.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeFirst() }
         commitDraft.summary = summary
+        guard !summaryOnly else { return }
         commitDraft.description = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

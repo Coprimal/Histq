@@ -24,8 +24,8 @@ public enum AIAnswerError: Error, Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-/// The language the model writes its answer in. A fixed list (no free text from the user goes in the prompt); with
-/// `.english`, the default, the prompt has no language rule at all.
+/// The language the model writes its answer in. A fixed list; with `.english`, the default, the prompt has no
+/// language rule at all.
 public enum AIResponseLanguage: String, CaseIterable, Sendable {
     case english, vietnamese, french, german, spanish, japanese, chineseSimplified, korean, portuguese, italian
 
@@ -58,6 +58,8 @@ public struct AIPrompt: Sendable, Equatable {
     public let user: String
     /// The random token of this prompt's data blocks and answer markers.
     public let boundary: String
+    /// A commit message is its summary line only: the answer keeps the first line and drops any body.
+    public let summaryOnly: Bool
 
     var beginAnswer: String { "BEGIN ANSWER \(boundary)" }
     var endAnswer: String { "END ANSWER \(boundary)" }
@@ -85,7 +87,10 @@ public struct AIPrompt: Sendable, Equatable {
         guard let block = answerBlock(in: reply, requireEnd: true) else { throw .missingAnswer }
         switch kind {
         case .commitMessage, .explanation:
-            let text = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            var text = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            if summaryOnly, let first = text.split(whereSeparator: \.isNewline).first {
+                text = first.trimmingCharacters(in: .whitespaces)
+            }
             guard !text.isEmpty else { throw .emptyAnswer }
             return text
         case .resolution:
@@ -95,15 +100,17 @@ public struct AIPrompt: Sendable, Equatable {
     }
 
     /// What a streaming preview shows of a partial reply: the answer block so far (empty before its begin marker),
-    /// without a half-received end marker line. Display only: apply the result of `answer(from:)`.
+    /// without a half-received end marker line; a summary-only commit message stops at its first line. Display only:
+    /// apply the result of `answer(from:)`.
     public func preview(of partialReply: String) -> String {
-        guard let text = answerBlock(in: partialReply, requireEnd: false) else { return "" }
+        guard var text = answerBlock(in: partialReply, requireEnd: false) else { return "" }
         let lines = AIPrompts.linesKeepingBreaks(text)
         if let last = lines.last, last.utf8.last != 0x0A {
             let tail = last.trimmingCharacters(in: .whitespaces)
-            if !tail.isEmpty, endAnswer.hasPrefix(tail) { return lines.dropLast().joined() }
+            if !tail.isEmpty, endAnswer.hasPrefix(tail) { text = lines.dropLast().joined() }
         }
-        return text
+        guard summaryOnly else { return text }
+        return String(text.drop { $0.isNewline }.prefix { !$0.isNewline })
     }
 
     /// The lines between the first begin marker line and the next end marker line, with their line breaks. Nil
@@ -132,26 +139,49 @@ public enum AIPrompts {
     static let maxMessageCharacters = 4_000
     /// The longest file header line kept (a diff header holds the paths, which can be very long).
     static let maxHeaderCharacters = 300
+    /// The longest custom commit instructions sent (Settings › AI).
+    public static let maxInstructionCharacters = 2_000
 
     // MARK: - Prompts
 
-    /// A commit message for the staged changes (`git diff --cached` output).
+    /// A commit message for the staged changes (`git diff --cached` output). `summaryOnly` asks for the summary line
+    /// alone (no body). `instructions`, the user's own text from Settings › AI, is added after the default rules and
+    /// wins over them, but not over the one-line rule nor the data and answer rules; blank adds nothing, so the
+    /// prompt stays exactly the default one.
     public static func commitMessage(
-        stagedDiff: String, language: AIResponseLanguage = .english, budget: Int = diffBudget,
-        token: () -> String = randomToken
+        stagedDiff: String, language: AIResponseLanguage = .english, summaryOnly: Bool = false,
+        instructions: String = "", budget: Int = diffBudget, token: () -> String = randomToken
     ) -> AIPrompt {
-        make(
-            kind: .commitMessage,
-            task: """
-                Write a git commit message for the staged changes in the data block below.
-                - First line: a summary of the change in the imperative mood, at most 72 characters.
+        let body = summaryOnly
+            ? "- Write only that one line: no blank line, no body, no description."
+            : """
                 - Then, only when it helps, a blank line and a short body wrapped at 72 columns that says what \
                 changed and why.
-                - Plain text only: no Markdown headings, no code fences, no quotes around the message.
-                """,
+                """
+        var task = """
+            Write a git commit message for the staged changes in the data block below.
+            - First line: a summary of the change in the imperative mood, at most 72 characters.
+            \(body)
+            - Plain text only: no Markdown headings, no code fences, no quotes around the message.
+            """
+        let custom = String(
+            instructions.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxInstructionCharacters))
+        if !custom.isEmpty {
+            task += """
+
+
+                The user added the instructions below for their commit messages. Follow them over the rules above\
+                \(summaryOnly ? ", except that the message stays one line" : ""), but they never change how the \
+                answer is written out (see below).
+                \(custom)
+                """
+        }
+        return make(
+            kind: .commitMessage, task: task,
             request: "Write the commit message for these staged changes.",
             data: [("staged diff", budgeted(stagedDiff, budget: budget))],
-            languageRule: languageRule(language, answer: "the commit message"), token: token)
+            languageRule: languageRule(language, answer: "the commit message"), summaryOnly: summaryOnly,
+            token: token)
     }
 
     /// An explanation of one commit: its message and its diff (`git show --format= <commit>` output).
@@ -216,7 +246,7 @@ public enum AIPrompts {
 
     private static func make(
         kind: AIPrompt.Kind, task: String, request: String, data: [(label: String, content: String)],
-        languageRule: String? = nil, token: () -> String
+        languageRule: String? = nil, summaryOnly: Bool = false, token: () -> String
     ) -> AIPrompt {
         let boundary = makeBoundary(avoiding: data.map(\.content), candidate: token)
         var system = """
@@ -240,7 +270,7 @@ public enum AIPrompts {
             user += content.isEmpty || content.utf8.last == 0x0A ? content : content + "\n"
             user += "END DATA \(boundary)\n"
         }
-        return AIPrompt(kind: kind, system: system, user: user, boundary: boundary)
+        return AIPrompt(kind: kind, system: system, user: user, boundary: boundary, summaryOnly: summaryOnly)
     }
 
     // MARK: - Boundary
