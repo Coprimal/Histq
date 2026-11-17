@@ -160,7 +160,9 @@ enum RepoMenus {
     }
 
     static func wip(_ session: RepoSession) -> [MenuEntry] {
-        [
+        // A leading separator is dropped when there is no Compare (`MenuEntry.tidy`).
+        compareSelection(.wip, session) + [
+            .separator,
             .action("Stash All Changes") { session.run(.stashPush(message: nil), title: "Stash", key: .stash) },
             .separator,
             .action("Discard All Changes…", destructive: true) {
@@ -204,7 +206,10 @@ enum RepoMenus {
         entries.append(.action("Checkout This Commit (Detached)…", enabled: !(isHead && current == nil)) {
             confirmDetached(hash, label: short, session)
         })
+        entries.append(.separator)
+        entries += compareSelection(.commit(hash), session)
         entries += [
+            .action("Compare with Working Tree") { session.selectCompare(base: hash, head: nil) },
             .separator,
             .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
             .action("Create Tag Here…") { session.dialog = .createTag(at: hash, label: short) },
@@ -251,6 +256,31 @@ enum RepoMenus {
         return entries
     }
 
+    /// "Compare" for the clicked row of a 2-row selection that `comparePair` accepts; else nothing.
+    private static func compareSelection(_ item: GraphItem, _ session: RepoSession) -> [MenuEntry] {
+        guard session.graphSelection.contains(item), let pair = comparePair(session) else { return [] }
+        return [.action("Compare") { session.selectCompare(base: pair.base, head: pair.head) }]
+    }
+
+    /// What a 2-row selection compares (the rule of `MultipleSelectionCard`'s Compare button): the older of two
+    /// commits (lower in the log) with the newer, or a commit with the working tree (the WIP row); nil for any other
+    /// selection (a stash, a commit not in the log).
+    static func comparePair(_ session: RepoSession) -> (base: String, head: String?)? {
+        let items = session.graphSelection
+        guard items.count == 2 else { return nil }
+        switch (items[0], items[1]) {
+        case (.wip, .commit(let hash)), (.commit(let hash), .wip):
+            return (hash, nil)
+        case (.commit(let first), .commit(let second)):
+            guard let index = session.log.value?.commitIndex, let a = index[first], let b = index[second] else {
+                return nil
+            }
+            return a > b ? (first, second) : (second, first)
+        default:
+            return nil
+        }
+    }
+
     /// The local branches, remote branches and tags at `hash`, in the badge column's order.
     private static func refItems(at hash: String, refs: Refs?) -> [SidebarItem] {
         guard let refs else { return [] }
@@ -287,6 +317,9 @@ enum RepoMenus {
                 },
                 .action("Rebase \(current) onto \(name)") {
                     session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
+                },
+                .action("Compare with Current Branch") {
+                    session.selectCompare(base: "refs/heads/\(current)", head: ref)
                 },
             ]
         }
@@ -336,6 +369,9 @@ enum RepoMenus {
                 },
                 .action("Rebase \(current) onto \(name)") {
                     session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
+                },
+                .action("Compare with Current Branch") {
+                    session.selectCompare(base: "refs/heads/\(current)", head: ref)
                 },
             ]
         }

@@ -31,6 +31,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Image files (PNG, JPEG, GIF, HEIC, WebP…) show their versions before and after the change, side by side, instead of "Binary file", for commits, staged and unstaged changes and untracked files.
 - File History: every commit that changed a file, with Follow renames, from a file's context menu or the diff header's History button; a row opens the file's diff at that commit.
 - Blame: who last changed each line of a file, at a commit or in the working tree, from a file's context menu or the diff header's Blame button.
+- Compare two commits or branches, or a commit with the working tree, from a 2-row selection and from the branch and commit menus.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

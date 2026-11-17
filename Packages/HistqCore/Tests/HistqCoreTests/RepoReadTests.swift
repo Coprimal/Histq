@@ -190,4 +190,48 @@ struct RepoReadTests {
         #expect(config.count == 1)
         #expect(config.first.map { "\($0.additions)\t\($0.deletions)\tsrc/config.swift" } == numstat)
     }
+
+    @Test("compare arguments keep revisions after --end-of-options and paths after --; a nil head is one revision")
+    func compareArguments() throws {
+        let args = DiffReader.compareArguments(base: "--output=x", head: "main", paths: ["-rf"], context: nil)
+        #expect(args.first == "--literal-pathspecs")
+        let end = try #require(args.firstIndex(of: "--end-of-options"))
+        #expect(Array(args[(end + 1)...]) == ["--output=x", "main", "--", "-rf"])
+        let worktree = DiffReader.compareArguments(base: "HEAD", head: nil, paths: ["docs/*.md"], context: 3)
+        #expect(worktree.suffix(4) == ["--end-of-options", "HEAD", "--", "docs/*.md"])
+        #expect(worktree.contains("-U3") && worktree.contains("--no-ext-diff") && worktree.contains("--no-textconv"))
+
+        let files = DiffReader.compareFilesArguments(base: "--output=x", head: "main")
+        #expect(files.first == "diff" && files.suffix(4) == ["--end-of-options", "--output=x", "main", "--"])
+        for flag in ["--no-relative", "--no-color", "-z", "-M", "--name-status", "--no-ext-diff", "--no-textconv"] {
+            #expect(files.firstIndex(of: flag).map { $0 < files.count - 4 } == true, "\(flag)")
+        }
+        #expect(DiffReader.compareFilesArguments(base: "HEAD", head: nil).suffix(3) == ["--end-of-options", "HEAD", "--"])
+    }
+
+    @Test("compare reads two commits like diff-tree, and the working tree without untracked files")
+    func compareReadsCommitsAndWorktree() async throws {
+        let graph = try await Graph()
+        defer { graph.copy.remove() }
+        let expected = try await graph.copy.git(
+            ["diff-tree", "-r", "--name-only", "--no-commit-id", "v1.0^1", "v1.0"], in: graph.repo
+        ).split(separator: "\n").map(String.init)
+        try #require(!expected.isEmpty)
+        let list = try await DiffReader.compareFiles(
+            base: "v1.0^1", head: "v1.0", runner: graph.runner, cwd: graph.repo, env: graph.env)
+        let fields = list.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+        #expect(stride(from: 1, to: fields.count, by: 2).map { fields[$0] } == expected)
+
+        let config = try await DiffReader.compare(
+            base: "v1.0^1", head: "v1.0", runner: graph.runner, cwd: graph.repo, env: graph.env,
+            paths: ["src/config.swift"])
+        let numstat = try await graph.copy.git(
+            ["diff", "--numstat", "v1.0^1", "v1.0", "--", "src/config.swift"], in: graph.repo)
+        #expect(config.first.map { "\($0.additions)\t\($0.deletions)\tsrc/config.swift" } == numstat)
+
+        let worktree = try await DiffReader.compareFiles(
+            base: "HEAD", head: nil, runner: graph.runner, cwd: graph.repo, env: graph.env)
+        let paths = Set(worktree.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
+        #expect(paths.contains("README.md") && !paths.contains("untracked.txt"))
+    }
 }

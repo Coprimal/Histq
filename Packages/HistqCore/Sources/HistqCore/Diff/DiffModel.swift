@@ -185,6 +185,25 @@ public enum DiffReader {
             commitArguments(revision, paths: paths, context: context), runner: runner, cwd: cwd, env: env)
     }
 
+    /// `base` against `head` (two commit-ishes), or against the working tree when `head` is nil. A worktree compare
+    /// leaves untracked files out (`git diff <base>` only sees tracked ones). `paths` takes a rename's both paths.
+    public static func compare(
+        base: String, head: String?, runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [],
+        context: Int? = nil
+    ) async throws -> [FileDiff] {
+        try await load(
+            compareArguments(base: base, head: head, paths: paths, context: context), runner: runner, cwd: cwd,
+            env: env)
+    }
+
+    /// The files `compare` diffs, as git's raw `--name-status -z` output (the app parses it like a commit's file
+    /// list). Untracked files are not part of a worktree compare.
+    public static func compareFiles(
+        base: String, head: String?, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async throws -> Data {
+        try await run(compareFilesArguments(base: base, head: head), runner: runner, cwd: cwd, env: env).stdout
+    }
+
     /// The bytes of `path` (root-relative) at `revision`: a commit-ish such as a hash or `HEAD`, `""` for
     /// the index, or `":2"`/`":3"` for a conflict stage. Content is raw (no textconv, no filters).
     public static func file(
@@ -235,6 +254,18 @@ public enum DiffReader {
         ["--literal-pathspecs", "diff-tree", "-r", "-p", "--root", "--diff-merges=first-parent", "--no-commit-id"]
             + formatOptions
             + contextOption(context) + ["--end-of-options", revision, "--"] + paths
+    }
+
+    /// `head` nil passes `base` only: git diffs it against the working tree.
+    public static func compareArguments(base: String, head: String?, paths: [String], context: Int?) -> [String] {
+        ["--literal-pathspecs", "diff"] + formatOptions + contextOption(context)
+            + ["--end-of-options", base] + (head.map { [$0] } ?? []) + ["--"] + paths
+    }
+
+    /// `--no-relative` so the listed paths match `compare`'s paths when the repo sets `diff.relative`.
+    public static func compareFilesArguments(base: String, head: String?) -> [String] {
+        ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--name-status", "-z", "-M",
+         "--end-of-options", base] + (head.map { [$0] } ?? []) + ["--"]
     }
 
     static func fileArguments(at revision: String, path: String) -> [String] {

@@ -374,6 +374,8 @@ final class RepoSession: Identifiable {
         case ref(SidebarItem)
         /// Another worktree's changes (its graph row), by its path.
         case worktree(String)
+        /// `base` against `head` (commit hashes or ref names), or against the working tree when `head` is nil.
+        case compare(base: String, head: String?)
     }
 
     /// The loaded detail of a selection; the views read `status`, `refs` and `log` for its values.
@@ -387,6 +389,8 @@ final class RepoSession: Identifiable {
         case multiple(Int)
         /// Another worktree's changes, read-only: its path and its status.
         case worktree(String, WorkingStatus)
+        /// A compare's files (`base` against `head`, nil for the working tree; untracked files left out).
+        case compare(base: String, head: String?, files: [FileChange])
 
         /// False for a commit whose files are still loading.
         var isReady: Bool {
@@ -1160,6 +1164,15 @@ final class RepoSession: Identifiable {
         select(selection)
     }
 
+    /// Compares `base` with `head` (nil: the working tree) now, in the click's frame: the detail shows its placeholder
+    /// until the files are read. The graph keeps its selected rows.
+    func selectCompare(base: String, head: String?) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectCompare(base: base, head: head) }) { return }
+        let selection = Selection.compare(base: base, head: head)
+        UITiming.select(timingDetail(selection))
+        select(selection)
+    }
+
     /// A blame gutter's click: selects commit `hash` like a graph click (its row, panel3's detail), but panel2 keeps
     /// the open tool.
     func selectKeepingTool(_ hash: String) {
@@ -1229,6 +1242,7 @@ final class RepoSession: Identifiable {
         case .multiple(let count): "commits \(count)"
         case .worktree(let path): "worktree-wip \(URL(filePath: path).lastPathComponent)"
         case .ref(let item): item.timingDetail
+        case .compare(let base, let head): "compare \(base) \(head ?? "worktree")"
         }
     }
 
@@ -1270,6 +1284,9 @@ final class RepoSession: Identifiable {
                 loaded = .multiple(count)
             case .worktree(let path):
                 loaded = .worktree(path, try await Self.readWorktreeStatus(backend, path: path))
+            case .compare(let base, let head):
+                loaded = .compare(base: base, head: head,
+                                  files: try await Self.readCompareFiles(backend, cwd: url, base: base, head: head))
             case .ref(let item):
                 if refs.value == nil, try await readStatusAndRefs(backend, scope: [.status, .refs]) {
                     loadLog(backend)
@@ -1407,7 +1424,7 @@ final class RepoSession: Identifiable {
             // Its graph row goes once it is clean, removed or unreadable.
             guard worktrees.value != nil else { return }
             vanished = !dirtyWorktrees.contains { $0.path == path }
-        case .overview, .multiple, .ref:
+        case .overview, .multiple, .ref, .compare:
             return
         }
         guard vanished else { return }
@@ -2300,6 +2317,14 @@ final class RepoSession: Identifiable {
             let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
                                       language: language)
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
+        case .compare(let base, let head):
+            // Read-only like a commit's changes (no hunk buttons).
+            async let diff = DiffReader.compare(base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths)
+            async let diffFull = DiffReader.compare(
+                base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+            let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
+                                      language: language)
+            return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         }
     }
 
@@ -2329,6 +2354,15 @@ final class RepoSession: Identifiable {
             case .untracked: ["\(hash)^3:\(file.path)"]
             case .unchanged: ["\(hash):\(file.path)"]
             default: ["\(hash):\(file.path)", "\(hash)^:\(oldPath)"]
+            }
+        case .compare(let base, let head):
+            if let head {
+                objects = ["\(head):\(file.path)", "\(base):\(oldPath)"]
+            } else {
+                let attributes = try? FileManager.default.attributesOfItem(
+                    atPath: cwd.appending(path: file.path, directoryHint: .notDirectory).path)
+                size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+                objects = ["\(base):\(oldPath)"]
             }
         }
         for object in objects {
@@ -2374,6 +2408,12 @@ final class RepoSession: Identifiable {
         case .commit(let hash):
             let before = file.kind == .added ? nil : await blob("\(hash)^", oldPath)
             let after = file.kind == .deleted ? nil : await blob(hash, file.path)
+            versions = [(.commit, before, after)]
+        case .compare(let base, let head):
+            let before = file.kind == .added ? nil : await blob(base, oldPath)
+            let after: Data? = if file.kind == .deleted { nil } else if let head { await blob(head, file.path) } else {
+                worktree()
+            }
             versions = [(.commit, before, after)]
         }
         let sides = versions
@@ -3280,6 +3320,17 @@ final class RepoSession: Identifiable {
             files += untracked.filter { !known.contains($0.path) }.map { FileChange(kind: .untracked, path: $0.path) }
         }
         return files
+    }
+
+    /// The files of a compare (`base` against `head`, nil for the working tree), off the main actor. Untracked files are
+    /// not part of it.
+    @concurrent
+    private nonisolated static func readCompareFiles(_ backend: Backend, cwd: URL, base: String, head: String?)
+        async throws -> [FileChange]
+    {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        return parseNameStatus(
+            try await DiffReader.compareFiles(base: base, head: head, runner: backend.runner, cwd: cwd, env: env))
     }
 
     /// Every file of commit `commit`'s tree (its Files card's "View all files"), path order: the changed ones as

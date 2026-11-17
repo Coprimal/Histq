@@ -104,7 +104,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | --- | --- |
 | `-HistqStateDir <dir>` | Keeps files, logs and session state in `<dir>`; uses the QA preferences suite and Keychain service. |
 | `-HistqBackground YES` | Never activates the app; windows stay behind others and are never key. |
-| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
+| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `commits:<sha>,<sha\|wip>` (full shas), `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
 | `-HistqSelectWalk <n>[,<ms>]` | Selects the first n commits `ms` apart (default 250), walks back up, then logs `walk done`. |
 | `-HistqSelectAfter <path>` | Then selects that WIP file (with or without `-HistqResolve`), to drive the conflict editor's leave prompt. |
 | `-HistqWindowSize <w>x<h>` / `-HistqTabbedWindows <n>` | Size of new windows; spreads the repositories over n native-tab windows. |

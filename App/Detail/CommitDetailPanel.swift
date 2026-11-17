@@ -134,16 +134,18 @@ private struct MessageBox: ViewModifier {
     }
 }
 
-/// The commit detail's Files card, loaded or not: the count (a skeleton while nil), the search, all-files and
-/// paths/tree buttons, and a body that takes the panel's height left under the info card. The search button opens a
-/// field at the body's top, and `content` gets its query (empty while closed). Logs its edges (`FilesLayoutLog`) as
-/// `state`.
-private struct CommitFilesCard<Content: View>: View {
+/// The commit detail's Files card (a compare's too), loaded or not: the count (a skeleton while nil), the search,
+/// all-files and paths/tree buttons, and a body that takes the panel's height left under the info card. The search
+/// button opens a field at the body's top, and `content` gets its query (empty while closed). Logs its edges
+/// (`FilesLayoutLog`) as `state`.
+struct CommitFilesCard<Content: View>: View {
     let count: Int?
     let token: Int
     let detail: String
     /// `placeholder`, `pending` (a header from the log, files loading) or `loaded`.
     let state: String
+    /// False leaves the all-files button out (a compare has no single tree).
+    var allFilesButton = true
     @ViewBuilder let content: (_ query: String) -> Content
     @State private var isSearching = false
     @State private var query = ""
@@ -180,7 +182,7 @@ private struct CommitFilesCard<Content: View>: View {
                 .buttonStyle(RowIconButtonStyle())
                 .help(isSearching ? "Close Search" : "Search Files")
                 .accessibilityLabel(isSearching ? "Close search" : "Search files")
-                AllFilesToggle()
+                if allFilesButton { AllFilesToggle() }
                 FileListModeToggle()
             }
         }
@@ -285,14 +287,23 @@ struct FilesLayoutLog: ViewModifier {
     }
 }
 
-/// Several graph rows selected.
+/// Several graph rows selected. Two commits, or the WIP row and a commit, get a Compare button.
 struct MultipleSelectionCard: View {
+    let session: RepoSession
     let count: Int
 
     var body: some View {
         SectionCard("Selection", systemImage: "square.stack.3d.up") {
             Text("\(count) commits selected")
                 .font(.body.weight(.medium))
+        } accessory: {
+            if let pair = RepoMenus.comparePair(session) {
+                Button("Compare") {
+                    session.selectCompare(base: pair.base, head: pair.head)
+                }
+                .buttonStyle(RowTextButtonStyle())
+                .help(pair.head == nil ? "Compare the commit with the working tree" : "Compare the two commits")
+            }
         }
     }
 }

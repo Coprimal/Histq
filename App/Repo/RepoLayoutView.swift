@@ -338,8 +338,8 @@ private struct SkeletonCommitRows: View {
 
 // MARK: - Panel 3: the detail
 
-/// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection count, or the
-/// overview cards (an unborn branch). Until it loads, the selection's cards hold skeleton rows (`PlaceholderCard`:
+/// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection count, a compare, or
+/// the overview cards (an unborn branch). Until it loads, the selection's cards hold skeleton rows (`PlaceholderCard`:
 /// spinner after 150 ms, the `placeholder` line); then the `content` line. A commit of the log skips the placeholder:
 /// its header shows in the click's frame (`content-info`), its files once read (`content`). All carry
 /// `session.selectDetail`.
@@ -390,9 +390,12 @@ private struct DetailPanel: View {
         case .commit, .stash, .ref:
             CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
         case .multiple(let count):
-            MultipleSelectionCard(count: count)
+            MultipleSelectionCard(session: session, count: count)
         case .worktree(let path):
             WorktreeChangesPlaceholder(path: path)
+        case .compare(let base, let head):
+            CompareDetailPanel(session: session, base: base, head: head, files: nil, token: session.selectToken,
+                               timingDetail: session.selectDetail)
         case .overview:
             if session.status.value?.entries.isEmpty == true {
                 CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
@@ -415,9 +418,12 @@ private struct DetailPanel: View {
             CommitDetailPanel(session: session, commit: commit, token: session.selectToken,
                               timingDetail: session.selectDetail)
         case .multiple(let count):
-            MultipleSelectionCard(count: count)
+            MultipleSelectionCard(session: session, count: count)
         case .worktree(let path, let status):
             WorktreeChangesPanel(path: path, status: status)
+        case .compare(let base, let head, let files):
+            CompareDetailPanel(session: session, base: base, head: head, files: files, token: session.selectToken,
+                               timingDetail: session.selectDetail)
         case .overview:
             ScrollView {
                 OverviewCards(branch: branch, path: session.url.path, commits: commits, status: session.status.value)

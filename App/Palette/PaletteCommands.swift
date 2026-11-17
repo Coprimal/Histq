@@ -189,7 +189,11 @@ enum PaletteCommands {
         }
         // The open diff's file: the header's File History and Blame (`DiffHeaderCard`).
         if let target = session.openFile, !target.isConflict, target.file.kind != .untracked {
-            let rev: String? = if case .commit(let hash) = target.source { hash } else { nil }
+            let rev: String? = switch target.source {
+            case .wip: nil
+            case .commit(let hash): hash
+            case .compare(_, let head): head
+            }
             snapshot.add(RepoMenus.fileTools(path: target.path, rev: rev,
                                              blame: target.file.kind != .deleted && !target.isImage, session: session),
                          detail: "File \((target.path as NSString).lastPathComponent)", systemImage: "doc.text")

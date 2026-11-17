@@ -872,6 +872,22 @@ final class WindowModel {
                 return
             }
             session.selectGraph([.commit(hash)])
+        case .commits:
+            // `commits:<sha>,<sha|wip>[,…]`: several rows selected at once, as a shift- or cmd-click does, once the
+            // refs and the log are in (a multi-selection's detail reads neither, so a first select would leave the
+            // sidebar unread).
+            guard let session = selectedSession, let value = request.value else {
+                Self.logger.error("-HistqSelect commits: no repo tab or no commits")
+                return
+            }
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.refs.value != nil, session.log.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                session?.selectGraph(value.split(separator: ",").map { $0 == "wip" ? .wip : .commit(String($0)) })
+            }
         case .file:
             guard let session = selectedSession, let path = request.value else {
                 Self.logger.error("-HistqSelect file: no repo tab or no path")

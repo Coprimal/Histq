@@ -8,12 +8,15 @@ import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A file whose diff panel2 shows: a WIP file (its unstaged and staged changes) or a file of a commit or a stash.
+/// A file whose diff panel2 shows: a WIP file (its unstaged and staged changes), a file of a commit or a stash, or a
+/// file of a compare.
 struct FileTarget: Hashable, Sendable {
     enum Source: Hashable, Sendable {
         case wip
         /// A commit or a stash, by its hash.
         case commit(String)
+        /// A file of a compare, read-only: `base` against `head` (nil for the working tree).
+        case compare(base: String, head: String?)
     }
 
     let source: Source
@@ -315,9 +318,14 @@ private struct DiffHeaderCard: View {
         .accessibilityLabel(help)
     }
 
-    /// The commit of a commit's or stash's file; nil for a WIP file (HEAD's history, the working tree's blame).
+    /// The commit of a commit's or stash's file, a compare's head; nil for a WIP file or a compare with the working
+    /// tree (HEAD's history, the working tree's blame).
     private var rev: String? {
-        if case .commit(let hash) = target.source { hash } else { nil }
+        switch target.source {
+        case .wip: nil
+        case .commit(let hash): hash
+        case .compare(_, let head): head
+        }
     }
 
     /// Where Back and close return: the tool the diff was opened from, else the graph.
