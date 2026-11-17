@@ -59,9 +59,9 @@ struct SavedTab: Codable, Equatable, Sendable {
     /// The tab is pinned; nil reads as false, and an unpinned tab is written as nil so files stay small. Absent from
     /// files of older builds.
     var pinned: Bool?
-    /// The pinned tab's circle color, an index into `Palette.graphLanes`; kept when the tab is unpinned, so pinning it
-    /// again shows the same color. Absent from files of older builds.
-    var pinColor: Int?
+    /// The tab's book icon color (its menu's Icon Color), an index into `Palette.graphLanes`; nil for the default.
+    /// Absent from files of older builds.
+    var iconColor: Int?
 }
 
 /// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).

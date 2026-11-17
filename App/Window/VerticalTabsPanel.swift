@@ -159,7 +159,8 @@ private struct VerticalTabList: View {
         let profile = model.profile(of: tab)
         let group = layout.groupKey[index]
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
-        return VerticalTabRow(title: tab.title, systemImage: Self.icon(of: tab), emoji: tab.emoji,
+        return VerticalTabRow(title: tab.title, systemImage: TabIcon.symbol(of: tab), emoji: tab.emoji,
+                              iconColor: tab.iconColor,
                               help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color, profileName: profile?.name,
                               groupName: group.map(RepoGroupKey.name(of:)),
                               selected: selected, dragged: dragged, namespace: namespace,
@@ -215,12 +216,6 @@ private struct VerticalTabList: View {
                     model.moveTab(from: dragFrom, to: dragTarget)
                 }
             }
-    }
-
-    /// The toolbar's repo icon for a repo tab; a missing repo and a Welcome tab get their own.
-    private static func icon(of tab: WindowModel.Tab) -> String {
-        if tab.isMissing { return "questionmark.folder" }
-        return tab.repoURL == nil ? "plus.square.dashed" : "book.closed"
     }
 
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
@@ -298,6 +293,8 @@ private struct VerticalTabRow: View {
     let systemImage: String
     /// The tab's emoji (`WindowModel.Tab.emoji`), shown instead of `systemImage`; nil for none.
     let emoji: String?
+    /// The symbol's color (`TabIcon.tint`); nil for the text's color.
+    let iconColor: Int?
     let help: String
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
@@ -358,43 +355,18 @@ private struct VerticalTabRow: View {
         .accessibilityAction(.default, onSelect)
     }
 
-    /// The tab's icon in the rows' 20 pt slot, with the profile's dot on its lower trailing corner: the emoji with
-    /// `TabIcon`'s white-ringed dot, else the symbol with a dot ringed in the panel's color so it reads over the glyph.
-    @ViewBuilder private var icon: some View {
-        if let emoji {
-            TabIcon(emoji: emoji, circleColor: nil, profileColor: profileColor, profileName: profileName)
-                .frame(width: 20)
-                .accessibilityHidden(true)
-        } else {
-            symbol
-        }
-    }
-
-    /// The symbol in the 20 pt slot, with its own profile dot.
-    private var symbol: some View {
-        Image(systemName: systemImage)
-            .foregroundStyle(selected ? Color.primary : Color.secondary)
+    /// The tab's icon (`TabIcon`: the emoji, else the symbol in its color) in the rows' 20 pt slot, with the profile's
+    /// white-ringed dot on its lower trailing corner.
+    private var icon: some View {
+        TabIcon(emoji: emoji, symbol: systemImage, tint: TabIcon.tint(iconColor, selected: selected),
+                profileColor: profileColor, profileName: profileName)
             .frame(width: 20)
-            .overlay(alignment: .bottomTrailing) {
-                if let profileColor {
-                    Circle()
-                        .fill(ProfileColors.color(profileColor))
-                        .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
-                        .overlay(Circle().strokeBorder(Palette.bgCard, lineWidth: 1.5))
-                        // A 3 pt margin to hover for the profile's name; the offset keeps the dot where it was.
-                        .padding(3)
-                        .contentShape(Rectangle())
-                        .help("Profile \(profileName ?? "")")
-                        .offset(x: 5, y: 5)
-                        .accessibilityHidden(true)
-                }
-            }
             .accessibilityHidden(true)
     }
 }
 
 /// The pinned tabs (`WindowModel.pinnedCount`, first in `tabs`) as a grid of icon cells above the rows, about 4 to a
-/// row: each its `TabIcon` (the emoji, else its circle) with the profile's dot. The selected cell sits on the sheet's
+/// row: each its `TabIcon` (the emoji, else its book) with the profile's dot. The selected cell sits on the sheet's
 /// color, a hovered one on a subtle fill; a grouped tab has its group's color as a bar under its icon. A press selects
 /// on mouse-down; the cells do not reorder (the top strip does) and a pinned group does not collapse here.
 private struct VerticalPinnedGrid: View {
@@ -423,7 +395,8 @@ private struct VerticalPinnedGrid: View {
         let profile = model.profile(of: tab)
         let group = model.tabGroups.first { $0.range.contains(index) }?.key
         let path = tab.repoURL?.path
-        return VerticalPinnedCell(title: tab.title, emoji: tab.emoji, pinColor: tab.pinColor,
+        return VerticalPinnedCell(title: tab.title, emoji: tab.emoji, symbol: TabIcon.symbol(of: tab),
+                                  iconColor: tab.iconColor,
                                   profileColor: profile?.color, profileName: profile?.name,
                                   groupName: group.map(RepoGroupKey.name(of:)),
                                   groupColor: group.map(TabGroupColors.line),
@@ -454,8 +427,9 @@ private struct VerticalPinnedGrid: View {
 private struct VerticalPinnedCell: View {
     let title: String
     let emoji: String?
-    /// The circle's color (`TabIcon.circleColor`) when the tab has no emoji.
-    let pinColor: Int?
+    /// The symbol shown without an emoji (`TabIcon.symbol(of:)`) and its color (`TabIcon.tint`).
+    let symbol: String
+    let iconColor: Int?
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
@@ -471,7 +445,7 @@ private struct VerticalPinnedCell: View {
     }
 
     var body: some View {
-        TabIcon(emoji: emoji, circleColor: emoji == nil ? TabIcon.circleColor(pinColor) : nil,
+        TabIcon(emoji: emoji, symbol: symbol, tint: TabIcon.tint(iconColor, selected: selected),
                 profileColor: profileColor, profileName: profileName)
             .accessibilityHidden(true)
             .frame(maxWidth: .infinity)

@@ -4,7 +4,7 @@ import AppKit
 import SwiftUI
 
 /// Sizes of the tab strip. The unpinned tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the
-/// row scrolls. A pinned tab is `pinnedTabWidth` wide. The vertical tabs (`VerticalTabsPanel`) use the same drag threshold, slot and dot.
+/// row scrolls. A pinned tab is `pinnedTabWidth` wide. The vertical tabs (`VerticalTabsPanel`) use the same drag threshold, slot and icon.
 enum TabStripMetrics {
     /// Tall enough that New Tab and the tab list sit inside the row, clear of the sheet under it.
     static let tabHeight: CGFloat = 34
@@ -24,10 +24,8 @@ enum TabStripMetrics {
     static let maxTabWidth: CGFloat = 200
     /// The close button's square, and the matching empty slot before the title that keeps it centered.
     static let slot: CGFloat = 16
-    /// The profile color dot before the tab's name.
-    static let dot: CGFloat = 8
-    /// The square a tab's emoji or a pinned tab's circle fills (`TabIcon`): the same as `slot`, so an emoji takes the
-    /// slot before the name and the name stays centered.
+    /// The square a tab's emoji or book fills (`TabIcon`): the same as `slot`, so the icon takes the slot before the
+    /// name and the name stays centered.
     static let icon: CGFloat = 16
     /// A pinned tab: its icon alone. At least 2 × `tabRadius`, so the selected tab's top arcs (`TabSheetShape`) fit.
     static let pinnedTabWidth: CGFloat = 44
@@ -215,8 +213,9 @@ private struct TabTrack: View {
         let profile = model.profile(of: tab)
         let group = layout.groupKey[index]
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
-        return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji, pinned: tab.pinned,
-                       pinColor: tab.pinColor, profileColor: profile?.color,
+        return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji,
+                       symbol: TabIcon.symbol(of: tab), pinned: tab.pinned, iconColor: tab.iconColor,
+                       profileColor: profile?.color,
                        profileName: profile?.name, groupName: group.map(RepoGroupKey.name(of:)),
                        groupColor: group.map(TabGroupColors.line),
                        selected: selected, dragged: dragged, namespace: namespace,
@@ -285,8 +284,9 @@ private struct TabTrack: View {
 
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
 /// Tabs to the Right (Below), each off when it has no tab to close, then Reveal in Finder (the tab's repo or worktree
-/// folder; off for a Welcome tab or a missing folder), Set Alias…, Set Emoji… and Pin Tab / Unpin Tab (Pin Group /
-/// Unpin Group for a tab of a worktree group, which pins with it), these three off for a Welcome tab.
+/// folder; off for a Welcome tab or a missing folder), Set Alias…, Set Emoji…, Icon Color (the book's) and Pin Tab /
+/// Unpin Tab (Pin Group / Unpin Group for a tab of a worktree group, which pins with it), these four off for a Welcome
+/// tab.
 @MainActor
 enum TabMenu {
     static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
@@ -313,10 +313,29 @@ enum TabMenu {
             .action("Set Emoji…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to mark.") {
                 model.presentModal(.tabEmoji(tabID: id))
             },
+            isRepo ? .submenu("Icon Color", iconColors(id, tab, model))
+                : .action("Icon Color", enabled: false, toolTip: "A new tab has no repository to mark.") {},
             .action(pinTitle, enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to pin.") {
                 model.setPinned(!tab.pinned, for: id)
             },
         ] + profile(id, tab, revealable, model)
+    }
+
+    /// The names of `Palette.graphLanes`, in order, for the Icon Color menu.
+    private static let iconColorNames = ["Blue", "Orange", "Green", "Pink", "Cyan", "Yellow", "Purple", "Red"]
+
+    /// The Icon Color menu: Default (the text's color), then each lane color with its dot; the tab's own is checked.
+    private static func iconColors(_ id: WindowModel.Tab.ID, _ tab: WindowModel.Tab, _ model: WindowModel)
+        -> [MenuEntry]
+    {
+        let colors = ProfileColors.hexes.indices.map { index in
+            MenuEntry.action(iconColorNames.indices.contains(index) ? iconColorNames[index] : "Color \(index + 1)",
+                             checked: tab.iconColor == index, image: ProfilePicker.dot(hex: ProfileColors.hexes[index])) {
+                [weak model] in model?.setIconColor(index, for: id)
+            }
+        }
+        return [.action("Default", checked: tab.iconColor == nil) { [weak model] in model?.setIconColor(nil, for: id) },
+                .separator] + colors
     }
 
     /// The tab's profiles, as the toolbar chip lists them, so a tab switches without being selected first. Only for a
@@ -410,19 +429,20 @@ private struct TabGroupLine: Shape {
     }
 }
 
-/// One tab: its name with its profile's color dot right before it, centered and cut with "…", and a close button
-/// while hovered. A tab with an emoji shows it in the slot before the name (the name alone stays centered), with the
-/// profile dot on the emoji's corner. A pinned tab shows only its icon (`TabIcon`: the emoji, else its circle), with no
-/// close button; its tooltip carries the name.
+/// One tab: its icon (`TabIcon`: the emoji, else the book) in the slot before its name, with the profile's color dot on
+/// the icon's corner; the name centered (the close button's slot balances the icon's) and cut with "…", and a close
+/// button while hovered. A pinned tab shows only its icon, with no close button; its tooltip carries the name.
 struct TabItem: View {
     let title: String
     let help: String
     /// The tab's emoji (`WindowModel.Tab.emoji`); nil for none.
     let emoji: String?
+    /// The symbol shown without an emoji (`TabIcon.symbol(of:)`).
+    let symbol: String
     /// A pinned tab: its icon alone, no name and no close button.
     let pinned: Bool
-    /// A pinned tab's circle color (`TabIcon.circleColor`), shown when it has no emoji.
-    let pinColor: Int?
+    /// The symbol's color (`TabIcon.tint`); nil for the text's color.
+    let iconColor: Int?
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
@@ -479,47 +499,30 @@ struct TabItem: View {
             .accessibilityAction(.default, onSelect)
     }
 
-    /// A pinned tab's icon alone, centered; else the name between the leading slot (empty, or the emoji) and the close
-    /// button's slot.
+    /// A pinned tab's icon alone, centered; else the name between the icon's slot and the close button's.
     @ViewBuilder private var label: some View {
         if pinned {
-            TabIcon(emoji: emoji, circleColor: emoji == nil ? TabIcon.circleColor(pinColor) : nil,
-                    profileColor: profileColor, profileName: profileName)
-                .frame(maxWidth: .infinity)
+            icon.frame(maxWidth: .infinity)
         } else {
             titled
         }
     }
 
-    /// The name, centered, with the profile dot before it (on the emoji instead when the tab has one).
+    private var icon: TabIcon {
+        TabIcon(emoji: emoji, symbol: symbol, tint: TabIcon.tint(iconColor, selected: selected),
+                profileColor: profileColor, profileName: profileName)
+    }
+
+    /// The name, centered: the icon's slot balances the close button's.
     private var titled: some View {
         HStack(spacing: 4) {
-            if let emoji {
-                // The emoji in the slot that balances the close button's, so the name stays centered.
-                TabIcon(emoji: emoji, circleColor: nil, profileColor: profileColor, profileName: profileName)
-                    .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
-            } else {
-                // Balances the close button's slot, so the name stays centered.
-                Color.clear.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
-            }
-            // The dot right before the name, centered with it.
-            HStack(spacing: 2) {
-                if emoji == nil, let profileColor {
-                    Circle()
-                        .fill(ProfileColors.color(profileColor))
-                        .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
-                        // A 3 pt margin to hover for the profile's name, not just the 8 pt dot.
-                        .padding(3)
-                        .contentShape(Rectangle())
-                        .help("Profile \(profileName ?? "")")
-                }
-                Text(title)
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(selected ? Color.primary : Color.secondary)
-            }
-            .frame(maxWidth: .infinity)
+            icon.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+            Text(title)
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(selected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity)
             if hovered && !dragged {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -558,20 +561,21 @@ struct TabItem: View {
     }
 }
 
-/// A tab's icon in a `size` square: its emoji, else a circle in `circleColor` (a pinned tab's), else nothing (the square
-/// stays), with the profile's color dot on its lower-right corner in a white ring. The top tabs and the vertical tabs
-/// share it.
+/// A tab's icon in a `size` square: its emoji, else its symbol (`symbol(of:)`, the book of a repo tab) in `tint`, with
+/// the profile's color dot on its lower-right corner in a white ring. The top tabs and the vertical tabs share it.
 struct TabIcon: View {
     let emoji: String?
-    /// The circle drawn when there is no emoji; nil for none.
-    let circleColor: Color?
+    /// The SF Symbol drawn when there is no emoji.
+    let symbol: String
+    /// The symbol's color (`tint(_:selected:)`).
+    let tint: Color
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
     var size: CGFloat = TabStripMetrics.icon
 
     /// The emoji's font size as a share of `size`: an emoji glyph is drawn smaller than its point size, so this fills
-    /// the square about as the circle does. Tuned against a zoomed shot.
+    /// the square about as the symbol does. Tuned against a zoomed shot.
     static let emojiScale: CGFloat = 0.8
     /// Around the dot, to hover for the profile's name, not just the small dot.
     private static let dotHoverMargin: CGFloat = 3
@@ -585,8 +589,10 @@ struct TabIcon: View {
                     .font(.system(size: size * Self.emojiScale))
                     .lineLimit(1)
                     .fixedSize()
-            } else if let circleColor {
-                Circle().fill(circleColor)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: size * Self.emojiScale))
+                    .foregroundStyle(tint)
             }
         }
         .frame(width: size, height: size)
@@ -609,13 +615,19 @@ struct TabIcon: View {
         }
     }
 
-    /// A pinned tab's circle color: its `pinColor` in `Palette.graphLanes`, wrapped into range (a hand-edited
-    /// `session.json` may hold any number); the first lane when it has none.
-    static func circleColor(_ pinColor: Int?) -> Color? {
+    /// A tab's symbol: the book of a repo tab (as the toolbar's repo icon); a missing repo and a Welcome tab get their
+    /// own.
+    static func symbol(of tab: WindowModel.Tab) -> String {
+        if tab.isMissing { return "questionmark.folder" }
+        return tab.repoURL == nil ? "plus.square.dashed" : "book.closed"
+    }
+
+    /// The symbol's color: the tab's `iconColor` in `Palette.graphLanes`, wrapped into range (a hand-edited
+    /// `session.json` may hold any number); without one, the tab's text color.
+    static func tint(_ iconColor: Int?, selected: Bool) -> Color {
         let lanes = Palette.graphLanes
-        guard !lanes.isEmpty else { return nil }
-        let index = ((pinColor ?? 0) % lanes.count + lanes.count) % lanes.count
-        return Color(nsColor: lanes[index])
+        guard let iconColor, !lanes.isEmpty else { return selected ? .primary : .secondary }
+        return Color(nsColor: lanes[(iconColor % lanes.count + lanes.count) % lanes.count])
     }
 }
 
