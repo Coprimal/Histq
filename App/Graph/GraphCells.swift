@@ -529,10 +529,15 @@ private struct PullRequestChip {
 final class GraphTextCellView: NSView {
     enum Tone { case primary, secondary }
 
-    var text = "" { didSet { setAccessibilityLabel(text) } }
-    var detail: String?
+    var text = "" { didSet { setAccessibilityLabel(text); refreshToolTip() } }
+    var detail: String? { didSet { refreshToolTip() } }
     var tone = Tone.primary
-    var isItalic = false
+    var isItalic = false { didSet { refreshToolTip() } }
+    /// The author column's avatar: drawn instead of the text while the column is too narrow for `compactTitle` (its
+    /// header's title, which shows an icon then).
+    var avatar: NSImage? { didSet { refreshToolTip() } }
+    var avatarDiameter: CGFloat = 16
+    var compactTitle: String?
     /// A row the graph search does not match while it has matches: the text draws at `Style.dimmedAlpha`.
     var isDimmed = false
 
@@ -569,6 +574,45 @@ final class GraphTextCellView: NSView {
         static let dimmedAlpha: CGFloat = 0.35
     }
 
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        refreshToolTip()
+    }
+
+    private var showsAvatar: Bool {
+        guard avatar != nil, let compactTitle else { return false }
+        return !GraphHeaderCell.fits(compactTitle, width: bounds.width)
+    }
+
+    private var textWidth: CGFloat { max(0, bounds.width - 2 * Style.padding) }
+
+    private var attributedText: NSAttributedString {
+        let attributes = switch (tone, isItalic) {
+        case (.primary, false): Style.primary
+        case (.secondary, false): Style.secondary
+        case (.primary, true): Style.primaryItalic
+        case (.secondary, true): Style.secondaryItalic
+        }
+        guard let detail else { return NSAttributedString(string: text, attributes: attributes) }
+        let combined = NSMutableAttributedString(string: text, attributes: attributes)
+        combined.append(NSAttributedString(string: "  " + detail, attributes: Style.secondary))
+        return combined
+    }
+
+    /// The whole text on hover when it is cut (or shown as the avatar); none when it shows whole.
+    private func refreshToolTip() {
+        let tip: String?
+        if text.isEmpty {
+            tip = nil
+        } else if showsAvatar {
+            tip = text
+        } else {
+            let string = attributedText
+            tip = ceil(string.size().width) > textWidth ? string.string : nil
+        }
+        if tip != toolTip { toolTip = tip }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard !text.isEmpty else { return }
         let context = NSGraphicsContext.current?.cgContext
@@ -577,24 +621,19 @@ final class GraphTextCellView: NSView {
             context?.setAlpha(Style.dimmedAlpha)
         }
         defer { if isDimmed { context?.restoreGState() } }
-        let attributes = switch (tone, isItalic) {
-        case (.primary, false): Style.primary
-        case (.secondary, false): Style.secondary
-        case (.primary, true): Style.primaryItalic
-        case (.secondary, true): Style.secondaryItalic
+        if showsAvatar, let avatar {
+            let rect = CGRect(x: Style.padding, y: ((bounds.height - avatarDiameter) / 2).rounded(),
+                              width: avatarDiameter, height: avatarDiameter)
+            context?.saveGState()
+            context?.addEllipse(in: rect)
+            context?.clip()
+            avatar.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            context?.restoreGState()
+            return
         }
         let lineHeight = ceil(Style.font.ascender - Style.font.descender + Style.font.leading)
-        let rect = CGRect(x: Style.padding, y: (bounds.height - lineHeight) / 2,
-                          width: max(0, bounds.width - 2 * Style.padding), height: lineHeight)
-        let string: NSAttributedString
-        if let detail {
-            let combined = NSMutableAttributedString(string: text, attributes: attributes)
-            combined.append(NSAttributedString(string: "  " + detail, attributes: Style.secondary))
-            string = combined
-        } else {
-            string = NSAttributedString(string: text, attributes: attributes)
-        }
-        string.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        let rect = CGRect(x: Style.padding, y: (bounds.height - lineHeight) / 2, width: textWidth, height: lineHeight)
+        attributedText.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 }
 
@@ -660,17 +699,35 @@ final class GraphHeaderCell: NSTableHeaderCell {
         .kern: 0.6,
     ]
 
+    /// The SF Symbol drawn instead of the title when the column is too narrow for the whole title.
+    var symbolName: String?
+
+    /// Whether `title` fits whole in a column `width` wide (the author cells show avatars when the author's does not).
+    @MainActor static func fits(_ title: String, width: CGFloat) -> Bool {
+        (title.uppercased() as NSString).size(withAttributes: attributes).width <= width - 12
+    }
+
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
         drawInterior(withFrame: cellFrame, in: controlView)
     }
 
     override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
-        let title = stringValue.uppercased() as NSString
-        let size = title.size(withAttributes: Self.attributes)
-        let rect = NSRect(x: cellFrame.minX + 8, y: cellFrame.midY - size.height / 2,
-                          width: max(0, cellFrame.width - 12), height: size.height)
-        title.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                   attributes: Self.attributes)
+        if let symbolName, !Self.fits(stringValue, width: cellFrame.width),
+           let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: stringValue)?
+               .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                   .applying(NSImage.SymbolConfiguration(paletteColors: [.secondaryLabelColor]))) {
+            let size = symbol.size
+            symbol.draw(in: NSRect(x: cellFrame.minX + 8, y: (cellFrame.midY - size.height / 2).rounded(),
+                                   width: size.width, height: size.height),
+                        from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        } else {
+            let title = stringValue.uppercased() as NSString
+            let size = title.size(withAttributes: Self.attributes)
+            let rect = NSRect(x: cellFrame.minX + 8, y: cellFrame.midY - size.height / 2,
+                              width: max(0, cellFrame.width - 12), height: size.height)
+            title.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                       attributes: Self.attributes)
+        }
         // A hairline between columns, like the resize handle's place.
         NSColor.separatorColor.setFill()
         NSRect(x: cellFrame.maxX - 1, y: cellFrame.minY + 6, width: 1, height: max(0, cellFrame.height - 12)).fill()

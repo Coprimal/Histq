@@ -34,6 +34,15 @@ enum GraphColumn: String, CaseIterable {
         }
     }
 
+    /// The header's icon when the column is too narrow for its title.
+    var compactSymbol: String? {
+        switch self {
+        case .author: "person"
+        case .date: "clock"
+        default: nil
+        }
+    }
+
     var defaultWidth: CGFloat {
         switch self {
         case .refs: 116
@@ -141,7 +150,10 @@ struct GraphView: NSViewRepresentable {
             Preferences.defaults.string(forKey: PrefKey.graphColumnWidths.rawValue) ?? "")
         for column in GraphColumn.allCases {
             let tableColumn = NSTableColumn(identifier: column.identifier)
-            tableColumn.headerCell = GraphHeaderCell(textCell: column.title)
+            let header = GraphHeaderCell(textCell: column.title)
+            header.symbolName = column.compactSymbol
+            tableColumn.headerCell = header
+            if header.symbolName != nil { tableColumn.headerToolTip = column.title }
             tableColumn.minWidth = column.minWidth
             tableColumn.width = stored[column] ?? column.defaultWidth
             #if DEBUG
@@ -908,6 +920,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case .author:
             let cell = reuse(tableView, column) { GraphTextCellView() }
+            cell.compactTitle = column.title
+            cell.avatarDiameter = metrics.nodeDiameter
+            cell.avatar = commit.flatMap { avatar(for: $0, in: tableView) }
             cell.text = commit?.authorName ?? ""
             cell.detail = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
@@ -936,25 +951,33 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         return AvatarStore.shared.avatar(email: commit.authorEmail, name: commit.authorName, pixels: pixels)
     }
 
-    /// An avatar arrived (redraw the visible nodes of its author) or the mode changed (redraw every visible node).
+    /// An avatar arrived (redraw the visible nodes and author cells of its author) or the mode changed (redraw every
+    /// visible one).
     @objc private func avatarsChanged(_ notification: Notification) {
         guard let table else { return }
         let column = table.column(withIdentifier: GraphColumn.graph.identifier)
+        let authorColumn = table.column(withIdentifier: GraphColumn.author.identifier)
         let visible = table.rows(in: table.visibleRect)
         guard column >= 0, visible.length > 0 else { return }
         let changed = notification.userInfo?[AvatarStore.emailKey] as? String
         for row in visible.location..<NSMaxRange(visible) {
             let index = row - log.syntheticRows.count
-            guard index >= 0, index < log.commits.count,
-                  let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? GraphCellView
-            else { continue }
+            guard index >= 0, index < log.commits.count else { continue }
             let commit = log.commits[index]
-            if commit.isMerge { continue }
             if let changed, !AvatarStore.matches(email: commit.authorEmail, name: commit.authorName, changed: changed) {
                 continue
             }
-            cell.avatar = avatar(for: commit, in: table)
-            cell.needsDisplay = true
+            let image = avatar(for: commit, in: table)
+            if authorColumn >= 0,
+               let cell = table.view(atColumn: authorColumn, row: row, makeIfNecessary: false) as? GraphTextCellView {
+                cell.avatar = image
+                cell.needsDisplay = true
+            }
+            if !commit.isMerge,
+               let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? GraphCellView {
+                cell.avatar = image
+                cell.needsDisplay = true
+            }
         }
     }
 
