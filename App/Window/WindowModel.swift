@@ -617,7 +617,9 @@ final class WindowModel {
             var end = start
             if let key = tabs[start].repoKey {
                 while end + 1 < tabs.count, tabs[end + 1].repoKey == key { end += 1 }
-                if end > start { groups.append(TabGroup(key: key, range: start...end)) }
+                if end > start {
+                    groups.append(TabGroup(key: key, range: start...end, name: TabGroupNames.shared.name(of: key)))
+                }
             }
             start = end + 1
         }

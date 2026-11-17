@@ -193,6 +193,7 @@ private struct TabTrack: View {
                                  openingWidth: (selected.map(layout.extent(of:)) ?? layout.tabExtent)
                                      + 2 * TabStripMetrics.flare,
                                  onToggle: { withAnimation(animation) { model.toggleGroup(group.key) } })
+                        .contextMenu { MenuEntriesView(entries: TabMenu.groupEntries(for: group.key, model: model)) }
                         .padding(.horizontal, TabStripMetrics.flare)
                         .offset(x: chipX - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
@@ -216,7 +217,7 @@ private struct TabTrack: View {
         return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji,
                        symbol: TabIcon.symbol(of: tab), pinned: tab.pinned, iconColor: tab.iconColor,
                        profileColor: profile?.color,
-                       profileName: profile?.name, groupName: group.map(RepoGroupKey.name(of:)),
+                       profileName: profile?.name, groupName: group.map(TabGroupNames.shared.name(of:)),
                        groupColor: group.map(TabGroupColors.line),
                        selected: selected, dragged: dragged, namespace: namespace,
                        onSelect: { model.selectTab(id: tab.id) },
@@ -319,6 +320,11 @@ enum TabMenu {
                 model.setPinned(!tab.pinned, for: id)
             },
         ] + profile(id, tab, revealable, model)
+    }
+
+    /// A tab group's name's right-click menu (the top tabs' chip, the vertical tabs' header): Rename Group….
+    static func groupEntries(for key: String, model: WindowModel) -> [MenuEntry] {
+        [.action("Rename Group…") { [weak model] in model?.presentModal(.groupName(key: key)) }]
     }
 
     /// The Icon Color menu: Default (Settings › Appearance's default tab icon), then each lane color with its dot; the
