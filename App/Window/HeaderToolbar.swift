@@ -126,8 +126,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             // On macOS 26 the buttons draw their own hover (`ToolbarHoverButton`), Pull and Push with an arrow beside
             // them (`splitButton`). A capsule of several buttons is one item whose view is the row of them, never a
             // group of view items.
-            let fetch = hoverButton(fetchItem, width: ToolbarHoverButton.loneWidth)
-            fetchItem.view = fetch
+            let fetch = hoverButton(fetchItem)
+            fetchItem.view = ToolbarHoverButton.capsule([fetch])
             fetchItem.menuFormRepresentation = fetch.menuForm
             for item in [pullItem, pushItem] {
                 item.view = splitButton(item)
@@ -172,8 +172,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// The button standing for a configured button item (its image, action, label, tooltip and state), which `set`
     /// keeps in step with the item from then on.
-    private func hoverButton(_ item: NSToolbarItem, width: CGFloat) -> ToolbarHoverButton {
-        let button = ToolbarHoverButton(target: self, action: item.action, label: item.label, width: width)
+    private func hoverButton(_ item: NSToolbarItem) -> ToolbarHoverButton {
+        let button = ToolbarHoverButton(target: self, action: item.action, label: item.label)
         button.image = item.image
         button.toolTip = item.toolTip
         button.isEnabled = item.isEnabled
@@ -185,31 +185,21 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// without the line AppKit's own menu item draws between them.
     private func splitButton(_ item: NSMenuToolbarItem) -> NSView {
         let label = "\(item.label) Options"
-        let arrow = ToolbarHoverButton(target: self, action: nil, label: label, width: ToolbarHoverButton.arrowWidth,
-                                       highlightDiameter: ToolbarHoverButton.arrowHighlightDiameter)
-        // Drawn into a plain template image, so the button keeps the dropdowns' arrow size instead of its large scale.
-        if let symbol = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: label)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: ToolbarDropdown.chevronSize, weight: .semibold))
-        {
-            let image = NSImage(size: symbol.size, flipped: false) { rect in symbol.draw(in: rect); return true }
-            image.isTemplate = true
-            arrow.image = image
-        }
+        // As big as the action's button and its icon, as EchoDiar's record ▾.
+        let arrow = ToolbarHoverButton(target: self, action: nil, label: label)
+        arrow.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: label)
         arrow.toolTip = label
         arrow.isEnabled = item.isEnabled
         arrow.dropdownMenu = item.menu
         arrowButtons[ObjectIdentifier(item)] = arrow
-        let stack = NSStackView(views: [hoverButton(item, width: ToolbarHoverButton.splitWidth), arrow])
-        stack.spacing = 0
-        return stack
+        return ToolbarHoverButton.capsule([hoverButton(item), arrow])
     }
 
     /// One bordered item, so one capsule, showing `subitems` as a row of `ToolbarHoverButton`s; in the overflow menu,
     /// `title` with a submenu of them.
     private func row(_ id: NSToolbarItem.Identifier, title: String, _ subitems: [NSToolbarItem]) -> NSToolbarItem {
-        let buttons = subitems.map { hoverButton($0, width: ToolbarHoverButton.rowWidth) }
-        let stack = NSStackView(views: buttons)
-        stack.spacing = 0
+        let buttons = subitems.map { hoverButton($0) }
+        let stack = ToolbarHoverButton.capsule(buttons)
         let item = NSToolbarItem(itemIdentifier: id)
         item.view = stack
         item.isBordered = true
@@ -742,16 +732,23 @@ final class ToolbarChevron: NSImageView {
 /// button to button, some nearly as big as the capsule. It stands for a button item (`HeaderToolbar.hoverButton`), which sets its image,
 /// state and tooltip; `menuForm` is its entry in the overflow menu.
 private final class ToolbarHoverButton: NSView {
-    /// AppKit pads an item view less on the sides than above and below: 36 by 24 makes a lone item's capsule round.
-    static let loneWidth: CGFloat = 36
-    /// A button's width in a row of them (`HeaderToolbar.row`): about the spacing of AppKit's group buttons.
-    static let rowWidth: CGFloat = 42
-    /// Pull ▾ and Push ▾ (`HeaderToolbar.splitButton`): the action's button and its arrow, close together. The
-    /// arrow's circle is smaller, so it stays inside the capsule's round end.
-    static let splitWidth: CGFloat = 32
-    static let arrowWidth: CGFloat = 24
-    static let arrowHighlightDiameter: CGFloat = 20
+    /// Every button's width, alone (Fetch), in a row (`HeaderToolbar.row`) or in Pull ▾ / Push ▾: the circles of
+    /// buttons side by side are 4 pt apart.
+    private static let width: CGFloat = 32
     private static let height: CGFloat = 24
+    private static let highlightDiameter: CGFloat = 28
+    /// The room `capsule` adds at both ends. AppKit pads an item view less on the sides than above and below: a lone
+    /// button 36 wide makes its capsule round, and leaves the same room around the circle at a capsule's ends as
+    /// above and below it.
+    private static let endInset: CGFloat = 2
+
+    /// One capsule's view: `buttons` side by side, with `endInset` at both ends.
+    static func capsule(_ buttons: [ToolbarHoverButton]) -> NSStackView {
+        let stack = NSStackView(views: buttons)
+        stack.spacing = 0
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: endInset, bottom: 0, right: endInset)
+        return stack
+    }
 
     private let button = PressReportingButton()
     let menuForm: NSMenuItem
@@ -759,7 +756,8 @@ private final class ToolbarHoverButton: NSView {
     private var isHovered = false { didSet { updateHighlight() } }
     private var observers: [NSObjectProtocol] = []
 
-    init(target: AnyObject, action: Selector?, label: String, width: CGFloat, highlightDiameter diameter: CGFloat = 28) {
+    init(target: AnyObject, action: Selector?, label: String) {
+        let width = Self.width, diameter = Self.highlightDiameter
         menuForm = NSMenuItem(title: label, action: action, keyEquivalent: "")
         menuForm.target = target
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height))
