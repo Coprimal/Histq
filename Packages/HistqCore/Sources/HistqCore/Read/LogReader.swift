@@ -103,8 +103,9 @@ public enum LogReader {
     /// The commits a history read (`pages`) would list now that are not in a previous read whose tips were
     /// `previousTips` (`tips(of:index:)`), in git's order (children before parents); `[]` when none. Nil when this
     /// cannot be proven to be the whole difference, so the caller reads the whole history again: no previous tip,
-    /// a previous tip that is not a hex hash, or a commit of the previous read that the refs and `alsoFrom` no
-    /// longer reach (a branch deleted, a reset, a force-push, a stash dropped). `env` and `alsoFrom` are as in
+    /// a previous tip that is not a hex hash, a replace ref (`git replace` can give an old commit other parents), or a
+    /// commit of the previous read that the refs and `alsoFrom` no longer reach (a branch deleted, a reset, a
+    /// force-push, a stash dropped). `env` and `alsoFrom` are as in
     /// `pages`; anything in `alsoFrom` but a hex hash is left out.
     ///
     /// The new commits followed by the previous ones are exactly the commits a fresh read lists, in a valid
@@ -116,9 +117,12 @@ public enum LogReader {
     public static func newCommits(
         runner: GitRunner, cwd: URL, env: [String: String], previousTips: [String], alsoFrom hashes: [String] = []
     ) async throws -> [Commit]? {
-        let isHex = { (text: String) in !text.isEmpty && text.allSatisfy(\.isHexDigit) }
+        let isHex = { (text: String) in !text.isEmpty && text.allSatisfy { $0.isASCII && $0.isHexDigit } }
         guard !previousTips.isEmpty, previousTips.allSatisfy(isHex) else { return nil }
         let extra = hashes.filter(isHex)
+        let replaced = try await runner.run(
+            ["for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/"], cwd: cwd, env: env)
+        guard replaced.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         // Every previous commit must still be reachable. `--stdin` comes before `--not`, and git reads the
         // revisions on stdin as given whatever `--not` says on the command line, so the previous tips count as
         // positive and the refs (with the same exclusions as the log) and `extra` as negative.

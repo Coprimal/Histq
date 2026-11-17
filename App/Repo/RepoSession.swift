@@ -61,7 +61,8 @@ enum GitToolchain {
     }
 }
 
-/// The log of a repo with its graph rows, in `git log --all --topo-order` order. `rows[i]` is `commits[i]`'s row; the
+/// The log of a repo with its graph rows, in `git log --all --topo-order` order (after an incremental reload, the new
+/// commits on top of the previous ones, see `RepoSession.readLogIncrementally`). `rows[i]` is `commits[i]`'s row; the
 /// rows above the commits (WIP, worktrees) are in `syntheticRows`, the stash rows in `hung`, each right above its base.
 struct LogSnapshot: Sendable {
     var commits: [Commit] = []
@@ -1516,9 +1517,9 @@ final class RepoSession: Identifiable {
 
     // MARK: Log
 
-    /// (Re)loads the whole log and lays out its graph off the main actor. The first load publishes the first page
-    /// as soon as it is parsed; a reload keeps the old log on screen until the new one is complete. A newer load
-    /// cancels this one.
+    /// (Re)loads the log and lays out its graph off the main actor. The first load publishes the first page as soon as
+    /// it is parsed; a reload first tries to read only the new commits (`readLogIncrementally`), else reads the whole
+    /// log, and keeps the old log on screen until the new one is complete. A newer load cancels this one.
     private func loadLog(_ backend: Backend) {
         logTask?.cancel()
         let isFirstLoad = log.value == nil
@@ -1631,7 +1632,8 @@ final class RepoSession: Identifiable {
     /// The log after a reload, from `previous` (a complete snapshot) and only the commits that are new since it
     /// (`LogReader.newCommits`), with the status and stashes read again, every row laid out again off the main actor.
     /// Nil when the new commits cannot be proven to be the whole difference (a commit of `previous` no longer
-    /// reachable, a shallow repo): the caller reads the whole log. Throws `CancellationError` when cancelled.
+    /// reachable, a shallow repo, a graft file or a replace ref): the caller reads the whole log. Throws
+    /// `CancellationError` when cancelled.
     ///
     /// It has the same commits as a fresh read, in a valid topological order, but not always in the order of git's
     /// `--topo-order`: the commits of `previous` keep their order and the new ones come on top, while a fresh read
@@ -1640,7 +1642,7 @@ final class RepoSession: Identifiable {
     private nonisolated static func readLogIncrementally(
         _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo]
     ) async throws -> LogSnapshot? {
-        guard previous.isComplete, !previous.isShallow, !isShallow(backend) else { return nil }
+        guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
         var snapshot = LogSnapshot(generation: generation)
@@ -1672,6 +1674,11 @@ final class RepoSession: Identifiable {
     /// Whether the repo is a shallow clone now (`<common dir>/shallow` exists).
     nonisolated private static func isShallow(_ backend: Backend) -> Bool {
         FileManager.default.fileExists(atPath: backend.directories.commonDir.appending(path: "shallow").path)
+    }
+
+    /// Whether the repo has a graft file (`<common dir>/info/grafts`), which can give an old commit other parents.
+    nonisolated private static func hasGrafts(_ backend: Backend) -> Bool {
+        FileManager.default.fileExists(atPath: backend.directories.commonDir.appending(path: "info/grafts").path)
     }
 
     /// Lays out `snapshot.synthetic`'s WIP and worktree rows at the top and hangs its stashes above their bases. Returns

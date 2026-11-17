@@ -225,4 +225,25 @@ struct LogReaderTests {
 
         #expect(try await newCommits(sandbox, repo, previousTips: tips) == nil)
     }
+
+    @Test("a replace ref gives nil: it can give an old commit other parents")
+    func replaceRef() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "main two"], in: repo)
+        let tips = try await tipsOfFullRead(sandbox, repo)
+        try await sandbox.git(["replace", "--graft", "HEAD"], in: repo)
+
+        #expect(try await newCommits(sandbox, repo, previousTips: tips) == nil)
+    }
+
+    @Test("a tip of fullwidth digits is no hash")
+    func fullwidthTip() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+
+        #expect(try await newCommits(sandbox, repo, previousTips: ["\u{FF11}\u{FF12}"]) == nil)
+    }
 }
