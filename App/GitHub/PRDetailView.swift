@@ -533,7 +533,9 @@ private struct PRHeaderCard: View {
                         session.closeFile()
                     } label: {
                         Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
                     }
                     .buttonStyle(RowIconButtonStyle())
                     .keyboardShortcut(.cancelAction)
