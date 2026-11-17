@@ -427,7 +427,7 @@ enum RepoMenus {
     // MARK: Worktrees
 
     /// A worktree's menu (its sidebar row, its graph row): open it in a tab, remove it (confirmed; never the main one or
-    /// this tab's own; losing its changes only through its own Force Remove item), prune, copy its path.
+    /// this tab's own; losing its changes only through its own Force Remove item), prune, copy its path, reveal it in Finder.
     static func worktree(_ path: String, _ session: RepoSession) -> [MenuEntry] {
         let info = session.worktrees.value?.first { $0.path == path }
         let name = info?.name ?? URL(filePath: path).lastPathComponent
@@ -453,7 +453,14 @@ enum RepoMenus {
             })
         }
         entries += [.separator] + worktrees(session).dropFirst()
-        entries += [.separator, .action("Copy Path") { copy(path) }]
+        let missing = info?.worktree.isPrunable ?? false
+        entries += [
+            .separator,
+            .action("Copy Path") { copy(path) },
+            .action("Reveal in Finder", enabled: !missing, toolTip: missing ? "Its folder is missing." : nil) {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(filePath: path)])
+            },
+        ]
         return entries
     }
 
