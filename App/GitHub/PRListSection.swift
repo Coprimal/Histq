@@ -100,22 +100,30 @@ private struct ListCard: View {
     let list: GitHubStore.List
     /// The authors' GitHub avatars may load (github.com, not the stub); `AvatarStore`'s mode still decides.
     let realAvatars: Bool
+    /// The header's search (`CardSearchButton`): the field above the rows, which then show only the matching ones.
+    @State private var isSearching = false
+    @State private var query = ""
 
     var body: some View {
         let store = session.github
         let state = store.lists[list]
+        let isExpanded = Binding(get: { !store.collapsed.contains(list) },
+                                 set: { if $0 { store.collapsed.remove(list) } else { store.collapsed.insert(list) } })
         SectionCard(list.title, systemImage: list.systemImage, count: state?.rows?.count,
                     countIsLoading: state?.rows == nil && state?.error == nil,
-                    isExpanded: Binding(get: { !store.collapsed.contains(list) },
-                                        set: { if $0 { store.collapsed.remove(list) } else { store.collapsed.insert(list) } }),
-                    contentPadding: SidebarMetrics.cardPadding) {
+                    isExpanded: isExpanded, contentPadding: SidebarMetrics.cardPadding) {
             VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
+                if isSearching {
+                    CardSearchField(prompt: "Filter by title or number", isSearching: $isSearching, query: $query)
+                }
                 if let error = state?.error {
                     ListErrorRow(error: error)
                 }
                 if let rows = state?.rows {
+                    let shown = isSearching ? rows.filter { matches($0) } : rows
                     if rows.isEmpty, state?.error == nil { EmptyRow(text: list.emptyText) }
-                    ForEach(rows) { row in
+                    if shown.isEmpty, !rows.isEmpty { EmptyRow(text: "No matches") }
+                    ForEach(shown) { row in
                         HostedRowView(session: session, row: row, checks: row.headSHA.flatMap { store.checks[$0] },
                                       realAvatars: realAvatars)
                     }
@@ -123,7 +131,16 @@ private struct ListCard: View {
                     SkeletonRows(fractions: list == .allOpen ? [0.7, 0.5, 0.6] : [0.6, 0.45])
                 }
             }
+        } accessory: {
+            if state?.rows != nil {
+                CardSearchButton(title: list.title, isSearching: $isSearching, query: $query, isExpanded: isExpanded)
+            }
         }
+    }
+
+    /// By its title or its number (`#12` or `12`).
+    private func matches(_ row: HostedRow) -> Bool {
+        FileSearch.matches("#\(row.number) \(row.title)", query: query)
     }
 }
 

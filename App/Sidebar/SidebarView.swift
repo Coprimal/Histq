@@ -144,25 +144,25 @@ struct SidebarView: View {
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.tags, .loaded(let refs)):
             SidebarSection(title: "Tags", systemImage: "tag", count: refs.tags.count,
-                           isExpanded: $session.tagsExpanded) {
-                TagRows(session: session, tags: refs.tags)
+                           isExpanded: $session.tagsExpanded) { query in
+                TagRows(session: session, tags: refs.tags, query: query)
             }
             .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.branches, .idle), (.branches, .loading):
             SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: nil,
-                           isExpanded: $session.localExpanded) {
+                           isExpanded: $session.localExpanded) { _ in
                 SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
             }
             SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
-                           isExpanded: $session.remoteExpanded) {
+                           isExpanded: $session.remoteExpanded) { _ in
                 SkeletonRows(fractions: [0.3, 0.55, 0.4])
             }
             SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
-                           isExpanded: $session.worktreesExpanded) {
+                           isExpanded: $session.worktreesExpanded) { _ in
                 SkeletonRows(fractions: [0.4, 0.55])
             }
         case (.tags, .idle), (.tags, .loading):
-            SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) {
+            SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) { _ in
                 SkeletonRows(fractions: [0.3, 0.45, 0.35, 0.5])
             }
         case (_, .failed(let message)):
@@ -183,9 +183,14 @@ private struct BranchSections: View {
 
     var body: some View {
         SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: refs.localBranches.count,
-                       isExpanded: $session.localExpanded) {
-            if refs.localBranches.isEmpty { EmptyRow(text: "No local branches") }
-            ForEach(refs.localBranches, id: \.refName) { branch in
+                       isExpanded: $session.localExpanded) { query in
+            let branches = refs.localBranches.filter { FileSearch.matches($0.name, query: query) }
+            if refs.localBranches.isEmpty {
+                EmptyRow(text: "No local branches")
+            } else if branches.isEmpty {
+                EmptyRow(text: "No matching branches")
+            }
+            ForEach(branches, id: \.refName) { branch in
                 // As in GitKraken, the checked-out branch shows a check in place of the branch icon.
                 BranchRow(session: session, item: .local(branch.name), name: branch.name,
                           systemImage: branch.isHead ? SidebarMetrics.currentImage : SidebarMetrics.branchImage) {
@@ -194,9 +199,14 @@ private struct BranchSections: View {
             }
         }
         SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: refs.remoteBranches.count,
-                       isExpanded: $session.remoteExpanded) {
-            if remotes.isEmpty { EmptyRow(text: "No remotes") }
-            ForEach(remotes, id: \.name) { remote in
+                       isExpanded: $session.remoteExpanded) { query in
+            let shown = filteredRemotes(query)
+            if remotes.isEmpty {
+                EmptyRow(text: "No remotes")
+            } else if shown.isEmpty {
+                EmptyRow(text: "No matching branches")
+            }
+            ForEach(shown, id: \.name) { remote in
                 RemoteRow(name: remote.name)
                     .contextMenu { MenuEntriesView(entries: RepoMenus.remote(named: remote.name, session)) }
                 ForEach(remote.branches, id: \.refName) { branch in
@@ -237,6 +247,17 @@ private struct BranchSections: View {
         }
         return order.map { ($0, groups[$0] ?? []) }
     }
+
+    /// The remotes whose name or a branch's full name (`origin/main`) matches `query`, with only their matching
+    /// branches; all of them with an empty query.
+    private func filteredRemotes(_ query: String) -> [(name: String, branches: [RemoteBranch])] {
+        guard !query.isEmpty else { return remotes }
+        return remotes.compactMap { remote in
+            let branches = remote.branches.filter { FileSearch.matches($0.name, query: query) }
+            guard !branches.isEmpty || FileSearch.matches(remote.name, query: query) else { return nil }
+            return (remote.name, branches)
+        }
+    }
 }
 
 /// The Worktrees card: its rows once the worktrees are read (after the graph's first page, so skeleton rows until
@@ -246,12 +267,15 @@ private struct WorktreeSection: View {
 
     var body: some View {
         SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: count,
-                       isExpanded: $session.worktreesExpanded) {
+                       isExpanded: $session.worktreesExpanded) { query in
             switch session.worktrees {
             case .idle, .loading:
                 SkeletonRows(fractions: [0.4, 0.55])
             case .loaded(let worktrees):
-                ForEach(worktrees, id: \.path) { info in
+                // By its folder name or its branch.
+                let shown = worktrees.filter { FileSearch.matches("\($0.name) \($0.headLabel)", query: query) }
+                if shown.isEmpty, !worktrees.isEmpty { EmptyRow(text: "No matching worktrees") }
+                ForEach(shown, id: \.path) { info in
                     WorktreeRow(session: session, info: info)
                 }
             case .failed(let message):
@@ -356,10 +380,16 @@ private struct WorktreeRow: View {
 private struct TagRows: View {
     let session: RepoSession
     let tags: [TagRef]
+    let query: String
 
     var body: some View {
-        if tags.isEmpty { EmptyRow(text: "No tags") }
-        ForEach(tags, id: \.refName) { tag in
+        let shown = tags.filter { FileSearch.matches($0.name, query: query) }
+        if tags.isEmpty {
+            EmptyRow(text: "No tags")
+        } else if shown.isEmpty {
+            EmptyRow(text: "No matching tags")
+        }
+        ForEach(shown, id: \.refName) { tag in
             BranchRow(session: session, item: .tag(tag.name), name: tag.name,
                       systemImage: tag.isAnnotated ? "tag.fill" : "tag") { EmptyView() }
         }
@@ -367,36 +397,103 @@ private struct TagRows: View {
 }
 
 /// A section of the sidebar in its own collapsible `SectionCard`: its rows, tightly stacked. `count` nil while the
-/// refs load. `accessory` sits at the header's end (the Remote card's menu).
+/// refs load. `accessory` sits at the header's end (the Remote card's menu). Once loaded, the header's search button
+/// opens a field above the rows, and `content` gets its query (empty while closed) to show the matching rows only.
 private struct SidebarSection<Content: View, Accessory: View>: View {
     let title: String
     let systemImage: String
     let count: Int?
     @Binding var isExpanded: Bool
-    @ViewBuilder let content: () -> Content
+    @ViewBuilder let content: (_ query: String) -> Content
     @ViewBuilder let accessory: () -> Accessory
+    @State private var isSearching = false
+    @State private var query = ""
 
     var body: some View {
         SectionCard(title, systemImage: systemImage, count: count, countIsLoading: count == nil,
                     isExpanded: $isExpanded, contentPadding: SidebarMetrics.cardPadding) {
-            // Its share of the sidebar's height, scrolling inside when the rows don't fit.
-            CardScrollView {
-                VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
-                    content()
+            VStack(alignment: .leading, spacing: 0) {
+                if isSearching {
+                    CardSearchField(prompt: "Filter by name", isSearching: $isSearching, query: $query)
                 }
+                // Its share of the sidebar's height, scrolling inside when the rows don't fit.
+                CardScrollView {
+                    VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
+                        content(isSearching ? query : "")
+                    }
+                }
+                .frame(maxHeight: .infinity)
             }
-            .frame(maxHeight: .infinity)
         } accessory: {
-            accessory()
+            HStack(spacing: 10) {
+                // Not while loading: the loaded card is another view, which would drop the open field.
+                if count != nil {
+                    CardSearchButton(title: title, isSearching: $isSearching, query: $query, isExpanded: $isExpanded)
+                }
+                accessory()
+            }
         }
     }
 }
 
 extension SidebarSection where Accessory == EmptyView {
     init(title: String, systemImage: String, count: Int?, isExpanded: Binding<Bool>,
-         @ViewBuilder content: @escaping () -> Content) {
+         @ViewBuilder content: @escaping (_ query: String) -> Content) {
         self.init(title: title, systemImage: systemImage, count: count, isExpanded: isExpanded, content: content,
                   accessory: { EmptyView() })
+    }
+}
+
+/// A sidebar card's search button, at its header's end (in the accent color while open): opens the card's
+/// `CardSearchField` (expanding a collapsed card), or closes it and clears the query.
+struct CardSearchButton: View {
+    let title: String
+    @Binding var isSearching: Bool
+    @Binding var query: String
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button {
+            if isSearching {
+                isSearching = false
+                query = ""
+            } else {
+                isSearching = true
+                isExpanded = true
+            }
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(isSearching ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                // The "…" menus' square, so both hover circles are the same size.
+                .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .help(isSearching ? "Close Search" : "Search \(title)")
+        .accessibilityLabel(isSearching ? "Close search" : "Search \(title)")
+    }
+}
+
+/// A sidebar card's search field, above its rows: it takes the focus as it opens, and Escape closes it and clears
+/// the query.
+struct CardSearchField: View {
+    let prompt: String
+    @Binding var isSearching: Bool
+    @Binding var query: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(prompt, text: $query, prompt: Text(prompt))
+            .textFieldStyle(.settings)
+            .labelsHidden()
+            .focused($focused)
+            // Next run-loop turn, once the field is in the window.
+            .onAppear { DispatchQueue.main.async { focused = true } }
+            .onKeyPress(.escape) {
+                isSearching = false
+                query = ""
+                return .handled
+            }
+            .padding(.bottom, 6)
     }
 }
 

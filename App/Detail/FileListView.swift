@@ -94,6 +94,15 @@ enum FileSearch {
         }
     }
 
+    /// Whether `text` holds every word of `query`, the same way (the sidebar cards' search of names); true for an
+    /// empty query.
+    static func matches(_ text: String, query: String) -> Bool {
+        let words = fold(query).split(separator: " ")
+        guard !words.isEmpty else { return true }
+        let text = fold(text)
+        return words.allSatisfy { text.contains($0) }
+    }
+
     private static func fold(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
             .replacing(/[-_\/\s]+/, with: " ")
