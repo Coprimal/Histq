@@ -73,6 +73,8 @@ struct ProfilesSettings: View {
                         ProfileRow(profile: profile, isDefault: store.defaultProfileID == profile.id,
                                    selected: profile.id == current?.id) {
                             profileID = profile.id
+                        } setDefault: {
+                            library.setDefault(profile.id)
                         }
                     }
                 }
@@ -317,12 +319,17 @@ private struct SigningKeyMissing: View {
     }
 }
 
-/// A profile in the list: its color dot, name and email, and a Default badge; a click selects it.
+/// A profile in the list: its color dot, name and email, and a Default badge; a click selects it. Hovering another
+/// profile shows Set Default at its trailing edge, over the row (never a button inside the row's button).
 private struct ProfileRow: View {
     let profile: Profile
     let isDefault: Bool
     let selected: Bool
     let action: () -> Void
+    let setDefault: () -> Void
+    @State private var hovered = false
+
+    private var showsSetDefault: Bool { hovered && !isDefault }
 
     var body: some View {
         Button(action: action) {
@@ -343,6 +350,9 @@ private struct ProfileRow: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 2)
                             .background(Capsule().fill(Color.accentColor))
+                    } else if showsSetDefault {
+                        // Keeps the email clear of the Set Default button laid over this spot.
+                        setDefaultButton.hidden()
                     }
                 }
             } icon: {
@@ -352,7 +362,22 @@ private struct ProfileRow: View {
             }
         }
         .buttonStyle(SidebarItemStyle(selected: selected))
+        .overlay(alignment: .trailing) {
+            if showsSetDefault {
+                setDefaultButton
+                    .padding(.trailing, 10)
+            }
+        }
+        .onHover { hovered = $0 }
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityActions {
+            if !isDefault { Button("Set Default", action: setDefault) }
+        }
+    }
+
+    private var setDefaultButton: some View {
+        Button("Set Default", action: setDefault)
+            .buttonStyle(RowTextButtonStyle())
     }
 }
 
