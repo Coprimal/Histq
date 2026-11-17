@@ -3,7 +3,8 @@
 // frame with a skeleton; the diff is read and the prompt built off the main actor, then the answer streams in as a
 // preview (`AIPrompt.preview`). Apply uses only `AIPrompt.answer(from:)`: a commit message fills the commit box, a
 // resolution replaces the current conflict region's Output as a manual edit (never saved or staged). Copy copies the
-// answer; Cancel stops the stream at once and closes the card. Errors show their `description`, never a key.
+// answer; Regenerate runs the same job again in a fresh card; Cancel stops the stream at once and closes the card.
+// Errors show their `description`, never a key.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -210,6 +211,11 @@ struct AIResultSheet: View {
             Button(copied ? "Copied" : "Copy", action: copy)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
                 .disabled(run.answer == nil)
+            if !run.isRunning {
+                Button("Regenerate", action: regenerate)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .help("Ask again for a new answer")
+            }
             if run.job.canApply {
                 Button("Apply", action: apply)
                     .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
@@ -336,6 +342,11 @@ struct AIResultSheet: View {
         copied = true
     }
 
+    /// The same job again in a new `AIRun`, so the card starts fresh.
+    private func regenerate() {
+        session.startAI(run.job)
+    }
+
     private func apply() {
         guard let answer = run.answer else { return }
         switch run.job {
@@ -360,6 +371,10 @@ struct AIResultSheet: View {
         case .finished(let answer):
             let firstLine = answer.split(separator: "\n").first.map(String.init) ?? ""
             AIStub.log("finished \(run.job.logName) chars \(answer.count) first-line \(AIStub.quoted(firstLine))")
+            if AIStub.takeRegenerate() {
+                regenerate()
+                return
+            }
             guard AIStub.seamOptions.contains("apply") else { return }
             let before = session.conflict.value?.merge
             apply()
@@ -422,7 +437,7 @@ enum AIResultMetrics {
 
 /// An AI button of a card: disabled, with a tooltip saying where to set one up, while the active provider is not set
 /// up; `unavailable` disables it for a reason of its own (nothing staged). A click only opens the result card: nothing
-/// is sent before it.
+/// is sent before it. Draws nothing while Settings › AI › Show AI features is off.
 struct AIHookButton: View {
     let title: String
     var systemImage: String?
@@ -433,10 +448,17 @@ struct AIHookButton: View {
     /// In a card header: a step smaller than `RowTextButtonStyle`'s callout.
     var small = false
     let action: () -> Void
+    @AppStorage(PrefKey.aiShowFeatures.rawValue, store: Preferences.defaults)
+    private var showFeatures = true
 
     private var setup: AISetup { .shared }
 
     var body: some View {
+        if showFeatures { button }
+    }
+
+    @ViewBuilder
+    private var button: some View {
         let reason = setup.isReady ? unavailable : AISetup.setUpHint
         Button(action: action) {
             HStack(spacing: 4) {

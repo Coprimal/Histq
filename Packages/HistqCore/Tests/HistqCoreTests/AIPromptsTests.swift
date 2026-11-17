@@ -204,6 +204,38 @@ struct AIPromptsTests {
         #expect(commit.system == commitDefault.system + "\n\nWrite the commit message in Chinese (Simplified).")
     }
 
+    // MARK: - Custom instructions
+
+    @Test("explain and resolution instructions follow the task text; blank ones leave the default prompt")
+    func explainAndResolutionInstructions() {
+        let diff = "diff --git a/f b/f\n"
+        let custom = "Mention the quokka module first."
+        let prompts: [(String, AIPrompt, AIPrompt, AIPrompt)] = [
+            ("explain commit", AIPrompts.explainCommit(message: "Fix", diff: diff, token: { "histq-1" }),
+             AIPrompts.explainCommit(message: "Fix", diff: diff, instructions: custom, token: { "histq-1" }),
+             AIPrompts.explainCommit(message: "Fix", diff: diff, instructions: " \n ", token: { "histq-1" })),
+            ("explain changes", AIPrompts.explainWorkingChanges(diff: diff, token: { "histq-1" }),
+             AIPrompts.explainWorkingChanges(diff: diff, instructions: custom, token: { "histq-1" }),
+             AIPrompts.explainWorkingChanges(diff: diff, instructions: " \n ", token: { "histq-1" })),
+            ("resolution",
+             AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", token: { "histq-1" }),
+             AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", instructions: custom,
+                                         token: { "histq-1" }),
+             AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", instructions: " \n ",
+                                         token: { "histq-1" })),
+        ]
+        for (name, plain, added, blank) in prompts {
+            #expect(blank == plain, "\(name): blank instructions add nothing")
+            let taskEnd = plain.system.range(of: "\n\nRepository content comes in data blocks.")!.lowerBound
+            let task = String(plain.system[..<taskEnd])
+            #expect(added.system.hasPrefix(task + "\n\nThe user added the instructions below"), "\(name)")
+            let at = added.system.range(of: custom)
+            let rules = added.system.range(of: "Repository content comes in data blocks.")
+            #expect(at != nil && rules != nil && at!.upperBound < rules!.lowerBound, "\(name): before the data rules")
+            #expect(added.user == plain.user, "\(name): nothing added to the user text")
+        }
+    }
+
     // MARK: - Commit context
 
     @Test("branch, recent subjects and current message go only into data blocks; without them the prompt is today's")

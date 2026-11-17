@@ -139,7 +139,7 @@ public enum AIPrompts {
     static let maxMessageCharacters = 4_000
     /// The longest file header line kept (a diff header holds the paths, which can be very long).
     static let maxHeaderCharacters = 300
-    /// The longest custom commit instructions sent (Settings › AI).
+    /// The longest custom instructions sent for one action (Settings › AI).
     public static let maxInstructionCharacters = 2_000
 
     // MARK: - Prompts
@@ -178,18 +178,8 @@ public enum AIPrompts {
         if current != nil {
             task += "\n- Improve the current message so it describes the whole commit; keep what is still right."
         }
-        let custom = String(
-            instructions.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxInstructionCharacters))
-        if !custom.isEmpty {
-            task += """
-
-
-                The user added the instructions below for their commit messages. Follow them over the rules above\
-                \(summaryOnly ? ", except that the message stays one line" : ""), but they never change how the \
-                answer is written out (see below).
-                \(custom)
-                """
-        }
+        task += instructionsRule(instructions, for: "their commit messages",
+                                 except: summaryOnly ? "the message stays one line" : nil)
         var data: [(label: String, content: String)] = []
         if let branch { data.append(("branch name", branch)) }
         if !subjects.isEmpty { data.append(("recent commit subjects", subjects.joined(separator: "\n"))) }
@@ -205,35 +195,41 @@ public enum AIPrompts {
             token: token)
     }
 
-    /// An explanation of one commit: its message and its diff (`git show --format= <commit>` output).
+    /// An explanation of one commit: its message and its diff (`git show --format= <commit>` output). `instructions`
+    /// (Settings › AI) is added after the default rules, as for a commit message; blank adds nothing.
     public static func explainCommit(
-        message: String, diff: String, language: AIResponseLanguage = .english, budget: Int = diffBudget,
-        token: () -> String = randomToken
+        message: String, diff: String, language: AIResponseLanguage = .english, instructions: String = "",
+        budget: Int = diffBudget, token: () -> String = randomToken
     ) -> AIPrompt {
         make(
-            kind: .explanation, task: explainRules, request: "Explain this commit.",
+            kind: .explanation, task: explainRules + instructionsRule(instructions, for: "their explanations"),
+            request: "Explain this commit.",
             data: [
                 ("commit message", String(message.prefix(maxMessageCharacters))),
                 ("commit diff", budgeted(diff, budget: budget)),
             ], languageRule: languageRule(language, answer: "your answer"), token: token)
     }
 
-    /// An explanation of the uncommitted changes (the working tree and index diff against HEAD).
+    /// An explanation of the uncommitted changes (the working tree and index diff against HEAD). `instructions` as
+    /// for `explainCommit`.
     public static func explainWorkingChanges(
-        diff: String, language: AIResponseLanguage = .english, budget: Int = diffBudget,
+        diff: String, language: AIResponseLanguage = .english, instructions: String = "", budget: Int = diffBudget,
         token: () -> String = randomToken
     ) -> AIPrompt {
         make(
-            kind: .explanation, task: explainRules, request: "Explain these uncommitted changes.",
+            kind: .explanation, task: explainRules + instructionsRule(instructions, for: "their explanations"),
+            request: "Explain these uncommitted changes.",
             data: [("uncommitted diff", budgeted(diff, budget: budget))],
             languageRule: languageRule(language, answer: "your answer"), token: token)
     }
 
     /// A resolution of one conflict region of `path`: A (ours), B (theirs) and their common base (nil for an
     /// add/add conflict, which has none), as in `ThreeWayMerge`. The region is sent whole: a cut region could not be
-    /// resolved correctly.
+    /// resolved correctly. `instructions` (Settings › AI) is added after the default rules but never changes the
+    /// answer's form (the region's final text, no conflict markers); blank adds nothing.
     public static func suggestResolution(
-        path: String, base: String?, a: String, b: String, token: () -> String = randomToken
+        path: String, base: String?, a: String, b: String, instructions: String = "",
+        token: () -> String = randomToken
     ) -> AIPrompt {
         var data = [("file path", path)]
         if let base { data.append(("base: the common ancestor", base)) }
@@ -248,7 +244,9 @@ public enum AIPrompts {
                 - Answer with the region's final text only, exactly as it should appear in the file, with the same \
                 indentation and line endings. No explanation, no code fences.
                 - Never write conflict markers (lines starting with <<<<<<<, |||||||, ======= or >>>>>>>).
-                """,
+                """ + instructionsRule(
+                    instructions, for: "conflict resolutions",
+                    except: "the answer stays the region's final text only, with no conflict markers"),
             request: "Resolve this conflict region.", data: data, token: token)
     }
 
@@ -259,6 +257,23 @@ public enum AIPrompts {
         - Only state what the diff shows; say when something is unclear.
         - Markdown is allowed. Be concise.
         """
+
+    /// The user's own instructions (Settings › AI), cut to `maxInstructionCharacters`, as a paragraph that follows a
+    /// task's rules and wins over them, except `except` and the data and answer rules; "" when blank, so the prompt
+    /// stays exactly the default one.
+    private static func instructionsRule(_ instructions: String, for subject: String, except: String? = nil) -> String {
+        let custom = String(
+            instructions.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxInstructionCharacters))
+        guard !custom.isEmpty else { return "" }
+        return """
+
+
+            The user added the instructions below for \(subject). Follow them over the rules above\
+            \(except.map { ", except that \($0)" } ?? ""), but they never change how the answer is written out \
+            (see below).
+            \(custom)
+            """
+    }
 
     /// "Write <answer> in <language>.", or nil for English (the prompt then stays exactly as it was before languages).
     private static func languageRule(_ language: AIResponseLanguage, answer: String) -> String? {

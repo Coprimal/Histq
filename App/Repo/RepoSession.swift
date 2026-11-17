@@ -2607,7 +2607,12 @@ final class RepoSession: Identifiable {
         aiRun = run
         let url = url
         let languages = Self.aiLanguages()
-        let instructions = Preferences.defaults.string(forKey: PrefKey.aiCommitInstructions.rawValue) ?? ""
+        let instructionsKey: PrefKey = switch job {
+        case .commitMessage: .aiCommitInstructions
+        case .explainCommit, .explainWorkingChanges: .aiExplainInstructions
+        case .resolution: .aiConflictInstructions
+        }
+        let instructions = Preferences.defaults.string(forKey: instructionsKey.rawValue) ?? ""
         let branch = currentBranch
         run.start { [weak self] in
             guard let backend = try await self?.backend() else { throw CancellationError() }
@@ -2633,9 +2638,9 @@ final class RepoSession: Identifiable {
 
     /// The job's prompt: the staged (or, when amending, the whole amended commit's), WIP or commit diff read with the
     /// read environment (never a profile), without what the worktree's `.aiignore` and the skip list leave out
-    /// (`AIPrompts.filtered`), cut to the prompt's budget. `instructions` (Settings › AI), `branch` (taken at the
-    /// click) and the last commit subjects go only into a commit message's prompt. A resolution's text was taken at
-    /// the click; it is never translated.
+    /// (`AIPrompts.filtered`), cut to the prompt's budget. `instructions` are the job's own (Settings › AI); `branch`
+    /// (taken at the click) and the last commit subjects go only into a commit message's prompt. A resolution's text
+    /// was taken at the click; it is never translated.
     @concurrent
     private nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
@@ -2660,7 +2665,7 @@ final class RepoSession: Identifiable {
             let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
             return AIPrompts.explainCommit(
                 message: message, diff: try aiFiltered(diff, worktree: worktree),
-                language: languages.response)
+                language: languages.response, instructions: instructions)
         case .explainWorkingChanges:
             // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
             let env = try await backend.readEnvironment(cwd: cwd)
@@ -2669,10 +2674,12 @@ final class RepoSession: Identifiable {
             let diff = try await staged + unstaged
             guard !diff.isEmpty else { throw AIJobError.noChanges }
             return AIPrompts.explainWorkingChanges(
-                diff: try aiFiltered(diff, worktree: worktree), language: languages.response)
+                diff: try aiFiltered(diff, worktree: worktree), language: languages.response,
+                instructions: instructions)
         case .resolution(let target):
             if try aiIgnore(worktree: worktree)?.matches(target.path) == true { throw AIJobError.fileIgnored }
-            return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b)
+            return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b,
+                                               instructions: instructions)
         }
     }
 

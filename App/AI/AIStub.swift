@@ -11,11 +11,12 @@
 // With `-HistqKeychain memory`, every built-in provider gets a fake key in the in-memory Keychain, so the AI buttons
 // are enabled.
 //
-// `-HistqAI <hook>[,apply][,cancel]` (stub runs only) clicks one AI button once it can run: `generate` (commit box),
-// `explain-wip` (commit box), `explain` (commit details), `resolve` (conflict editor), `test` (Settings › AI, Test
-// Connection), `load-models` (Settings › AI, Load models); `apply` applies the finished answer, `cancel` cancels as
-// soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
-// reads its content; `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
+// `-HistqAI <hook>[,apply][,cancel][,regenerate]` (stub runs only) clicks one AI button once it can run: `generate`
+// (commit box), `explain-wip` (commit box), `explain` (commit details), `resolve` (conflict editor), `test` (Settings ›
+// AI, Test Connection), `load-models` (Settings › AI, Load models); `apply` applies the finished answer, `regenerate`
+// clicks Regenerate once on the first finish (once per launch), `cancel` cancels as soon as the first words show,
+// `close-tab` and `close-window` close the card's tab or window while the job still reads its content;
+// `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
 // `generate` waits until the refs are read (the branch name). Evidence goes to `<stateDir>/ai.log` (never a key).
 import Foundation
 import HistqCore
@@ -72,6 +73,17 @@ enum AIStub {
         guard !seamTaken, seamParts.first == hook else { return false }
         seamTaken = true
         log("click \(hook)")
+        return true
+    }
+
+    @MainActor private static var regenerateTaken = false
+
+    /// `-HistqAI <hook>,regenerate`: true once per launch, on the first finish (the card is re-created per run).
+    @MainActor
+    static func takeRegenerate() -> Bool {
+        guard !regenerateTaken, seamOptions.contains("regenerate") else { return false }
+        regenerateTaken = true
+        log("regenerate")
         return true
     }
 

@@ -150,6 +150,8 @@ enum PrefKey: String, CaseIterable {
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
+    case aiShowFeatures
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
     case aiProvider
     /// The model of each AI provider, by `AIProvider` raw value; a missing or empty one = the provider's default.
@@ -164,6 +166,10 @@ enum PrefKey: String, CaseIterable {
     case aiCommitSummaryOnly
     /// The user's own instructions added to the Generate Message prompt (empty: none).
     case aiCommitInstructions
+    /// The user's own instructions added to the Explain prompts, for a commit and for the changes (empty: none).
+    case aiExplainInstructions
+    /// The user's own instructions added to the Suggest Resolution prompt (empty: none).
+    case aiConflictInstructions
     /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
     case toastLevel
 
@@ -197,13 +203,14 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .aiShowFeatures: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
         case .aiCustomBaseURL: ""
         case .aiResponseLanguage: "english"
         case .aiCommitLanguage: "english"
         case .aiCommitSummaryOnly: false
-        case .aiCommitInstructions: ""
+        case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions: ""
         case .toastLevel: "all"
         }
     }

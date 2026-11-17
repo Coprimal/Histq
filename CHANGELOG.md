@@ -33,6 +33,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - AI requests keep only the header of lock and generated files (lockfiles, minified files, source maps, generated code).
 - A `.aiignore` file at the repository root (gitignore-style patterns: `#` comments, `*`, `?`, `**`, `[...]`, `\` escapes, a leading or trailing `/`; case-insensitive; no `!` lines) keeps matching files out of every AI request.
 - Generate Message works with Amend on: it covers the whole amended commit and improves the current message.
+- Settings › AI › Explanations and Conflict resolution: Custom instructions, as for commit messages, and Reset to Default in each instructions box to clear it.
+- Settings › AI › Show AI features: off hides every AI button.
+- Regenerate in the AI card asks the provider again for a new answer.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.
