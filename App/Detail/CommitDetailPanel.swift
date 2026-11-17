@@ -70,9 +70,24 @@ struct CommitDetailPanel: View {
 private enum CommitDetailMetrics {
     /// The info card's share of the panel's height at most; a longer message scrolls inside the card.
     static let infoFraction: CGFloat = 0.4
-    /// The message's height at least (about two subject lines), even when the card's other rows alone pass
-    /// `infoFraction` (a small window).
-    static let messageMinHeight: CGFloat = 44
+    /// The message's height at least (about two subject lines and its box's padding), even when the card's other
+    /// rows alone pass `infoFraction` (a small window).
+    static let messageMinHeight: CGFloat = 44 + 2 * messagePadding
+    /// The padding inside the message's box.
+    static let messagePadding: CGFloat = 10
+}
+
+/// The box that sets the commit message (subject and body) apart from the card's other rows: a faint fill, a 1 pt
+/// edge, padding around.
+private struct MessageBox: ViewModifier {
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(CommitDetailMetrics.messagePadding)
+            .background(shape.fill(Palette.tabFill))
+            .overlay(shape.strokeBorder(Palette.surfaceBorder, lineWidth: 1))
+    }
 }
 
 /// The commit detail's Files card, loaded or not: the count (a skeleton while nil), the paths/tree toggle, and a body
@@ -113,6 +128,7 @@ struct CommitDetailPlaceholder: View {
                 // the loaded card's height.
                 VStack(alignment: .leading, spacing: 10) {
                     line(.title3.weight(.semibold), fraction: 0.75, height: 16)
+                        .modifier(MessageBox())
                     HStack(spacing: 8) {
                         SkeletonLine(width: InfoMetrics.avatar, height: InfoMetrics.avatar)
                         VStack(alignment: .leading, spacing: 2) {
@@ -231,6 +247,7 @@ private struct CommitInfoCard: View {
                     // Each commit's message starts at its top.
                     .id(commit.hash)
                 }
+                .modifier(MessageBox())
                 VStack(alignment: .leading, spacing: 10) {
                     PersonRow(role: "Author", name: commit.authorName, email: commit.authorEmail,
                               date: format(commit.authorDate))
