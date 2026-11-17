@@ -146,10 +146,10 @@ enum Palette {
     static let diffRemovedSign = srgb(0xF0605C)
     /// A hunk header row's band. White 0.05
     static let diffHunkFill = NSColor.white.withAlphaComponent(0.05)
-    /// The line numbers in the gutters. White 0.35
-    static let diffLineNumber = NSColor.white.withAlphaComponent(0.35)
-    /// Code text without a token. White 0.86
-    static let diffText = NSColor.white.withAlphaComponent(0.86)
+    /// The line numbers in the gutters. White 0.45
+    static let diffLineNumber = NSColor.white.withAlphaComponent(0.45)
+    /// Code text without a token: white, not grey (user, 2026-11-17). White 0.97
+    static let diffText = NSColor.white.withAlphaComponent(0.97)
 
     // MARK: Conflict editor (AppKit: its panes draw their rows in `draw(_:)`)
 
@@ -176,12 +176,12 @@ enum Palette {
     static let syntaxString = srgb(0xFC6A5D)
     /// #D0BF69
     static let syntaxNumber = srgb(0xD0BF69)
-    /// #7F8C99
-    static let syntaxComment = srgb(0x7F8C99)
+    /// #98A5B2
+    static let syntaxComment = srgb(0x98A5B2)
     /// #5DD8FF
     static let syntaxType = srgb(0x5DD8FF)
-    /// White 0.6
-    static let syntaxPunctuation = NSColor.white.withAlphaComponent(0.6)
+    /// White 0.8
+    static let syntaxPunctuation = NSColor.white.withAlphaComponent(0.8)
 
     // MARK: Terminal (AppKit: SwiftTerm draws its own cells)
 
