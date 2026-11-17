@@ -1,6 +1,6 @@
 // Panel 0, the vertical tabs (General › Tab position: Left): the window's tabs as rows on the window glass, left of
-// every page, the selected row joined to the page's sheet, with New tab and the tab list at the bottom. The tab strip
-// under the toolbar does not show then.
+// every page, the selected row joined to the page's sheet, the pinned tabs as a grid of icons above the rows, with New
+// tab and the tab list at the bottom. The tab strip under the toolbar does not show then.
 import SwiftUI
 
 /// Where the window's app tabs show: the strip under the toolbar, or panel 0 on the left.
@@ -38,10 +38,20 @@ enum VerticalTabsMetrics {
     static let groupHeaderFont = Font.system(size: 12, weight: .semibold)
     /// A group's rows sit this far right of the others; its line runs down the middle of that room.
     static let groupIndent: CGFloat = 12
+    /// A pinned tab's cell in the grid above the rows (`VerticalPinnedGrid`): about this square, 4 to a row in the
+    /// panel, `pinnedSpacing` apart.
+    static let pinnedCell: CGFloat = 30
+    static let pinnedCellMax: CGFloat = 34
+    static let pinnedSpacing: CGFloat = 4
+    static let pinnedRadius: CGFloat = 8
+    /// A grouped pinned tab's bar in its group's color along the cell's bottom, inset from its sides.
+    static let pinnedGroupBar: CGFloat = 2
+    static let pinnedGroupBarInset: CGFloat = 6
 }
 
-/// The window's tabs top to bottom, the selected tab's running operation, then New tab and the tab list, with no
-/// container: the selected row is a tab of the page's sheet beside it (`VerticalTabSheetShape`).
+/// The window's tabs top to bottom (the pinned ones first, as a grid of icons), the selected tab's running operation,
+/// then New tab and the tab list, with no container: the selected row is a tab of the page's sheet beside it
+/// (`VerticalTabSheetShape`).
 struct VerticalTabsPanel: View {
     @Environment(WindowModel.self) private var model
 
@@ -57,8 +67,9 @@ struct VerticalTabsPanel: View {
     }
 }
 
-/// The tabs as Settings sidebar rows (`VerticalTabRow`): a press selects at once (on mouse-down), a drag past a few points
-/// reorders.
+/// The pinned tabs as a grid of icons (`VerticalPinnedGrid`), then the others as Settings sidebar rows
+/// (`VerticalTabRow`): a press selects at once (on mouse-down), a drag past a few points reorders a row (pinned tabs
+/// are reordered in the top strip only).
 private struct VerticalTabList: View {
     let model: WindowModel
     @Namespace private var namespace
@@ -77,7 +88,15 @@ private struct VerticalTabList: View {
     var body: some View {
         ScrollViewReader { scroller in
             ScrollView(.vertical, showsIndicators: false) {
-                rows
+                // In the scroll view, so `scrollTo` reaches a pinned tab's cell and a press on it does not drag the
+                // window.
+                VStack(alignment: .leading, spacing: 0) {
+                    if model.pinnedCount > 0 {
+                        VerticalPinnedGrid(model: model)
+                            .padding(.top, TabStripMetrics.flare)
+                    }
+                    rows
+                }
             }
             .scrollBounceBehavior(.basedOnSize)
             .background(WindowDragBlocker())
@@ -89,16 +108,28 @@ private struct VerticalTabList: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// The unpinned tabs and their groups' names. The pinned tabs (and their groups' names) are not rows: they take no
+    /// height, and their items are skipped. Their gaps (and names) still count in `positions`, but only as one shift
+    /// of every row, since they stand first in every order a row's drag can make (`WindowModel.moveDestinations`), and
+    /// the rows use positions only as differences. Indices stay `model.tabs`' own.
     private var rows: some View {
         let layout = TabGroupLayout(tabs: model.tabs, groups: model.tabGroups, collapsed: model.collapsedGroups,
                                     tabExtent: SidebarItemStyle.height, gap: SidebarItemStyle.spacing,
+                                    extent: { model.tabs[$0].pinned ? 0 : SidebarItemStyle.height },
                                     headerExtent: { _ in VerticalTabsMetrics.groupHeaderHeight })
+        // A pinned group is pinned whole, so its first tab tells.
+        let items = layout.items.filter { item in
+            switch item {
+            case .header(let group): !model.tabs[group.range.lowerBound].pinned
+            case .tab(_, let tab): !tab.pinned
+            }
+        }
         let current = layout.positions(order: Array(model.tabs.indices))
         // While a tab is dragged, the others (and the group names) stand where they would with it dropped at its target.
         let target = draggedID == nil ? current
             : layout.positions(order: TabGroupLayout.moved(model.tabs.count, dragFrom, dragTarget))
         return VStack(alignment: .leading, spacing: SidebarItemStyle.spacing) {
-            ForEach(layout.items) { item in
+            ForEach(items) { item in
                 switch item {
                 case .header(let group):
                     // The line runs from under the name to the group's last row's end.
@@ -128,8 +159,8 @@ private struct VerticalTabList: View {
         let profile = model.profile(of: tab)
         let group = layout.groupKey[index]
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
-        return VerticalTabRow(title: tab.title, systemImage: Self.icon(of: tab), help: tab.repoURL?.path ?? tab.title,
-                              profileColor: profile?.color, profileName: profile?.name,
+        return VerticalTabRow(title: tab.title, systemImage: Self.icon(of: tab), emoji: tab.emoji,
+                              help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color, profileName: profile?.name,
                               groupName: group.map(RepoGroupKey.name(of:)),
                               selected: selected, dragged: dragged, namespace: namespace,
                               onSelect: { model.selectTab(id: tab.id) },
@@ -259,12 +290,14 @@ private struct VerticalTabGroupHeader: View {
 /// One tab as a Settings sidebar row (`SidebarItemStyle`, user 2026-11-13): 28 pt tall, 10 pt padding, a 20 pt icon
 /// slot then the title (body font). The selected row is a tab of the page's sheet (`VerticalTabSheetShape` in
 /// `Palette.sheet`, as the top tabs' selected tab; the shape slides between rows) with full-strength text; the others
-/// are secondary with a hover capsule. The profile's color is a dot on the icon's corner; the close button replaces the
-/// trailing slot on hover. A grouped tab (a repo's worktrees) sits under its group's name, right of the group's line
-/// (`VerticalTabGroupHeader`).
+/// are secondary with a hover capsule. A tab with an emoji shows it (`TabIcon`) in the icon slot instead of the symbol.
+/// The profile's color is a dot on the icon's corner; the close button replaces the trailing slot on hover. A grouped
+/// tab (a repo's worktrees) sits under its group's name, right of the group's line (`VerticalTabGroupHeader`).
 private struct VerticalTabRow: View {
     let title: String
     let systemImage: String
+    /// The tab's emoji (`WindowModel.Tab.emoji`), shown instead of `systemImage`; nil for none.
+    let emoji: String?
     let help: String
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
@@ -325,9 +358,20 @@ private struct VerticalTabRow: View {
         .accessibilityAction(.default, onSelect)
     }
 
-    /// The tab's icon in the rows' 20 pt slot, with the profile's dot on its lower trailing corner, ringed in the
-    /// panel's color so it reads over the glyph.
-    private var icon: some View {
+    /// The tab's icon in the rows' 20 pt slot, with the profile's dot on its lower trailing corner: the emoji with
+    /// `TabIcon`'s white-ringed dot, else the symbol with a dot ringed in the panel's color so it reads over the glyph.
+    @ViewBuilder private var icon: some View {
+        if let emoji {
+            TabIcon(emoji: emoji, circleColor: nil, profileColor: profileColor, profileName: profileName)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+        } else {
+            symbol
+        }
+    }
+
+    /// The symbol in the 20 pt slot, with its own profile dot.
+    private var symbol: some View {
         Image(systemName: systemImage)
             .foregroundStyle(selected ? Color.primary : Color.secondary)
             .frame(width: 20)
@@ -346,6 +390,118 @@ private struct VerticalTabRow: View {
                 }
             }
             .accessibilityHidden(true)
+    }
+}
+
+/// The pinned tabs (`WindowModel.pinnedCount`, first in `tabs`) as a grid of icon cells above the rows, about 4 to a
+/// row: each its `TabIcon` (the emoji, else its circle) with the profile's dot. The selected cell sits on the sheet's
+/// color, a hovered one on a subtle fill; a grouped tab has its group's color as a bar under its icon. A press selects
+/// on mouse-down; the cells do not reorder (the top strip does) and a pinned group does not collapse here.
+private struct VerticalPinnedGrid: View {
+    let model: WindowModel
+    /// The tab under the current mouse press, so a press selects once.
+    @State private var pressedID: WindowModel.Tab.ID?
+
+    private let columns = [GridItem(.adaptive(minimum: VerticalTabsMetrics.pinnedCell,
+                                              maximum: VerticalTabsMetrics.pinnedCellMax),
+                                    spacing: VerticalTabsMetrics.pinnedSpacing)]
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: VerticalTabsMetrics.pinnedSpacing) {
+            // Pinned tabs come first, so the offset is the tab's index in `model.tabs`.
+            ForEach(Array(model.tabs.prefix(model.pinnedCount).enumerated()), id: \.element.id) { index, tab in
+                cell(index: index, tab: tab)
+            }
+        }
+        // Lined up with the rows on the leading side, clear of the sheet on the trailing one.
+        .padding(.leading, TabStripMetrics.rowInset)
+        .padding(.trailing, PanelContainerMetrics.padding)
+    }
+
+    /// One pinned tab's cell, with its press, menu, middle click and tooltip.
+    private func cell(index: Int, tab: WindowModel.Tab) -> some View {
+        let profile = model.profile(of: tab)
+        let group = model.tabGroups.first { $0.range.contains(index) }?.key
+        let path = tab.repoURL?.path
+        return VerticalPinnedCell(title: tab.title, emoji: tab.emoji, pinColor: tab.pinColor,
+                                  profileColor: profile?.color, profileName: profile?.name,
+                                  groupName: group.map(RepoGroupKey.name(of:)),
+                                  groupColor: group.map(TabGroupColors.line),
+                                  selected: tab.id == model.selectedTabID,
+                                  onSelect: { model.selectTab(id: tab.id) })
+            .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
+            .gesture(press(tab.id))
+            .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: true)) }
+            // A pinned tab shows no name: its tooltip leads with it, then the path when that says more.
+            .help(path.map { $0 == tab.title ? tab.title : "\(tab.title)\n\($0)" } ?? tab.title)
+            .id(tab.id)
+    }
+
+    /// Selects the tab on mouse-down, once per press; no drag.
+    private func press(_ id: WindowModel.Tab.ID) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                guard pressedID != id else { return }
+                pressedID = id
+                model.selectTab(id: id)
+            }
+            .onEnded { _ in pressedID = nil }
+    }
+}
+
+/// A pinned tab's cell in `VerticalPinnedGrid`: its icon centered in a rounded square, on the sheet's color when
+/// selected and a subtle fill on hover, with its group's color as a bar along the bottom.
+private struct VerticalPinnedCell: View {
+    let title: String
+    let emoji: String?
+    /// The circle's color (`TabIcon.circleColor`) when the tab has no emoji.
+    let pinColor: Int?
+    /// The profile's `#RRGGBB`; nil without a profile (no dot).
+    let profileColor: String?
+    let profileName: String?
+    /// The tab's group's name and line color; nil outside a group.
+    let groupName: String?
+    let groupColor: Color?
+    let selected: Bool
+    let onSelect: () -> Void
+    @State private var hovered = false
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: VerticalTabsMetrics.pinnedRadius, style: .continuous)
+    }
+
+    var body: some View {
+        TabIcon(emoji: emoji, circleColor: emoji == nil ? TabIcon.circleColor(pinColor) : nil,
+                profileColor: profileColor, profileName: profileName)
+            .accessibilityHidden(true)
+            .frame(maxWidth: .infinity)
+            .frame(height: VerticalTabsMetrics.pinnedCell)
+            .background {
+                if selected {
+                    shape.fill(Palette.sheet)
+                } else if hovered {
+                    shape.fill(Palette.hoverFill)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if let groupColor {
+                    Capsule()
+                        .fill(groupColor)
+                        .frame(height: VerticalTabsMetrics.pinnedGroupBar)
+                        .padding(.horizontal, VerticalTabsMetrics.pinnedGroupBarInset)
+                        .allowsHitTesting(false)
+                }
+            }
+            // The whole cell takes the press and the hover, not just the icon.
+            .contentShape(shape)
+            .animation(Motion.hover, value: hovered)
+            .onHover { hovered = $0 }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(title)
+            .accessibilityValue(["Pinned", groupName.map { "Group \($0)" }, profileName.map { "Profile \($0)" }]
+                .compactMap(\.self).joined(separator: ", "))
+            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction(.default, onSelect)
     }
 }
 

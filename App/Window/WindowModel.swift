@@ -24,6 +24,13 @@ final class WindowModel {
         var repoKey: String?
         /// The name the user gave the tab (its menu's Set Alias…); nil shows the folder's name.
         var alias: String?
+        /// The emoji the user gave the tab (its menu's Set Emoji…), one `Character`; nil shows none.
+        var emoji: String?
+        /// The tab sits in the pinned area at the far left (`pinnedCount`); a worktree group is pinned whole.
+        var pinned = false
+        /// The pinned tab's circle color, an index into `Palette.graphLanes`, picked when it is first pinned
+        /// (`nextPinColor`); kept when it is unpinned, so pinning it again shows the same color.
+        var pinColor: Int?
 
         /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { alias ?? repoURL?.lastPathComponent ?? "New Tab" }
@@ -152,8 +159,9 @@ final class WindowModel {
 
     /// Opens a repo in a tab and selects it: the tab that already shows it, else the selected tab if it is a
     /// Welcome tab, else a new tab. `nil` opens a new Welcome tab. A worktree opened from the tab `opener` (its graph
-    /// row, the sidebar) joins the opener's group at once: its new tab goes right after the group's last tab. Any other
-    /// new tab goes last, and moves beside its repo's tabs once its repo is read (`resolveRepoKeys`).
+    /// row, the sidebar) joins the opener's group at once: its new tab goes right after the group's last tab, pinned
+    /// when the group is (`gatherGroups`). Any other new tab goes last, and moves beside its repo's tabs once its repo
+    /// is read (`resolveRepoKeys`).
     func openTab(_ url: URL?, opener: Tab.ID? = nil) {
         navigation.page = .home
         closeSettings()
@@ -179,6 +187,7 @@ final class WindowModel {
             var tab = Tab(repoURL: url)
             tab.repoKey = tabs[opener].repoKey
             tabs.insert(tab, at: groupEnd(of: opener) + 1)
+            gatherGroups()
             selectedTabID = tab.id
             if tab.repoKey == nil { resolveRepoKeys([tab.id]) }
         } else {
@@ -398,7 +407,8 @@ final class WindowModel {
         welcomes.removeAll()
         tabs = saved.map { tab in
             Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
-                isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias)
+                isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias, emoji: tab.emoji,
+                pinned: tab.pinned ?? false, pinColor: tab.pinColor)
         }
         restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), saved))
         resolveRepoKeys(tabs.filter { !$0.isMissing }.map(\.id))
@@ -422,12 +432,16 @@ final class WindowModel {
             var saved = restored[tab.id] ?? SavedTab()
             saved.path = path
             saved.alias = tab.alias
+            saved.emoji = tab.emoji
+            saved.pinned = tab.pinned ? true : nil
+            saved.pinColor = tab.pinColor
             return saved
         }
         let commit: String? = if case .commit(let hash) = session.selection { hash } else { nil }
         // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
         let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
-        return SavedTab(path: path, profile: profile, commit: commit, alias: tab.alias)
+        return SavedTab(path: path, profile: profile, commit: commit, alias: tab.alias, emoji: tab.emoji,
+                        pinned: tab.pinned ? true : nil, pinColor: tab.pinColor)
     }
 
     /// "Repo not found" › Locate…: the tab opens `url` instead (the tab that already shows it when there is one).
@@ -517,7 +531,8 @@ final class WindowModel {
     var canReopenClosedTab: Bool { !closedTabs.isEmpty }
 
     /// ⇧⌘T: reopens the last closed repo tab at its index, back in its worktree group (`gatherGroups`), with its
-    /// profile, commit and alias, and selects it. A repo open again in another tab meanwhile is selected instead.
+    /// profile, commit, alias, emoji and pin, and selects it. A repo open again in another tab meanwhile is selected
+    /// instead.
     func reopenClosedTab() {
         guard let closed = closedTabs.popLast(), let path = closed.saved.path else { return }
         navigation.page = .home
@@ -526,7 +541,8 @@ final class WindowModel {
         let url = URL(fileURLWithPath: path, isDirectory: true)
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
-        var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias)
+        var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias, emoji: closed.saved.emoji,
+                      pinned: closed.saved.pinned ?? false, pinColor: closed.saved.pinColor)
         tab.repoKey = closed.repoKey
         tabs.insert(tab, at: min(closed.index, tabs.count))
         restored[tab.id] = closed.saved
@@ -542,6 +558,47 @@ final class WindowModel {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         tabs[index].alias = trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// A tab's menu › Set Emoji…: `emoji` marks the tab, its last emoji only (`TabEmoji.normalized`); nil, or text
+    /// with no emoji, removes it.
+    func setEmoji(_ emoji: String?, for id: Tab.ID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        tabs[index].emoji = emoji.flatMap(TabEmoji.normalized)
+    }
+
+    /// A tab's menu › Pin Tab / Unpin Tab: pins or unpins the tab, with its whole worktree group (the tabs of its
+    /// `repoKey`). Pinned tabs go to the end of the pinned area, each given a circle color when it has none
+    /// (`nextPinColor`); unpinned ones go to the start of the other tabs, keeping their color. The selection stays.
+    func setPinned(_ pinned: Bool, for id: Tab.ID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        let isAffected: (Tab) -> Bool = { other in tab.repoKey.map { other.repoKey == $0 } ?? (other.id == id) }
+        guard tabs.contains(where: { isAffected($0) && $0.pinned != pinned }) else { return }
+        var moved = tabs.filter(isAffected)
+        let rest = tabs.filter { !isAffected($0) }
+        // Every moved tab is pinned before the colors are picked, so a color one kept from an earlier pin counts.
+        for index in moved.indices { moved[index].pinned = pinned }
+        if pinned {
+            for index in moved.indices where moved[index].pinColor == nil {
+                moved[index].pinColor = nextPinColor(among: rest + moved)
+            }
+        }
+        let boundary = rest.prefix { $0.pinned }.count
+        tabs = Array(rest[..<boundary]) + moved + Array(rest[boundary...])
+        gatherGroups()
+    }
+
+    /// The number of pinned tabs, which come first in `tabs`.
+    var pinnedCount: Int { tabs.prefix { $0.pinned }.count }
+
+    /// The circle color for a tab being pinned: the first index of `Palette.graphLanes` no pinned tab of `tabs` uses,
+    /// else the least used one. Takes the tabs as they are being rearranged, which `self.tabs` is not yet.
+    private func nextPinColor(among tabs: [Tab]) -> Int {
+        var uses = Array(repeating: 0, count: Palette.graphLanes.count)
+        for tab in tabs where tab.pinned {
+            if let color = tab.pinColor, uses.indices.contains(color) { uses[color] += 1 }
+        }
+        return uses.indices.min { uses[$0] < uses[$1] } ?? 0
     }
 
     /// Moves the tab at `source` to `destination` (its index once moved), one of `moveDestinations(from:)`; the
@@ -572,14 +629,17 @@ final class WindowModel {
     }
 
     /// Where the tab at `source` may be dropped (indices once moved): a grouped tab only within its group, another
-    /// tab anywhere but between two tabs of a group, so a group is never split.
+    /// tab anywhere but between two tabs of a group, so a group is never split; and a pinned tab only among the pinned
+    /// tabs, an unpinned one only among the others.
     func moveDestinations(from source: Int) -> [Int] {
         guard tabs.indices.contains(source) else { return [] }
         if let group = tabGroups.first(where: { $0.range.contains(source) }) { return Array(group.range) }
+        let area = tabs[source].pinned ? 0..<pinnedCount : pinnedCount..<tabs.count
         var rest = tabs.map(\.repoKey)
         rest.remove(at: source)
         return (0...rest.count).filter { index in
-            index == 0 || index == rest.count || rest[index] == nil || rest[index - 1] != rest[index]
+            area.contains(index)
+                && (index == 0 || index == rest.count || rest[index] == nil || rest[index - 1] != rest[index])
         }
     }
 
@@ -643,7 +703,9 @@ final class WindowModel {
         gatherGroups()
     }
 
-    /// Moves each repo's tabs right after its first tab, the others keeping their order; the selection stays.
+    /// Moves each repo's tabs right after its first tab, the others keeping their order; then pins a whole group when
+    /// one of its tabs is pinned (with a circle color, `nextPinColor`) and moves the pinned tabs first, each side
+    /// keeping its order. The selection stays.
     private func gatherGroups() {
         var gathered: [Tab] = []
         var placed = Set<String>()
@@ -655,7 +717,17 @@ final class WindowModel {
             guard placed.insert(key).inserted else { continue }
             gathered += tabs.filter { $0.repoKey == key }
         }
-        if gathered.map(\.id) != tabs.map(\.id) { tabs = gathered }
+        // A tab that joins a pinned group (a new worktree tab, a repo read, Locate, ⇧⌘T) is pinned with it.
+        let pinnedKeys = Set(gathered.filter(\.pinned).compactMap(\.repoKey))
+        for index in gathered.indices where !gathered[index].pinned {
+            if let key = gathered[index].repoKey, pinnedKeys.contains(key) { gathered[index].pinned = true }
+        }
+        for index in gathered.indices where gathered[index].pinned && gathered[index].pinColor == nil {
+            gathered[index].pinColor = nextPinColor(among: gathered)
+        }
+        // Groups stay side by side: each is wholly pinned or not.
+        gathered = gathered.filter(\.pinned) + gathered.filter { !$0.pinned }
+        if gathered != tabs { tabs = gathered }
         // The selected tab may just have joined a collapsed group (a Welcome tab's repo read).
         expandSelectedGroup()
     }
@@ -899,6 +971,25 @@ final class WindowModel {
                 }
                 session.selectHosted(.pullRequest(pull.number))
             }
+        }
+    }
+}
+
+/// A tab's emoji, as Set Emoji… keeps it: one emoji `Character` (a flag or a ZWJ sequence is one, kept whole).
+enum TabEmoji {
+    /// The last emoji of `text` once trimmed (typing "a😀b🔥" gives "🔥"); nil when it has none ("1", plain text). A
+    /// character counts when one of its scalars shows as an emoji by default, or is an emoji followed by U+FE0F
+    /// (as "❤️").
+    static func normalized(_ text: String) -> String? {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).reversed().first(where: isEmoji).map(String.init)
+    }
+
+    /// The character shows as an emoji (see `normalized`).
+    private static func isEmoji(_ character: Character) -> Bool {
+        let scalars = Array(character.unicodeScalars)
+        return scalars.indices.contains { index in
+            scalars[index].properties.isEmojiPresentation
+                || (scalars[index].properties.isEmoji && index + 1 < scalars.count && scalars[index + 1] == "\u{FE0F}")
         }
     }
 }

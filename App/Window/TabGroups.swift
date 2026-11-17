@@ -73,19 +73,22 @@ struct TabGroupLayout {
     }
 
     let items: [Item]
-    /// A tab's width (top tabs) or height (vertical tabs).
+    /// A tab's width (top tabs) or height (vertical tabs) when every tab shares one; `extent(of:)` gives each tab's.
     let tabExtent: CGFloat
+    /// Each tab's extent, by index (a pinned top tab is narrower than the others).
+    private let extents: [CGFloat]
     let headerExtents: [String: CGFloat]
     let gap: CGFloat
     /// The group of each grouped tab, by index.
     let groupKey: [Int: String]
     /// The collapsed groups (`WindowModel.collapsedGroups`): their header only, their tabs take no room.
     let collapsed: Set<String>
-    /// Each group's tab count, by key.
-    private let groupSize: [String: Int]
+    /// Each group's tab indices, by key.
+    private let groupRange: [String: ClosedRange<Int>]
 
+    /// `extent` gives the tab at an index its own extent; without it every tab takes `tabExtent`.
     init(tabs: [WindowModel.Tab], groups: [TabGroup], collapsed: Set<String>, tabExtent: CGFloat, gap: CGFloat,
-         headerExtent: (TabGroup) -> CGFloat) {
+         extent: ((Int) -> CGFloat)? = nil, headerExtent: (TabGroup) -> CGFloat) {
         var items: [Item] = []
         var groupKey: [Int: String] = [:]
         for (index, tab) in tabs.enumerated() {
@@ -98,11 +101,17 @@ struct TabGroupLayout {
         }
         self.items = items
         self.tabExtent = tabExtent
+        extents = tabs.indices.map { extent?($0) ?? tabExtent }
         self.gap = gap
         self.groupKey = groupKey
         self.collapsed = collapsed
         headerExtents = Dictionary(groups.map { ($0.key, headerExtent($0)) }, uniquingKeysWith: { first, _ in first })
-        groupSize = Dictionary(groups.map { ($0.key, $0.range.count) }, uniquingKeysWith: { first, _ in first })
+        groupRange = Dictionary(groups.map { ($0.key, $0.range) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The tab at `index`'s width (top tabs) or height (vertical tabs); `tabExtent` outside the tabs.
+    func extent(of index: Int) -> CGFloat {
+        extents.indices.contains(index) ? extents[index] : tabExtent
     }
 
     /// The tab indices in order with the tab at `from` dropped at `to` (its index once moved).
@@ -128,14 +137,15 @@ struct TabGroupLayout {
             positions.tabs[index] = x
             // A collapsed group's tabs stand at its header's end, with no room.
             if let key, collapsed.contains(key) { continue }
-            x += tabExtent + gap
+            x += extent(of: index) + gap
         }
         return positions
     }
 
     /// From a group's header start to its last tab's end (its header's end when collapsed).
     func span(of key: String) -> CGFloat {
-        let tabs = collapsed.contains(key) ? 0 : CGFloat(groupSize[key] ?? 0) * (tabExtent + gap)
+        let range = collapsed.contains(key) ? nil : groupRange[key]
+        let tabs = range.map { $0.reduce(0) { $0 + extent(of: $1) + gap } } ?? 0
         return (headerExtents[key] ?? 0) + tabs
     }
 

@@ -21,12 +21,15 @@ enum WindowModal: Identifiable {
     case generateKey(profileID: UUID)
     /// A tab's menu › Set Alias… for the tab `tabID`.
     case tabAlias(tabID: UUID)
+    /// A tab's menu › Set Emoji… for the tab `tabID`.
+    case tabEmoji(tabID: UUID)
 
     var id: String {
         switch self {
         case .confirmation(let confirmation): "confirm \(confirmation.title)"
         case .generateKey(let id): "generate key \(id)"
         case .tabAlias(let id): "tab alias \(id)"
+        case .tabEmoji(let id): "tab emoji \(id)"
         }
     }
 }
@@ -142,6 +145,8 @@ struct ModalHost: View {
             GenerateKeyModal(profileID: profileID) { model.closeModal() }
         case .window(.tabAlias(let tabID)):
             TabAliasModal(model: model, tabID: tabID) { model.closeModal() }
+        case .window(.tabEmoji(let tabID)):
+            TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
                               isDestructive: confirmation.isDestructive) {
@@ -224,6 +229,73 @@ private struct TabAliasModal: View {
 
     private func save() {
         model.setAlias(alias, for: tabID)
+        onClose()
+    }
+}
+
+/// A tab's menu › Set Emoji…: the tab's emoji in one field that keeps only the last emoji typed or picked
+/// (`TabEmoji.normalized`), with Choose… for the Character Viewer. Return saves; an empty field removes the emoji, as
+/// Remove does.
+private struct TabEmojiModal: View {
+    let model: WindowModel
+    let tabID: UUID
+    let onClose: () -> Void
+    @State private var emoji = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        let tab = model.tabs.first { $0.id == tabID }
+        ModalCard(title: "Set an emoji for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
+                  subtitle: "The tab shows this emoji at its left, and a pinned tab shows only it. Leave it empty for none.",
+                  width: 420) {
+            ModalSection {
+                HStack(spacing: 8) {
+                    TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
+                        .textFieldStyle(.settings)
+                        .labelsHidden()
+                        .autocorrectionDisabled()
+                        .focused($fieldFocused)
+                        .onSubmit(save)
+                        .onChange(of: emoji) { _, new in
+                            let kept = TabEmoji.normalized(new) ?? ""
+                            if kept != new { emoji = kept }
+                        }
+                    Button("Choose…", action: choose)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                }
+            }
+        } actions: {
+            if tab?.emoji != nil {
+                Button("Remove", action: remove)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+            }
+            Button("Cancel", action: onClose)
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            Button("Save", action: save)
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .keyboardShortcut(.defaultAction)
+        }
+        .onAppear {
+            emoji = tab?.emoji ?? ""
+            // The card is installed on this turn; the field takes the focus on the next one.
+            DispatchQueue.main.async { fieldFocused = true }
+        }
+    }
+
+    /// Focuses the field, then opens the Character Viewer on the next turn, so its pick goes into the field.
+    private func choose() {
+        fieldFocused = true
+        DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
+    }
+
+    private func remove() {
+        model.setEmoji(nil, for: tabID)
+        onClose()
+    }
+
+    private func save() {
+        model.setEmoji(emoji.isEmpty ? nil : emoji, for: tabID)
         onClose()
     }
 }

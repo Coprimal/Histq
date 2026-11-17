@@ -54,6 +54,14 @@ struct SavedTab: Codable, Equatable, Sendable {
     var commit: String?
     /// The tab's alias (its menu's Set Alias…); nil shows the folder's name. Absent from files of older builds.
     var alias: String?
+    /// The tab's emoji (its menu's Set Emoji…); nil shows none. Absent from files of older builds.
+    var emoji: String?
+    /// The tab is pinned; nil reads as false, and an unpinned tab is written as nil so files stay small. Absent from
+    /// files of older builds.
+    var pinned: Bool?
+    /// The pinned tab's circle color, an index into `Palette.graphLanes`; kept when the tab is unpinned, so pinning it
+    /// again shows the same color. Absent from files of older builds.
+    var pinColor: Int?
 }
 
 /// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).
