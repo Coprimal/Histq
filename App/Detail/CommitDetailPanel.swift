@@ -364,14 +364,14 @@ private struct CommitInfoCard: View {
         if !parents.isEmpty {
             HStack(spacing: 8) {
                 Text(commit.isStash ? "Base" : parents.count == 1 ? "Parent" : "Parents")
+                    .font(.settingsCaption)
                     .foregroundStyle(.secondary)
                     .frame(width: InfoMetrics.labelWidth, alignment: .leading)
                 ForEach(parents, id: \.self) { parent in
                     Button(String(parent.prefix(7))) {
                         session.selectGraph([.commit(parent)])
                     }
-                    .buttonStyle(RowTextButtonStyle())
-                    .font(.body.monospaced())
+                    .buttonStyle(RowTextButtonStyle(compact: true))
                     .help("Show \(parent)")
                 }
                 Spacer(minLength: 0)
@@ -424,7 +424,7 @@ private struct CappedMessageLayout: Layout {
 
 private enum InfoMetrics {
     static let labelWidth: CGFloat = 52
-    static let avatar: CGFloat = 28
+    static let avatar: CGFloat = 24
 }
 
 /// An avatar, the name, then the email and the date under it.
@@ -440,14 +440,14 @@ private struct PersonRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(name)
-                        .font(.body.weight(.medium))
+                        .font(.callout.weight(.medium))
                         .lineLimit(1)
                     Text(role.lowercased())
-                        .font(.settingsCaption)
+                        .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
                 Text(email.isEmpty ? date : "\(email) · \(date)")
-                    .font(.settingsCaption)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -466,10 +466,11 @@ private struct ShaRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Text("SHA")
+                .font(.settingsCaption)
                 .foregroundStyle(.secondary)
                 .frame(width: InfoMetrics.labelWidth, alignment: .leading)
             Text(hash)
-                .font(.body.monospaced())
+                .font(.callout.monospaced())
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
@@ -483,6 +484,7 @@ private struct ShaRow: View {
                     Image(systemName: "square.on.square").opacity(copied ? 0 : 1)
                     Image(systemName: "checkmark").opacity(copied ? 1 : 0)
                 }
+                .font(.callout)
                 .foregroundStyle(.secondary)
             }
             .buttonStyle(RowIconButtonStyle())
