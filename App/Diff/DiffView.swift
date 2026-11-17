@@ -167,6 +167,7 @@ struct DiffView: View {
 private struct DiffHeaderCard: View {
     let session: RepoSession
     let target: FileTarget
+    @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var storedPreset = "classic"
 
     var body: some View {
         @Bindable var session = session
@@ -183,8 +184,8 @@ private struct DiffHeaderCard: View {
                 }
                 .buttonStyle(RowIconButtonStyle())
                 .keyboardShortcut(.cancelAction)
-                .help("Back to the \(backName) (Esc)")
-                .accessibilityLabel("Back to the \(backName.lowercased())")
+                .help(closesPane ? "Close the diff (Esc)" : "Back to the \(backName) (Esc)")
+                .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
                 .padding(.leading, 4)
                 // The name first: the secondary actions fold into a "…" menu when the row is too narrow for them.
                 ViewThatFits(in: .horizontal) {
@@ -216,7 +217,7 @@ private struct DiffHeaderCard: View {
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(RowIconButtonStyle())
-                .help("Close (back to the \(backName))")
+                .help(closesPane ? "Close the diff" : "Close (back to the \(backName))")
                 .accessibilityLabel("Close the diff")
                 .padding(.trailing, 4)
             }
@@ -326,6 +327,11 @@ private struct DiffHeaderCard: View {
         case .commit(let hash): hash
         case .compare(_, let head): head
         }
+    }
+
+    /// Stacked, not opened from a tool: Back and close hide the bottom pane under the graph, which stays in view.
+    private var closesPane: Bool {
+        session.returnTool == nil && LayoutPreset.resolved(storedPreset) == .stacked
     }
 
     /// Where Back and close return: the tool the diff was opened from, else the graph.

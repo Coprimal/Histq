@@ -46,6 +46,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Undo and redo for stash save, drop, apply and pop: undoing a drop or a pop puts the stash back with its message.
 - Undo and redo for creating and deleting local tags.
 - Undo of resolving a conflicted file in the conflict editor while the merge, rebase, cherry-pick or revert is still stopped: the file's conflict comes back.
+- Stacked layout (View menu, command palette or Settings › Appearance): a file diff, the conflict editor, file history, blame or a pull request opens in a pane under the graph, so the graph stays visible.
+- Focus layout (Option-Cmd-F): the sidebar and detail panel hide and the graph or diff takes the whole width; Option-Cmd-F again returns to the layout used before.
+- View › Reset Layout restores the default panel widths, the Stacked split and the Classic layout.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

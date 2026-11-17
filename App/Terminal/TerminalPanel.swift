@@ -20,6 +20,12 @@ enum TerminalDrawerMetrics {
     static let minHeight: CGFloat = 130
     /// What the graph keeps above the drawer: its column titles and a few rows.
     static let graphMinHeight: CGFloat = 160
+    /// Stacked with a pane open: what the graph, its divider and the bottom pane keep above the drawer.
+    static let stackedPanesMinHeight = RepoLayoutMetrics.stackedGraphMin + RepoLayoutMetrics.gap
+        + RepoLayoutMetrics.bottomPaneMin
+    /// Stacked with a pane open, in a short window: the drawer gives way first, down to its header and a line (a
+    /// merge banner at the 520 pt window minimum leaves it about 75).
+    static let stackedMinHeight: CGFloat = 64
     /// The handle between the graph's card and the drawer: the panel's usual gap between cards.
     static let handleHeight: CGFloat = SectionCardMetrics.spacing
     /// Around the terminal's cells inside its card, below the header.
@@ -27,8 +33,10 @@ enum TerminalDrawerMetrics {
 
     /// `height` clamped so the drawer keeps its minimum and the graph keeps its own in `available` (the height the
     /// graph, the handle and the drawer share). When the panel is too short for both, the graph gives way.
-    static func clamped(_ height: CGFloat, available: CGFloat) -> CGFloat {
-        max(minHeight, min(height, available - graphMinHeight - handleHeight))
+    /// `stackedPaneOpen`: the drawer keeps room for Stacked's graph and bottom pane instead, and shrinks first.
+    static func clamped(_ height: CGFloat, available: CGFloat, stackedPaneOpen: Bool = false) -> CGFloat {
+        guard stackedPaneOpen else { return max(minHeight, min(height, available - graphMinHeight - handleHeight)) }
+        return max(stackedMinHeight, min(height, available - stackedPanesMinHeight - handleHeight))
     }
 }
 
@@ -318,13 +326,16 @@ struct TerminalDrawer: View {
     let session: RepoSession
     let terminal: RepoTerminal?
     let available: CGFloat
+    /// Stacked shows a pane under the graph: the drawer shrinks first (`TerminalDrawerMetrics.clamped`).
+    var stackedPaneOpen = false
     @Environment(WindowModel.self) private var model
     /// The height while the handle is dragged; written to the model when the drag ends.
     @State private var dragHeight: CGFloat?
     @State private var dragStart: CGFloat?
 
     var body: some View {
-        let height = TerminalDrawerMetrics.clamped(dragHeight ?? model.terminalHeight, available: available)
+        let height = TerminalDrawerMetrics.clamped(
+            dragHeight ?? model.terminalHeight, available: available, stackedPaneOpen: stackedPaneOpen)
         VStack(spacing: 0) {
             handle(height: height)
             SectionCard("Terminal", systemImage: "terminal", contentPadding: TerminalDrawerMetrics.contentPadding) {
@@ -391,7 +402,8 @@ struct TerminalDrawer: View {
                         let start = dragStart ?? height
                         if dragStart == nil { dragStart = height }
                         // Up makes it taller.
-                        dragHeight = TerminalDrawerMetrics.clamped(start - drag.translation.height, available: available)
+                        dragHeight = TerminalDrawerMetrics.clamped(
+                            start - drag.translation.height, available: available, stackedPaneOpen: stackedPaneOpen)
                     }
                     .onEnded { _ in
                         if let dragHeight { model.terminalHeight = dragHeight }

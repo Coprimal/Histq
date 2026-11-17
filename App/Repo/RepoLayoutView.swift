@@ -6,7 +6,8 @@ import HistqCore
 import SwiftUI
 
 /// Sizes of the repo layout. The middle panel takes what the side panels leave. The window's minimum size
-/// (`minimumWindowSize(tabPosition:)`) fits the three panels at their minimums, and the vertical tabs when they show.
+/// (`minimumWindowSize(tabPosition:preset:)`) fits the three panels at their minimums, and the vertical tabs when they
+/// show.
 enum RepoLayoutMetrics {
     /// Between two panels: the divider's grab area.
     static let gap: CGFloat = 8
@@ -15,12 +16,19 @@ enum RepoLayoutMetrics {
     static let sidebar: ClosedRange<CGFloat> = 200...420
     static let detail: ClosedRange<CGFloat> = 320...640
     static let graphMin: CGFloat = 360
+    /// Stacked: the graph above the bottom pane keeps its column titles and about three rows.
+    static let stackedGraphMin: CGFloat = 120
+    /// Stacked: the bottom pane keeps its header card and the first lines of a diff. At the 520 pt window minimum
+    /// panel 2 has about 407 pt; with the terminal drawer at its minimum (130 + its 8 pt handle), the graph, the 8 pt
+    /// divider and the bottom pane take 248 of the 269 left.
+    static let bottomPaneMin: CGFloat = 120
     /// The panels' row in the sheet: both insets and both gaps.
     static let chrome: CGFloat = 2 * inset + 2 * gap
     /// 200 + 360 + 320 + 32, and the sheet's 16 from the window's edges = 928 wide; with the vertical tabs, their 150
     /// and their own leading inset (the sheet's inset is the gap after them): 1086. 520 tall: the header row and about
-    /// 15 list rows.
-    static func minimumWindowSize(tabPosition: TabPosition) -> CGSize {
+    /// 15 list rows. The same for every preset: Stacked's panes fit in 520 (`bottomPaneMin`), and Focus keeps the
+    /// side panels' room so leaving it never grows the window.
+    static func minimumWindowSize(tabPosition: TabPosition, preset: LayoutPreset) -> CGSize {
         let tabs = tabPosition == .left ? VerticalTabsMetrics.width + inset : 0
         return CGSize(width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome + 2 * inset + tabs,
                       height: 520)
@@ -86,8 +94,27 @@ struct RepoLayoutView: View {
     /// The height panel 2 gives the graph and the terminal drawer, below its banners: what bounds the drawer, so an
     /// error or operation banner never pushes the graph under its minimum. Nil until first measured.
     @State private var graphAndDrawerHeight: CGFloat?
+    @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var storedPreset = "classic"
+    /// Stacked: the graph's share of panel 2's height above the bottom pane.
+    @AppStorage(PrefKey.stackedSplit.rawValue, store: Preferences.defaults) private var stackedSplit = 0.45
+    /// Stacked: the graph's height while the divider above the bottom pane is dragged; the split is written to
+    /// `stackedSplit` when the drag ends.
+    @State private var dragGraphHeight: CGFloat?
+    /// The graph's height when that drag began.
+    @State private var splitDragStart: CGFloat?
 
     private enum DividerSide { case sidebar, detail }
+
+    private var isStacked: Bool { LayoutPreset.resolved(storedPreset) == .stacked }
+
+    /// Focus: the sidebar and the detail (with their dividers) leave the tree and panel 2 takes the whole row. The
+    /// stored widths are neither used nor written, so leaving Focus shows the panels as they were.
+    private var isFocus: Bool { LayoutPreset.resolved(storedPreset) == .focus }
+
+    /// Stacked shows a file, pull request, issue or tool in its bottom pane.
+    private var isStackedPaneOpen: Bool {
+        isStacked && (session.openFile != nil || session.openHosted != nil || session.openTool != nil)
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -105,15 +132,17 @@ struct RepoLayoutView: View {
         .background(GitHubDriver(session: session))
     }
 
-    /// The three panels and their dividers. `height`: the layout's, which bounds the terminal drawer until panel 2's
-    /// own height is measured.
+    /// The three panels and their dividers (Focus: panel 2 alone). `height`: the layout's, which bounds the terminal
+    /// drawer until panel 2's own height is measured.
     private func panels(widths: PanelWidths, available: CGFloat, height: CGFloat) -> some View {
         HStack(spacing: 0) {
             // The panels' cards sit right on the page's sheet (MainView), a level between the window glass and
             // the cards.
-            SidebarView(session: session)
-                .frame(width: widths.sidebar)
-            divider(.sidebar, widths: widths, available: available)
+            if !isFocus {
+                SidebarView(session: session)
+                    .frame(width: widths.sidebar)
+                divider(.sidebar, widths: widths, available: available)
+            }
             VStack(spacing: SectionCardMetrics.spacing) {
                 // Reads the operation itself, so a status read redraws the banner and not the panels.
                 OperationBanner(session: session)
@@ -124,21 +153,31 @@ struct RepoLayoutView: View {
                     if session.isTerminalOpen {
                         TerminalDrawer(
                             session: session, terminal: session.terminal,
-                            available: graphAndDrawerHeight ?? height)
+                            available: graphAndDrawerHeight ?? height, stackedPaneOpen: isStackedPaneOpen)
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
             }
             .frame(maxWidth: .infinity)
-            divider(.detail, widths: widths, available: available)
-            DetailPanel(session: session)
-                .frame(width: widths.detail)
+            if !isFocus {
+                divider(.detail, widths: widths, available: available)
+                DetailPanel(session: session)
+                    .frame(width: widths.detail)
+            }
         }
     }
 
     /// The graph, with the open file's diff or conflict editor, the open pull request or issue, or the open file
-    /// history or blame over it.
-    private var panel2: some View {
+    /// history or blame over it (Classic and Focus), or under it in a bottom pane (Stacked).
+    @ViewBuilder private var panel2: some View {
+        if isStacked {
+            stackedPanel2
+        } else {
+            classicPanel2
+        }
+    }
+
+    private var classicPanel2: some View {
         ZStack {
             // The graph stays mounted under an open file, so Esc brings it back as it was (scroll, selection)
             // and opening a file costs no teardown in the click's frame.
@@ -147,33 +186,92 @@ struct RepoLayoutView: View {
                 .opacity(fileOpen ? 0 : 1)
                 .allowsHitTesting(!fileOpen)
                 .accessibilityHidden(fileOpen)
-            // A tool stays mounted under the diff opened from it, so Back brings it back as it was (scroll).
-            if let tool = session.openTool ?? session.returnTool {
-                let toolHidden = session.openTool == nil
-                Group {
-                    switch tool {
-                    case .fileHistory(let path, let rev, let follow):
-                        FileHistoryView(session: session, tool: tool, path: path, rev: rev, follow: follow)
-                    case .blame(let path, let rev):
-                        BlameView(session: session, path: path, rev: rev)
-                    }
+            panel2Overlays
+        }
+    }
+
+    /// Stacked: the graph stays on top and clickable; what Classic shows over it shows in a pane under a divider, only
+    /// while one is open. The graph keeps its place in the tree, so opening or closing the pane never rebuilds it, and
+    /// another file swaps in the pane in place.
+    private var stackedPanel2: some View {
+        let paneOpen = isStackedPaneOpen
+        return GeometryReader { proxy in
+            let graphHeight = stackedGraphHeight(in: proxy.size.height)
+            VStack(spacing: 0) {
+                CommitListPanel(session: session)
+                    .frame(height: paneOpen ? graphHeight : nil)
+                if paneOpen {
+                    splitDivider(graphHeight: graphHeight, height: proxy.size.height)
+                    // A conflict editor taller than the pane's minimum is cut, never drawn over the drawer.
+                    ZStack { panel2Overlays }
+                        .frame(minHeight: 0, maxHeight: .infinity)
+                        .clipped()
                 }
-                .opacity(toolHidden ? 0 : 1)
-                .allowsHitTesting(!toolHidden)
-                .accessibilityHidden(toolHidden)
-                // Its Back button's Esc must not compete with the diff's.
-                .disabled(toolHidden)
             }
-            if case .pullRequest(let number) = session.openHosted {
-                PRDetailView(session: session, number: number)
-            } else if case .issue(let number) = session.openHosted {
-                IssueDetailView(session: session, number: number)
-            } else if let target = session.openFile {
-                if target.isConflict {
-                    ConflictEditorView(session: session, target: target)
-                } else {
-                    DiffView(session: session, target: target)
+        }
+    }
+
+    /// Stacked: the graph's height in panel 2's `height`, from the split or the drag, keeping the bottom pane's
+    /// minimum, then the graph's.
+    private func stackedGraphHeight(in height: CGFloat) -> CGFloat {
+        let room = height - RepoLayoutMetrics.gap
+        let wanted = dragGraphHeight ?? room * min(max(stackedSplit, 0), 1)
+        return max(RepoLayoutMetrics.stackedGraphMin, min(wanted, room - RepoLayoutMetrics.bottomPaneMin))
+    }
+
+    /// Stacked: the gap between the graph and the bottom pane (as the terminal drawer's handle): drag it to share
+    /// panel 2's height.
+    private func splitDivider(graphHeight: CGFloat, height: CGFloat) -> some View {
+        Color.clear
+            .frame(height: RepoLayoutMetrics.gap)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .pointerStyle(.rowResize)
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { drag in
+                        let start = splitDragStart ?? graphHeight
+                        if splitDragStart == nil { splitDragStart = graphHeight }
+                        // Down makes the graph taller.
+                        dragGraphHeight = start + drag.translation.height
+                    }
+                    .onEnded { _ in
+                        let room = height - RepoLayoutMetrics.gap
+                        if room > 0 { stackedSplit = stackedGraphHeight(in: height) / room }
+                        dragGraphHeight = nil
+                        splitDragStart = nil
+                    })
+            .accessibilityHidden(true)
+    }
+
+    /// What shows in panel 2 instead of the graph: the open file history or blame, pull request or issue, or file.
+    @ViewBuilder private var panel2Overlays: some View {
+        // A tool stays mounted under the diff opened from it, so Back brings it back as it was (scroll).
+        if let tool = session.openTool ?? session.returnTool {
+            let toolHidden = session.openTool == nil
+            Group {
+                switch tool {
+                case .fileHistory(let path, let rev, let follow):
+                    FileHistoryView(session: session, tool: tool, path: path, rev: rev, follow: follow)
+                case .blame(let path, let rev):
+                    BlameView(session: session, path: path, rev: rev)
                 }
+            }
+            .opacity(toolHidden ? 0 : 1)
+            .allowsHitTesting(!toolHidden)
+            .accessibilityHidden(toolHidden)
+            // Its Back button's Esc must not compete with the diff's.
+            .disabled(toolHidden)
+        }
+        if case .pullRequest(let number) = session.openHosted {
+            PRDetailView(session: session, number: number)
+        } else if case .issue(let number) = session.openHosted {
+            IssueDetailView(session: session, number: number)
+        } else if let target = session.openFile {
+            if target.isConflict {
+                ConflictEditorView(session: session, target: target)
+            } else {
+                DiffView(session: session, target: target)
             }
         }
     }

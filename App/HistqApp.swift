@@ -585,6 +585,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Preferences.defaults.set(next.rawValue, forKey: PrefKey.tabPosition.rawValue)
     }
 
+    /// View › Classic / Stacked / Focus (the item's `representedObject`): Focus again (⌥⌘F) leaves Focus. The windows
+    /// follow it live.
+    @objc func chooseLayout(_ sender: NSMenuItem) {
+        guard let preset = (sender.representedObject as? String).flatMap(LayoutPreset.init(rawValue:)) else { return }
+        LayoutPreset.choose(preset)
+    }
+
+    /// View › Reset Layout: default panel widths and Stacked split, and Classic.
+    @objc func resetLayout(_ sender: Any?) {
+        LayoutPreset.reset()
+    }
+
     @objc func checkForUpdates(_ sender: Any?) {
         updater.checkForUpdates()
     }
@@ -663,10 +675,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if menuItem.action == #selector(toggleTabPosition(_:)) {
             menuItem.title = TabPosition.current == .left ? "Move Tabs to the Top" : "Move Tabs to the Left"
         }
+        if menuItem.action == #selector(chooseLayout(_:)) {
+            menuItem.state = menuItem.representedObject as? String == LayoutPreset.current.rawValue ? .on : .off
+        }
         return true
     }
 
-    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal, the tab position) and Window menus:
+    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal, the tab position, the layout presets) and Window menus:
     /// without Edit, text fields lose copy and paste.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
@@ -726,6 +741,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         terminalItem.target = self
         viewMenu.addItem(withTitle: "Move Tabs to the Left", action: #selector(toggleTabPosition(_:)), keyEquivalent: "")
             .target = self
+        viewMenu.addItem(.separator())
+        // ⌥⌘F: ⌃⌘F is AppKit's Enter Full Screen.
+        for preset in [LayoutPreset.classic, .stacked, .focus] {
+            let item = viewMenu.addItem(withTitle: preset.rawValue.capitalized, action: #selector(chooseLayout(_:)),
+                                        keyEquivalent: preset == .focus ? "f" : "")
+            item.keyEquivalentModifierMask = [.command, .option]
+            item.representedObject = preset.rawValue
+            item.target = self
+        }
+        viewMenu.addItem(withTitle: "Reset Layout", action: #selector(resetLayout(_:)), keyEquivalent: "").target = self
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
@@ -741,8 +766,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 }
 
 /// A window's size limits. Its minimum fits the repo layout's three panels at their minimums, and the vertical tabs
-/// in that position (`RepoLayoutMetrics.minimumWindowSize(tabPosition:)`), but never exceeds the visible frame of the screen it is on. With a
-/// full-size content view the frame and the content have the same size.
+/// in that position, for the layout preset (`RepoLayoutMetrics.minimumWindowSize(tabPosition:preset:)`), but never
+/// exceeds the visible frame of the screen it is on. With a full-size content view the frame and the content have the
+/// same size.
 @MainActor
 private enum WindowSizing {
     /// A new window's size when the screen has room for it.
@@ -764,7 +790,7 @@ private enum WindowSizing {
 
     /// `preferred`, at least the minimum, at most the screen's visible frame.
     static func initialSize(on screen: NSScreen?) -> NSSize {
-        let minimum = RepoLayoutMetrics.minimumWindowSize(tabPosition: .current)
+        let minimum = RepoLayoutMetrics.minimumWindowSize(tabPosition: .current, preset: .current)
         let size = NSSize(width: max(preferred.width, minimum.width), height: max(preferred.height, minimum.height))
         guard let visible = screen?.visibleFrame.size else { return size }
         return NSSize(width: min(size.width, visible.width), height: min(size.height, visible.height))
@@ -773,7 +799,7 @@ private enum WindowSizing {
     /// Sets the window's minimum size for its screen, and grows the window (top edge kept, inside the screen) when
     /// it is smaller than that.
     static func clampMinimum(of window: NSWindow) {
-        let minimum = RepoLayoutMetrics.minimumWindowSize(tabPosition: .current)
+        let minimum = RepoLayoutMetrics.minimumWindowSize(tabPosition: .current, preset: .current)
         guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else {
             window.minSize = minimum
             return

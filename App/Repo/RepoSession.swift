@@ -1217,12 +1217,16 @@ final class RepoSession: Identifiable {
     }
 
     /// Selects graph rows: the path a click in the graph takes (and `-HistqSelect wip|commit:<sha>`, a parent
-    /// jump). One row shows its detail, several a count; none keeps the detail as it is.
-    func selectGraph(_ items: [GraphItem]) {
-        if asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items) }) { return }
+    /// jump). One row shows its detail, several a count; none keeps the detail as it is. `keepsPanel2` (Stacked, where
+    /// the graph stays clickable above the bottom pane): the pane keeps what it shows until a file of the new row
+    /// swaps in it.
+    func selectGraph(_ items: [GraphItem], keepsPanel2: Bool = LayoutPreset.current == .stacked) {
+        if !keepsPanel2, asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items, keepsPanel2: false) }) {
+            return
+        }
         // Another worktree's row is a selection alone (its changes); several rows leave it out.
         let items = items.count > 1 ? items.filter { if case .worktree = $0 { false } else { true } } : items
-        closePanel2()
+        if !keepsPanel2 { closePanel2() }
         graphSelection = items
         guard let first = items.first else { return }
         let selection: Selection
@@ -1237,7 +1241,7 @@ final class RepoSession: Identifiable {
             }
         }
         UITiming.select(timingDetail(selection))
-        select(selection)
+        select(selection, keepsPanel2: keepsPanel2)
     }
 
     /// Compares `base` with `head` (nil: the working tree) now, in the click's frame: the detail shows its placeholder
@@ -1504,10 +1508,11 @@ final class RepoSession: Identifiable {
             return
         }
         guard vanished else { return }
+        // The pane closes in Stacked too: what it shows (a WIP file once the tree is clean) may be gone.
         if case .worktree = selection, hasChanges {
-            selectGraph([.wip])
+            selectGraph([.wip], keepsPanel2: false)
         } else if let head = status.value?.branch.commit {
-            selectGraph([.commit(head)])
+            selectGraph([.commit(head)], keepsPanel2: false)
         } else {
             // An unborn branch: the overview cards.
             graphSelection = []
@@ -2218,12 +2223,13 @@ final class RepoSession: Identifiable {
     /// A click on a worktree's sidebar row: its changes when it has any (this tab's own: the WIP row; another's: its
     /// row), else its HEAD commit.
     func selectWorktree(_ info: WorktreeInfo) {
-        if info.isCurrent, hasChanges { return selectGraph([.wip]) }
+        // A sidebar click shows the graph, in Stacked too (as `selectRef`).
+        if info.isCurrent, hasChanges { return selectGraph([.wip], keepsPanel2: false) }
         if !info.isCurrent, dirtyWorktrees.contains(where: { $0.path == info.path }) {
-            return selectGraph([.worktree(info.path)])
+            return selectGraph([.worktree(info.path)], keepsPanel2: false)
         }
         guard let head = info.worktree.head else { return }
-        selectGraph([.commit(head)])
+        selectGraph([.commit(head)], keepsPanel2: false)
     }
 
     /// This tab opened as a worktree from another tab (a double-click in the sidebar, "Open in New Tab"): its changes

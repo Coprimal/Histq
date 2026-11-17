@@ -1,9 +1,9 @@
 // The command palette's rows for one window, copied when it opens (task 8.5): Undo / Redo, the toolbar's repo actions and their
 // Pull ▾ / Push ▾ menus, Show All Branches and Hide / Show Stale Branches, "Checkout <branch>" for every local and
-// remote branch, the window's tabs, Open Repository…, the Settings pages and the tab position, then the repo's menu
-// operations (working tree, the selected commit, the stashes, each branch, remote branch and tag, the remotes). Every
-// repo row runs the same `MenuEntry` or `ToolbarAction` the menus and buttons run, so its confirmations, forms and
-// enabled state are theirs.
+// remote branch, the window's tabs, Open Repository…, the Settings pages, the tab position and the layout presets, then
+// the repo's menu operations (working tree, the selected commit, the stashes, each branch, remote branch and tag, the
+// remotes). Every repo row runs the same `MenuEntry` or `ToolbarAction` the menus and buttons run, so its
+// confirmations, forms and enabled state are theirs.
 import AppKit
 import HistqCore
 
@@ -149,7 +149,7 @@ enum PaletteCommands {
         }
     }
 
-    /// Open Repository…, the Settings pages and the tab position.
+    /// Open Repository…, the Settings pages, the tab position, the layout presets and Reset Layout.
     private static func app(_ model: WindowModel, into snapshot: inout PaletteSnapshot) {
         snapshot.add("Open Repository…", detail: "⌘O", section: .app, systemImage: "folder.badge.plus") {
             NSApp.sendAction(#selector(AppDelegate.openDocument(_:)), to: nil, from: nil)
@@ -167,6 +167,19 @@ enum PaletteCommands {
             Preferences.defaults.set(onLeft ? TabPosition.top.rawValue : TabPosition.left.rawValue,
                                      forKey: PrefKey.tabPosition.rawValue)
         }
+        // The View menu's layout presets: Focus again leaves Focus.
+        let preset = LayoutPreset.current
+        for (row, image) in [(LayoutPreset.classic, "rectangle.split.3x1"), (.stacked, "rectangle.split.1x2"),
+                             (.focus, "rectangle")] {
+            let title = row == .focus && preset == .focus ? "Leave Focus Layout" : "\(row.rawValue.capitalized) Layout"
+            let detail = row == .focus ? "View › Layout ⌥⌘F" : "View › Layout"
+            snapshot.add(title, detail: preset == row ? detail + " (current)" : detail, section: .app,
+                         systemImage: image) {
+                LayoutPreset.choose(row)
+            }
+        }
+        snapshot.add("Reset Layout", detail: "View › Reset Layout", section: .app,
+                     systemImage: "arrow.counterclockwise") { LayoutPreset.reset() }
     }
 
     /// The repo's context menus: the working tree's (when it has changes), the selected commit's or stash's, each
