@@ -8,6 +8,8 @@ enum SectionCardMetrics {
     static let spacing: CGFloat = 8
     /// A titled card's header row.
     static let headerHeight: CGFloat = 32
+    /// Extra room under a header whose accessory holds buttons, so they don't sit on the body's first field.
+    static let accessoryGap: CGFloat = 4
 }
 
 /// A titled card (`GlassCard`: surface fill, 1 pt `surfaceBorder` edge, the content cards' radius). Its header holds

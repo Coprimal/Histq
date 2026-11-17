@@ -421,6 +421,8 @@ struct AIHookButton: View {
     var unavailable: String?
     /// DEBUG `-HistqAI <seam>`: the hook a QA launch clicks.
     var seam: String
+    /// In a card header: a step smaller than `RowTextButtonStyle`'s callout.
+    var small = false
     let action: () -> Void
 
     private var setup: AISetup { .shared }
@@ -436,6 +438,7 @@ struct AIHookButton: View {
                 Text(title)
                     .lineLimit(1)
             }
+            .font(small ? .subheadline.weight(.medium) : .callout.weight(.medium))
         }
         .buttonStyle(RowTextButtonStyle())
         .fixedSize()

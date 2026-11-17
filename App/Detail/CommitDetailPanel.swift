@@ -307,7 +307,8 @@ private struct CommitInfoCard: View {
             // The card's body, under its header and above its bottom padding: the message gets what the other rows
             // leave of the card's `maxHeight`.
             CappedMessageLayout(
-                maxHeight: maxHeight - SectionCardMetrics.headerHeight - SettingsMetrics.cardPadding,
+                maxHeight: maxHeight - SectionCardMetrics.headerHeight - SectionCardMetrics.accessoryGap
+                    - SettingsMetrics.cardPadding,
                 minMessageHeight: CommitDetailMetrics.messageMinHeight, spacing: 10
             ) {
                 // As tall as the message up to its cap, then a scroll view of that height.
@@ -332,12 +333,13 @@ private struct CommitInfoCard: View {
                     parentsRow
                 }
             }
+            .padding(.top, SectionCardMetrics.accessoryGap)
             .onChange(of: token, initial: true) { UITiming.contentInfo(timingDetail) }
         } accessory: {
             // AI (task 12.3): opens the result card; nothing is sent before the click.
             AIHookButton(title: "Explain", systemImage: "sparkles",
                          help: commit.isStash ? "Explain this stash with AI" : "Explain this commit with AI",
-                         seam: "explain") {
+                         seam: "explain", small: true) {
                 let message = commit.body.isEmpty ? commit.subject : commit.subject + "\n\n" + commit.body
                 session.startAI(.explainCommit(hash: commit.hash, message: message))
             }

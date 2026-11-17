@@ -463,16 +463,19 @@ private struct CommitBox: View {
                 }
                 ErrorText(message: error)
             }
+            .padding(.top, SectionCardMetrics.accessoryGap)
         } accessory: {
             // AI (task 12.3): each opens the result card; nothing is sent before the click.
             HStack(spacing: 6) {
                 AIHookButton(title: "Explain", help: "Explain the uncommitted changes with AI",
-                             unavailable: changeCount == 0 ? "No changes to explain" : nil, seam: "explain-wip") {
+                             unavailable: changeCount == 0 ? "No changes to explain" : nil, seam: "explain-wip",
+                             small: true) {
                     session.startAI(.explainWorkingChanges)
                 }
                 AIHookButton(title: "Generate Message", systemImage: "sparkles",
                              help: "Write a commit message for the staged changes with AI",
-                             unavailable: stagedCount == 0 ? "Stage changes first" : nil, seam: "generate") {
+                             unavailable: stagedCount == 0 ? "Stage changes first" : nil, seam: "generate",
+                             small: true) {
                     let summaryOnly = Preferences.defaults.bool(forKey: PrefKey.aiCommitSummaryOnly.rawValue)
                     session.startAI(.commitMessage(summaryOnly: summaryOnly))
                 }
