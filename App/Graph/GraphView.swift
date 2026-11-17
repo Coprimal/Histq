@@ -696,6 +696,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         {
             // A new load (or a new layout): every row may have changed. A reload of a log already on screen keeps the
             // top visible row where it was (rows above it may have come or gone) and does not scroll to the selection.
+            let start = DispatchTime.now().uptimeNanoseconds
             let anchor = old.rowCount > 0 ? scrollAnchor(table) : nil
             log = new
             // A load's first pages may need fewer lanes than the whole log: the column keeps the last log's until the
@@ -708,6 +709,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 restoreScroll(anchor, in: table)
                 needsScroll = false
             }
+            UITiming.graphReload(generation: new.generation, since: start)
             return
         }
         log = new

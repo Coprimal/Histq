@@ -88,6 +88,9 @@ struct LogSnapshot: Sendable {
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
     /// inserts the rows a snapshot of the same load adds and reloads for a new one.
     var generation = 0
+    /// Timing only: the step times of the incremental read that made it (`readLogIncrementally`), for its
+    /// `log-reload` line.
+    var readSteps = ""
 
     /// What a table row of the graph shows.
     enum Entry {
@@ -1397,7 +1400,9 @@ final class RepoSession: Identifiable {
             let backend = try await backend()
             // A newer refresh took over (it owns `refreshTask` now).
             try Task.checkCancellation()
+            let readStart = DispatchTime.now().uptimeNanoseconds
             let refsMoved = try await readStatusAndRefs(backend, scope: scope)
+            UITiming.refreshRead(since: readStart)
             if scope.contains(.log) || refsMoved { loadLog(backend) }
             // A worktree added or removed, or a commit made in one, shows as a refs change. Never before the first log
             // page: that one starts the first read.
@@ -1534,6 +1539,7 @@ final class RepoSession: Identifiable {
         logTask = Task { [weak self] in
             do {
                 let start = DispatchTime.now().uptimeNanoseconds
+                UITiming.logStart(generation: generation, incremental: oldLog != nil)
                 var incremental: LogSnapshot?
                 if let oldLog {
                     do {
@@ -1562,22 +1568,30 @@ final class RepoSession: Identifiable {
                 if !isFirstLoad {
                     let ms = String(format: "%.1f", Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
                     if let incremental, let oldLog {
-                        UITiming.logReload("incremental \(incremental.commits.count - oldLog.commits.count) \(ms)")
+                        UITiming.logReload("incremental \(incremental.commits.count - oldLog.commits.count) \(ms) "
+                            + incremental.readSteps)
                     } else {
                         UITiming.logReload("full \(ms)")
                     }
                 }
                 guard let self else { return }
+                let publishStart = DispatchTime.now().uptimeNanoseconds
                 let previous = log.value
                 log = .loaded(snapshot)
                 logTask = nil
                 UITiming.logComplete(commitCount: snapshot.commits.count)
                 updateBranchMap()
                 if !isFirstLoad { dropVanishedSelection(previousLog: previous) }
+                UITiming.logPublish(since: publishStart)
                 // A log without a page (an unborn branch) never started the worktrees' first read.
                 if case .idle = self.worktrees { loadWorktrees(backend) }
                 // The status or the stashes changed while it loaded, or the worktrees were read meanwhile.
-                if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
+                if syntheticRowsChanged {
+                    UITiming.logAgain("synthetic")
+                    loadLog(backend)
+                } else {
+                    updateWorktreeRows(backend)
+                }
             } catch {
                 guard !Self.isCancellation(error), let self else { return }
                 logTask = nil
@@ -1642,31 +1656,43 @@ final class RepoSession: Identifiable {
     private nonisolated static func readLogIncrementally(
         _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo]
     ) async throws -> LogSnapshot? {
+        var steps = UITiming.Steps()
         guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        steps.lap("env")
         var snapshot = LogSnapshot(generation: generation)
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        steps.lap("stashes")
         let tips = LogReader.tips(of: previous.commits, index: previous.commitIndex)
+        steps.lap("tips")
         guard let delta = try await LogReader.newCommits(
             runner: backend.runner, cwd: cwd, env: env, previousTips: tips,
             alsoFrom: snapshot.stashes.map(\.base)),
             !delta.contains(where: { previous.commitIndex[$0.hash] != nil })
         else { return nil }
+        steps.lap("delta")
         snapshot.worktrees = worktrees
         snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
+        // The status's wait (it runs alongside the steps above) counts with the environment.
+        steps.lap("env")
         try Task.checkCancellation()
         if delta.isEmpty {
             snapshot.commits = previous.commits
+            steps.lap("concat")
             snapshot.commitIndex = previous.commitIndex
         } else {
             snapshot.commits = delta + previous.commits
+            steps.lap("concat")
             snapshot.commitIndex.reserveCapacity(snapshot.commits.count)
             for (index, commit) in snapshot.commits.enumerated() { snapshot.commitIndex[commit.hash] = index }
         }
+        steps.lap("index")
         try Task.checkCancellation()
         snapshot.isComplete = true
         layOutAll(&snapshot)
+        steps.lap("layout")
+        snapshot.readSteps = steps.description
         try Task.checkCancellation()
         return snapshot
     }
@@ -1814,6 +1840,7 @@ final class RepoSession: Identifiable {
         guard logTask == nil, let current = log.value, current.isComplete else { return }
         let worktrees = dirtyWorktrees
         guard worktrees != current.worktrees else { return }
+        UITiming.logAgain("worktree")
         logGeneration &+= 1
         let generation = logGeneration
         logTask = Task { [weak self] in
@@ -1822,7 +1849,12 @@ final class RepoSession: Identifiable {
             log = .loaded(snapshot)
             logTask = nil
             updateBranchMap()
-            if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
+            if syntheticRowsChanged {
+                UITiming.logAgain("synthetic")
+                loadLog(backend)
+            } else {
+                updateWorktreeRows(backend)
+            }
         }
     }
 
@@ -1831,9 +1863,11 @@ final class RepoSession: Identifiable {
     private func updateBranchMap() {
         guard let log = log.value, let refs = refs.value else { return }
         branchMapTask?.cancel()
+        UITiming.branchMapStart(generation: log.generation)
         branchMapTask = Task { [weak self] in
             let (names, claims, ms) = await Self.attributeBranches(log, refs: refs)
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled else { return UITiming.branchMapCancelled(ms: ms) }
+            guard let self else { return }
             branchMap = BranchMap(
                 names: names, claims: claims, logGeneration: log.generation, generation: branchMap.generation &+ 1)
             branchMapTask = nil
