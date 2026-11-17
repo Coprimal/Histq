@@ -472,14 +472,14 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         case repoItem.menu, repoItem.overflowMenu: repoEntries()
         case branchItem.menu, branchItem.overflowMenu: model.actionSession.map(RepoMenus.branchPicker) ?? []
         case profileItem.menu, profileItem.overflowMenu:
-            model.actionSession.map { ProfilePicker.entries(session: $0, model: model) } ?? []
+            if let session = model.actionSession, let id = model.selectedTabID {
+                ProfilePicker.entries(tab: id, current: session.profile?.id, model: model)
+            } else { [] }
         case pullItem.menu, pullItem.menuFormRepresentation?.submenu: model.actionSession.map(RepoMenus.pull) ?? []
         case pushItem.menu, pushItem.menuFormRepresentation?.submenu: model.actionSession.map(RepoMenus.push) ?? []
         default: []
         }
         let built = MenuBuilder.menu(entries)
-        // Before the title item is put first: it pairs the menu's first items with the profiles.
-        if menu === profileItem.menu || menu === profileItem.overflowMenu { ProfilePicker.decorate(built) }
         var items = built.items
         built.removeAllItems()
         if menu === repoItem.menu || menu === repoItem.overflowMenu,

@@ -289,7 +289,17 @@ enum TabMenu {
             .action("Set Alias…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to name.") {
                 model.presentModal(.tabAlias(tabID: id))
             },
-        ]
+        ] + profile(id, tab, revealable, model)
+    }
+
+    /// The tab's profiles, as the toolbar chip lists them, so a tab switches without being selected first. Only for a
+    /// repo tab whose folder is there.
+    private static func profile(_ id: WindowModel.Tab.ID, _ tab: WindowModel.Tab, _ revealable: Bool,
+                                _ model: WindowModel) -> [MenuEntry]
+    {
+        guard revealable else { return [] }
+        let current = model.profile(of: tab)?.id
+        return [.separator, .submenu("Profile", ProfilePicker.entries(tab: id, current: current, model: model))]
     }
 
     /// Closes a tab; closing the last tab closes the window, like ⌘W.

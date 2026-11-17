@@ -53,8 +53,9 @@ final class WindowModel {
     /// switches. Created on first use by `welcome(for:)`.
     @ObservationIgnored private var welcomes: [Tab.ID: WelcomeModel] = [:]
     /// Session restore: the saved profile and commit of restored tabs that have no session yet (sessions are made on
-    /// first select), applied when it is made; until then the next save keeps them as they were.
-    @ObservationIgnored private var restored: [Tab.ID: SavedTab] = [:]
+    /// first select), applied when it is made; until then the next save keeps them as they were. Observed: a profile
+    /// picked in such a tab's menu (`setProfile`) redraws its dot and saves the session.
+    private var restored: [Tab.ID: SavedTab] = [:]
     /// The page the window shows: the selected tab (`.home`).
     let navigation = Navigation()
     /// The Settings modal shows over the page (task 9.7). Read only by `ModalHost`, the toolbar and the backdrop
@@ -126,6 +127,22 @@ final class WindowModel {
         guard let saved = restored[tab.id]?.profile else { return store.profile(forRepo: url) }
         // As `RepoSession.profile`: a deleted profile falls back to the default.
         return saved.profileID.flatMap { store.profile(id: $0) ?? store.defaultProfile }
+    }
+
+    /// Switches a repo tab to a profile (nil: none), from the toolbar chip or the tab's right-click menu. A tab not
+    /// selected yet has no session: its pick waits in `restored` until its session is made, without loading the repo.
+    /// Either way the repo remembers it, as a pick in the chip does.
+    func setProfile(_ profileID: UUID?, of id: Tab.ID) {
+        if let session = sessions[id] { return session.setProfile(profileID) }
+        guard let tab = tabs.first(where: { $0.id == id }), let url = tab.repoURL, !tab.isMissing else { return }
+        var saved = restored[id] ?? SavedTab(path: url.path)
+        saved.profile = SavedProfile(profileID)
+        restored[id] = saved
+        Task {
+            let library = ProfileLibrary.shared
+            guard await library.loaded() != nil else { return }
+            library.update { $0.remember(profileID, forRepo: url) }
+        }
     }
 
     /// The selected tab's session while the tab shows; nil for a

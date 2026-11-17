@@ -24,12 +24,15 @@ struct MenuEntry {
     var isChecked = false
     /// Why a disabled item cannot run, shown on hover.
     var toolTip: String?
+    /// Shown before the title, in its own colors (a profile's dot).
+    var image: NSImage?
 
     static func action(_ title: String, enabled: Bool = true, destructive: Bool = false, checked: Bool = false,
-                       toolTip: String? = nil, _ perform: @escaping @MainActor () -> Void) -> MenuEntry
+                       toolTip: String? = nil, image: NSImage? = nil,
+                       _ perform: @escaping @MainActor () -> Void) -> MenuEntry
     {
         MenuEntry(title: title, kind: .action(perform), isEnabled: enabled, isDestructive: destructive, isChecked: checked,
-                  toolTip: toolTip)
+                  toolTip: toolTip, image: image)
     }
 
     static func submenu(_ title: String, _ entries: [MenuEntry]) -> MenuEntry {
@@ -70,6 +73,9 @@ enum MenuBuilder {
                 item.isEnabled = entry.isEnabled
                 item.state = entry.isChecked ? .on : .off
                 item.toolTip = entry.toolTip
+                item.image = entry.image
+                // macOS 27 hides menu item images unless told not to.
+                if #available(macOS 27, *), entry.image != nil { item.preferredImageVisibility = .visible }
                 menu.addItem(item)
             case .submenu(let children):
                 let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
@@ -110,7 +116,17 @@ struct MenuEntriesView: View {
             case .separator:
                 Divider()
             case .action(let perform):
-                if entry.isChecked {
+                if let image = entry.image {
+                    // A label, so the image shows; checked as a toggle.
+                    let label = Label { Text(entry.title) } icon: { Image(nsImage: image) }.labelStyle(.titleAndIcon)
+                    if entry.isChecked {
+                        Toggle(isOn: Binding(get: { true }, set: { _ in perform() })) { label }
+                            .disabled(!entry.isEnabled)
+                    } else {
+                        Button { perform() } label: { label }
+                            .disabled(!entry.isEnabled)
+                    }
+                } else if entry.isChecked {
                     Toggle(entry.title, isOn: Binding(get: { true }, set: { _ in perform() }))
                         .disabled(!entry.isEnabled)
                 } else {

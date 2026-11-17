@@ -48,16 +48,16 @@ enum ProfilePicker {
     }
 
     /// The menu: every profile (the tab's checked), "None (your git config)", then "Edit Profiles…", which opens
-    /// Settings › Profiles. A pick switches the tab at once (`RepoSession.setProfile`).
-    static func entries(session: RepoSession, model: WindowModel) -> [MenuEntry] {
+    /// Settings › Profiles. A pick switches the tab at once (`WindowModel.setProfile`). Shown by the toolbar chip (the
+    /// selected tab) and by a tab's right-click menu (that tab, selected or not).
+    static func entries(tab id: WindowModel.Tab.ID, current: UUID?, model: WindowModel) -> [MenuEntry] {
         let library = ProfileLibrary.shared
-        let current = session.profile?.id
         var entries: [MenuEntry] = []
         switch library.state {
         case .loaded(let store):
             entries = store.profiles.map { profile in
-                .action(title(profile), checked: profile.id == current) { [weak session] in
-                    session?.setProfile(profile.id)
+                .action(title(profile), checked: profile.id == current, image: dot(hex: profile.color)) { [weak model] in
+                    model?.setProfile(profile.id, of: id)
                 }
             }
         case .failed:
@@ -67,18 +67,10 @@ enum ProfilePicker {
         }
         entries += [
             .separator,
-            .action("None (your git config)", checked: current == nil) { [weak session] in session?.setProfile(nil) },
+            .action("None (your git config)", checked: current == nil) { [weak model] in model?.setProfile(nil, of: id) },
             .separator,
             .action("Edit Profiles…") { [weak model] in model?.selectSettings(.profiles) },
         ]
         return entries
-    }
-
-    /// Puts each profile's dot before its item (`MenuEntry` has no image); the profiles are the menu's first items.
-    static func decorate(_ menu: NSMenu) {
-        guard let profiles = ProfileLibrary.shared.store?.profiles else { return }
-        for (item, profile) in zip(menu.items, profiles) where !item.isSeparatorItem {
-            item.image = dot(hex: profile.color)
-        }
     }
 }
