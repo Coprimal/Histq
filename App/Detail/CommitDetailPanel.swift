@@ -388,8 +388,12 @@ private struct ShaRow: View {
                 NSPasteboard.general.setString(hash, forType: .string)
                 copied = true
             } label: {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .foregroundStyle(.secondary)
+                // Both icons stay laid out so the button keeps one width when it swaps to the check.
+                ZStack {
+                    Image(systemName: "square.on.square").opacity(copied ? 0 : 1)
+                    Image(systemName: "checkmark").opacity(copied ? 1 : 0)
+                }
+                .foregroundStyle(.secondary)
             }
             .buttonStyle(RowIconButtonStyle())
             .help("Copy SHA")
