@@ -74,14 +74,16 @@ struct LogFilter: Equatable, Sendable {
 }
 
 /// The log of a repo with its graph rows, in `git log --all --topo-order` order. `rows[i]` is `commits[i]`'s row; the
-/// rows above the commits (WIP, worktrees) are in `syntheticRows`, the stash rows in `hung`, each right above its base.
+/// WIP row above the commits is in `syntheticRows`, the other worktrees' and the stash rows in `hung`, each right above
+/// its base (as GitKraken).
 struct LogSnapshot: Sendable {
     var commits: [Commit] = []
     var rows: [GraphRow] = []
-    /// Laid out before the commits, shown above them: the WIP row when the working tree has changes, then one row per
-    /// other worktree with changes; once the log is complete, the stashes whose base is not in it (without a line).
+    /// Laid out before the commits, shown above them: the WIP row when the working tree has changes; once the log is
+    /// complete, the other worktrees' and stash rows whose base is not in it (without a line).
     var syntheticRows: [GraphRow] = []
-    /// The stash rows, each laid out right above its base commit, newest first among one base; top first.
+    /// The other worktrees' rows, then the stash rows (newest first), each laid out right above its base commit; top
+    /// first.
     var hung: [GraphHungRow] = []
     /// What the synthetic rows were laid out from (`RepoSession.syntheticRows(status:stashes:worktrees:)`).
     var synthetic: [GraphSyntheticRow] = []
@@ -269,21 +271,51 @@ struct WorktreeInfo: Hashable, Sendable {
     var isDirty: Bool { changes?.isEmpty == false }
 }
 
-/// A working tree's change counts: what the WIP row shows ("3 unstaged · 2 staged"; untracked and conflicted files
-/// count as unstaged).
+/// A working tree's change counts: "3 unstaged · 2 staged" (untracked and conflicted files count as unstaged), and the
+/// WIP row's edited, added and deleted files (GitKraken's icons; each file once, staged or not).
 struct WorktreeChanges: Hashable, Sendable {
     let unstaged: Int
     let staged: Int
+    /// Modified, renamed, copied, type-changed or conflicted files.
+    let edited: Int
+    /// New files: added (staged, or `git add -N`) or untracked.
+    let added: Int
+    let deleted: Int
 
     init(_ status: WorkingStatus) {
         var unstaged = 0
         var staged = 0
-        for entry in status.entries {
+        var edited = 0
+        var added = 0
+        var deleted = 0
+        for entry in status.entries where entry.kind != .ignored {
             if entry.isStaged { staged += 1 }
             if entry.isUnstaged || entry.kind == .untracked || entry.kind == .unmerged { unstaged += 1 }
+            // A conflict's letters are both sides' (`DU`, `AA`): it is edited.
+            if entry.kind == .unmerged {
+                edited += 1
+            } else if entry.index == .deleted || entry.worktree == .deleted {
+                deleted += 1
+            } else if entry.kind == .untracked || entry.index == .added || entry.worktree == .added {
+                added += 1
+            } else {
+                edited += 1
+            }
         }
         self.unstaged = unstaged
         self.staged = staged
+        self.edited = edited
+        self.added = added
+        self.deleted = deleted
+    }
+
+    /// "5 edited · 1 added": the WIP row's counts as text (its tooltip and accessibility label).
+    var kindSummary: String {
+        var parts: [String] = []
+        if edited > 0 { parts.append("\(edited) edited") }
+        if added > 0 { parts.append("\(added) added") }
+        if deleted > 0 { parts.append("\(deleted) deleted") }
+        return parts.joined(separator: " · ")
     }
 
     var isEmpty: Bool { unstaged == 0 && staged == 0 }
@@ -1554,9 +1586,9 @@ final class RepoSession: Identifiable {
         return Self.syntheticRows(status: status, stashes: stashes, worktrees: log.worktrees) != log.synthetic
     }
 
-    /// The synthetic rows: the WIP row when the working tree has changes (hanging from HEAD), then one per other
-    /// worktree with changes (hanging from its HEAD), both above the commits, then the stashes (each right above the
-    /// commit it was made on), newest first.
+    /// The synthetic rows: the WIP row when the working tree has changes (hanging from HEAD, above the commits), then
+    /// one per other worktree with changes (right above its HEAD), then the stashes (each right above the commit it was
+    /// made on), newest first.
     nonisolated static func syntheticRows(status: WorkingStatus, stashes: [Stash], worktrees: [WorktreeInfo])
         -> [GraphSyntheticRow]
     {
@@ -1718,8 +1750,8 @@ final class RepoSession: Identifiable {
         return snapshot.commitIndex[base] == nil
     }
 
-    /// A top row of the complete `log` was laid out with a line to a base the log does not hold (solo can leave
-    /// another worktree's HEAD out): its line runs to the end until it is laid out again (`beginLayout`).
+    /// A top row of the complete `log` (the WIP row; the other worktrees' rows hang) was laid out with a line to a base
+    /// the log does not hold: its line runs to the end until it is laid out again (`beginLayout`).
     private static func hasLineToMissingBase(_ log: LogSnapshot) -> Bool {
         log.syntheticRows.contains { row in
             guard case .synthetic(let synthetic) = row.node else { return false }
@@ -1727,17 +1759,18 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// Lays out `snapshot.synthetic`'s WIP and worktree rows at the top and hangs its stashes above their bases. Returns
-    /// the layout to feed the commits, and the top rows' layout: the stashes whose base never came are laid out with it
-    /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are);
-    /// so is a worktree row whose base the complete log does not hold. The pinned branches take the leftmost lanes.
+    /// Lays out `snapshot.synthetic`'s WIP row at the top and hangs the other worktrees' rows and its stashes above
+    /// their bases (as GitKraken: another worktree's changes sit on its HEAD, not above every commit). Returns the
+    /// layout to feed the commits, and the top rows' layout: the hung rows whose base never came are laid out with it
+    /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are).
+    /// The pinned branches take the leftmost lanes.
     nonisolated private static func beginLayout(_ snapshot: inout LogSnapshot) -> (layout: GraphLayout, top: GraphLayout) {
         var layout = GraphLayout(pinned: snapshot.filter.pinned)
-        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind != .stash }.map { row in
+        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind == .wip }.map { row in
             isMissingBase(row, in: snapshot) ? GraphSyntheticRow(kind: row.kind, id: row.id, base: nil) : row
         })
         let top = layout
-        layout.hang(snapshot.synthetic.filter { $0.kind == .stash })
+        layout.hang(snapshot.synthetic.filter { $0.kind != .wip })
         return (layout, top)
     }
 

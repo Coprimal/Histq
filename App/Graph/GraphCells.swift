@@ -657,8 +657,9 @@ private struct PullRequestChip {
 final class GraphTextCellView: NSView {
     enum Tone { case primary, secondary }
 
-    var text = "" { didSet { setAccessibilityLabel(text); refreshToolTip() } }
-    var detail: String? { didSet { refreshToolTip() } }
+    var text = "" { didSet { refreshAccessibilityLabel(); refreshToolTip() } }
+    /// A WIP row's files after the text, as GitKraken: each kind's glyph in its file-list color, then its count.
+    var changes: WorktreeChanges? { didSet { refreshAccessibilityLabel(); refreshToolTip() } }
     var tone = Tone.primary
     var isItalic = false { didSet { refreshToolTip() } }
     /// The author column's avatar: drawn instead of the text while the column is too narrow for `compactTitle` (its
@@ -700,6 +701,24 @@ final class GraphTextCellView: NSView {
         static let secondaryItalic = attributes(.secondary, italic: true)
         static let padding: CGFloat = 8
         static let dimmedAlpha: CGFloat = 0.35
+        // `FileChange`'s glyphs and colors, so the row matches the file lists.
+        static let edited = glyph("pencil", Palette.graphLanes[1])
+        static let added = glyph("plus", Palette.graphLanes[2])
+        static let deleted = glyph("minus", Palette.graphLanes[7])
+
+        /// A symbol with its color baked in (an attachment does not take the text's color), centered on the capitals.
+        private static func glyph(_ name: String, _ color: NSColor) -> NSTextAttachment {
+            let attachment = NSTextAttachment()
+            let configuration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+            guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(configuration)
+            else { return attachment }
+            attachment.image = image
+            attachment.bounds = CGRect(x: 0, y: ((font.capHeight - image.size.height) / 2).rounded(),
+                                       width: image.size.width, height: image.size.height)
+            return attachment
+        }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -721,10 +740,26 @@ final class GraphTextCellView: NSView {
         case (.primary, true): Style.primaryItalic
         case (.secondary, true): Style.secondaryItalic
         }
-        guard let detail else { return NSAttributedString(string: text, attributes: attributes) }
+        guard let changes else { return NSAttributedString(string: text, attributes: attributes) }
         let combined = NSMutableAttributedString(string: text, attributes: attributes)
-        combined.append(NSAttributedString(string: "  " + detail, attributes: Style.secondary))
+        let counts = tone == .primary ? Style.primary : Style.secondary
+        for (count, glyph) in [(changes.edited, Style.edited), (changes.added, Style.added),
+                               (changes.deleted, Style.deleted)] where count > 0 {
+            combined.append(NSAttributedString(string: "   ", attributes: counts))
+            combined.append(NSAttributedString(attachment: glyph))
+            combined.append(NSAttributedString(string: " \(count)", attributes: counts))
+        }
         return combined
+    }
+
+    /// The text with the WIP counts in words ("// WIP  5 edited · 1 added").
+    private var plainText: String {
+        guard let summary = changes?.kindSummary, !summary.isEmpty else { return text }
+        return text + "  " + summary
+    }
+
+    private func refreshAccessibilityLabel() {
+        setAccessibilityLabel(plainText)
     }
 
     /// The whole text on hover when it is cut (or shown as the avatar); none when it shows whole.
@@ -735,8 +770,7 @@ final class GraphTextCellView: NSView {
         } else if showsAvatar {
             tip = text
         } else {
-            let string = attributedText
-            tip = ceil(string.size().width) > textWidth ? string.string : nil
+            tip = ceil(attributedText.size().width) > textWidth ? plainText : nil
         }
         if tip != toolTip { toolTip = tip }
     }

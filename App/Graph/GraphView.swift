@@ -441,7 +441,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private var ghost: Ghost?
-    private var wipDetail: String?
+    private var wipChanges: WorktreeChanges?
     private var dateFormat: String?
     private let formatter = DateFormatter()
     private var metrics = GraphMetrics(density: "regular")
@@ -684,9 +684,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             reloadVisible = true
         }
         if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
-        let wip = view.status.map(Self.wipDetail)
-        if wip != wipDetail {
-            wipDetail = wip
+        let wip = view.status.map(WorktreeChanges.init)
+        if wip != wipChanges {
+            wipChanges = wip
             reloadVisible = true
         }
 
@@ -857,11 +857,6 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         scroll.reflectScrolledClipView(clip)
     }
 
-    /// "3 unstaged · 2 staged": the WIP row's counts (untracked and conflicted files count as unstaged).
-    private static func wipDetail(_ status: WorkingStatus) -> String {
-        WorktreeChanges(status).detail
-    }
-
     // MARK: Rows
 
     private func item(at row: Int) -> GraphItem? {
@@ -964,7 +959,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case .message:
             let cell = reuse(tableView, column) { GraphTextCellView() }
-            cell.detail = nil
+            cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             if let commit {
                 cell.text = commit.subject
@@ -976,12 +971,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.isItalic = true
             } else if let worktree = worktree(synthetic) {
                 cell.text = "// WIP"
-                cell.detail = worktree.changes.map(\.detail).flatMap { $0.isEmpty ? nil : $0 }
+                cell.changes = worktree.changes
                 cell.tone = .secondary
                 cell.isItalic = true
             } else {
                 cell.text = "// WIP"
-                cell.detail = wipDetail.flatMap { $0.isEmpty ? nil : $0 }
+                cell.changes = wipChanges
                 cell.tone = .primary
                 cell.isItalic = true
             }
@@ -993,7 +988,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             cell.avatarDiameter = metrics.nodeDiameter
             cell.avatar = commit.flatMap { avatar(for: $0, in: tableView) }
             cell.text = commit?.authorName ?? ""
-            cell.detail = nil
+            cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             cell.tone = .secondary
             cell.isItalic = false
@@ -1004,7 +999,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // Formatted only for the rows on screen.
             let date = commit?.authorDate ?? (synthetic?.kind == .stash ? stash(synthetic?.id)?.date : nil)
             cell.text = date.map(formatter.string(from:)) ?? ""
-            cell.detail = nil
+            cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             cell.tone = .secondary
             cell.isItalic = false
