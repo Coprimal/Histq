@@ -578,6 +578,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         target()?.model.toggleTerminal()
     }
 
+    /// View › Move Tabs to the Left/Top: writes General › Tab position, as the palette command does; the windows
+    /// follow it live.
+    @objc func toggleTabPosition(_ sender: Any?) {
+        let next: TabPosition = TabPosition.current == .left ? .top : .left
+        Preferences.defaults.set(next.rawValue, forKey: PrefKey.tabPosition.rawValue)
+    }
+
     @objc func checkForUpdates(_ sender: Any?) {
         updater.checkForUpdates()
     }
@@ -653,10 +660,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             menuItem.title = hides ? "Hide Terminal" : "Show Terminal"
             return session != nil
         }
+        if menuItem.action == #selector(toggleTabPosition(_:)) {
+            menuItem.title = TabPosition.current == .left ? "Move Tabs to the Top" : "Move Tabs to the Left"
+        }
         return true
     }
 
-    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal) and Window menus:
+    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal, the tab position) and Window menus:
     /// without Edit, text fields lose copy and paste.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
@@ -714,6 +724,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                             keyEquivalent: "`")
         terminalItem.keyEquivalentModifierMask = [.control]
         terminalItem.target = self
+        viewMenu.addItem(withTitle: "Move Tabs to the Left", action: #selector(toggleTabPosition(_:)), keyEquivalent: "")
+            .target = self
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
