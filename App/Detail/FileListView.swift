@@ -54,12 +54,14 @@ struct FileChange: Hashable, Sendable, Identifiable {
         }
     }
 
+    /// GitKraken's colors: orange edited, green added, light red removed, purple conflicted, cyan renamed.
     var tint: Color {
         switch kind {
-        case .added, .untracked: Color(nsColor: Palette.graphLanes[5])
-        case .modified, .typeChanged: Color(nsColor: Palette.graphLanes[0])
-        case .deleted, .conflicted: Color(nsColor: Palette.graphLanes[6])
-        case .renamed, .copied: Color(nsColor: Palette.graphLanes[2])
+        case .added, .untracked: Color(nsColor: Palette.graphLanes[2])
+        case .modified, .typeChanged: Color(nsColor: Palette.graphLanes[1])
+        case .deleted: Color(nsColor: Palette.graphLanes[7])
+        case .conflicted: Color(nsColor: Palette.graphLanes[6])
+        case .renamed, .copied: Color(nsColor: Palette.graphLanes[4])
         case .unchanged: .secondary
         }
     }
