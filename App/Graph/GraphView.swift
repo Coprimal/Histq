@@ -106,6 +106,9 @@ struct GraphView: NSViewRepresentable {
     /// The repo's remote names (`RepoSession.remotes`): with one remote, a remote branch's badge drops the remote
     /// from its name (`RefBadge.remoteLabel`).
     var remotes: [String] = []
+    /// The repo's remotes' URLs by name (`RepoSession.remotes`): the cloud on a remote's badges gives way to its
+    /// owner's logo (`AvatarStore.ownerAvatar`).
+    var remoteURLs: [String: String] = [:]
     /// A click on a pull request chip, with its number.
     var onOpenPullRequest: @MainActor (Int) -> Void = { _ in }
     /// The branch each commit is on (`RepoSession.branchMap`): a lone selected commit without a branch badge of its own
@@ -430,6 +433,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var refs: Refs?
     private var pullRequests: [String: RefBadge.PullRequest] = [:]
     private var remotes: [String] = []
+    private var remoteURLs: [String: String] = [:]
+    /// The logos of the remotes' owners loaded so far, by remote name (`RefBadgeCellView.remoteAvatars`).
+    private var remoteAvatars: [String: NSImage] = [:]
     private var badges: [String: [RefBadge]] = [:]
     private var branchMap = BranchMap()
     /// The faded badge on the selected row (`RefBadge.isGhost`), with the row and commit it was made for.
@@ -680,6 +686,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             pullRequests = view.pullRequests
             remotes = view.remotes
             badges = view.refs.map { RefBadge.badges(for: $0, pullRequests: pullRequests, remotes: remotes) } ?? [:]
+            reloadVisible = true
+        }
+        if view.remoteURLs != remoteURLs {
+            remoteURLs = view.remoteURLs
+            remoteAvatars = ownerAvatars()
             reloadVisible = true
         }
         if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
@@ -934,6 +945,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // After the row's own badges (a detached HEAD, tags): when the column is short, the hint gives way first.
             if let ghostBadge { cell.badges.append(ghostBadge) }
             cell.color = graphRow.color
+            cell.remoteAvatars = remoteAvatars
             cell.metrics = metrics
             // A reloaded row keeps its hover stack, made again from its new badges (a click on the stack selects
             // the row, which may reload it); a cell reused for another row gives it up.
@@ -1024,6 +1036,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// visible one).
     @objc private func avatarsChanged(_ notification: Notification) {
         guard let table else { return }
+        let owner = notification.userInfo?[AvatarStore.emailKey] as? String
+        if owner == nil || owner?.hasPrefix("owner:") == true { refreshRemoteAvatars(table) }
         let column = table.column(withIdentifier: GraphColumn.graph.identifier)
         let authorColumn = table.column(withIdentifier: GraphColumn.author.identifier)
         let visible = table.rows(in: table.visibleRect)
@@ -1047,6 +1061,37 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.needsDisplay = true
             }
         }
+    }
+
+    /// The logo of each remote's owner that is loaded (`AvatarStore.ownerAvatar` starts the others' loads), at the
+    /// sidebar's size so both share one download.
+    private func ownerAvatars() -> [String: NSImage] {
+        let scale = table?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixels = Int((16 * scale).rounded(.up))
+        return remoteURLs.compactMapValues { url in
+            GitHubClient.repository(fromRemoteURL: url).flatMap {
+                AvatarStore.shared.ownerAvatar(of: $0, pixels: pixels)
+            }
+        }
+    }
+
+    /// A remote owner's logo arrived, or the avatar mode changed: the visible badges (and the hover stack) redraw.
+    private func refreshRemoteAvatars(_ table: NSTableView) {
+        let avatars = ownerAvatars()
+        guard avatars != remoteAvatars else { return }
+        remoteAvatars = avatars
+        let column = table.column(withIdentifier: GraphColumn.refs.identifier)
+        let visible = table.rows(in: table.visibleRect)
+        if column >= 0 {
+            for row in visible.location..<NSMaxRange(visible) {
+                guard let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? RefBadgeCellView
+                else { continue }
+                cell.remoteAvatars = avatars
+                cell.needsDisplay = true
+            }
+        }
+        stackOverlay?.remoteAvatars = avatars
+        stackOverlay?.needsDisplay = true
     }
 
     private func stash(_ hash: String?) -> Stash? {
@@ -1093,12 +1138,14 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         guard !hasBranch, let name = branchMap.branch(at: index, in: log) else { return nil }
         let isLocal = refs?.localBranches.contains { $0.name == name } ?? false
         var label: String?
+        var remoteName: String?
         if !isLocal, let refs, let remote = refs.remoteBranches.first(where: { $0.name == name }) {
             label = RefBadge.remoteLabel(of: remote, singleRemote: RefBadge.singleRemote(refs, remotes: remotes))
+            remoteName = remote.remote
         }
         return Ghost(row: row, hash: hash, badge: RefBadge(
             kind: .branch(isLocal: isLocal, isRemote: !isLocal, isHead: false), name: name, label: label,
-            isGhost: true))
+            isGhost: true, remote: remoteName))
     }
 
     /// Moves the ghost to the selection's: reloads only the refs and graph cells of the row it leaves and the row it
@@ -1320,6 +1367,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         if row != stackRow || overlay.badges != cell.badges { overlay.hovered = nil }
         overlay.badges = cell.badges
         overlay.color = cell.color
+        overlay.remoteAvatars = cell.remoteAvatars
         overlay.metrics = metrics
         let size = overlay.stackSize(rowHeight: cellRect.height, lineEnd: cellRect.width)
         // Near the bottom of the view the stack grows up from the row, so it is not cut.

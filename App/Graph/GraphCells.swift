@@ -38,6 +38,9 @@ struct RefBadge: Hashable {
     /// The faded badge of the branch a selected commit is on (`BranchAttribution`), drawn with its line at
     /// `Palette.graphGhostAlpha`; not a menu, drag or drop target.
     var isGhost = false
+    /// The remote the cloud icon stands for (`origin`): its owner's logo replaces the cloud once loaded
+    /// (`RefBadgeCellView.remoteAvatars`).
+    var remote: String?
 
     /// The name drawn in the badge.
     var shownName: String { label ?? name }
@@ -51,25 +54,27 @@ struct RefBadge: Hashable {
     {
         var byCommit: [String: [RefBadge]] = [:]
         let single = singleRemote(refs, remotes: remotes)
-        let remoteCommits = Dictionary(refs.remoteBranches.map { ($0.name, $0.commit) }, uniquingKeysWith: { a, _ in a })
+        let remoteBranches = Dictionary(refs.remoteBranches.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
         var mergedRemotes = Set<String>()
         if case .detached(let commit) = refs.head {
             byCommit[commit, default: []].append(RefBadge(kind: .head, name: "HEAD"))
         }
         for branch in refs.localBranches.sorted(by: { $0.isHead && !$1.isHead }) {
-            var isRemote = false
-            if let upstream = branch.upstream, remoteCommits[upstream] == branch.commit {
-                isRemote = true
+            var tracked: RemoteBranch?
+            if let upstream = branch.upstream, let remote = remoteBranches[upstream], remote.commit == branch.commit {
+                tracked = remote
                 mergedRemotes.insert(upstream)
             }
             byCommit[branch.commit, default: []].append(RefBadge(
-                kind: .branch(isLocal: true, isRemote: isRemote, isHead: branch.isHead), name: branch.name,
-                ahead: branch.ahead, behind: branch.behind, pullRequest: branch.upstream.flatMap { pullRequests[$0] }))
+                kind: .branch(isLocal: true, isRemote: tracked != nil, isHead: branch.isHead), name: branch.name,
+                ahead: branch.ahead, behind: branch.behind, pullRequest: branch.upstream.flatMap { pullRequests[$0] },
+                remote: tracked?.remote))
         }
         for remote in refs.remoteBranches where !mergedRemotes.contains(remote.name) {
             byCommit[remote.commit, default: []].append(RefBadge(
                 kind: .branch(isLocal: false, isRemote: true, isHead: false), name: remote.name,
-                label: remoteLabel(of: remote, singleRemote: single), pullRequest: pullRequests[remote.name]))
+                label: remoteLabel(of: remote, singleRemote: single), pullRequest: pullRequests[remote.name],
+                remote: remote.remote))
         }
         for tag in refs.tags {
             byCommit[tag.commit ?? tag.target, default: []].append(RefBadge(kind: .tag, name: tag.name))
@@ -97,7 +102,7 @@ struct RefBadge: Hashable {
 
 /// The BRANCH / TAG column's cell: the row's badges from the left, as many as fit whole, then "+N" for the rest. When
 /// even the first does not fit whole it steps down (`Level`) in the room "+N" leaves: its name without ↑↓ and the pull
-/// request chip, cut with "…" (at least 3 characters), without HEAD's check, then its other icons alone (the laptop and
+/// request chip, cut with "…" (at least 3 characters), then its icons alone (HEAD's check, the laptop and
 /// the cloud always stay); "+N" always stays. Nothing is drawn outside a badge, or past the cell. A line in the lane
 /// color runs from the last badge to the column's right edge, where the graph cell continues it to the node. With
 /// `stack` set it is the hover overlay instead (`GraphTableController`): every badge whole, one under the other, as in
@@ -106,6 +111,8 @@ final class RefBadgeCellView: NSView {
     var badges: [RefBadge] = []
     /// The row's lane color (`GraphRow.color`).
     var color = 0
+    /// The logos of the remotes' owners by remote name (`AvatarStore.ownerAvatar`): drawn in place of the cloud.
+    var remoteAvatars: [String: NSImage] = [:]
     var metrics = GraphMetrics(density: "regular")
     /// Set on the hover overlay: the hovered row's height, whether the stack grows up from that row (near the bottom of
     /// the view), and where its line to the node ends (the column's right edge, in the overlay).
@@ -157,11 +164,15 @@ final class RefBadgeCellView: NSView {
         static let padding: CGFloat = 7
         static let gap: CGFloat = 4
         static let iconGap: CGFloat = 3
-        /// The check's slot. The laptop, cloud and tag get `refIcon`: bigger, so they read at a glance (user,
-        /// 2026-11-13); the text and the badge height stay.
+        /// The pull request chip's icon slot. The laptop, cloud and tag get `refIcon`: bigger, so they read at a glance
+        /// (user, 2026-11-13); the text and the badge height stay. HEAD's check gets `headIcon`, the biggest (user,
+        /// 2026-11-17: it tells at a glance which branch the tab has checked out).
         static let icon: CGFloat = 12
         static let refIcon: CGFloat = 15
+        static let headIcon: CGFloat = 16
         static let radius: CGFloat = 5
+        /// The border of the checked-out branch's badge.
+        static let headBorder: CGFloat = 1.5
         /// A badge's height, less in a row too short for it (compact).
         static let height: CGFloat = 22
         /// Room kept for the line to the node.
@@ -172,10 +183,13 @@ final class RefBadgeCellView: NSView {
         static let chipRadius: CGFloat = 4
     }
 
-    /// A glyph's slot width: the check keeps the small one.
+    /// A glyph's slot width: HEAD's check gets the biggest.
     private static func iconWidth(_ name: String) -> CGFloat {
-        name == "checkmark.circle.fill" ? Style.icon : Style.refIcon
+        name == headIcon ? Style.headIcon : Style.refIcon
     }
+
+    /// The check of the branch checked out (or of a detached HEAD): always drawn, in front of the name.
+    private static let headIcon = "checkmark.circle.fill"
 
     /// SF Symbols in the badge text color, drawn at a size that fills their slot (the cloud and tag are 16 pt wide at
     /// 12 pt, scaled down to 15; at 10.5 pt they stayed 14). A Lucide icon (24 pt) is tinted the same color.
@@ -186,15 +200,13 @@ final class RefBadgeCellView: NSView {
             symbols[name] = image
             return image
         }
-        let isCheck = name == "checkmark.circle.fill"
-        var configuration = NSImage.SymbolConfiguration(pointSize: isCheck ? 10.5 : 12, weight: .regular)
-        // In the palette color the check's own layer fills in the disc; tinted whole, it stays a cutout.
-        if !isCheck {
-            configuration = configuration.applying(NSImage.SymbolConfiguration(paletteColors: [Palette.graphBadgeText]))
-        }
+        let isCheck = name == headIcon
+        // HEAD's check stands out: a solid white disc with a bold check in the graph's dark surface.
+        let colors = isCheck ? [Palette.graphSurface, Palette.graphBadgeText] : [Palette.graphBadgeText]
+        let configuration = NSImage.SymbolConfiguration(pointSize: isCheck ? 13.5 : 12, weight: isCheck ? .bold : .regular)
+            .applying(NSImage.SymbolConfiguration(paletteColors: colors))
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration)
-            .map { isCheck ? tinted($0) : $0 }
         symbols[name] = image
         return image
     }
@@ -214,10 +226,10 @@ final class RefBadgeCellView: NSView {
     private static func icons(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
         switch badge.kind {
         case .branch(let isLocal, let isRemote, let isHead):
-            return (isHead ? ["checkmark.circle.fill"] : [],
+            return (isHead ? [headIcon] : [],
                     (isLocal ? ["lucide-laptop-minimal"] : []) + (isRemote ? ["cloud"] : []))
         case .tag: return (["tag"], [])
-        case .head: return (["checkmark.circle.fill"], [])
+        case .head: return ([headIcon], [])
         case .worktree: return (["folder"], [])
         }
     }
@@ -238,47 +250,42 @@ final class RefBadgeCellView: NSView {
     /// The pull request icon, in the chip and, on a badge drawn without it, at the badge's right end.
     private static let pullIcon = "lucide-git-pull-request-arrow"
 
-    /// `icons` with the pull request icon last, for a badge drawn without its chip (user, 2026-11-17: it always
-    /// shows, as the laptop and the cloud do; the chip with "#N" only on a whole badge, as in the hover stack).
-    private static func iconsWithPull(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
+    /// The icons a badge always keeps, on the side each has in the full badge: `icons` with the pull request icon
+    /// last, for a badge drawn without its chip (user, 2026-11-16: the laptop and the cloud never give way;
+    /// 2026-11-17: nor the pull request icon, which the chip with "#N" shows only on a whole badge, as in the hover
+    /// stack; nor HEAD's check).
+    private static func refIcons(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
         let all = icons(badge)
         return badge.pullRequest == nil ? all : (all.leading, all.trailing + [pullIcon])
     }
 
-    /// The icons a badge always keeps (user, 2026-11-16: the laptop and the cloud never give way; 2026-11-17: nor the
-    /// pull request icon): all but HEAD's check, on the side each has in the full badge. A tag, a folder and a
-    /// detached HEAD's check have only theirs.
-    private static func refIcons(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
-        let all = iconsWithPull(badge)
-        let leading = all.leading.filter { $0 != "checkmark.circle.fill" }
-        return leading.isEmpty && all.trailing.isEmpty ? all : (leading, all.trailing)
-    }
-
     /// The icons drawn at `level`, on the side each has in the full badge.
     private static func icons(_ badge: RefBadge, at level: Level) -> (leading: [String], trailing: [String]) {
-        switch level {
-        case .full: icons(badge)
-        case .name(allIcons: true): iconsWithPull(badge)
-        case .name(allIcons: false), .icon: refIcons(badge)
-        }
+        level == .full ? icons(badge) : refIcons(badge)
     }
 
-    /// The width of `refIcons` side by side.
-    private static func refIconsWidth(_ badge: RefBadge) -> CGFloat {
+    /// The icons drawn alone at `.icon` (`refIcons`) or `.check` (HEAD's check).
+    private static func iconsAlone(_ badge: RefBadge, at level: Level) -> [String] {
+        if level == .check { return [headIcon] }
         let (leading, trailing) = refIcons(badge)
-        let names = leading + trailing
-        return names.reduce(0) { $0 + iconWidth($1) } + CGFloat(max(0, names.count - 1)) * Style.iconGap
+        return leading + trailing
+    }
+
+    /// The width of `names` side by side.
+    private static func iconsWidth(_ names: [String]) -> CGFloat {
+        names.reduce(0) { $0 + iconWidth($1) } + CGFloat(max(0, names.count - 1)) * Style.iconGap
     }
 
     /// How much of a badge is drawn.
     fileprivate enum Level: Equatable {
         /// Icons, name, ↑↓ and the pull request chip.
         case full
-        /// The name (cut with "…" when short) without ↑↓, the pull request chip giving way to its icon; without HEAD's
-        /// check when even 3 characters do not fit beside all the icons.
-        case name(allIcons: Bool)
+        /// The name (cut with "…" when short) without ↑↓, the pull request chip giving way to its icon.
+        case name
         /// The icons it always keeps (`refIcons`) alone: one in a square.
         case icon
+        /// HEAD's check alone in a square, when not even `refIcons` fit: the checked-out branch never loses it.
+        case check
     }
 
     /// The badge's level and width in `room` points of a row whose badges are `height` high; nil when not even its
@@ -286,14 +293,15 @@ final class RefBadgeCellView: NSView {
     private static func fit(_ badge: RefBadge, room: CGFloat, height: CGFloat) -> (level: Level, width: CGFloat)? {
         let size = widths(badge)
         if size.chrome + size.name <= room { return (.full, size.chrome + size.name) }
-        for allIcons in [true, false] {
-            let (leading, trailing) = icons(badge, at: .name(allIcons: allIcons))
-            let chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
-            if chrome + minimumName(badge) <= room { return (.name(allIcons: allIcons), min(room, chrome + size.name)) }
-        }
+        let (leading, trailing) = refIcons(badge)
+        let chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
+        if chrome + minimumName(badge) <= room { return (.name, min(room, chrome + size.name)) }
         // As much room around the icons as a single one has in its square.
-        let width = refIconsWidth(badge) + height - Style.refIcon
-        return width <= room ? (.icon, width) : nil
+        for level in [Level.icon, .check] where level == .icon || leading.contains(headIcon) {
+            let width = iconsWidth(iconsAlone(badge, at: level)) + height - Style.refIcon
+            if width <= room { return (level, width) }
+        }
+        return nil
     }
 
     /// The least of a name shown: its first 3 characters and "…" (with a point to spare, so AppKit keeps 3), or all
@@ -550,15 +558,30 @@ final class RefBadgeCellView: NSView {
                            context: CGContext)
     {
         let path = CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil)
+        let isHead = switch badge.kind {
+        case .branch(_, _, let isHead): isHead
+        case .head: true
+        case .tag, .worktree: false
+        }
+        let lane = self.color % Palette.graphLanes.count
         let color: NSColor = if case .tag = badge.kind {
             Palette.graphTagFill
         } else {
-            Palette.graphBadgeFills[self.color % Palette.graphBadgeFills.count]
+            (isHead ? Palette.graphHeadBadgeFills : Palette.graphBadgeFills)[lane]
         }
         (fill == .faint ? color.withAlphaComponent(color.alphaComponent * Style.faintFill) : color).setFill()
-        // No border, not even on HEAD's branch: its check icon marks it (user, 2026-11-13).
         context.addPath(path)
         context.fillPath()
+        // The checked-out branch (or detached HEAD) stands out from the others (user, 2026-11-17): a brighter fill and
+        // a bright white border.
+        if isHead {
+            Palette.graphBadgeText.setStroke()
+            context.setLineWidth(Style.headBorder)
+            let inset = rect.insetBy(dx: Style.headBorder / 2, dy: Style.headBorder / 2)
+            context.addPath(CGPath(roundedRect: inset, cornerWidth: Style.radius - Style.headBorder / 2,
+                                   cornerHeight: Style.radius - Style.headBorder / 2, transform: nil))
+            context.strokePath()
+        }
         if fill == .lit {
             NSColor.white.withAlphaComponent(Style.litFill).setFill()
             context.addPath(path)
@@ -568,11 +591,11 @@ final class RefBadgeCellView: NSView {
         defer { context.restoreGState() }
         context.clip(to: rect)
 
-        if level == .icon {
-            let (leading, trailing) = Self.refIcons(badge)
-            var x = rect.midX - Self.refIconsWidth(badge) / 2
-            for name in leading + trailing {
-                drawIcon(name, x: x, midY: rect.midY)
+        if level == .icon || level == .check {
+            let names = Self.iconsAlone(badge, at: level)
+            var x = rect.midX - Self.iconsWidth(names) / 2
+            for name in names {
+                drawIcon(name, of: badge, x: x, midY: rect.midY)
                 x += Self.iconWidth(name) + Style.iconGap
             }
             return
@@ -580,7 +603,7 @@ final class RefBadgeCellView: NSView {
         let (leading, trailing) = Self.icons(badge, at: level)
         var x = rect.minX + Style.padding
         for name in leading {
-            drawIcon(name, x: x, midY: rect.midY)
+            drawIcon(name, of: badge, x: x, midY: rect.midY)
             x += Self.iconWidth(name) + Style.iconGap
         }
         var trailingX = rect.maxX - Style.padding
@@ -591,7 +614,7 @@ final class RefBadgeCellView: NSView {
         }
         for name in trailing.reversed() {
             trailingX -= Self.iconWidth(name)
-            drawIcon(name, x: trailingX, midY: rect.midY)
+            drawIcon(name, of: badge, x: trailingX, midY: rect.midY)
             trailingX -= Style.iconGap
         }
         if level == .full, let counts = Self.aheadBehind(badge) {
@@ -627,6 +650,20 @@ final class RefBadgeCellView: NSView {
 
     private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat) {
         drawIcon(name, x: x, midY: midY, slot: Self.iconWidth(name))
+    }
+
+    /// `badge`'s icon `name`; the cloud gives way to the logo of its remote's owner once loaded (`remoteAvatars`).
+    private func drawIcon(_ name: String, of badge: RefBadge, x: CGFloat, midY: CGFloat) {
+        guard name == "cloud", let image = badge.remote.flatMap({ remoteAvatars[$0] }) else {
+            return drawIcon(name, x: x, midY: midY)
+        }
+        let side = Style.refIcon
+        let rect = CGRect(x: x, y: (midY - side / 2).rounded(), width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).addClip()
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true,
+                   hints: [.interpolation: NSImageInterpolation.high.rawValue])
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, slot: CGFloat) {

@@ -112,6 +112,8 @@ enum Palette {
     static let graphStashBand = graphStash.withAlphaComponent(0.16)
     /// A branch badge's fill: its row's lane color at 0.38.
     static let graphBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.38) }
+    /// The checked-out branch's badge: brighter, its lane color at 0.6 (with a white border).
+    static let graphHeadBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.6) }
     /// Text and icons on a badge: pure white, so they read on the dark fills (user, 2026-11-17). White
     static let graphBadgeText = NSColor.white
     /// A tag badge's neutral fill. White 0.14
