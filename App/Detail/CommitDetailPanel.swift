@@ -200,7 +200,7 @@ struct CommitDetailPlaceholder: View {
                 // The loaded rows' fonts and spacing (subject, author, sha, parent), so a one-line message's card has
                 // the loaded card's height.
                 VStack(alignment: .leading, spacing: 10) {
-                    line(.title3, fraction: 0.75, height: 16)
+                    line(.body, fraction: 0.75, height: 11)
                         .modifier(MessageBox())
                     HStack(spacing: 8) {
                         SkeletonLine(width: InfoMetrics.avatar, height: InfoMetrics.avatar)
@@ -349,10 +349,11 @@ private struct CommitInfoCard: View {
     private var message: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(commit.subject)
-                .font(.title3)
+                .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
             if !commit.body.isEmpty {
                 Text(commit.body)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
