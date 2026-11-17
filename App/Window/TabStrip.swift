@@ -266,18 +266,26 @@ private struct TabTrack: View {
 }
 
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
-/// Tabs to the Right (Below), each off when it has no tab to close, and Set Alias…, off for a Welcome tab.
+/// Tabs to the Right (Below), each off when it has no tab to close, then Reveal in Finder (the tab's repo or worktree
+/// folder; off for a Welcome tab or a missing folder) and Set Alias…, off for a Welcome tab.
 @MainActor
 enum TabMenu {
     static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
         guard let index = model.tabs.firstIndex(where: { $0.id == id }) else { return [] }
-        let isRepo = model.tabs[index].repoURL != nil
+        let tab = model.tabs[index]
+        let isRepo = tab.repoURL != nil
+        let revealable = isRepo && !tab.isMissing
         return [
             .action("Close Tab") { close(id, model) },
             .action("Close Other Tabs", enabled: model.tabs.count > 1) { model.closeOtherTabs(id) },
             .action(vertical ? "Close Tabs Below" : "Close Tabs to the Right",
                     enabled: index < model.tabs.count - 1) { model.closeTabs(after: id) },
             .separator,
+            .action("Reveal in Finder", enabled: revealable,
+                    toolTip: revealable ? nil
+                        : isRepo ? "The repository's folder is gone." : "A new tab has no repository.") {
+                if let url = tab.repoURL { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            },
             .action("Set Alias…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to name.") {
                 model.presentModal(.tabAlias(tabID: id))
             },
