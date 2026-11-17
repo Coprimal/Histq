@@ -1,5 +1,5 @@
 // A file's diff in panel2, in place of the graph (Esc or the back button returns to it), each part in its own card:
-// the header (back, the file, its status, +N −M, Diff / Full file), then one card per side of the change (a WIP file's
+// the header (back, the file, its status, +N −M, Diff / Full file, close), then one card per side of the change (a WIP file's
 // Unstaged and Staged changes, a commit's changes), or a card that says why there are no lines (binary, too large, no
 // change). An image whose diff is binary shows its versions before and after the change instead of lines. The diff
 // loads off the main actor; until then the cards are skeletons.
@@ -158,7 +158,7 @@ struct DiffView: View {
     }
 }
 
-/// Back, the file's icon, name and folder, its status, the line counts and the mode switch; a commit's file adds
+/// Back, the file's icon, name and folder, its status, the line counts, the mode switch and close; a commit's file adds
 /// "Checkout This Version". The counts are skeletons until the diff is in.
 private struct DiffHeaderCard: View {
     let session: RepoSession
@@ -217,6 +217,18 @@ private struct DiffHeaderCard: View {
                                 compact: true)
                         .fixedSize()
                 }
+                Button {
+                    session.closeFile()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(RowIconButtonStyle())
+                .help("Close (back to the Graph)")
+                .accessibilityLabel("Close the diff")
+                .padding(.trailing, 4)
             }
             // As tall as the compact tabs' padded track (24 pt pills inset 4 pt), the sidebar's look.
             .frame(height: 32)
