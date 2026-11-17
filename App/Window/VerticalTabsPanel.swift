@@ -293,7 +293,7 @@ private struct VerticalTabRow: View {
     let systemImage: String
     /// The tab's emoji (`WindowModel.Tab.emoji`), shown instead of `systemImage`; nil for none.
     let emoji: String?
-    /// The symbol's color (`TabIcon.tint`); nil for the text's color.
+    /// The book's own color (`TabIcon`); nil for the default tab icon.
     let iconColor: Int?
     let help: String
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
@@ -358,7 +358,7 @@ private struct VerticalTabRow: View {
     /// The tab's icon (`TabIcon`: the emoji, else the symbol in its color) in the rows' 20 pt slot, with the profile's
     /// white-ringed dot on its lower trailing corner.
     private var icon: some View {
-        TabIcon(emoji: emoji, symbol: systemImage, tint: TabIcon.tint(iconColor, selected: selected),
+        TabIcon(emoji: emoji, symbol: systemImage, iconColor: iconColor, selected: selected,
                 profileColor: profileColor, profileName: profileName)
             .frame(width: 20)
             .accessibilityHidden(true)
@@ -427,7 +427,7 @@ private struct VerticalPinnedGrid: View {
 private struct VerticalPinnedCell: View {
     let title: String
     let emoji: String?
-    /// The symbol shown without an emoji (`TabIcon.symbol(of:)`) and its color (`TabIcon.tint`).
+    /// The symbol shown without an emoji (`TabIcon.symbol(of:)`) and its own color (`TabIcon`).
     let symbol: String
     let iconColor: Int?
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
@@ -445,7 +445,7 @@ private struct VerticalPinnedCell: View {
     }
 
     var body: some View {
-        TabIcon(emoji: emoji, symbol: symbol, tint: TabIcon.tint(iconColor, selected: selected),
+        TabIcon(emoji: emoji, symbol: symbol, iconColor: iconColor, selected: selected,
                 profileColor: profileColor, profileName: profileName)
             .accessibilityHidden(true)
             .frame(maxWidth: .infinity)

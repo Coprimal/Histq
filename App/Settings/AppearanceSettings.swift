@@ -1,10 +1,13 @@
-// Settings › Appearance: where the tabs show, the commit graph's avatars, date format, row height and text columns,
+// Settings › Appearance: where the tabs show and their default icon, the commit graph's avatars, date format, row height and text columns,
 // and the file lists' layout and file sizes.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
 struct AppearanceSettings: View {
     @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
+    @AppStorage(PrefKey.defaultTabEmoji.rawValue, store: Preferences.defaults) private var tabEmoji = ""
+    @AppStorage(PrefKey.defaultTabIconColor.rawValue, store: Preferences.defaults) private var tabIconColor = -1
+    @FocusState private var emojiFocused: Bool
     @AppStorage(PrefKey.avatarMode.rawValue, store: Preferences.defaults) private var avatarMode = "generated"
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
@@ -32,6 +35,42 @@ struct AppearanceSettings: View {
                 } label: {
                     Text("Tab position")
                     SettingsHint("Top: a strip under the toolbar. Left: a column beside the panels.")
+                }
+                SettingsDivider()
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        TextField("Emoji", text: $tabEmoji, prompt: Text("None"))
+                            .textFieldStyle(.settings)
+                            .frame(width: 64)
+                            .labelsHidden()
+                            .autocorrectionDisabled()
+                            .focused($emojiFocused)
+                            .onChange(of: tabEmoji) { _, new in
+                                // One emoji only, as a tab's Set Emoji… keeps it.
+                                let kept = TabEmoji.normalized(new) ?? ""
+                                if kept != new { tabEmoji = kept }
+                            }
+                        Button("Choose…", action: chooseEmoji)
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                    }
+                } label: {
+                    Text("Default tab emoji")
+                    SettingsHint("Shown instead of the book on tabs without their own emoji or icon color. Empty: "
+                        + "the book.")
+                }
+                SettingsDivider()
+                LabeledContent {
+                    CapsuleMenuPicker(label: "Default icon color", selection: $tabIconColor,
+                                      title: Self.colorTitle(tabIconColor)) {
+                        Text("Default").tag(-1)
+                        ForEach(ProfileColors.hexes.indices, id: \.self) { index in
+                            Self.colorTitle(index).tag(index)
+                        }
+                    }
+                    .disabled(!tabEmoji.isEmpty)
+                } label: {
+                    Text("Default icon color")
+                    SettingsHint("The book's color on tabs without their own. Default: the tab's text color.")
                 }
             }
             SettingsGroup("Avatars") {
@@ -107,6 +146,18 @@ struct AppearanceSettings: View {
 
     private var formats: [String] {
         Self.dateFormats.contains(dateFormat) ? Self.dateFormats : Self.dateFormats + [dateFormat]
+    }
+
+    /// Focuses the emoji field, then opens the Character Viewer on the next turn, so its pick goes into the field.
+    private func chooseEmoji() {
+        emojiFocused = true
+        DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
+    }
+
+    /// A lane color's name after its dot; "Default" for -1 (or a number out of range).
+    private static func colorTitle(_ index: Int) -> Text {
+        guard ProfileColors.hexes.indices.contains(index) else { return Text("Default") }
+        return Text("\(Image(nsImage: ProfilePicker.dot(hex: ProfileColors.hexes[index], gap: 4)))\(TabIcon.colorName(index))")
     }
 
     private static func avatarTitle(_ mode: String) -> String {

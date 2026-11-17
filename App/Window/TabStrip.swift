@@ -321,16 +321,13 @@ enum TabMenu {
         ] + profile(id, tab, revealable, model)
     }
 
-    /// The names of `Palette.graphLanes`, in order, for the Icon Color menu.
-    private static let iconColorNames = ["Blue", "Orange", "Green", "Pink", "Cyan", "Yellow", "Purple", "Red"]
-
-    /// The Icon Color menu: Default (the text's color), then each lane color with its dot; the tab's own is checked.
+    /// The Icon Color menu: Default (Settings › Appearance's default tab icon), then each lane color with its dot; the
+    /// tab's own is checked.
     private static func iconColors(_ id: WindowModel.Tab.ID, _ tab: WindowModel.Tab, _ model: WindowModel)
         -> [MenuEntry]
     {
         let colors = ProfileColors.hexes.indices.map { index in
-            MenuEntry.action(iconColorNames.indices.contains(index) ? iconColorNames[index] : "Color \(index + 1)",
-                             checked: tab.iconColor == index, image: ProfilePicker.dot(hex: ProfileColors.hexes[index])) {
+            MenuEntry.action(TabIcon.colorName(index), checked: tab.iconColor == index, image: ProfilePicker.dot(hex: ProfileColors.hexes[index])) {
                 [weak model] in model?.setIconColor(index, for: id)
             }
         }
@@ -441,7 +438,7 @@ struct TabItem: View {
     let symbol: String
     /// A pinned tab: its icon alone, no name and no close button.
     let pinned: Bool
-    /// The symbol's color (`TabIcon.tint`); nil for the text's color.
+    /// The book's own color (`TabIcon`); nil for the default tab icon.
     let iconColor: Int?
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
@@ -509,7 +506,7 @@ struct TabItem: View {
     }
 
     private var icon: TabIcon {
-        TabIcon(emoji: emoji, symbol: symbol, tint: TabIcon.tint(iconColor, selected: selected),
+        TabIcon(emoji: emoji, symbol: symbol, iconColor: iconColor, selected: selected,
                 profileColor: profileColor, profileName: profileName)
     }
 
@@ -561,14 +558,19 @@ struct TabItem: View {
     }
 }
 
-/// A tab's icon in a `size` square: its emoji, else its symbol (`symbol(of:)`, the book of a repo tab) in `tint`, with
-/// the profile's color dot on its lower-right corner in a white ring. The top tabs and the vertical tabs share it.
+/// A tab's icon in a `size` square: its emoji, else its symbol (`symbol(of:)`, the book of a repo tab) in its icon
+/// color, with the profile's color dot on its lower-right corner in a white ring. A book with neither its own emoji nor
+/// its own color takes Settings › Appearance's default tab icon: its emoji, else its color. The top tabs and the
+/// vertical tabs share it.
 struct TabIcon: View {
+    /// The tab's own emoji (`WindowModel.Tab.emoji`); nil for none.
     let emoji: String?
     /// The SF Symbol drawn when there is no emoji.
     let symbol: String
-    /// The symbol's color (`tint(_:selected:)`).
-    let tint: Color
+    /// The tab's own book color (`WindowModel.Tab.iconColor`), an index into `Palette.graphLanes`; nil for none.
+    let iconColor: Int?
+    /// The tab is selected: a book without a color takes the selected text's color.
+    let selected: Bool
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
@@ -581,8 +583,14 @@ struct TabIcon: View {
     private static let dotHoverMargin: CGFloat = 3
     /// How far the dot's center sits inside the icon's corner.
     private static let dotInset: CGFloat = 2.5
+    @AppStorage(PrefKey.defaultTabEmoji.rawValue, store: Preferences.defaults) private var defaultEmoji = ""
+    @AppStorage(PrefKey.defaultTabIconColor.rawValue, store: Preferences.defaults) private var defaultColor = -1
+
+    /// The tab's own choice, else the default for a book that has none.
+    private var usesDefault: Bool { emoji == nil && iconColor == nil && symbol == Self.book }
 
     var body: some View {
+        let emoji = emoji ?? (usesDefault ? TabEmoji.normalized(defaultEmoji) : nil)
         ZStack {
             if let emoji {
                 Text(emoji)
@@ -592,7 +600,8 @@ struct TabIcon: View {
             } else {
                 Image(systemName: symbol)
                     .font(.system(size: size * Self.emojiScale))
-                    .foregroundStyle(tint)
+                    .foregroundStyle(Self.tint(usesDefault && defaultColor >= 0 ? defaultColor : iconColor,
+                                               selected: selected))
             }
         }
         .frame(width: size, height: size)
@@ -619,12 +628,23 @@ struct TabIcon: View {
     /// own.
     static func symbol(of tab: WindowModel.Tab) -> String {
         if tab.isMissing { return "questionmark.folder" }
-        return tab.repoURL == nil ? "plus.square.dashed" : "book.closed"
+        return tab.repoURL == nil ? "plus.square.dashed" : book
     }
 
-    /// The symbol's color: the tab's `iconColor` in `Palette.graphLanes`, wrapped into range (a hand-edited
-    /// `session.json` may hold any number); without one, the tab's text color.
-    static func tint(_ iconColor: Int?, selected: Bool) -> Color {
+    /// A repo tab's symbol, the one the default tab icon replaces.
+    static let book = "book.closed"
+
+    /// The names of `Palette.graphLanes`, in order, for the icon color menus.
+    static let colorNames = ["Blue", "Orange", "Green", "Pink", "Cyan", "Yellow", "Purple", "Red"]
+
+    /// The name of lane color `index` (`colorNames`).
+    static func colorName(_ index: Int) -> String {
+        colorNames.indices.contains(index) ? colorNames[index] : "Color \(index + 1)"
+    }
+
+    /// The symbol's color: `iconColor` in `Palette.graphLanes`, wrapped into range (a hand-edited `session.json` or
+    /// preference may hold any number); without one, the tab's text color.
+    private static func tint(_ iconColor: Int?, selected: Bool) -> Color {
         let lanes = Palette.graphLanes
         guard let iconColor, !lanes.isEmpty else { return selected ? .primary : .secondary }
         return Color(nsColor: lanes[(iconColor % lanes.count + lanes.count) % lanes.count])

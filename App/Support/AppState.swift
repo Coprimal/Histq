@@ -112,6 +112,10 @@ enum PrefKey: String, CaseIterable {
     case defaultProfileID
     /// App tab strip position: "top" or "left".
     case tabPosition
+    /// The emoji a repo tab without its own emoji or icon color shows instead of the book (`TabIcon`); empty = the book.
+    case defaultTabEmoji
+    /// The book's color for a repo tab without its own: an index into `Palette.graphLanes`; -1 = the text's color.
+    case defaultTabIconColor
     /// Native window tabs in the traffic-light row (Phase 8 attempt).
     case nativeTabsOnTop
     /// Repo layout panel widths, encoded by `RepoLayoutView`; empty = the layout's defaults.
@@ -176,6 +180,8 @@ enum PrefKey: String, CaseIterable {
         case .gitPath: ""
         case .defaultProfileID: ""
         case .tabPosition: "top"
+        case .defaultTabEmoji: ""
+        case .defaultTabIconColor: -1
         case .nativeTabsOnTop: false
         case .panelWidths: ""
         case .graphColumnWidths: ""
