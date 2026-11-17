@@ -989,7 +989,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         case .author:
             let cell = reuse(tableView, column) { GraphTextCellView() }
             cell.compactTitle = column.title
-            cell.avatarDiameter = metrics.nodeDiameter
+            // 80 % of the node, kept even so it centers on a whole point in the (even) row height.
+            cell.avatarDiameter = (metrics.nodeDiameter * 0.8 / 2).rounded() * 2
             cell.avatar = commit.flatMap { avatar(for: $0, in: tableView) }
             cell.text = commit?.authorName ?? ""
             cell.detail = nil
