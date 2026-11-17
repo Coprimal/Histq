@@ -21,6 +21,20 @@ struct CommitSearchTests {
         #expect(CommitSearch.matches(commits, query: "series") == [0, 2])
     }
 
+    @Test("Spaces, tabs, -, _ and / match each other, a run of them as one")
+    func separatorsMatchEachOther() {
+        let commits = [
+            Self.commit("1111111111111111111111111111111111111111",
+                        "Merge pull request #79 from IdetaAutomation/urgent-fix-conv-url-in-cluster"),
+            Self.commit("2222222222222222222222222222222222222222", "Urgent  fix for the café"),
+            Self.commit("3333333333333333333333333333333333333333", "Urgentfix"),
+        ]
+        #expect(CommitSearch.matches(commits, query: "urgent fix") == [0, 1])
+        #expect(CommitSearch.matches(commits, query: "URGENT_fix") == [0, 1])
+        #expect(CommitSearch.matches(commits, query: "automation urgent") == [0])
+        #expect(CommitSearch.matches(commits, query: "fix-for the cafe") == [1])
+    }
+
     @Test("4 hex characters find the commit by hash prefix; 3 do not")
     func hashPrefixNeedsFourCharacters() {
         let commits = [

@@ -1,4 +1,5 @@
-// The graph's commit search (⌘F): which commits of the log a query finds, by subject (case- and diacritic-insensitive)
+// The graph's commit search (⌘F): which commits of the log a query finds, by subject (case- and diacritic-insensitive,
+// spaces, "-", "_" and "/" alike)
 // or, for a query of 4 or more hex characters, by any part of the hash. Pure and synchronous, so the app runs it off the main
 // actor. A per-commit Foundation compare costs about 1 µs (75 ms for 50,000 commits in a Debug build), so the subjects
 // are folded once into one byte buffer (`Index`, built once per log) and each query is a `memmem` scan of it.
@@ -150,26 +151,47 @@ public enum CommitSearch {
     }
 
     /// Appends `text` lowercased and without diacritics, as UTF-8: an ASCII text byte by byte (most subjects), any
-    /// other through Foundation's folding.
-    /// Copies the bytes, then lowercases them in place (a pointer loop: this runs for every commit, in Debug builds
-    /// too).
+    /// other through Foundation's folding. Each run of word separators (spaces, tabs, `-`, `_`, `/`) becomes one
+    /// space, so "urgent fix", "urgent-fix" and "URGENT_fix" find each other, as in GitKraken.
     fileprivate static func appendFolded(_ text: String, to bytes: inout [UInt8]) {
         let start = bytes.count
         bytes.append(contentsOf: text.utf8)
-        let isASCII = bytes.withUnsafeMutableBufferPointer { buffer in
-            guard let base = buffer.baseAddress else { return true }
-            var pointer = base + start
-            let end = base + buffer.count
-            while pointer < end {
-                let byte = pointer.pointee
-                if byte >= 0x80 { return false }
-                if byte >= 0x41, byte <= 0x5A { pointer.pointee = byte | 0x20 }
-                pointer += 1
-            }
-            return true
-        }
-        guard !isASCII else { return }
+        guard !normalize(&bytes, from: start, asciiOnly: true) else { return }
         bytes.removeSubrange(start...)
         bytes.append(contentsOf: text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).utf8)
+        normalize(&bytes, from: start, asciiOnly: false)
+    }
+
+    /// Lowercases the ASCII letters of `bytes` from `start` and turns each run of separators into one space, in place
+    /// (a pointer loop: this runs for every commit, in Debug builds too). With `asciiOnly`, stops at the first
+    /// non-ASCII byte and returns false (the bytes are then half done); else keeps such bytes as they are.
+    @discardableResult
+    private static func normalize(_ bytes: inout [UInt8], from start: Int, asciiOnly: Bool) -> Bool {
+        let kept: Int? = bytes.withUnsafeMutableBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return start }
+            var read = base + start
+            var write = read
+            let end = base + buffer.count
+            var afterSeparator = false
+            while read < end {
+                let byte = read.pointee
+                read += 1
+                if byte >= 0x80, asciiOnly { return nil }
+                // Space, tab, "-", "_", "/".
+                if byte == 0x20 || byte == 0x09 || byte == 0x2D || byte == 0x5F || byte == 0x2F {
+                    if afterSeparator { continue }
+                    afterSeparator = true
+                    write.pointee = 0x20
+                } else {
+                    afterSeparator = false
+                    write.pointee = byte >= 0x41 && byte <= 0x5A ? byte | 0x20 : byte
+                }
+                write += 1
+            }
+            return base.distance(to: write)
+        }
+        guard let kept else { return false }
+        bytes.removeSubrange(kept...)
+        return true
     }
 }
