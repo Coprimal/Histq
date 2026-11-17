@@ -248,7 +248,7 @@ private struct DiffContent: View {
         if let diff = section.diff, diff.isModeChange, let old = diff.oldMode, let new = diff.newMode {
             return "Mode changed from \(old) to \(new)."
         }
-        return "No line changes."
+        return section.side == .file ? "Empty file." : "No line changes."
     }
 }
 

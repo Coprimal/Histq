@@ -12,6 +12,21 @@ struct CommitDetailPanel: View {
     /// removal must not log the next select's lines.
     let token: Int
     let timingDetail: String
+    @AppStorage(PrefKey.commitShowsAllFiles.rawValue, store: Preferences.defaults) private var showsAll = false
+    /// Every file of a commit's tree ("View all files"), read while the switch is on; kept for its commit only.
+    @State private var allFiles: AllFiles?
+
+    private struct AllFiles {
+        let hash: String
+        let files: [FileChange]
+    }
+
+    /// What the all-files read depends on: a new commit, the switch, or the commit's own files arriving.
+    private struct AllFilesKey: Equatable {
+        let hash: String
+        let showsAll: Bool
+        let filesLoaded: Bool
+    }
 
     var body: some View {
         // The cards fill the panel: the info card as tall as its content up to `infoFraction` of the panel (its
@@ -23,17 +38,34 @@ struct CommitDetailPanel: View {
                                maxHeight: proxy.size.height * CommitDetailMetrics.infoFraction)
                     .layoutPriority(1)
                 CommitFilesCard(count: commit.files?.count, token: token, detail: timingDetail,
-                                state: commit.files == nil ? "pending" : "loaded") {
-                    files
+                                state: commit.files == nil ? "pending" : "loaded") { query in
+                    files(matching: query)
                 }
             }
         }
+        .task(id: AllFilesKey(hash: commit.hash, showsAll: showsAll, filesLoaded: commit.files != nil)) {
+            guard showsAll, commit.files != nil, allFiles?.hash != commit.hash else { return }
+            let commit = commit
+            // A failed read falls back to the changed files, so the card never stays a skeleton.
+            let files = (try? await session.readAllFiles(of: commit)) ?? commit.files ?? []
+            guard !Task.isCancelled else { return }
+            allFiles = AllFiles(hash: commit.hash, files: files)
+        }
     }
 
-    @ViewBuilder private var files: some View {
-        if let files = commit.files {
+    /// The rows the card lists: the changed files, or every file of the tree with "View all files" on; nil while
+    /// either is still being read.
+    private var shownFiles: [FileChange]? {
+        guard showsAll, commit.files != nil else { return commit.files }
+        return allFiles?.hash == commit.hash ? allFiles?.files : nil
+    }
+
+    /// The card's body: the shown files that `query` matches (all with an empty query).
+    @ViewBuilder private func files(matching query: String) -> some View {
+        if let shown = shownFiles {
+            let files = FileSearch.filter(shown, query: query)
             if files.isEmpty {
-                Text("No file changes")
+                Text(shown.isEmpty ? "No file changes" : "No matching files")
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .frame(height: FileListView<EmptyView>.rowHeight)
@@ -50,6 +82,11 @@ struct CommitDetailPanel: View {
                 }
                 // Each commit's list starts at its top.
                 .id(commit.hash)
+            }
+        } else if commit.files != nil {
+            // Every file of the tree still loading: skeleton rows only when the read takes over 150 ms.
+            DelayedReveal(token: commit.hash, detail: "\(timingDetail) all-files") {
+                SkeletonFileRows(fractions: [0.6, 0.45, 0.7, 0.5])
             }
         } else {
             // Files still loading: an empty body, skeleton rows only when the read takes over 150 ms.
@@ -90,27 +127,63 @@ private struct MessageBox: ViewModifier {
     }
 }
 
-/// The commit detail's Files card, loaded or not: the count (a skeleton while nil), the paths/tree toggle, and a body
-/// that takes the panel's height left under the info card. Logs its edges (`FilesLayoutLog`) as `state`.
+/// The commit detail's Files card, loaded or not: the count (a skeleton while nil), the search, all-files and
+/// paths/tree buttons, and a body that takes the panel's height left under the info card. The search button opens a
+/// field at the body's top, and `content` gets its query (empty while closed). Logs its edges (`FilesLayoutLog`) as
+/// `state`.
 private struct CommitFilesCard<Content: View>: View {
     let count: Int?
     let token: Int
     let detail: String
     /// `placeholder`, `pending` (a header from the log, files loading) or `loaded`.
     let state: String
-    @ViewBuilder let content: () -> Content
+    @ViewBuilder let content: (_ query: String) -> Content
+    @State private var isSearching = false
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         SectionCard("Files", systemImage: "doc.on.doc", count: count, countIsLoading: count == nil, contentPadding: 6) {
             // One stack: a frame on a list of views (skeleton rows) would apply to each row.
             VStack(alignment: .leading, spacing: 0) {
-                content()
+                if isSearching {
+                    TextField("Search files", text: $query, prompt: Text("Search files"))
+                        .textFieldStyle(.settings)
+                        .labelsHidden()
+                        .focused($searchFocused)
+                        // Next run-loop turn, once the field is in the window.
+                        .onAppear { DispatchQueue.main.async { searchFocused = true } }
+                        .onKeyPress(.escape) {
+                            setSearching(false)
+                            return .handled
+                        }
+                        .padding(.bottom, 6)
+                }
+                content(isSearching ? query : "")
             }
             .frame(maxHeight: .infinity, alignment: .top)
         } accessory: {
-            FileListModeToggle()
+            HStack(spacing: 10) {
+                Button {
+                    setSearching(!isSearching)
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(isSearching ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                }
+                .buttonStyle(RowIconButtonStyle())
+                .help(isSearching ? "Close Search" : "Search Files")
+                .accessibilityLabel(isSearching ? "Close search" : "Search files")
+                AllFilesToggle()
+                FileListModeToggle()
+            }
         }
         .modifier(FilesLayoutLog(token: token, detail: detail, state: state))
+    }
+
+    /// Opens the field (it takes the focus as it appears), or closes it and clears the query.
+    private func setSearching(_ on: Bool) {
+        isSearching = on
+        if !on { query = "" }
     }
 }
 
@@ -144,7 +217,7 @@ struct CommitDetailPlaceholder: View {
             } accessory: {
                 SkeletonLine(width: 64, height: 14)
             }
-            CommitFilesCard(count: nil, token: token, detail: detail, state: "placeholder") {
+            CommitFilesCard(count: nil, token: token, detail: detail, state: "placeholder") { _ in
                 SkeletonFileRows(fractions: [0.6, 0.45, 0.7, 0.5])
             }
         }

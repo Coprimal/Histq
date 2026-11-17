@@ -819,12 +819,12 @@ final class WindowModel {
                     try? await Task.sleep(for: .milliseconds(20))
                 }
                 try? await Task.sleep(for: .milliseconds(100))
-                guard let session, case .commit(let commit)? = session.detail.value,
-                      let file = commit.files?.first(where: { $0.path == parts[1] })
-                else {
-                    Self.logger.error("-HistqSelect commitfile: \(parts[1], privacy: .public) is not in that commit")
+                guard let session, case .commit(let commit)? = session.detail.value, let files = commit.files else {
+                    Self.logger.error("-HistqSelect commitfile: the commit's files did not load")
                     return
                 }
+                // A path the commit did not change opens as its row in "View all files" does.
+                let file = files.first { $0.path == parts[1] } ?? FileChange(kind: .unchanged, path: parts[1])
                 session.selectFile(FileTarget(source: .commit(commit.hash), file: file))
             }
         case .pr:

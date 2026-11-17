@@ -9,6 +9,8 @@ import SwiftUI
 struct FileChange: Hashable, Sendable, Identifiable {
     enum Kind: Hashable, Sendable {
         case added, modified, deleted, renamed, copied, typeChanged, untracked, conflicted
+        /// A file of the commit's tree it did not change (the Files card's "View all files").
+        case unchanged
     }
 
     let kind: Kind
@@ -48,6 +50,7 @@ struct FileChange: Hashable, Sendable, Identifiable {
         case .renamed, .copied: "arrow.right"
         case .untracked: "questionmark"
         case .conflicted: "exclamationmark.triangle"
+        case .unchanged: "doc"
         }
     }
 
@@ -57,6 +60,7 @@ struct FileChange: Hashable, Sendable, Identifiable {
         case .modified, .typeChanged: Color(nsColor: Palette.graphLanes[0])
         case .deleted, .conflicted: Color(nsColor: Palette.graphLanes[6])
         case .renamed, .copied: Color(nsColor: Palette.graphLanes[2])
+        case .unchanged: .secondary
         }
     }
 
@@ -70,11 +74,30 @@ struct FileChange: Hashable, Sendable, Identifiable {
         case .copied: "Copied"
         case .untracked: "Untracked"
         case .conflicted: "Conflicted"
+        case .unchanged: "Unchanged"
         }
     }
 
     var name: String { (path as NSString).lastPathComponent }
     var folder: String { (path as NSString).deletingLastPathComponent }
+}
+
+/// A files card's search: the files whose path holds every word of the query, in any order (case- and
+/// diacritic-insensitive; spaces, "-", "_" and "/" alike, as the commit search).
+enum FileSearch {
+    static func filter(_ files: [FileChange], query: String) -> [FileChange] {
+        let words = fold(query).split(separator: " ")
+        guard !words.isEmpty else { return files }
+        return files.filter { file in
+            let path = fold(file.path)
+            return words.allSatisfy { path.contains($0) }
+        }
+    }
+
+    private static func fold(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .replacing(/[-_\/\s]+/, with: " ")
+    }
 }
 
 /// The two ways a file list shows its rows.
@@ -97,6 +120,24 @@ struct FileListModeToggle: View {
         .buttonStyle(RowIconButtonStyle())
         .help(isTree ? "Show as Paths" : "Show as Tree")
         .accessibilityLabel(isTree ? "Show as paths" : "Show as tree")
+    }
+}
+
+/// The changed-only / all-files switch of a commit's Files card (`PrefKey.commitShowsAllFiles`), in the accent color
+/// while every file shows.
+struct AllFilesToggle: View {
+    @AppStorage(PrefKey.commitShowsAllFiles.rawValue, store: Preferences.defaults) private var showsAll = false
+
+    var body: some View {
+        Button {
+            showsAll.toggle()
+        } label: {
+            Image(systemName: showsAll ? "folder.fill" : "folder")
+                .foregroundStyle(showsAll ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .help(showsAll ? "Show Changed Files Only" : "View All Files")
+        .accessibilityLabel(showsAll ? "Show changed files only" : "View all files")
     }
 }
 

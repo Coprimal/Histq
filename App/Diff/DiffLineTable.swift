@@ -19,6 +19,8 @@ enum DiffSide: Hashable, Sendable {
     case commit
     /// A file git does not track: its lines, read-only (the WIP panel stages it whole).
     case untracked
+    /// A file a commit did not change (its Files card's "View all files"): its lines at that commit, read-only.
+    case file
 
     var title: String {
         switch self {
@@ -26,6 +28,7 @@ enum DiffSide: Hashable, Sendable {
         case .staged: "Staged"
         case .commit: "Changes"
         case .untracked: "Untracked"
+        case .file: "File"
         }
     }
 
@@ -35,6 +38,7 @@ enum DiffSide: Hashable, Sendable {
         case .staged: "tray.full"
         case .commit: "doc.text"
         case .untracked: "questionmark.square.dashed"
+        case .file: "doc"
         }
     }
 
@@ -43,7 +47,7 @@ enum DiffSide: Hashable, Sendable {
         switch self {
         case .unstaged: [.stage, .discard]
         case .staged: [.unstage]
-        case .commit, .untracked: []
+        case .commit, .untracked, .file: []
         }
     }
 }
@@ -114,17 +118,38 @@ struct DiffSection: Sendable, Identifiable {
         side = .untracked
         diff = nil
         full = nil
-        var state = ScanState()
-        var lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
-        if lines.last?.isEmpty == true { lines.removeLast() }
-        rows = lines.enumerated().map { index, bytes in
-            let text = DiffRowBuilder.display(String(decoding: bytes, as: UTF8.self))
-            let tokens = SyntaxScanner.scan(line: text, state: &state, language: language)
-            return DiffRow(kind: .added, id: nil, oldLine: nil, newLine: index + 1, text: text, tokens: tokens)
+        rows = Self.lines(of: data, language: language) { index, text, tokens in
+            DiffRow(kind: .added, id: nil, oldLine: nil, newLine: index + 1, text: text, tokens: tokens)
         }
         fullRows = rows
         additions = rows.count
         deletions = 0
+    }
+
+    /// An unchanged file's text as context lines, numbered from 1 on both sides.
+    nonisolated init(unchanged data: Data, language: Language?) {
+        side = .file
+        diff = nil
+        full = nil
+        rows = Self.lines(of: data, language: language) { index, text, tokens in
+            DiffRow(kind: .context, id: nil, oldLine: index + 1, newLine: index + 1, text: text, tokens: tokens)
+        }
+        fullRows = rows
+        additions = 0
+        deletions = 0
+    }
+
+    /// `data`'s lines (the empty one after a final line break dropped) with their syntax tokens, made into rows.
+    private nonisolated static func lines(
+        of data: Data, language: Language?, row: (Int, String, [SyntaxToken]) -> DiffRow
+    ) -> [DiffRow] {
+        var state = ScanState()
+        var lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
+        if lines.last?.isEmpty == true { lines.removeLast() }
+        return lines.enumerated().map { index, bytes in
+            let text = DiffRowBuilder.display(String(decoding: bytes, as: UTF8.self))
+            return row(index, text, SyntaxScanner.scan(line: text, state: &state, language: language))
+        }
     }
 }
 

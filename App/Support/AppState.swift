@@ -141,6 +141,9 @@ enum PrefKey: String, CaseIterable {
     /// The detail panel's file lists: "tree" (rows under their folders) or "path" (one row per file). Settings ›
     /// Appearance and each files card's header switch it.
     case fileListMode
+    /// A commit's Files card lists every file of the commit's tree, the unchanged ones dimmed (GitKraken's "View all
+    /// files"); its header switches it.
+    case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
@@ -186,6 +189,7 @@ enum PrefKey: String, CaseIterable {
         case .terminalOpenWithNewTab: false
         case .recentRepos: [String]()
         case .fileListMode: "tree"
+        case .commitShowsAllFiles: false
         case .showFileSizes: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()

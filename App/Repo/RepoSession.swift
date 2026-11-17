@@ -1987,6 +1987,11 @@ final class RepoSession: Identifiable {
                             language: language),
             ]
             return FileDiffDetail(loadID: loadID, sections: sections.compactMap { $0 })
+        case .commit(let hash) where file.kind == .unchanged:
+            // A file the commit did not change ("View all files"): its blob at that commit, every line as context.
+            let data = try await runner.run(["cat-file", "blob", "\(hash):\(file.path)"], cwd: cwd, env: env).stdout
+            if data.prefix(8000).contains(0) { return FileDiffDetail(loadID: loadID, content: .binary) }
+            return FileDiffDetail(loadID: loadID, content: .sections([DiffSection(unchanged: data, language: language)]))
         case .commit(let hash):
             // A stash's untracked file is only in its untracked-files commit (a root commit: every line added).
             let revision = file.kind == .untracked ? "\(hash)^3" : hash
@@ -2021,8 +2026,11 @@ final class RepoSession: Identifiable {
             size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
             objects = [":0:\(file.path)", "HEAD:\(oldPath)"]
         case .commit(let hash):
-            objects = file.kind == .untracked
-                ? ["\(hash)^3:\(file.path)"] : ["\(hash):\(file.path)", "\(hash)^:\(oldPath)"]
+            objects = switch file.kind {
+            case .untracked: ["\(hash)^3:\(file.path)"]
+            case .unchanged: ["\(hash):\(file.path)"]
+            default: ["\(hash):\(file.path)", "\(hash)^:\(oldPath)"]
+            }
         }
         for object in objects {
             // Exit 128: no such object on that side (an added file, a root commit, an unborn branch).
@@ -2930,6 +2938,34 @@ final class RepoSession: Identifiable {
             files += untracked.filter { !known.contains($0.path) }.map { FileChange(kind: .untracked, path: $0.path) }
         }
         return files
+    }
+
+    /// Every file of commit `commit`'s tree (its Files card's "View all files"), path order: the changed ones as
+    /// `commit.files` has them (a deleted file, gone from the tree, too), the others `.unchanged`. Submodules are left
+    /// out unless changed (no blob to show). Read environment, off the main actor; nothing is cached.
+    func readAllFiles(of commit: CommitDetail) async throws -> [FileChange] {
+        let backend = try await backend()
+        return try await Self.readTreeFiles(backend, cwd: url, hash: commit.hash, changed: commit.files ?? [])
+    }
+
+    @concurrent
+    private nonisolated static func readTreeFiles(
+        _ backend: Backend, cwd: URL, hash: String, changed: [FileChange]
+    ) async throws -> [FileChange] {
+        guard GitOperations.isObjectID(hash) else { throw CommitReadError.notACommit(hash) }
+        let env = try await backend.readEnvironment(cwd: cwd)
+        // `<mode> SP <type> SP <object> TAB <path>`, NUL-terminated.
+        let output = try await backend.runner.run(
+            ["ls-tree", "-r", "-z", "--full-tree", "--end-of-options", hash], cwd: cwd, env: env).stdout
+        var byPath = Dictionary(changed.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        for entry in output.split(separator: 0) {
+            let line = String(decoding: entry, as: UTF8.self)
+            guard let tab = line.firstIndex(of: "\t") else { continue }
+            let path = String(line[line.index(after: tab)...])
+            guard byPath[path] == nil, line[..<tab].split(separator: " ").dropFirst().first == "blob" else { continue }
+            byPath[path] = FileChange(kind: .unchanged, path: path)
+        }
+        return byPath.values.sorted { $0.path < $1.path }
     }
 
     /// `--name-status -z`: a status (`M`, `A`, `D`, `T`, `R100`, `C75`), then the path; renames and copies give the
