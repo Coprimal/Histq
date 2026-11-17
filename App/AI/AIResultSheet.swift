@@ -10,8 +10,10 @@ import SwiftUI
 
 /// What an AI button asks for.
 enum AIJob: Equatable, Sendable {
-    /// `summaryOnly`: Settings › AI › Summary only, taken at the click (Apply then keeps the description).
-    case commitMessage(summaryOnly: Bool)
+    /// `summaryOnly`: Settings › AI › Summary only, taken at the click (Apply then keeps the description). `amend`:
+    /// Amend was on, so the message describes the whole amended commit; `currentMessage` is the commit box's message
+    /// at the click (the one being amended; sent only with `amend`).
+    case commitMessage(summaryOnly: Bool, amend: Bool, currentMessage: String)
     /// `message`: the commit's subject and body.
     case explainCommit(hash: String, message: String)
     case explainWorkingChanges
@@ -69,11 +71,18 @@ struct AIResolutionTarget: Equatable, Sendable {
 enum AIJobError: Error, CustomStringConvertible {
     case nothingStaged
     case noChanges
+    case allIgnored
+    case fileIgnored
+    case aiIgnoreUnreadable
 
     var description: String {
         switch self {
         case .nothingStaged: "Nothing is staged. Stage the changes the message should describe."
         case .noChanges: "There are no changes to explain (new untracked files are not included)."
+        case .allIgnored: "Every changed file is excluded by .aiignore; nothing was sent."
+        case .fileIgnored: "This file is excluded by .aiignore; nothing was sent."
+        case .aiIgnoreUnreadable:
+            "The .aiignore file can't be read (symlink, not a file, or over 64 KB); nothing was sent."
         }
     }
 }
@@ -231,7 +240,7 @@ struct AIResultSheet: View {
 
     private var applyHelp: String {
         switch run.job {
-        case .commitMessage(let summaryOnly):
+        case .commitMessage(let summaryOnly, _, _):
             summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
         default: ""
@@ -330,7 +339,7 @@ struct AIResultSheet: View {
     private func apply() {
         guard let answer = run.answer else { return }
         switch run.job {
-        case .commitMessage(let summaryOnly):
+        case .commitMessage(let summaryOnly, _, _):
             session.applyAICommitMessage(answer, summaryOnly: summaryOnly)
             onClose()
         case .resolution(let target):

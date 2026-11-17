@@ -559,13 +559,38 @@ private struct CommitBox: View {
                 }
                 AIHookButton(title: "Generate Message", systemImage: "sparkles",
                              help: "Write a commit message for the staged changes with AI",
-                             unavailable: stagedCount == 0 ? "Stage changes first" : nil, seam: "generate",
-                             small: true) {
+                             unavailable: generateUnavailable, seam: "generate", small: true) {
                     let summaryOnly = Preferences.defaults.bool(forKey: PrefKey.aiCommitSummaryOnly.rawValue)
-                    session.startAI(.commitMessage(summaryOnly: summaryOnly))
+                    session.startAI(.commitMessage(summaryOnly: summaryOnly, amend: session.commitDraft.amend,
+                                                   currentMessage: message))
                 }
             }
         }
+        #if DEBUG
+        .task {
+            // `-HistqAI generate,amend`: Amend on as the toggle does, so the last message loads before the click.
+            guard AIStub.seamHook == "generate", AIStub.seamOptions.contains("amend"), !session.commitDraft.amend
+            else { return }
+            AIStub.log("amend on")
+            amendBinding.wrappedValue = true
+        }
+        #endif
+    }
+
+    /// Why Generate Message cannot run: nothing staged (Amend covers the last commit), or the amended message still
+    /// loading, so a click never takes a stale one.
+    private var generateUnavailable: String? {
+        let draft = session.commitDraft
+        if busy.contains(.amendMessage) { return "Loading the last commit message" }
+        if stagedCount == 0 && !draft.amend { return "Stage changes first" }
+        #if DEBUG
+        // `-HistqAI generate[,amend]`: the seam clicks once the branch is read and, with `amend`, the message is in.
+        if AIStub.seamHook == "generate" {
+            if session.refs.value == nil { return "Reading the branches" }
+            if AIStub.seamOptions.contains("amend") && !draft.amend { return "Turning Amend on" }
+        }
+        #endif
+        return nil
     }
 
     private var commitTitle: String {

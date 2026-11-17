@@ -29,6 +29,10 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Toasts at the bottom right after a push, pull, fetch, commit or other operation, saying whether it worked or failed, and what a push, pull or fetch changed (or that there was nothing to do). They close after a few seconds or with their x; Settings › General › Notifications shows all, errors only or none.
 - Settings › AI › Commit messages: Summary only (Generate Message writes the summary line and keeps your description) and Custom instructions, added to the prompt and followed over its default style.
 - Image files (PNG, JPEG, GIF, HEIC, WebP…) show their versions before and after the change, side by side, instead of "Binary file", for commits, staged and unstaged changes and untracked files.
+- AI commit messages follow the branch name and the style of up to 5 recent commit subjects.
+- AI requests keep only the header of lock and generated files (lockfiles, minified files, source maps, generated code).
+- A `.aiignore` file at the repository root (gitignore-style patterns: `#` comments, `*`, `?`, `**`, `[...]`, `\` escapes, a leading or trailing `/`; case-insensitive; no `!` lines) keeps matching files out of every AI request.
+- Generate Message works with Amend on: it covers the whole amended commit and improves the current message.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

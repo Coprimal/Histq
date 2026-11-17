@@ -2608,10 +2608,11 @@ final class RepoSession: Identifiable {
         let url = url
         let languages = Self.aiLanguages()
         let instructions = Preferences.defaults.string(forKey: PrefKey.aiCommitInstructions.rawValue) ?? ""
+        let branch = currentBranch
         run.start { [weak self] in
             guard let backend = try await self?.backend() else { throw CancellationError() }
             return try await Self.aiPrompt(job, backend: backend, cwd: url, languages: languages,
-                                           instructions: instructions)
+                                           instructions: instructions, branch: branch)
         }
     }
 
@@ -2630,26 +2631,36 @@ final class RepoSession: Identifiable {
         return (language(.aiResponseLanguage), language(.aiCommitLanguage))
     }
 
-    /// The job's prompt: the staged, WIP or commit diff read with the read environment (never a profile), cut to the
-    /// prompt's budget. `instructions` (Settings › AI) go only into a commit message's prompt. A resolution's text
-    /// was taken at the click; it is never translated.
+    /// The job's prompt: the staged (or, when amending, the whole amended commit's), WIP or commit diff read with the
+    /// read environment (never a profile), without what the worktree's `.aiignore` and the skip list leave out
+    /// (`AIPrompts.filtered`), cut to the prompt's budget. `instructions` (Settings › AI), `branch` (taken at the
+    /// click) and the last commit subjects go only into a commit message's prompt. A resolution's text was taken at
+    /// the click; it is never translated.
     @concurrent
     private nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
-        languages: (response: AIResponseLanguage, commit: AIResponseLanguage), instructions: String
+        languages: (response: AIResponseLanguage, commit: AIResponseLanguage), instructions: String, branch: String?
     ) async throws -> AIPrompt {
+        let worktree = backend.directories.worktree
         switch job {
-        case .commitMessage(let summaryOnly):
+        case .commitMessage(let summaryOnly, let amend, let currentMessage):
             let env = try await backend.readEnvironment(cwd: cwd)
-            let diff = try await DiffReader.patchText(.staged, runner: backend.runner, cwd: cwd, env: env)
-            guard !diff.isEmpty else { throw AIJobError.nothingStaged }
-            return AIPrompts.commitMessage(stagedDiff: diff, language: languages.commit, summaryOnly: summaryOnly,
-                                           instructions: instructions)
+            let diff = try await DiffReader.patchText(
+                amend ? .stagedAgainstParent : .staged, runner: backend.runner, cwd: cwd, env: env)
+            guard amend || !diff.isEmpty else { throw AIJobError.nothingStaged }
+            let filtered = try aiFiltered(diff, worktree: worktree)
+            let subjects = (try? await readSubjects(backend, cwd: cwd, range: amend ? "HEAD^" : "HEAD", limit: 5)) ?? []
+            let current = currentMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AIPrompts.commitMessage(stagedDiff: filtered, language: languages.commit, summaryOnly: summaryOnly,
+                                           instructions: instructions, branch: branch, recentSubjects: subjects,
+                                           currentMessage: amend && !current.isEmpty ? currentMessage : nil)
         case .explainCommit(let hash, let message):
             guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
             let env = try await backend.readEnvironment(cwd: cwd)
             let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
-            return AIPrompts.explainCommit(message: message, diff: diff, language: languages.response)
+            return AIPrompts.explainCommit(
+                message: message, diff: try aiFiltered(diff, worktree: worktree),
+                language: languages.response)
         case .explainWorkingChanges:
             // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
             let env = try await backend.readEnvironment(cwd: cwd)
@@ -2657,10 +2668,26 @@ final class RepoSession: Identifiable {
             async let unstaged = DiffReader.patchText(.unstaged, runner: backend.runner, cwd: cwd, env: env)
             let diff = try await staged + unstaged
             guard !diff.isEmpty else { throw AIJobError.noChanges }
-            return AIPrompts.explainWorkingChanges(diff: diff, language: languages.response)
+            return AIPrompts.explainWorkingChanges(
+                diff: try aiFiltered(diff, worktree: worktree), language: languages.response)
         case .resolution(let target):
+            if try aiIgnore(worktree: worktree)?.matches(target.path) == true { throw AIJobError.fileIgnored }
             return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b)
         }
+    }
+
+    /// `diff` through `AIPrompts.filtered` with the worktree's `.aiignore`; throws `allIgnored` when `.aiignore` left
+    /// out every file (only the closing note would be sent). An empty diff is returned as it is.
+    private nonisolated static func aiFiltered(_ diff: String, worktree: URL) throws -> String {
+        guard let kept = AIPrompts.filteredUnlessAllIgnored(diff, ignore: try aiIgnore(worktree: worktree))
+        else { throw AIJobError.allIgnored }
+        return kept
+    }
+
+    /// The worktree's `.aiignore` (`AIIgnore.load`): nil when it is missing; one that can't be read safely throws
+    /// `aiIgnoreUnreadable`, so nothing is sent unfiltered. Its text is never sent.
+    private nonisolated static func aiIgnore(worktree: URL) throws -> AIIgnore? {
+        do { return try AIIgnore.load(worktree: worktree) } catch { throw AIJobError.aiIgnoreUnreadable }
     }
 
     /// Apply of a commit message: its first line is the summary, the rest (after the blank line) the description.

@@ -147,11 +147,20 @@ public enum AIPrompts {
     /// A commit message for the staged changes (`git diff --cached` output). `summaryOnly` asks for the summary line
     /// alone (no body). `instructions`, the user's own text from Settings › AI, is added after the default rules and
     /// wins over them, but not over the one-line rule nor the data and answer rules; blank adds nothing, so the
-    /// prompt stays exactly the default one.
+    /// prompt stays exactly the default one. `branch`, `recentSubjects` (at most 5) and `currentMessage` (the message
+    /// being amended; `stagedDiff` is then the whole commit) each go in as a data block before the diff; without
+    /// them, the prompt stays exactly the default one too.
     public static func commitMessage(
         stagedDiff: String, language: AIResponseLanguage = .english, summaryOnly: Bool = false,
-        instructions: String = "", budget: Int = diffBudget, token: () -> String = randomToken
+        instructions: String = "", branch: String? = nil, recentSubjects: [String] = [],
+        currentMessage: String? = nil, budget: Int = diffBudget, token: () -> String = randomToken
     ) -> AIPrompt {
+        let branch = branch.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        let subjects = recentSubjects.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .prefix(5).map { String($0.prefix(200)) }
+        let current = currentMessage.flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : String($0.prefix(maxMessageCharacters))
+        }
         let body = summaryOnly
             ? "- Write only that one line: no blank line, no body, no description."
             : """
@@ -159,11 +168,16 @@ public enum AIPrompts {
                 changed and why.
                 """
         var task = """
-            Write a git commit message for the staged changes in the data block below.
+            Write a git commit message for \
+            \(current == nil ? "the staged changes in the data block below" : "the commit in the data blocks below").
             - First line: a summary of the change in the imperative mood, at most 72 characters.
             \(body)
             - Plain text only: no Markdown headings, no code fences, no quotes around the message.
             """
+        if !subjects.isEmpty { task += "\n- Match the style of the recent commit subjects; never copy one." }
+        if current != nil {
+            task += "\n- Improve the current message so it describes the whole commit; keep what is still right."
+        }
         let custom = String(
             instructions.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxInstructionCharacters))
         if !custom.isEmpty {
@@ -176,10 +190,17 @@ public enum AIPrompts {
                 \(custom)
                 """
         }
+        var data: [(label: String, content: String)] = []
+        if let branch { data.append(("branch name", branch)) }
+        if !subjects.isEmpty { data.append(("recent commit subjects", subjects.joined(separator: "\n"))) }
+        if let current { data.append(("current commit message", current)) }
+        data.append((current == nil ? "staged diff" : "commit diff", budgeted(stagedDiff, budget: budget)))
         return make(
             kind: .commitMessage, task: task,
-            request: "Write the commit message for these staged changes.",
-            data: [("staged diff", budgeted(stagedDiff, budget: budget))],
+            request: current == nil
+                ? "Write the commit message for these staged changes."
+                : "Write the commit message for the commit in the data blocks below.",
+            data: data,
             languageRule: languageRule(language, answer: "the commit message"), summaryOnly: summaryOnly,
             token: token)
     }
@@ -294,6 +315,37 @@ public enum AIPrompts {
         }
     }
 
+    // MARK: - Diff filter
+
+    /// `diff` without what an AI request must not see, run before `budgeted`: a file whose old or new path `ignore`
+    /// matches is dropped whole, header included, and counted in one closing note; a lock or generated file keeps
+    /// only its header line and a note, unless it is the only file left. A diff with no file header, or with
+    /// nothing to drop or cut, is returned unchanged. Text before the first header is kept.
+    public static func filtered(_ diff: String, ignore: AIIgnore?) -> String {
+        let files = splitFiles(diff).map { file -> (lines: [Substring], paths: [String]?) in
+            let line = file.lines[0]
+            let isHeader = line.hasPrefix("diff --git ") || line.hasPrefix("diff --cc ") || line.hasPrefix("diff --combined ")
+            return (file.lines, isHeader ? filePaths(file.lines) : nil)
+        }
+        let kept = files.filter { file in file.paths?.contains { ignore?.matches($0) == true } != true }
+        let dropped = files.count - kept.count
+        // A lock file that is the only change is kept whole: its contents are then all there is to describe.
+        let changes = kept.filter { $0.paths != nil }.count
+        let cut = { (paths: [String]?) in changes > 1 && paths?.contains(where: isLockOrGenerated) == true }
+        guard dropped > 0 || kept.contains(where: { cut($0.paths) }) else { return diff }
+
+        var out = ""
+        for file in kept {
+            if cut(file.paths) {
+                out += file.lines[0] + "\n[Histq: contents of this generated or lock file left out]\n"
+            } else {
+                out += file.lines.map { $0 + "\n" }.joined()
+            }
+        }
+        if dropped > 0 { out += "[Histq: \(dropped) files left out by .aiignore]\n" }
+        return out
+    }
+
     // MARK: - Diff budget
 
     /// `diff` cut to at most `budget` UTF-8 bytes, file by file, at line boundaries. Every file shown keeps its
@@ -361,7 +413,7 @@ public enum AIPrompts {
 
     /// The diff's files (each starting at a `diff --git`, `diff --cc` or `diff --combined` line), as lines without
     /// their `\n`, and each file's size in UTF-8 bytes.
-    private static func splitFiles(_ diff: String) -> [(lines: [Substring], size: Int)] {
+    static func splitFiles(_ diff: String) -> [(lines: [Substring], size: Int)] {
         var files: [(lines: [Substring], size: Int)] = []
         // A CRLF is one Character in Swift, so both separators are listed; the model does not need the CR back.
         var lines = diff.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" })

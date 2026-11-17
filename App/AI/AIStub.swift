@@ -6,7 +6,8 @@
 // answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, an
 // explanation, or for a resolution side A's text then side B's with LF line breaks; a request without one (Test
 // connection) gets "OK". A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`.
-// `error` answers HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`).
+// `error` answers HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`) and
+// its data blocks' labels (`blocks [<label>, ...]`, never their content).
 // With `-HistqKeychain memory`, every built-in provider gets a fake key in the in-memory Keychain, so the AI buttons
 // are enabled.
 //
@@ -14,7 +15,8 @@
 // `explain-wip` (commit box), `explain` (commit details), `resolve` (conflict editor), `test` (Settings › AI, Test
 // Connection), `load-models` (Settings › AI, Load models); `apply` applies the finished answer, `cancel` cancels as
 // soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
-// reads its content. Evidence goes to `<stateDir>/ai.log` (never a key).
+// reads its content; `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
+// `generate` waits until the refs are read (the branch name). Evidence goes to `<stateDir>/ai.log` (never a key).
 import Foundation
 import HistqCore
 import os
@@ -59,6 +61,8 @@ enum AIStub {
     private static let seamParts: [String] = isEnabled
         ? (AppState.launchFlag("-HistqAI") ?? "").split(separator: ",").map(String.init) : []
     static var seamOptions: Set<String> { Set(seamParts.dropFirst()) }
+    /// The hook `-HistqAI` names (`generate`, `explain`, …); nil without one.
+    static var seamHook: String? { seamParts.first }
 
     @MainActor private static var seamTaken = false
 
@@ -119,10 +123,7 @@ enum AIStub {
     static func replyText(body: Data) -> String {
         guard let parts = prompt(body: body) else { return "OK" }
         let (system, user) = (parts.system, parts.user)
-        guard let range = system.range(of: "BEGIN ANSWER histq-[0-9a-f]+", options: .regularExpression) else {
-            return "OK"
-        }
-        let token = String(system[range].dropFirst("BEGIN ANSWER ".count))
+        guard let token = boundary(system: system) else { return "OK" }
         let answer: String
         if system.contains("Write a git commit message") {
             answer = "Add a canned change from the AI stub\n\nWritten by the DEBUG AI stub (-HistqAIStub); no "
@@ -137,6 +138,24 @@ enum AIStub {
                 + "prompt held \(user.utf8.count) bytes.\n"
         }
         return "Here is the answer.\nBEGIN ANSWER \(token)\n\(terminated(answer))END ANSWER \(token)\n"
+    }
+
+    /// The prompt's boundary token, from its system prompt's answer rule.
+    private static func boundary(system: String) -> String? {
+        guard let range = system.range(of: "BEGIN ANSWER histq-[0-9a-f]+", options: .regularExpression) else {
+            return nil
+        }
+        return String(system[range].dropFirst("BEGIN ANSWER ".count))
+    }
+
+    /// The labels of a request's data blocks, in order: only lines that open a block with the prompt's own boundary,
+    /// so a look-alike line inside a diff is never logged.
+    static func blockLabels(body: Data) -> [String] {
+        guard let parts = prompt(body: body), let token = boundary(system: parts.system) else { return [] }
+        let opening = "BEGIN DATA \(token) ("
+        return parts.user.split(separator: "\n").compactMap { line in
+            line.hasPrefix(opening) && line.hasSuffix(")") ? String(line.dropFirst(opening.count).dropLast()) : nil
+        }
     }
 
     private static func terminated(_ text: String) -> String {
@@ -209,6 +228,7 @@ final class AIStubProtocol: URLProtocol, @unchecked Sendable {
             AIStub.log("list models \(url.host() ?? "")")
         } else {
             AIStub.log("language \(AIStub.languageName(body: body))")
+            AIStub.log("blocks [\(AIStub.blockLabels(body: body).joined(separator: ", "))]")
         }
         if AIStub.mode == "error" {
             respond(url, status: 401, type: "application/json")

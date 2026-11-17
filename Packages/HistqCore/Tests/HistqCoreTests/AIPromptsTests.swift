@@ -204,6 +204,40 @@ struct AIPromptsTests {
         #expect(commit.system == commitDefault.system + "\n\nWrite the commit message in Chinese (Simplified).")
     }
 
+    // MARK: - Commit context
+
+    @Test("branch, recent subjects and current message go only into data blocks; without them the prompt is today's")
+    func commitContextOnlyInDataBlocks() {
+        let diff = "diff --git a/f b/f\n"
+        let branch = "feature/zebra-42"
+        let subjects = ["feat: add quokka export", "fix: wombat parser"]
+        let current = "Draft narwhal message"
+        let prompt = AIPrompts.commitMessage(
+            stagedDiff: diff, branch: branch, recentSubjects: subjects, currentMessage: current, token: { "histq-1" })
+
+        var outside = prompt.user
+        while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
+              let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        for value in [branch, current] + subjects {
+            #expect(prompt.user.contains(value))
+            #expect(!outside.contains(value) && !prompt.system.contains(value), "\(value) outside a data block")
+        }
+        let labels = ["branch name", "recent commit subjects", "current commit message", "commit diff"]
+        #expect(prompt.user.components(separatedBy: "BEGIN DATA histq-1 (").dropFirst().map {
+            String($0.prefix { $0 != ")" })
+        } == labels)
+        #expect(prompt.system.hasPrefix("You are the AI assistant of Histq, a git client.\n\nWrite a git commit message"))
+
+        let plain = AIPrompts.commitMessage(stagedDiff: diff, token: { "histq-1" })
+        #expect(plain.user == "Write the commit message for these staged changes.\n\nBEGIN DATA histq-1 (staged diff)\n"
+            + "diff --git a/f b/f\nEND DATA histq-1\n")
+        let blank = AIPrompts.commitMessage(
+            stagedDiff: diff, branch: " ", recentSubjects: ["", " "], currentMessage: " \n", token: { "histq-1" })
+        #expect(blank == plain, "blank context adds nothing")
+    }
+
     // MARK: - Diff budget
 
     @Test("an oversized diff keeps small files whole and cuts big ones at line boundaries with a note")

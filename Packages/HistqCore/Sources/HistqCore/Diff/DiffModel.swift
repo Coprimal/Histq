@@ -193,10 +193,13 @@ public enum DiffReader {
         try await run(fileArguments(at: revision, path: path), runner: runner, cwd: cwd, env: env).stdout
     }
 
-    /// Which diff `patchText` reads: the same ones as `staged`, `unstaged` and `commit`.
+    /// Which diff `patchText` reads: the same ones as `staged`, `unstaged` and `commit`, plus
+    /// `stagedAgainstParent`, the index against HEAD's parent: what an amend would commit, so the last commit's
+    /// changes and the staged ones together (against the empty tree when HEAD is a root commit).
     public enum PatchSource: Sendable, Equatable {
         case staged, unstaged
         case commit(String)
+        case stagedAgainstParent
     }
 
     /// A diff as patch text, with the same arguments as the parsed loaders (so the same hardening): the AI prompts
@@ -208,8 +211,21 @@ public enum DiffReader {
         case .staged: stagedArguments(paths: [], context: nil)
         case .unstaged: unstagedArguments(paths: [], context: nil)
         case .commit(let revision): commitArguments(revision, paths: [], context: nil)
+        case .stagedAgainstParent:
+            stagedArguments(paths: [], context: nil, base: try await amendBase(runner: runner, cwd: cwd, env: env))
         }
         return try await run(args, runner: runner, cwd: cwd, env: env).text
+    }
+
+    /// HEAD's parent as an object id, or the empty tree when HEAD has none (a root commit, or an unborn
+    /// branch). The empty tree is hashed by git (empty stdin, no `-w`, so nothing is written) rather than
+    /// hard-coded: its id differs in a SHA-256 repo.
+    private static func amendBase(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> String {
+        let parent = try await runner.run(
+            ["rev-parse", "-q", "--verify", "HEAD^^{commit}"], cwd: cwd, env: env, allowedExitCodes: [0, 1])
+        let id = parent.exitCode == 0 ? parent.text : try await runner.run(
+            ["hash-object", "-t", "tree", "--stdin"], cwd: cwd, env: env).text
+        return id.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Arguments
@@ -225,9 +241,10 @@ public enum DiffReader {
             + paths
     }
 
-    static func stagedArguments(paths: [String], context: Int?) -> [String] {
+    /// `base`: the commit or tree to diff the index against (HEAD when nil).
+    static func stagedArguments(paths: [String], context: Int?, base: String? = nil) -> [String] {
         ["--literal-pathspecs", "diff", "--cached"] + formatOptions + contextOption(context)
-            + ["--ignore-submodules=dirty", "--"] + paths
+            + ["--ignore-submodules=dirty"] + (base.map { ["--end-of-options", $0] } ?? []) + ["--"] + paths
     }
 
     static func commitArguments(_ revision: String, paths: [String], context: Int?) -> [String] {

@@ -135,8 +135,8 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. Stub only. |
 | `-HistqOpenCreatePR <branch>` / `-HistqCreatePRSubmit YES` | Opens the Create Pull Request form; fills and submits it. Stub only. |
 | `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |
-| `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network. |
-| `-HistqAI <hook>[,apply\|,cancel]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `test` or `load-models`. Stub only. |
+| `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network; logs each request's data block labels as `blocks [<label>, ...]` in `ai.log` (labels only, never content). |
+| `-HistqAI <hook>[,amend][,apply\|,cancel]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `test` or `load-models`. `generate,amend` turns Amend on and clicks Generate Message once the last message has loaded. Stub only. |
 
 ## Project layout
 
