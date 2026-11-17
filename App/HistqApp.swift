@@ -381,7 +381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Puts `window` on screen, in front and key (or only in front). A DEBUG `-HistqBackground YES` launch (QA shots,
     /// the preview) orders it behind every other window instead and never makes it key: it must not take the user's
     /// focus or cover their work. `screencapture -l` still captures it. Once the user works in it (the app is active,
-    /// e.g. ⌘, or ⌘N pressed in it), windows come to the front as usual.
+    /// e.g. ⌘, or ⇧⌘N pressed in it), windows come to the front as usual.
     private func present(_ window: NSWindow, key: Bool = true) {
         if AppState.isBackgroundLaunch && !NSApp.isActive {
             window.orderBack(nil)
@@ -672,12 +672,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Histq", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let fileMenu = NSMenu(title: "File")
-        fileMenu.addItem(withTitle: "New Window", action: #selector(newWindowAction(_:)), keyEquivalent: "n").target = self
+        fileMenu.addItem(withTitle: "New Window", action: #selector(newWindowAction(_:)), keyEquivalent: "N").target = self
         fileMenu.addItem(withTitle: "New Tab", action: #selector(newTab(_:)), keyEquivalent: "t").target = self
+        // ⌘N opens a new tab too: hidden, so the menu shows only ⌘T.
+        let newTabItem = fileMenu.addItem(withTitle: "New Tab", action: #selector(newTab(_:)), keyEquivalent: "n")
+        newTabItem.target = self
+        newTabItem.isHidden = true
+        newTabItem.allowsKeyEquivalentWhenHidden = true
         fileMenu.addItem(withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o").target = self
         fileMenu.addItem(withTitle: "Clone…", action: #selector(cloneRepository(_:)), keyEquivalent: "").target = self
         fileMenu.addItem(withTitle: "Command Palette…", action: #selector(toggleCommandPalette(_:)), keyEquivalent: "k")
             .target = self
+        // ⌘P opens the palette too: hidden, so the menu shows only ⌘K.
+        let paletteItem = fileMenu.addItem(withTitle: "Command Palette…", action: #selector(toggleCommandPalette(_:)),
+                                           keyEquivalent: "p")
+        paletteItem.target = self
+        paletteItem.isHidden = true
+        paletteItem.allowsKeyEquivalentWhenHidden = true
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab(_:)), keyEquivalent: "w").target = self
         fileMenu.addItem(withTitle: "Reopen Closed Tab", action: #selector(reopenClosedTab(_:)), keyEquivalent: "T")
