@@ -31,7 +31,7 @@ enum TabStripMetrics {
     static let pinnedTabWidth: CGFloat = 44
     /// The profile color dot on a tab's icon's lower-right corner, and the white ring around it (outside the color).
     static let iconDot: CGFloat = 6
-    static let iconDotRing: CGFloat = 1.5
+    static let iconDotRing: CGFloat = 1
     /// How far a press moves before it reorders the tab.
     static let dragThreshold: CGFloat = 5
     /// A tab group's line: under its chip and tabs, around its selected tab (and the vertical tabs' bar).
