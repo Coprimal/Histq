@@ -75,7 +75,7 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [menuAction("Mark as Resolved (Stage File)", busy: [.stage(file.path)]) {
                             run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
-                        }]
+                        }] + fileTools(file)
                     }
                     .folderButtons { _, files in
                         rowButton("checkmark.circle", help: "Mark Folder as Resolved (Stage Files)",
@@ -130,7 +130,7 @@ struct WIPPanel: View {
                             },
                             menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                        busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
-                        ]
+                        ] + fileTools(file)
                     }
                     .folderMenu { folder, files in
                         [
@@ -175,7 +175,7 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [menuAction("Unstage File", busy: [.unstage(file.path)]) {
                             run([.unstage(Self.unstagePaths(file))], busy: [.unstage(file.path)], part: .staged)
-                        }]
+                        }] + fileTools(file)
                     }
                     .folderButtons { _, files in
                         rowButton("minus.circle", help: "Unstage Folder", busy: files.map { .unstage($0.path) }) {
@@ -272,6 +272,14 @@ struct WIPPanel: View {
                             _ perform: @escaping @MainActor () -> Void) -> MenuEntry
     {
         .action(title, enabled: !keys.contains(where: busy.contains), destructive: destructive, perform)
+    }
+
+    /// File History (to HEAD) and Blame (of the working tree) after a separator; none for an untracked file (no
+    /// history, nothing to blame), no Blame for a deleted one.
+    private func fileTools(_ file: FileChange) -> [MenuEntry] {
+        guard file.kind != .untracked else { return [] }
+        return [.separator]
+            + RepoMenus.fileTools(path: file.path, rev: nil, blame: file.kind != .deleted, session: session)
     }
 
     /// Stages `files` (a folder's), each showing busy.

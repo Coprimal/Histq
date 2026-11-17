@@ -3,7 +3,8 @@
 // interactive rebase from here, squash the selected commits, copy),
 // the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…), the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
-// (open in a tab, add, remove, prune), checkout file from a commit, and what a double-click checks out.
+// (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, and what a double-click
+// checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -676,9 +677,11 @@ enum RepoMenus {
                         key: .checkout, isDestructive: false)
     }
 
-    /// "Checkout File from This Commit" in a commit's file list: confirmed when the file has local changes.
+    /// "Checkout File from This Commit" in a commit's file list (confirmed when the file has local changes), then its
+    /// File History and Blame at the commit. A deleted file has only its history.
     static func checkoutFile(_ file: FileChange, commit: String, session: RepoSession) -> [MenuEntry] {
-        guard file.kind != .deleted else { return [] }
+        let tools = fileTools(path: file.path, rev: commit, blame: file.kind != .deleted, session: session)
+        guard file.kind != .deleted else { return tools }
         let short = String(commit.prefix(7))
         let write = RepoSession.Write.checkoutFiles([file.path], from: commit)
         return [
@@ -691,6 +694,22 @@ enum RepoMenus {
                 } else {
                     session.run(write, title: "Checkout \(file.name) from \(short)")
                 }
+            },
+            .separator,
+        ] + tools
+    }
+
+    /// "File History" and "Blame" of a tracked file at `rev` (nil: HEAD's history, the working tree's blame), shown in
+    /// panel2. `blame` false leaves Blame out (a deleted file has no lines to blame).
+    static func fileTools(path: String, rev: String?, blame: Bool = true, session: RepoSession) -> [MenuEntry] {
+        let history = MenuEntry.action(
+            "File History", image: NSImage.icon("clock.arrow.circlepath", accessibilityDescription: nil)
+        ) { session.selectTool(.fileHistory(path: path, rev: rev, follow: false)) }
+        guard blame else { return [history] }
+        return [
+            history,
+            .action("Blame", image: NSImage.icon("person.text.rectangle", accessibilityDescription: nil)) {
+                session.selectTool(.blame(path: path, rev: rev))
             },
         ]
     }

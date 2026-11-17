@@ -327,6 +327,30 @@ struct OperationFailure: Identifiable {
     let message: String
 }
 
+/// A tool panel2 shows instead of the graph: a file's history (of `rev`, HEAD when nil; across renames with `follow`)
+/// or its blame (at `rev`, the working tree when nil). `path` is root-relative.
+enum RepoTool: Equatable, Sendable {
+    case fileHistory(path: String, rev: String?, follow: Bool)
+    case blame(path: String, rev: String?)
+
+    /// The timing log's detail: `history src/app.swift`, `blame src/app.swift`.
+    var timingDetail: String {
+        switch self {
+        case .fileHistory(let path, _, _): "history \(path)"
+        case .blame(let path, _): "blame \(path)"
+        }
+    }
+}
+
+/// What a tool read: the file's commits, newest first, or its blame; a blame refuses a binary file and one over
+/// `RepoSession.fileSizeLimit` (its size in bytes), as the diff does.
+enum ToolContent: Sendable {
+    case history([FileHistoryEntry])
+    case blame([BlameGroup])
+    case binary
+    case tooLarge(Int)
+}
+
 /// One tab's repository. `select(_:)` switches the detail at once (`detail` becomes `.loading` in the same call)
 /// and loads it in a cancellable task; a newer select cancels the older load. `refresh(scope:)` rereads status, refs
 /// or the log (the watcher calls it). All git runs on `GitRunner`, with the read environment for this folder.
@@ -663,10 +687,23 @@ final class RepoSession: Identifiable {
     /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
     private(set) var openFile: FileTarget?
     /// The pull request or issue panel2 shows instead of the graph (a click in the PRs tab); nil shows the graph or
-    /// the open file. Only one of the two is ever set.
+    /// the open file. Only one of the two (and `openTool`) is ever set.
     private(set) var openHosted: HostedItem?
     /// Changes with every PR or issue select: its placeholder logs a line per select.
     private(set) var hostedToken = 0
+    /// The file history or blame panel2 shows instead of the graph; nil shows the graph, the open file or the open pull
+    /// request or issue. Never set with them: a diff opened from a tool keeps the tool in `returnTool`.
+    private(set) var openTool: RepoTool?
+    /// The tool the open diff was opened from (a history row): closing the diff (Back, Esc) shows it again, as it was.
+    private(set) var returnTool: RepoTool?
+    /// The last selected tool's read: `.loading` in the same call as the click, then its content. Kept while the tool
+    /// is closed, so a diff opened from it returns to it as it was; the next `selectTool` replaces it.
+    private(set) var toolState: Loadable<ToolContent> = .idle
+    /// Changes with every tool select: its placeholder logs a line per select.
+    private(set) var toolToken = 0
+    /// The tool `toolState` was read for.
+    @ObservationIgnored private var loadedTool: RepoTool?
+    @ObservationIgnored private var toolTask: Task<Void, Never>?
     /// The tab's terminal (task 13.1): made on the first open the user asks for (`openTerminal`; a drawer shown with a
     /// new tab has none until clicked), kept while the drawer is closed or another tab shows, ended with the tab
     /// (`close()`) or its window. Nil until then, and again after its shell exited on its own.
@@ -822,6 +859,7 @@ final class RepoSession: Identifiable {
         detailTask?.cancel()
         prefetchTask?.cancel()
         fileTask?.cancel()
+        toolTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
         branchMapTask?.cancel()
@@ -837,6 +875,7 @@ final class RepoSession: Identifiable {
         detailTask?.cancel()
         prefetchTask?.cancel()
         fileTask?.cancel()
+        toolTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
         branchMapTask?.cancel()
@@ -1068,10 +1107,11 @@ final class RepoSession: Identifiable {
     /// (no load), a commit of the log shows its header with its files loading, anything else is `.loading` (the
     /// placeholder). The load runs in a task that a newer select cancels. Selecting the current selection again (a tab
     /// switch) reloads it, unless the cache has it. A commit on screen whole prefetches its neighbours
-    /// (`prefetchNeighbours`); a newer select cancels that too.
-    func select(_ selection: Selection) {
+    /// (`prefetchNeighbours`); a newer select cancels that too. `keepsPanel2`: another selection leaves panel2 as it is
+    /// (a blame gutter's click keeps the blame).
+    func select(_ selection: Selection, keepsPanel2: Bool = false) {
         // Another row (a parent jump, a vanished WIP) shows the graph again; a tab switch keeps the open file.
-        if selection != self.selection { closeFile() }
+        if selection != self.selection, !keepsPanel2 { closePanel2() }
         self.selection = selection
         selectToken &+= 1
         selectDetail = timingDetail(selection)
@@ -1102,7 +1142,7 @@ final class RepoSession: Identifiable {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items) }) { return }
         // Another worktree's row is a selection alone (its changes); several rows leave it out.
         let items = items.count > 1 ? items.filter { if case .worktree = $0 { false } else { true } } : items
-        closeFile()
+        closePanel2()
         graphSelection = items
         guard let first = items.first else { return }
         let selection: Selection
@@ -1118,6 +1158,14 @@ final class RepoSession: Identifiable {
         }
         UITiming.select(timingDetail(selection))
         select(selection)
+    }
+
+    /// A blame gutter's click: selects commit `hash` like a graph click (its row, panel3's detail), but panel2 keeps
+    /// the open tool.
+    func selectKeepingTool(_ hash: String) {
+        graphSelection = [.commit(hash)]
+        UITiming.select(timingDetail(.commit(hash)))
+        select(.commit(hash), keepsPanel2: true)
     }
 
     /// What a select can show at once: the cached detail, else (a commit, not a stash) the log's header with its files
@@ -1296,7 +1344,7 @@ final class RepoSession: Identifiable {
     /// commit placeholder at once and jumps once they are in (`Selection.ref`).
     func selectRef(_ item: SidebarItem) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectRef(item) }) { return }
-        closeFile()
+        closePanel2()
         selectSidebarItem(item)
         guard let refs = refs.value else { return select(.ref(item)) }
         guard let (resolved, commit) = Self.resolve(item, in: refs) else { return }
@@ -1885,12 +1933,13 @@ final class RepoSession: Identifiable {
 
     /// Shows `target`'s diff in panel2 instead of the graph now: `fileDiff` is `.loading` when this returns, so the
     /// placeholder shows in the click's frame. The diff loads in a task that a newer select cancels.
-    /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`).
-    func selectFile(_ target: FileTarget) {
+    /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`). A diff opened from a
+    /// tool (a history row) passes it as `returnTool`: closing the diff shows the tool again instead of the graph.
+    func selectFile(_ target: FileTarget, returnTool: RepoTool? = nil) {
         if isConflictDirty {
             // The open conflict's row again keeps its ticks (a reload would drop them).
             if target == openFile { return }
-            if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target) }) { return }
+            if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target, returnTool: returnTool) }) { return }
         }
         UITiming.select(fileDetail(target))
         if openHosted != nil {
@@ -1898,6 +1947,8 @@ final class RepoSession: Identifiable {
             pullDetail.close()
             issueDetail.close()
         }
+        openTool = nil
+        self.returnTool = returnTool
         openFile = target
         fileIgnoresSizeLimit = false
         startFileLoad()
@@ -1917,13 +1968,17 @@ final class RepoSession: Identifiable {
     }
 
     /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
-    /// The conflict editor's unsaved ticks and edits go with it. An open pull request or issue closes too.
+    /// The conflict editor's unsaved ticks and edits go with it. An open pull request, issue or tool closes too. A diff
+    /// opened from a tool (`returnTool`) shows that tool again instead, with its read (read again only if replaced).
     func closeFile() {
         if openHosted != nil {
             openHosted = nil
             pullDetail.close()
             issueDetail.close()
         }
+        openTool = nil
+        let back = openFile != nil ? returnTool : nil
+        returnTool = nil
         guard openFile != nil else { return }
         fileTask?.cancel()
         fileTask = nil
@@ -1934,6 +1989,17 @@ final class RepoSession: Identifiable {
         conflictError = nil
         cancelConflictSave()
         conflictLeave = nil
+        if let back {
+            openTool = back
+            if back != loadedTool { loadTool(back) }
+        }
+    }
+
+    /// Shows the graph whatever panel2 shows (another graph row, ref, pull request or tool): a diff opened from a tool
+    /// closes with it instead of going back to it.
+    private func closePanel2() {
+        returnTool = nil
+        closeFile()
     }
 
     /// The conflict editor's close button: shows the graph again, asking first when there are unsaved resolutions.
@@ -1993,12 +2059,74 @@ final class RepoSession: Identifiable {
     func selectHosted(_ item: HostedItem) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectHosted(item) }) { return }
         UITiming.select(item.timingDetail)
-        closeFile()
+        closePanel2()
         openHosted = item
         hostedToken &+= 1
         switch item {
         case .pullRequest(let number): pullDetail.load(number, github: github)
         case .issue(let number): issueDetail.load(number, github: github)
+        }
+    }
+
+    /// The timing log's detail of the open tool (`history src/app.swift`).
+    var toolDetail: String { openTool?.timingDetail ?? "" }
+
+    /// Shows a file's history or blame in panel2 now: the open file, pull request or issue closes and `toolState` is
+    /// `.loading` when this returns, so the placeholder shows in the click's frame. Selecting a tool again (another
+    /// `follow`) reads it again.
+    func selectTool(_ tool: RepoTool) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectTool(tool) }) { return }
+        UITiming.select(tool.timingDetail)
+        closePanel2()
+        openTool = tool
+        loadTool(tool)
+    }
+
+    /// Reads `tool` off the main actor into `toolState`; a newer tool select cancels it.
+    private func loadTool(_ tool: RepoTool) {
+        toolTask?.cancel()
+        toolToken &+= 1
+        let token = toolToken
+        loadedTool = tool
+        toolState = .loading
+        toolTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let backend = try await backend()
+                let content = try await Self.readTool(backend, cwd: url, tool: tool)
+                try Task.checkCancellation()
+                guard token == toolToken else { return }
+                toolState = .loaded(content)
+            } catch {
+                guard token == toolToken, !Self.isCancellation(error) else { return }
+                toolState = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// A file's history or blame with the read environment (no textconv, no external diff, the repo's filters
+    /// blanked: a working tree blame of a filtered file fails instead of running the filter), off the main actor.
+    @concurrent
+    private nonisolated static func readTool(_ backend: Backend, cwd: URL, tool: RepoTool) async throws -> ToolContent {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        switch tool {
+        case .fileHistory(let path, let rev, let follow):
+            return .history(try await FileHistoryReader.read(
+                path, revision: rev, follow: follow, runner: backend.runner, cwd: cwd, env: env))
+        case .blame(let path, let rev):
+            // The diff's gates: the size first (so a huge blob is never read), then git's NUL test. A read that
+            // fails leaves the error to blame.
+            let target = FileTarget(source: rev.map { .commit($0) } ?? .wip,
+                                    file: FileChange(kind: .unchanged, path: path))
+            let size = await largestSize(of: target, runner: backend.runner, cwd: cwd, env: env)
+            if size > fileSizeLimit { return .tooLarge(size) }
+            let data = if let rev {
+                try? await DiffReader.file(at: rev, path: path, runner: backend.runner, cwd: cwd, env: env)
+            } else {
+                (try? worktreeData(path, cwd: cwd)) ?? nil
+            }
+            if data?.prefix(8000).contains(0) == true { return .binary }
+            return .blame(try await BlameReader.read(path, revision: rev, runner: backend.runner, cwd: cwd, env: env))
         }
     }
 

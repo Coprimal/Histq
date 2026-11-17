@@ -136,16 +136,34 @@ struct RepoLayoutView: View {
         }
     }
 
-    /// The graph, with the open file's diff or conflict editor, or the open pull request or issue, over it.
+    /// The graph, with the open file's diff or conflict editor, the open pull request or issue, or the open file
+    /// history or blame over it.
     private var panel2: some View {
         ZStack {
             // The graph stays mounted under an open file, so Esc brings it back as it was (scroll, selection)
             // and opening a file costs no teardown in the click's frame.
-            let fileOpen = session.openFile != nil || session.openHosted != nil
+            let fileOpen = session.openFile != nil || session.openHosted != nil || session.openTool != nil
             CommitListPanel(session: session)
                 .opacity(fileOpen ? 0 : 1)
                 .allowsHitTesting(!fileOpen)
                 .accessibilityHidden(fileOpen)
+            // A tool stays mounted under the diff opened from it, so Back brings it back as it was (scroll).
+            if let tool = session.openTool ?? session.returnTool {
+                let toolHidden = session.openTool == nil
+                Group {
+                    switch tool {
+                    case .fileHistory(let path, let rev, let follow):
+                        FileHistoryView(session: session, tool: tool, path: path, rev: rev, follow: follow)
+                    case .blame(let path, let rev):
+                        BlameView(session: session, path: path, rev: rev)
+                    }
+                }
+                .opacity(toolHidden ? 0 : 1)
+                .allowsHitTesting(!toolHidden)
+                .accessibilityHidden(toolHidden)
+                // Its Back button's Esc must not compete with the diff's.
+                .disabled(toolHidden)
+            }
             if case .pullRequest(let number) = session.openHosted {
                 PRDetailView(session: session, number: number)
             } else if case .issue(let number) = session.openHosted {

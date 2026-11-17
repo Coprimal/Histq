@@ -73,8 +73,15 @@ struct CommitDetailPanel: View {
                 CardScrollView {
                     FileListView(files: files, repoURL: session.url)
                         .fileMenu { [session, commit] file in
-                            // A stash's untracked files are not in its commit: no checkout from a stash.
-                            commit.isStash ? [] : RepoMenus.checkoutFile(file, commit: commit.hash, session: session)
+                            // No checkout from a stash; its untracked files are not in its commit: no history or blame.
+                            if !commit.isStash {
+                                RepoMenus.checkoutFile(file, commit: commit.hash, session: session)
+                            } else if file.kind != .untracked {
+                                RepoMenus.fileTools(path: file.path, rev: commit.hash, blame: file.kind != .deleted,
+                                                    session: session)
+                            } else {
+                                []
+                            }
                         }
                         .onSelectFile(selected: openPath) { [session, commit] file in
                             session.selectFile(FileTarget(source: .commit(commit.hash), file: file))

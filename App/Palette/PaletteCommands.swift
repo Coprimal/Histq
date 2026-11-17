@@ -187,6 +187,13 @@ enum PaletteCommands {
         default:
             break
         }
+        // The open diff's file: the header's File History and Blame (`DiffHeaderCard`).
+        if let target = session.openFile, !target.isConflict, target.file.kind != .untracked {
+            let rev: String? = if case .commit(let hash) = target.source { hash } else { nil }
+            snapshot.add(RepoMenus.fileTools(path: target.path, rev: rev,
+                                             blame: target.file.kind != .deleted && !target.isImage, session: session),
+                         detail: "File \((target.path as NSString).lastPathComponent)", systemImage: "doc.text")
+        }
         for stash in session.log.value?.stashes ?? [] {
             snapshot.add(RepoMenus.stash(stash.hash, session), detail: "Stash \(stash.selector) \(stash.message)",
                          systemImage: "tray")
