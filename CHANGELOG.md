@@ -38,6 +38,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - The graph column can be widened only as far as its lanes need.
 - The conflict editor highlights the lines of each side and of the Output like GitKraken.
 - New branch and laptop icons, and a filled check on the checked-out branch.
+- A click on a branch checked out with uncommitted changes (in this worktree or another one), or on a worktree with changes in the Worktrees card, selects the row of those changes instead of the last commit; opening a worktree in a tab does the same.
+- A click on another worktree's changes row in the graph shows its unstaged and staged files instead of opening it in a tab; a double-click in the Worktrees card or Open in New Tab opens it.
 
 ## [0.1.0] - YYYY-MM-DD
 

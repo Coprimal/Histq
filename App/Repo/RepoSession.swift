@@ -348,6 +348,8 @@ final class RepoSession: Identifiable {
         /// A sidebar ref picked before the refs were read (a launch request): it loads as its commit, and
         /// `selection` becomes `.commit` with the graph on that row.
         case ref(SidebarItem)
+        /// Another worktree's changes (its graph row), by its path.
+        case worktree(String)
     }
 
     /// The loaded detail of a selection; the views read `status`, `refs` and `log` for its values.
@@ -359,6 +361,8 @@ final class RepoSession: Identifiable {
         /// A commit or a stash.
         case commit(CommitDetail)
         case multiple(Int)
+        /// Another worktree's changes, read-only: its path and its status.
+        case worktree(String, WorkingStatus)
 
         /// False for a commit whose files are still loading.
         var isReady: Bool {
@@ -542,7 +546,7 @@ final class RepoSession: Identifiable {
     /// page, so they never delay the tab's first content, then with every refs read and when the tab is shown again.
     private(set) var worktrees: Loadable<[WorktreeInfo]> = .idle
     /// Opens a folder in a tab of this tab's window, selecting the tab that already shows it (a worktree's "Open in
-    /// New Tab", a click on its graph row). Set by `WindowModel` when it makes the session.
+    /// New Tab", a double-click on its sidebar row). Set by `WindowModel` when it makes the session.
     @ObservationIgnored var openInTab: @MainActor (URL) -> Void = { _ in }
     /// Shows an operation's outcome as a toast in the tab's window (`ToastHost`). Set by `WindowModel` when it makes
     /// the session.
@@ -1096,8 +1100,8 @@ final class RepoSession: Identifiable {
     /// jump). One row shows its detail, several a count; none keeps the detail as it is.
     func selectGraph(_ items: [GraphItem]) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items) }) { return }
-        // Another worktree's row is never a selection: a click on it opens that worktree (`openWorktree`).
-        let items = items.filter { if case .worktree = $0 { false } else { true } }
+        // Another worktree's row is a selection alone (its changes); several rows leave it out.
+        let items = items.count > 1 ? items.filter { if case .worktree = $0 { false } else { true } } : items
         closeFile()
         graphSelection = items
         guard let first = items.first else { return }
@@ -1109,7 +1113,7 @@ final class RepoSession: Identifiable {
             case .wip: selection = .wip
             case .stash(let hash): selection = .stash(hash)
             case .commit(let hash): selection = .commit(hash)
-            case .worktree: return
+            case .worktree(let path): selection = .worktree(path)
             }
         }
         UITiming.select(timingDetail(selection))
@@ -1175,6 +1179,7 @@ final class RepoSession: Identifiable {
         case .commit(let hash): "commit \(hash)"
         case .stash(let hash): "stash \(hash)"
         case .multiple(let count): "commits \(count)"
+        case .worktree(let path): "worktree-wip \(URL(filePath: path).lastPathComponent)"
         case .ref(let item): item.timingDetail
         }
     }
@@ -1215,6 +1220,8 @@ final class RepoSession: Identifiable {
                 loaded = .commit(try await readCommitCached(backend, hash: hash, isStash: isStash))
             case .multiple(let count):
                 loaded = .multiple(count)
+            case .worktree(let path):
+                loaded = .worktree(path, try await Self.readWorktreeStatus(backend, path: path))
             case .ref(let item):
                 if refs.value == nil, try await readStatusAndRefs(backend, scope: [.status, .refs]) {
                     loadLog(backend)
@@ -1224,6 +1231,12 @@ final class RepoSession: Identifiable {
                     throw CommitReadError.refGone(item.timingDetail)
                 }
                 if resolved != item { sidebarSelection = resolved }
+                if changesRow(of: resolved, in: refs) == .wip {
+                    self.selection = .wip
+                    graphSelection = [.wip]
+                    loaded = .wip
+                    break
+                }
                 self.selection = .commit(hash)
                 graphSelection = [.commit(hash)]
                 // Resolved: the cached detail, or the log's header while its files load, as a click on its row.
@@ -1278,14 +1291,27 @@ final class RepoSession: Identifiable {
     }
 
     /// A click on a sidebar row: selects it, and the graph and the detail jump to its commit (the branch tip, the tag's
-    /// commit) in the same call; the graph scrolls that row into view. Before the refs are read (a launch request), the
-    /// detail shows the commit placeholder at once and jumps once they are in (`Selection.ref`).
+    /// commit) in the same call; the graph scrolls that row into view. A branch checked out with uncommitted changes
+    /// jumps to their row instead (`changesRow`). Before the refs are read (a launch request), the detail shows the
+    /// commit placeholder at once and jumps once they are in (`Selection.ref`).
     func selectRef(_ item: SidebarItem) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectRef(item) }) { return }
         closeFile()
         selectSidebarItem(item)
         guard let refs = refs.value else { return select(.ref(item)) }
-        if let commit = Self.resolve(item, in: refs)?.1 { selectGraph([.commit(commit)]) }
+        guard let (resolved, commit) = Self.resolve(item, in: refs) else { return }
+        selectGraph([changesRow(of: resolved, in: refs) ?? .commit(commit)])
+    }
+
+    /// Whether this worktree has uncommitted changes: the graph then has a WIP row above HEAD.
+    private var hasChanges: Bool { status.value?.entries.isEmpty == false }
+
+    /// The row of a local branch's uncommitted changes: this worktree's WIP row when it is checked out here, another
+    /// worktree's row when it is checked out there; nil when it is not checked out or has no changes.
+    private func changesRow(of item: SidebarItem, in refs: Refs) -> GraphItem? {
+        guard case .local(let name) = item else { return nil }
+        if refs.localBranches.contains(where: { $0.name == name && $0.isHead }) { return hasChanges ? .wip : nil }
+        return dirtyWorktrees.first { $0.worktree.branch == "refs/heads/\(name)" }.map { .worktree($0.path) }
     }
 
     /// Selects a branch by name (DEBUG `-HistqSelect branch:<name>`) through `selectRef`, the path a click takes: a
@@ -1315,9 +1341,10 @@ final class RepoSession: Identifiable {
     // MARK: Keeping the selection
 
     /// After a refresh or a log reload, a selected row that is gone moves to HEAD (the detail shows it): the WIP once the
-    /// working tree is clean (a commit, a stash, a discard), a stash once dropped or popped, and a commit that was in the
-    /// previous complete log and is not in the new one (an amend, a reset). A selection that still exists stays, and the
-    /// graph selects its row again after the reload. `previousLog` is nil outside a log reload: commits are not checked.
+    /// working tree is clean (a commit, a stash, a discard), a stash once dropped or popped, a commit that was in the
+    /// previous complete log and is not in the new one (an amend, a reset), and another worktree's row once it is clean
+    /// or gone (to this worktree's WIP row when it has changes). A selection that still exists stays, and the graph
+    /// selects its row again after the reload. `previousLog` is nil outside a log reload: commits are not checked.
     private func dropVanishedSelection(previousLog: LogSnapshot? = nil) {
         let vanished: Bool
         switch selection {
@@ -1328,11 +1355,17 @@ final class RepoSession: Identifiable {
         case .commit(let hash):
             guard let previousLog, previousLog.isComplete, let log = log.value, log.isComplete else { return }
             vanished = previousLog.commits.contains { $0.hash == hash } && !log.commits.contains { $0.hash == hash }
+        case .worktree(let path):
+            // Its graph row goes once it is clean, removed or unreadable.
+            guard worktrees.value != nil else { return }
+            vanished = !dirtyWorktrees.contains { $0.path == path }
         case .overview, .multiple, .ref:
             return
         }
         guard vanished else { return }
-        if let head = status.value?.branch.commit {
+        if case .worktree = selection, hasChanges {
+            selectGraph([.wip])
+        } else if let head = status.value?.branch.commit {
             selectGraph([.commit(head)])
         } else {
             // An unborn branch: the overview cards.
@@ -1608,7 +1641,10 @@ final class RepoSession: Identifiable {
                 try Task.checkCancellation()
                 guard let self else { return }
                 worktreeTask = nil
-                if worktrees.value != list { worktrees = .loaded(list) }
+                if worktrees.value != list {
+                    worktrees = .loaded(list)
+                    refreshWorktreeSelection(backend)
+                }
                 updateWorktreeRows(backend)
             } catch {
                 guard !Self.isCancellation(error), let self else { return }
@@ -1651,6 +1687,29 @@ final class RepoSession: Identifiable {
                 isCurrent: URL(filePath: worktree.path).resolvingSymlinksInPath().path == current,
                 changes: changes[index])
         }
+    }
+
+    /// After the worktrees are read again: another worktree's changes on screen move on once it is clean or gone
+    /// (`dropVanishedSelection`), else are read again in place (no placeholder; a failed read keeps them as they were).
+    private func refreshWorktreeSelection(_ backend: Backend) {
+        guard case .worktree(let path) = selection else { return }
+        dropVanishedSelection()
+        guard selection == .worktree(path), case .loaded(.worktree) = detail else { return }
+        let token = selectToken
+        detailTask?.cancel()
+        detailTask = Task { [weak self] in
+            guard let status = try? await Self.readWorktreeStatus(backend, path: path), let self, token == selectToken
+            else { return }
+            detail = .loaded(.worktree(path, status))
+        }
+    }
+
+    /// Another worktree's status, read in its own folder with the read environment built for it (as `readWorktrees`).
+    @concurrent
+    private nonisolated static func readWorktreeStatus(_ backend: Backend, path: String) async throws -> WorkingStatus {
+        let folder = URL(filePath: path, directoryHint: .isDirectory)
+        let env = try await backend.readEnvironment(cwd: folder)
+        return try await StatusReader.read(runner: backend.runner, cwd: folder, env: env)
     }
 
     /// Lays the graph out again when the other worktrees' rows no longer match the loaded log's: from the commits in
@@ -1782,8 +1841,33 @@ final class RepoSession: Identifiable {
         return .success(.addWorktree(path: path, source: source, newBranch: newBranch))
     }
 
-    /// Opens another worktree of the repo in a tab of this window (its graph row, the sidebar's "Open in New Tab"): the
-    /// tab switches at once, its detail loading.
+    /// A click on a worktree's sidebar row: its changes when it has any (this tab's own: the WIP row; another's: its
+    /// row), else its HEAD commit.
+    func selectWorktree(_ info: WorktreeInfo) {
+        if info.isCurrent, hasChanges { return selectGraph([.wip]) }
+        if !info.isCurrent, dirtyWorktrees.contains(where: { $0.path == info.path }) {
+            return selectGraph([.worktree(info.path)])
+        }
+        guard let head = info.worktree.head else { return }
+        selectGraph([.commit(head)])
+    }
+
+    /// This tab opened as a worktree from another tab (a double-click in the sidebar, "Open in New Tab"): its changes
+    /// (the WIP row) when it has any, else its HEAD commit, whatever row it showed before. A tab still reading its
+    /// status is already on `.overview`, which ends on the same row.
+    func showWorkingState() {
+        guard let status = status.value else {
+            if selection != .overview { select(.overview) }
+            return
+        }
+        guard let item: GraphItem = status.entries.isEmpty ? status.branch.commit.map({ .commit($0) }) : .wip else {
+            return select(.overview)
+        }
+        if graphSelection != [item] { selectGraph([item]) }
+    }
+
+    /// Opens another worktree of the repo in a tab of this window (a double-click on its sidebar row, "Open in New Tab"
+    /// in its context menus): the tab switches at once, its detail loading.
     func openWorktree(_ path: String) {
         UITiming.select("worktree \(URL(filePath: path).lastPathComponent)")
         openInTab(URL(filePath: path, directoryHint: .isDirectory))

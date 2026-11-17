@@ -341,12 +341,12 @@ struct WIPPanel: View {
     }
 
     /// Paths with unmerged index entries, in status order.
-    private static func conflicted(_ status: WorkingStatus) -> [FileChange] {
+    fileprivate static func conflicted(_ status: WorkingStatus) -> [FileChange] {
         status.conflicted.map { FileChange(kind: .conflicted, path: $0.path) }
     }
 
     /// Changes in the working tree and untracked files (conflicts have their own card).
-    private static func unstaged(_ status: WorkingStatus) -> [FileChange] {
+    fileprivate static func unstaged(_ status: WorkingStatus) -> [FileChange] {
         status.entries.compactMap { entry in
             switch entry.kind {
             case .untracked: FileChange(kind: .untracked, path: entry.path)
@@ -356,10 +356,95 @@ struct WIPPanel: View {
         }
     }
 
-    private static func staged(_ status: WorkingStatus) -> [FileChange] {
+    fileprivate static func staged(_ status: WorkingStatus) -> [FileChange] {
         status.entries.compactMap { entry in
             entry.isStaged
                 ? FileChange(letter: entry.index.rawValue, path: entry.path, originalPath: entry.originalPath) : nil
+        }
+    }
+}
+
+/// Another worktree's changes (a click on its graph or sidebar row), read-only: its folder, then its conflicted,
+/// unstaged and staged files as its own tab lists them. Staging, discarding, committing and file diffs are its tab's.
+struct WorktreeChangesPanel: View {
+    let path: String
+    let status: WorkingStatus
+
+    var body: some View {
+        let folder = URL(filePath: path, directoryHint: .isDirectory)
+        let conflicted = WIPPanel.conflicted(status)
+        let unstaged = WIPPanel.unstaged(status)
+        let staged = WIPPanel.staged(status)
+        VStack(spacing: SectionCardMetrics.spacing) {
+            WorktreeHeaderCard(path: path, branch: status.branch.name)
+            if !conflicted.isEmpty {
+                filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder)
+            }
+            filesCard("Unstaged", systemImage: "doc.badge.ellipsis", unstaged, empty: "No unstaged changes",
+                      folder: folder)
+            filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder)
+            if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func filesCard(_ title: String, systemImage: String, _ files: [FileChange], empty: String, folder: URL)
+        -> some View
+    {
+        SectionCard(title, systemImage: systemImage, count: files.count, contentPadding: 6) {
+            if files.isEmpty {
+                EmptyFilesText(text: empty)
+            } else {
+                FilesScroll {
+                    FileListView(files: files, repoURL: folder)
+                }
+            }
+        } accessory: {
+            FileListModeToggle()
+        }
+    }
+}
+
+/// The worktree whose changes `WorktreeChangesPanel` shows: its folder's name, its branch, its path.
+private struct WorktreeHeaderCard: View {
+    let path: String
+    /// Nil while loading (the placeholder) or on a detached HEAD.
+    let branch: String?
+
+    var body: some View {
+        SectionCard(URL(filePath: path).lastPathComponent, systemImage: "folder") {
+            VStack(alignment: .leading, spacing: 4) {
+                if let branch {
+                    Label { Text(branch) } icon: { IconImage("lucide-git-branch") }
+                }
+                Text(ProfileLibrary.abbreviated(path))
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// The skeleton of `WorktreeChangesPanel`: its folder card, then the Unstaged and Staged cards with capsule rows.
+struct WorktreeChangesPlaceholder: View {
+    let path: String
+
+    var body: some View {
+        VStack(spacing: SectionCardMetrics.spacing) {
+            WorktreeHeaderCard(path: path, branch: nil)
+            SectionCard("Unstaged", systemImage: "doc.badge.ellipsis", countIsLoading: true, contentPadding: 6) {
+                SkeletonFileRows(fractions: [0.55, 0.4, 0.65, 0.5])
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
+            SectionCard("Staged", systemImage: "tray.full", countIsLoading: true, contentPadding: 6) {
+                SkeletonFileRows(fractions: [0.5, 0.35])
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
         }
     }
 }

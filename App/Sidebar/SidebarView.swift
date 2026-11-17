@@ -307,9 +307,9 @@ private struct WorktreeSection: View {
 }
 
 /// A worktree's row: a check for this tab's own (as the checked-out branch), a folder for the others; its folder name,
-/// a pencil when it has uncommitted changes, then its branch or short HEAD. A click jumps the graph to its HEAD commit
-/// at once; a double-click opens another worktree in a tab, recognized beside the single click
-/// (`simultaneousGesture`). Its context menu opens, removes or prunes.
+/// a pencil when it has uncommitted changes, then its branch or short HEAD. A click jumps the graph at once to its
+/// changes' row when it has any (`selectWorktree`), else to its HEAD commit; a double-click opens another worktree in a
+/// tab, recognized beside the single click (`simultaneousGesture`). Its context menu opens, removes or prunes.
 private struct WorktreeRow: View {
     let session: RepoSession
     let info: WorktreeInfo
@@ -367,8 +367,7 @@ private struct WorktreeRow: View {
     }
 
     private func showHead() {
-        guard let head = info.worktree.head else { return }
-        session.selectGraph([.commit(head)])
+        session.selectWorktree(info)
     }
 
     private func open() {

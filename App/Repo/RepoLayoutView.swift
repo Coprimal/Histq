@@ -252,7 +252,6 @@ private struct CommitListPanel: View {
                           },
                           canUndo: { [session] redo in session.historyAvailability(redo: redo).isEnabled },
                           onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
-                          onOpenWorktree: { [session] path in session.openWorktree(path) },
                           pullRequests: session.github.branchPullRequests,
                           remotes: session.remotes.map(\.name),
                           onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },
@@ -374,6 +373,8 @@ private struct DetailPanel: View {
             CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
         case .multiple(let count):
             MultipleSelectionCard(count: count)
+        case .worktree(let path):
+            WorktreeChangesPlaceholder(path: path)
         case .overview:
             if session.status.value?.entries.isEmpty == true {
                 CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
@@ -397,6 +398,8 @@ private struct DetailPanel: View {
                               timingDetail: session.selectDetail)
         case .multiple(let count):
             MultipleSelectionCard(count: count)
+        case .worktree(let path, let status):
+            WorktreeChangesPanel(path: path, status: status)
         case .overview:
             ScrollView {
                 OverviewCards(branch: branch, path: session.url.path, commits: commits, status: session.status.value)

@@ -1,6 +1,6 @@
 // The commit graph: an NSTableView with gk's columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, COMMIT DATE / TIME).
 // Rows: the WIP row (when the working tree has changes), a WIP row per other worktree with changes (labeled with its
-// folder's name; a click opens it in a tab), the stash rows, then the commits, laid out by `GraphLayout`.
+// folder's name; a click shows its changes), the stash rows, then the commits, laid out by `GraphLayout`.
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
 // inserted as rows, a new load reloads. A click selects at once (`action`); a double-click calls the checkout hook
 // (`doubleAction`) without delaying the single click. A click on a branch badge's pull request chip opens that pull
@@ -15,7 +15,7 @@ enum GraphItem: Hashable, Sendable {
     /// A stash, by its commit hash.
     case stash(String)
     case commit(String)
-    /// Another worktree's WIP row, by the worktree's path. Never a selection: a click opens the worktree in a tab.
+    /// Another worktree's WIP row, by the worktree's path: a click shows its changes (read-only).
     case worktree(String)
 }
 
@@ -101,8 +101,6 @@ struct GraphView: NSViewRepresentable {
     var dropEntries: @MainActor (RefBadge, RefBadge) -> [MenuEntry] = { _, _ in [] }
     var canUndo: @MainActor (_ redo: Bool) -> Bool = { _ in false }
     var onUndo: @MainActor (_ redo: Bool) -> Void = { _ in }
-    /// A click on another worktree's WIP row, with its path (arrow keys passing over the row do not call it).
-    var onOpenWorktree: @MainActor (String) -> Void = { _ in }
     /// The open pull requests by remote branch (`GitHubStore.branchPullRequests`): their chips on the branch badges.
     var pullRequests: [String: RefBadge.PullRequest] = [:]
     /// The repo's remote names (`RepoSession.remotes`): with one remote, a remote branch's badge drops the remote
@@ -1116,14 +1114,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         table.reloadData(forRowIndexes: rows, columnIndexes: columns)
     }
 
-    /// A click: the selection already changed at mouse down; a click that did not change it reports nothing new. A
-    /// click on another worktree's WIP row opens that worktree (only a click: arrows never open tabs).
+    /// A click: the selection already changed at mouse down; a click that did not change it reports nothing new.
     @objc func clicked(_ sender: Any?) {
         reportSelection()
-        guard let table, case .worktree(let path)? = item(at: clickedRow),
-              table.selectedRowIndexes == IndexSet(integer: clickedRow)
-        else { return }
-        view?.onOpenWorktree(path)
     }
 
     /// Checks out the double-clicked row (the hook); the first click of the pair has already selected it.
@@ -1172,13 +1165,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
-    /// Worktree rows are left out: a selection of only those (a click on one, an arrow onto one) reports nothing and
-    /// the detail stays.
+    /// Another worktree's row is reported alone (its changes); among several rows the session leaves it out.
     private func reportSelection() {
         guard let table, !isUpdating else { return }
-        let items = table.selectedRowIndexes.compactMap(item(at:)).filter {
-            if case .worktree = $0 { false } else { true }
-        }
+        let items = table.selectedRowIndexes.compactMap(item(at:))
         guard items != reported, !items.isEmpty || table.selectedRowIndexes.isEmpty else { return }
         reported = items
         view?.onSelect(items)

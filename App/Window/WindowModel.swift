@@ -158,10 +158,10 @@ final class WindowModel {
     var actionSession: RepoSession? { navigation.page == .home ? selectedSession : nil }
 
     /// Opens a repo in a tab and selects it: the tab that already shows it, else the selected tab if it is a
-    /// Welcome tab, else a new tab. `nil` opens a new Welcome tab. A worktree opened from the tab `opener` (its graph
-    /// row, the sidebar) joins the opener's group at once: its new tab goes right after the group's last tab, pinned
-    /// when the group is (`gatherGroups`). Any other new tab goes last, and moves beside its repo's tabs once its repo
-    /// is read (`resolveRepoKeys`).
+    /// Welcome tab, else a new tab. `nil` opens a new Welcome tab. A worktree opened from the tab `opener` (a
+    /// double-click in its sidebar, "Open in New Tab") joins the opener's group at once: its new tab goes right after
+    /// the group's last tab, pinned when the group is (`gatherGroups`). Any other new tab goes last, and moves beside
+    /// its repo's tabs once its repo is read (`resolveRepoKeys`).
     func openTab(_ url: URL?, opener: Tab.ID? = nil) {
         navigation.page = .home
         closeSettings()
@@ -250,8 +250,13 @@ final class WindowModel {
     /// A tab's session, with the profile and commit a restored tab had in the saved session.
     private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
         let session = RepoSession(url: url)
-        // A worktree's "Open in New Tab" and its graph row open it in this window, beside this tab's group.
-        session.openInTab = { [weak self] url in self?.openTab(url, opener: id) }
+        // A worktree's "Open in New Tab" and a double-click on its sidebar row open it in this window, beside this
+        // tab's group. The worktree's tab shows its changes, else its HEAD commit, even when it was open on another
+        // row.
+        session.openInTab = { [weak self] url in
+            self?.openTab(url, opener: id)
+            self?.selectedSession?.showWorkingState()
+        }
         session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         let saved = restored.removeValue(forKey: id)
         if let saved {
@@ -845,6 +850,28 @@ final class WindowModel {
                 return
             }
             session.selectBranch(named: name)
+        case .worktree, .openworktree, .branchclick:
+            // `worktree:<folder name>`: a click on its sidebar row; `openworktree:<folder name>`: a double-click
+            // (its tab opens); `branchclick:<name>`: a click on a branch's row. Once the worktrees are read.
+            guard let session = selectedSession, let name = request.value else {
+                Self.logger.error("-HistqSelect worktree: no repo tab or no worktree name")
+                return
+            }
+            let opens = request.kind == .openworktree
+            Task { [weak session] in
+                for _ in 0..<250 {
+                    guard let session else { return }
+                    if request.kind == .branchclick, session.worktrees.value != nil {
+                        return session.selectBranch(named: name)
+                    }
+                    if let info = session.worktrees.value?.first(where: { $0.name == name }) {
+                        if opens { session.openWorktree(info.path) } else { session.selectWorktree(info) }
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                Self.logger.error("-HistqSelect worktree: no worktree \(name, privacy: .public)")
+            }
         case .wip:
             guard let session = selectedSession else {
                 Self.logger.error("-HistqSelect wip: no repo tab")
