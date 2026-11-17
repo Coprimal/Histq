@@ -790,12 +790,22 @@ final class DiffHunkCellView: NSView {
             view.removeFromSuperview()
         }
         for (index, (action, title)) in buttons.enumerated() {
-            let button = NSButton(title: title, target: self, action: #selector(pressed(_:)))
-            button.bezelStyle = .push
-            // Every button of the app is a capsule (user, 2026-11-13); before macOS 26 AppKit has no shape to pick.
-            if #available(macOS 26, *) { button.borderShape = .capsule }
-            button.controlSize = .small
-            button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+            // Stage is green, Discard a light red (user, 2026-11-17); Unstage keeps the plain bezel.
+            let fill: NSColor? = switch action {
+            case .stage: Palette.diffAddedSign.withAlphaComponent(0.5)
+            case .discard: Palette.diffRemovedSign.withAlphaComponent(0.3)
+            case .unstage: nil
+            }
+            let button = fill.map { TintedCapsuleButton(title: title, fill: $0) } ?? NSButton(title: title, target: nil, action: nil)
+            button.target = self
+            button.action = #selector(pressed(_:))
+            if fill == nil {
+                button.bezelStyle = .push
+                // Every button of the app is a capsule (user, 2026-11-13); before macOS 26 AppKit has no shape to pick.
+                if #available(macOS 26, *) { button.borderShape = .capsule }
+                button.controlSize = .small
+                button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+            }
             button.tag = index
             button.hasDestructiveAction = action == .discard
             stack.addArrangedSubview(button)
@@ -811,5 +821,63 @@ final class DiffHunkCellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         Palette.diffHunkFill.setFill()
         bounds.fill(using: .sourceOver)
+    }
+}
+
+/// A hunk header's colored capsule button with a white title. A push button's `bezelColor` turns grey whenever the
+/// window is not key, so the capsule is a layer fill that keeps its color; a hover brightens it, a press dims it.
+final class TintedCapsuleButton: NSButton {
+    private let fill: NSColor
+    private var hovered = false
+
+    init(title: String, fill: NSColor) {
+        self.fill = fill
+        super.init(frame: .zero)
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize(for: .small)),
+            .foregroundColor: NSColor.white,
+        ])
+        isBordered = false
+        wantsLayer = true
+        layer?.backgroundColor = fill.cgColor
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// The small push button's size: its title plus 10 pt on each side, 22 pt tall.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: super.intrinsicContentSize.width + 20, height: 22)
+    }
+
+    override var isHighlighted: Bool {
+        didSet { updateFill(animated: false) }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        updateFill(animated: true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        updateFill(animated: true)
+    }
+
+    private func updateFill(animated: Bool) {
+        let alpha = fill.alphaComponent * (isHighlighted ? 0.6 : hovered ? 1.5 : 1)
+        let color = fill.withAlphaComponent(min(alpha, 1)).cgColor
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = animated ? 0.12 : 0
+            context.allowsImplicitAnimation = animated
+            layer?.backgroundColor = color
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
     }
 }
