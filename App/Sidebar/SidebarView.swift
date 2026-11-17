@@ -1,8 +1,9 @@
 // A repo tab's sidebar (panel 1): tabs Branches (Local, Remote and Worktrees cards, ahead/behind counts), Tags, and
 // Pull requests & Issues (`PullRequestSections`: the GitHub lists, or the Connect card). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
-// for it); a right-click opens the same menu as its badge in the graph. The Remote card's header menu adds a remote and
-// renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
+// for it); a right-click opens the same menu as its badge in the graph. A branch the graph hides is dimmed, with an eye
+// that shows it again; a pinned or soloed one has a pin or a scope. The Local and Remote cards' header menus hide stale
+// branches or show all. The Remote card's header menu also adds a remote and renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
 // when one has uncommitted changes); a double-click opens another one in a tab, its header menu adds or prunes.
 import HistqCore
 import SwiftUI
@@ -197,6 +198,21 @@ private struct BranchSections: View {
                     AheadBehind(branch: branch)
                 }
             }
+        } accessory: {
+            Menu {
+                MenuEntriesView(entries: RepoMenus.branchView(session))
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(.secondary)
+                    // Square, so the hover circle (sized on the label's shorter side) clears the wide glyph.
+                    .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
+            }
+            .menuStyle(.button)
+            .buttonStyle(RowIconButtonStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Local branches")
+            .accessibilityLabel("Local branch actions")
         }
         SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: refs.remoteBranches.count,
                        isExpanded: $session.remoteExpanded) { query in
@@ -219,7 +235,7 @@ private struct BranchSections: View {
             }
         } accessory: {
             Menu {
-                MenuEntriesView(entries: RepoMenus.remotes(session))
+                MenuEntriesView(entries: RepoMenus.remotes(session) + [.separator] + RepoMenus.branchView(session))
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
@@ -550,18 +566,25 @@ private struct BranchRow<Trailing: View>: View {
 
     var body: some View {
         let selected = session.sidebarSelection == item
+        // A branch the graph leaves out: its icon and name dimmed.
+        let dimmed = ref.map(session.isHidden) == true ? 0.5 : 1.0
         HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             IconImage(systemImage)
                 // The checked-out branch's check reads at a glance (a step bigger than the branch glyphs).
                 .imageScale(systemImage == SidebarMetrics.currentImage ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+                .opacity(dimmed)
             HStack(spacing: 4) {
                 Text(name)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .opacity(dimmed)
                 Spacer(minLength: 4)
+                if let ref, session.isPinned(ref) { Image(systemName: "pin.fill").imageScale(.small) }
+                if let ref, session.isSoloed(ref) { Image(systemName: "scope").imageScale(.small) }
                 trailing()
+                if let ref, session.isHidden(ref) { showButton(ref) }
             }
         }
         .foregroundStyle(selected ? Color.primary : Color.secondary)
@@ -584,6 +607,25 @@ private struct BranchRow<Trailing: View>: View {
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { session.selectRef(item) }
         .accessibilityAction(named: "Checkout") { RepoMenus.checkout(item, session) }
+    }
+
+    /// The branch's full ref name; nil for a tag.
+    private var ref: String? {
+        switch item {
+        case .local(let name): "refs/heads/\(name)"
+        case .remote(let name): "refs/remotes/\(name)"
+        case .tag: nil
+        }
+    }
+
+    /// A hidden branch's eye: a click shows it in the graph again (not one hidden as stale while that is on).
+    private func showButton(_ ref: String) -> some View {
+        let stale = session.view.hideStale && session.isStale(ref) && !session.isPinned(ref)
+        return Button { session.show(ref) } label: { Image(systemName: "eye.slash") }
+            .buttonStyle(RowIconButtonStyle())
+            .disabled(stale)
+            .help(stale ? "Hidden as a stale branch: turn off Hide Stale Branches" : "Show in the graph")
+            .accessibilityLabel("Show \(name)")
     }
 }
 

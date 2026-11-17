@@ -4,7 +4,8 @@
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
 // inserted as rows, a new load reloads. A click selects at once (`action`); a double-click calls the checkout hook
 // (`doubleAction`) without delaying the single click. A click on a branch badge's pull request chip opens that pull
-// request at mouse down instead of selecting the row.
+// request at mouse down instead of selecting the row. `GraphVisibilityChip` floats over its header while branches are
+// hidden or soloed.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -1444,5 +1445,27 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             }
             .joined(separator: ",")
         Preferences.defaults.set(encoded, forKey: PrefKey.graphColumnWidths.rawValue)
+    }
+}
+
+/// Over the graph's header while branches are left out: "2 hidden · Show All", "Solo · Show All" or both; a click shows
+/// every branch (`RepoSession.showAll`).
+struct GraphVisibilityChip: View {
+    let session: RepoSession
+
+    var body: some View {
+        let hidden = session.hiddenCount
+        if hidden > 0 || session.isSoloActive {
+            let summary = [hidden > 0 ? "\(hidden) hidden" : nil, session.isSoloActive ? "Solo" : nil]
+                .compactMap(\.self).joined(separator: " · ")
+            Button { session.showAll() } label: {
+                Text("\(summary) · \(Text("Show All").foregroundStyle(Color.accentColor))")
+                    .font(.caption)
+            }
+            .buttonStyle(RaisedButtonStyle(height: 22, horizontalPadding: 10))
+            .help("Show every branch in the graph")
+            .padding(.top, 2)
+            .padding(.trailing, 8)
+        }
     }
 }

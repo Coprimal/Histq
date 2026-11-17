@@ -16,10 +16,12 @@ public struct LocalBranch: Sendable, Hashable {
     public let upstreamGone: Bool
     /// HEAD of the worktree the read ran in points at this branch.
     public let isHead: Bool
+    /// The tip commit's committer date; nil when git gave none.
+    public let tipDate: Date?
 
     public init(
         name: String, refName: String, commit: String, upstream: String?, ahead: Int, behind: Int,
-        upstreamGone: Bool, isHead: Bool
+        upstreamGone: Bool, isHead: Bool, tipDate: Date? = nil
     ) {
         self.name = name
         self.refName = refName
@@ -29,6 +31,7 @@ public struct LocalBranch: Sendable, Hashable {
         self.behind = behind
         self.upstreamGone = upstreamGone
         self.isHead = isHead
+        self.tipDate = tipDate
     }
 }
 
@@ -40,12 +43,15 @@ public struct RemoteBranch: Sendable, Hashable {
     /// The first path component of `name` (a remote whose own name contains `/` is cut at the first one).
     public let remote: String
     public let commit: String
+    /// The tip commit's committer date; nil when git gave none.
+    public let tipDate: Date?
 
-    public init(name: String, refName: String, remote: String, commit: String) {
+    public init(name: String, refName: String, remote: String, commit: String, tipDate: Date? = nil) {
         self.name = name
         self.refName = refName
         self.remote = remote
         self.commit = commit
+        self.tipDate = tipDate
     }
 }
 
@@ -102,10 +108,11 @@ public struct Refs: Sendable, Hashable {
 public enum RefReader {
     /// Fields separated by `\x1f` (`%1f`); ref names cannot contain control characters or newlines.
     /// `%(*objectname)`/`%(*objecttype)` are the peeled object of an annotated tag (empty otherwise).
+    /// `%(committerdate:unix)` comes last and is empty for an annotated tag.
     public static let arguments = [
         "for-each-ref",
         "--format=%(refname)%1f%(objectname)%1f%(objecttype)%1f%(*objectname)%1f%(*objecttype)%1f"
-            + "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(symref)",
+            + "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(symref)%1f%(committerdate:unix)",
         "refs/heads", "refs/remotes", "refs/tags",
     ]
 
@@ -130,20 +137,22 @@ public enum RefReader {
         var tags: [TagRef] = []
         for line in output.split(separator: "\n") {
             let f = line.split(separator: "\u{1F}", omittingEmptySubsequences: false).map(String.init)
-            guard f.count == 8 else { continue }
+            guard f.count >= 8 else { continue }
             let (refName, object, type, peeled, peeledType, upstream, track, symref) =
                 (f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7])
+            let tipDate = f.count > 8 ? TimeInterval(f[8]).map(Date.init(timeIntervalSince1970:)) : nil
             if let name = refName.dropPrefix("refs/heads/") {
                 let counts = parseTrack(track)
                 locals.append(LocalBranch(
                     name: name, refName: refName, commit: object, upstream: upstream.isEmpty ? nil : upstream,
                     ahead: counts.ahead, behind: counts.behind, upstreamGone: counts.gone,
-                    isHead: refName == headRef))
+                    isHead: refName == headRef, tipDate: tipDate))
             } else if let name = refName.dropPrefix("refs/remotes/") {
                 guard symref.isEmpty else { continue }
                 let remote = name.utf8.split(separator: UInt8(ascii: "/"), maxSplits: 1).first
                     .map { String(decoding: $0, as: UTF8.self) } ?? name
-                remotes.append(RemoteBranch(name: name, refName: refName, remote: remote, commit: object))
+                remotes.append(RemoteBranch(
+                    name: name, refName: refName, remote: remote, commit: object, tipDate: tipDate))
             } else if let name = refName.dropPrefix("refs/tags/") {
                 let annotated = type == "tag"
                 let commit: String? =

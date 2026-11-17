@@ -61,6 +61,18 @@ enum GitToolchain {
     }
 }
 
+/// What the graph leaves out and pins, from a `RepoViewState` against the refs it was resolved with
+/// (`RepoSession.logFilter(view:refs:)`).
+struct LogFilter: Equatable, Sendable {
+    /// Full ref names left out of the graph: the hidden branches, the own upstreams of the hidden local ones and, with
+    /// "hide stale branches" on, the stale ones. Never the current branch, nor its upstream unless hidden itself.
+    var hidden: Set<String> = []
+    /// Full ref names: when any, the graph reads only them and HEAD.
+    var solo: [String] = []
+    /// The pinned branches' tip hashes, in pin order, one each: `GraphLayout(pinned:)`.
+    var pinned: [String] = []
+}
+
 /// The log of a repo with its graph rows, in `git log --all --topo-order` order. `rows[i]` is `commits[i]`'s row; the
 /// rows above the commits (WIP, worktrees) are in `syntheticRows`, the stash rows in `hung`, each right above its base.
 struct LogSnapshot: Sendable {
@@ -84,6 +96,8 @@ struct LogSnapshot: Sendable {
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
     /// inserts the rows a snapshot of the same load adds and reloads for a new one.
     var generation = 0
+    /// The hidden, soloed and pinned branches the log was read and laid out with.
+    var filter = LogFilter()
 
     /// What a table row of the graph shows.
     enum Entry {
@@ -679,6 +693,14 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var logGeneration = 0
     /// The stashes, read with the refs; nil until the first read. Compared with the log's to reload it when they change.
     @ObservationIgnored private var stashes: [Stash]?
+    /// The graph's hidden, soloed and pinned branches and its "hide stale branches" switch, saved per worktree; read
+    /// with the setup (`backend()`), before the first log load.
+    private(set) var view = RepoViewState()
+    /// What `view` leaves out and pins against the latest refs; recomputed with each refs read and each view change.
+    private(set) var visibility = LogFilter()
+    @ObservationIgnored private var viewLoaded = false
+    /// The last save of `view`: each save waits for the one before, so the file ends with the latest state.
+    @ObservationIgnored private var viewSave: Task<Void, Never>?
     @ObservationIgnored private var worktreeTask: Task<Void, Never>?
     @ObservationIgnored private let watcher = RepoWatcher()
     /// The auto-fetch timer while `PrefKey.autoFetchMinutes` is on; cancelled when the tab closes.
@@ -749,6 +771,8 @@ final class RepoSession: Identifiable {
         /// The worktree's undo journal and rebase folder under `StatePaths` (never in `.git`).
         let journal: UndoJournal
         let rebaseFolder: URL
+        /// The graph's view as saved when the tab opened.
+        let view: RepoViewState
 
         /// The read environment for this folder, built once per load: it lists the repo's filter and diff drivers
         /// first, so they can be disabled. Never with the tab's profile: a read needs no identity, signing or SSH key,
@@ -1507,6 +1531,8 @@ final class RepoSession: Identifiable {
             let changed = refs.value != newRefs
             refs = .loaded(newRefs)
             if changed { updateBranchMap() }
+            pruneView(newRefs)
+            updateVisibility()
         }
         dropVanishedSelection()
         return moved || syntheticRowsChanged
@@ -1590,10 +1616,13 @@ final class RepoSession: Identifiable {
         let generation = logGeneration
         // The rows of the other worktrees as last read (none before the first read, which waits for this first page).
         let worktrees = dirtyWorktrees
+        // The first load starts beside the first refs read: with a saved view and no refs yet, `readLog` reads them.
+        let filter: LogFilter? = view == .empty || refs.value != nil ? visibility : nil
+        let view = view
         logTask = Task { [weak self] in
             do {
                 let snapshot = try await Self.readLog(
-                    backend, cwd: cwd, generation: generation, worktrees: worktrees
+                    backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view
                 ) { first in
                     guard isFirstLoad, !Task.isCancelled else { return }
                     await MainActor.run {
@@ -1612,8 +1641,13 @@ final class RepoSession: Identifiable {
                 if !isFirstLoad { dropVanishedSelection(previousLog: previous) }
                 // A log without a page (an unborn branch) never started the worktrees' first read.
                 if case .idle = self.worktrees { loadWorktrees(backend) }
-                // The status or the stashes changed while it loaded, or the worktrees were read meanwhile.
-                if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
+                // The status or the stashes changed while it loaded, or the worktrees were read meanwhile; or the
+                // refs it read itself differ from the session's.
+                if syntheticRowsChanged || (filter == nil && refs.value != nil && snapshot.filter != visibility) {
+                    loadLog(backend)
+                } else {
+                    updateWorktreeRows(backend)
+                }
             } catch {
                 guard !Self.isCancellation(error), let self else { return }
                 logTask = nil
@@ -1628,18 +1662,29 @@ final class RepoSession: Identifiable {
 
     /// Parses every page and lays it out, off the main actor, below the WIP and stash rows (the status and the stashes
     /// are read while git walks the history). `firstPage` gets the first page (laid out) as soon as it is ready.
+    /// `filter`: the graph's hidden, soloed and pinned branches; nil = resolve `view` against refs read here.
     /// Throws `CancellationError` when cancelled (the stream itself ends without an error then).
     @concurrent
     private nonisolated static func readLog(
-        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
-        firstPage: @Sendable (LogSnapshot) async -> Void
+        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo], filter: LogFilter?,
+        view: RepoViewState, firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
         var snapshot = LogSnapshot(generation: generation)
-        // Read first: the log also reads the stashes' bases, which no branch may hold any more.
+        if let filter {
+            snapshot.filter = filter
+        } else {
+            snapshot.filter = logFilter(
+                view: view, refs: try await RefReader.read(runner: backend.runner, cwd: cwd, env: env))
+        }
+        let filter = snapshot.filter
+        // Read first: the log also reads the stashes' bases, which no branch may hold any more (not in solo mode).
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
-        let pages = LogReader.pages(runner: backend.runner, cwd: cwd, env: env, alsoFrom: snapshot.stashes.map(\.base))
+        let pages = LogReader.pages(
+            runner: backend.runner, cwd: cwd, env: env,
+            alsoFrom: filter.solo.isEmpty ? snapshot.stashes.map(\.base) : [],
+            hidden: excludes(filter.hidden), solo: filter.solo)
         snapshot.worktrees = worktrees
         snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
         var (layout, top) = beginLayout(&snapshot)
@@ -1662,15 +1707,223 @@ final class RepoSession: Identifiable {
         return snapshot
     }
 
+    /// `row`'s base is not in the complete log `snapshot`.
+    nonisolated private static func isMissingBase(_ row: GraphSyntheticRow, in snapshot: LogSnapshot) -> Bool {
+        guard snapshot.isComplete, let base = row.base else { return false }
+        return snapshot.commitIndex[base] == nil
+    }
+
+    /// A top row of the complete `log` was laid out with a line to a base the log does not hold (solo can leave
+    /// another worktree's HEAD out): its line runs to the end until it is laid out again (`beginLayout`).
+    private static func hasLineToMissingBase(_ log: LogSnapshot) -> Bool {
+        log.syntheticRows.contains { row in
+            guard case .synthetic(let synthetic) = row.node else { return false }
+            return isMissingBase(synthetic, in: log)
+        }
+    }
+
     /// Lays out `snapshot.synthetic`'s WIP and worktree rows at the top and hangs its stashes above their bases. Returns
     /// the layout to feed the commits, and the top rows' layout: the stashes whose base never came are laid out with it
-    /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are).
+    /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are);
+    /// so is a worktree row whose base the complete log does not hold. The pinned branches take the leftmost lanes.
     nonisolated private static func beginLayout(_ snapshot: inout LogSnapshot) -> (layout: GraphLayout, top: GraphLayout) {
-        var layout = GraphLayout()
-        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind != .stash })
+        var layout = GraphLayout(pinned: snapshot.filter.pinned)
+        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind != .stash }.map { row in
+            isMissingBase(row, in: snapshot) ? GraphSyntheticRow(kind: row.kind, id: row.id, base: nil) : row
+        })
         let top = layout
         layout.hang(snapshot.synthetic.filter { $0.kind == .stash })
         return (layout, top)
+    }
+
+    // MARK: Branch visibility
+
+    /// Branches older than this (their tip's committer date) are stale.
+    private nonisolated static let staleAge: TimeInterval = 90 * 24 * 60 * 60
+
+    /// The graph leaves `ref` (a full ref name) out: hidden, the own upstream of a hidden local branch, or stale.
+    func isHidden(_ ref: String) -> Bool { visibility.hidden.contains(ref) }
+    /// The user soloed `ref`.
+    func isSoloed(_ ref: String) -> Bool { view.solo.contains(ref) }
+    /// The user pinned `ref` to the left.
+    func isPinned(_ ref: String) -> Bool { view.pinned.contains(ref) }
+    /// The branches the graph leaves out (the chip's count).
+    var hiddenCount: Int { visibility.hidden.count }
+    /// The graph shows only the soloed branches and HEAD.
+    var isSoloActive: Bool { !visibility.solo.isEmpty }
+
+    /// `ref`'s tip is older than 90 days (what "hide stale branches" hides).
+    func isStale(_ ref: String) -> Bool {
+        guard let refs = refs.value else { return false }
+        let date = refs.localBranches.first { $0.refName == ref }?.tipDate
+            ?? refs.remoteBranches.first { $0.refName == ref }?.tipDate
+        return date.map { $0 < Date.now.addingTimeInterval(-Self.staleAge) } ?? false
+    }
+
+    /// Hides `ref` from the graph; never the current branch.
+    func hide(_ ref: String) {
+        if case .branch(let name, _) = refs.value?.head, ref == "refs/heads/\(name)" { return }
+        guard !view.hidden.contains(ref) else { return }
+        view.hidden.append(ref)
+        viewChanged()
+    }
+
+    /// Shows `ref` again, and the hidden local branches it is the own upstream of. A stale branch stays hidden while
+    /// "hide stale branches" is on.
+    func show(_ ref: String) {
+        let locals = refs.value?.localBranches.filter { local in
+            Self.tracksOwnName(local) && local.upstream.map { "refs/remotes/\($0)" } == ref
+        }.map(\.refName) ?? []
+        let hidden = view.hidden.filter { $0 != ref && !locals.contains($0) }
+        guard hidden != view.hidden else { return }
+        view.hidden = hidden
+        viewChanged()
+    }
+
+    func solo(_ ref: String) {
+        guard !view.solo.contains(ref) else { return }
+        view.solo.append(ref)
+        viewChanged()
+    }
+
+    func unsolo(_ ref: String) {
+        guard view.solo.contains(ref) else { return }
+        view.solo.removeAll { $0 == ref }
+        viewChanged()
+    }
+
+    func pin(_ ref: String) {
+        guard !view.pinned.contains(ref) else { return }
+        view.pinned.append(ref)
+        viewChanged()
+    }
+
+    func unpin(_ ref: String) {
+        guard view.pinned.contains(ref) else { return }
+        view.pinned.removeAll { $0 == ref }
+        viewChanged()
+    }
+
+    func setHideStale(_ on: Bool) {
+        guard view.hideStale != on else { return }
+        view.hideStale = on
+        viewChanged()
+    }
+
+    /// Shows every branch: no hidden or soloed one, stale ones too. Pins stay.
+    func showAll() {
+        guard !view.hidden.isEmpty || !view.solo.isEmpty || view.hideStale else { return }
+        view.hidden = []
+        view.solo = []
+        view.hideStale = false
+        viewChanged()
+    }
+
+    /// After a change of `view`, in the click's frame: the graph's filter follows, the view is saved and the log read
+    /// again off the main actor (the old one stays on screen until then; a selected commit still in it stays selected).
+    private func viewChanged() {
+        updateVisibility()
+        saveView()
+        refresh(scope: .log)
+    }
+
+    private func updateVisibility() {
+        let new = view == .empty ? LogFilter() : refs.value.map { Self.logFilter(view: view, refs: $0) } ?? LogFilter()
+        if new != visibility { visibility = new }
+    }
+
+    /// Drops the branches `refs` no longer has from `view` (deleted, pruned, renamed outside Histq): a soloed one
+    /// would make `git log` fail.
+    private func pruneView(_ refs: Refs) {
+        guard view != .empty else { return }
+        let names = Set(refs.localBranches.map(\.refName) + refs.remoteBranches.map(\.refName))
+        var pruned = view
+        pruned.hidden.removeAll { !names.contains($0) }
+        pruned.solo.removeAll { !names.contains($0) }
+        pruned.pinned.removeAll { !names.contains($0) }
+        guard pruned != view else { return }
+        view = pruned
+        saveView()
+    }
+
+    /// Saves `view` off the main actor, after the saves before it.
+    private func saveView() {
+        let (state, cwd, previous) = (view, url, viewSave)
+        viewSave = Task {
+            await previous?.value
+            do {
+                try await Self.save(state, cwd: cwd)
+            } catch {
+                Self.logger.error("view save failed: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    @concurrent
+    private nonisolated static func save(_ state: RepoViewState, cwd: URL) async throws {
+        try state.save(key: stateKey(cwd))
+    }
+
+    /// `view` against `refs`. Hidden: the hidden branches that exist but the current one, each hidden local one's
+    /// own upstream (see `tracksOwnName`) and, with "hide stale branches" on, every branch whose tip is older than
+    /// `staleAge`; the last two never hide the current branch's upstream, and stale never a pinned branch. Solo: the soloed branches that exist; none on an unborn branch (git cannot read its
+    /// HEAD). Pinned: the tips of the pinned branches that are shown (in solo mode only the soloed ones and the
+    /// current branch), each tip once.
+    nonisolated static func logFilter(view: RepoViewState, refs: Refs, now: Date = .now) -> LogFilter {
+        let remotes = Dictionary(refs.remoteBranches.map { ($0.name, $0.refName) }) { first, _ in first }
+        let upstream = { (local: LocalBranch) in local.upstream.flatMap { remotes[$0] } }
+        let head = refs.localBranches.first(where: \.isHead)
+        let kept = Set([head?.refName, head.flatMap(upstream)].compactMap(\.self))
+        let hiddenNames = Set(view.hidden)
+        let pinnedNames = Set(view.pinned)
+        let cutoff = now.addingTimeInterval(-staleAge)
+        let isStale = { (ref: String, date: Date?) in
+            view.hideStale && !kept.contains(ref) && !pinnedNames.contains(ref) && date.map { $0 < cutoff } ?? false
+        }
+        var hidden: Set<String> = []
+        for local in refs.localBranches {
+            if hiddenNames.contains(local.refName) {
+                hidden.insert(local.refName)
+                if tracksOwnName(local), let ref = upstream(local), !kept.contains(ref) { hidden.insert(ref) }
+            } else if isStale(local.refName, local.tipDate) {
+                hidden.insert(local.refName)
+            }
+        }
+        for remote in refs.remoteBranches
+        where hiddenNames.contains(remote.refName) || isStale(remote.refName, remote.tipDate) {
+            hidden.insert(remote.refName)
+        }
+        // The current branch shows even when hidden before it was checked out.
+        if let head { hidden.remove(head.refName) }
+
+        let tips = Dictionary(
+            refs.localBranches.map { ($0.refName, $0.commit) } + refs.remoteBranches.map { ($0.refName, $0.commit) }
+        ) { first, _ in first }
+        let solo = refs.head.commit == nil ? [] : view.solo.filter { tips[$0] != nil }
+        var pinned: [String] = []
+        for ref in view.pinned where !hidden.contains(ref) && (solo.isEmpty || solo.contains(ref) || ref == head?.refName) {
+            if let tip = tips[ref], !pinned.contains(tip) { pinned.append(tip) }
+        }
+        return LogFilter(hidden: hidden, solo: solo, pinned: pinned)
+    }
+
+    /// `local`'s upstream is its own remote counterpart (`feature` → `origin/feature`), which hiding `local` hides too;
+    /// not a branch others may track as well (`feature` made from `origin/main`).
+    private nonisolated static func tracksOwnName(_ local: LocalBranch) -> Bool {
+        local.upstream.map { $0.drop { $0 != "/" }.dropFirst() == local.name } ?? false
+    }
+
+    /// The `--exclude` refs for `hidden`: each one, and the `HEAD` of each remote with a hidden branch (a symref `--all`
+    /// lists, which would show its target again; excluding it is harmless when its target is shown, as `--all` lists
+    /// the target too).
+    private nonisolated static func excludes(_ hidden: Set<String>) -> [String] {
+        let heads = hidden.compactMap { ref -> String? in
+            guard ref.hasPrefix("refs/remotes/"), let remote = ref.dropFirst("refs/remotes/".count).split(separator: "/").first else {
+                return nil
+            }
+            return "refs/remotes/\(remote)/HEAD"
+        }
+        return hidden.sorted() + Set(heads).sorted()
     }
 
     // MARK: Worktrees
@@ -1783,7 +2036,7 @@ final class RepoSession: Identifiable {
     private func updateWorktreeRows(_ backend: Backend) {
         guard logTask == nil, let current = log.value, current.isComplete else { return }
         let worktrees = dirtyWorktrees
-        guard worktrees != current.worktrees else { return }
+        guard worktrees != current.worktrees || Self.hasLineToMissingBase(current) else { return }
         logGeneration &+= 1
         let generation = logGeneration
         logTask = Task { [weak self] in
@@ -3759,13 +4012,20 @@ final class RepoSession: Identifiable {
                     runner: runner, base: toolchain.readBase, directories: directories,
                     journal: UndoJournal(file: StatePaths.directory("undo").appending(
                         path: "\(key).json", directoryHint: .notDirectory)),
-                    rebaseFolder: StatePaths.root.appending(path: "rebase/\(key)", directoryHint: .isDirectory))
+                    rebaseFolder: StatePaths.root.appending(path: "rebase/\(key)", directoryHint: .isDirectory),
+                    view: RepoViewState.load(key: key))
             }
         }
         guard let setUpTask else { throw CancellationError() }
         // Not cancelled with the caller: another select still needs it.
         do {
-            return try await setUpTask.value
+            let backend = try await setUpTask.value
+            if !viewLoaded {
+                viewLoaded = true
+                view = backend.view
+                updateVisibility()
+            }
+            return backend
         } catch {
             // A failed setup (no git, not a repo) is retried by the next load.
             if !Self.isCancellation(error), self.setUpTask == setUpTask { self.setUpTask = nil }
@@ -3775,7 +4035,7 @@ final class RepoSession: Identifiable {
 
     /// A file name for the worktree's state: the SHA-256 of its real path (`ProfileStore.repoKey`), so each worktree
     /// of a repo has its own journal and no path character reaches a file name.
-    private nonisolated static func stateKey(_ cwd: URL) -> String {
+    nonisolated static func stateKey(_ cwd: URL) -> String {
         SHA256.hash(data: Data(ProfileStore.repoKey(cwd).utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 

@@ -81,7 +81,9 @@ struct RepoReadTests {
         #expect(branches["series"]?.upstream == nil)
 
         #expect(Set(refs.remoteBranches.map(\.name)) == ["origin/main", "origin/develop", "origin/feature"])
-        #expect(refs.remoteBranches.allSatisfy { $0.remote == "origin" })
+        #expect(refs.remoteBranches.allSatisfy { $0.remote == "origin" && $0.tipDate != nil })
+        let mainTime = try await graph.copy.git(["log", "-1", "--format=%ct", "main"], in: graph.repo)
+        #expect(main.tipDate != nil && main.tipDate == TimeInterval(mainTime).map(Date.init(timeIntervalSince1970:)))
 
         let tags = Dictionary(uniqueKeysWithValues: refs.tags.map { ($0.name, $0) })
         let annotated = try #require(tags["v1.0"])

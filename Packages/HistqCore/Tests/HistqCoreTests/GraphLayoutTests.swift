@@ -1,7 +1,8 @@
 // Key feature tests for GraphLayout (task 3.1): a merge's second parent opens a lane that is freed after
 // the join and reused later, pages lay out like one batch, the `graph` fixture stays narrow with its
-// first-parent chain in one color and its stashes right above their bases, and (only with
-// HISTQ_BIG_FIXTURE) 50k commits parse and lay out in under 2 s.
+// first-parent chain in one color and its stashes right above their bases, pinned branches keep the
+// leftmost lanes (task 3.2) and no pins changes nothing, and (only with HISTQ_BIG_FIXTURE) 50k commits
+// parse and lay out in under 2 s.
 import Foundation
 import HistqCore
 import Testing
@@ -118,6 +119,70 @@ struct GraphLayoutTests {
         #expect(count >= 50_000)
         #expect(widest <= 3, "every topic lane is freed at its fork")
         #expect(elapsed < .seconds(2))
+    }
+
+    @Test("a pinned branch's first-parent chain stays in lane 0 even when other branches come first")
+    func pinnedChainKeepsLaneZero() {
+        // O is unrelated and comes first; M2 is a child of the pinned tip F2, so its line bends into lane 0.
+        let commits = [
+            commit("o1", ["b"]), commit("m2", ["f2"]), commit("f2", ["f1"]), commit("f1", ["b"]), commit("b", []),
+        ]
+        var unpinned = GraphLayout()
+        #expect(unpinned.append(commits).map(\.lane) == [0, 1, 1, 1, 0])
+
+        var layout = GraphLayout(pinned: ["f2"])
+        let rows = layout.append(commits)
+        #expect(rows.map(\.lane) == [1, 2, 0, 0, 0])
+        #expect(rows[2].top.contains { $0.shape == .bendIn && $0.from == 2 && $0.to == 0 }, "M2's line joins F2 in lane 0")
+        #expect(rows[2].color == rows[1].color, "F2 continues M2's color")
+        expectConnected(rows)
+
+        for size in [1, 2] {
+            var paged = GraphLayout(pinned: ["f2"])
+            var pagedRows: [GraphRow] = []
+            for start in stride(from: 0, to: commits.count, by: size) {
+                pagedRows += paged.append(Array(commits[start..<min(start + size, commits.count)]))
+            }
+            #expect(pagedRows == rows, "pages of \(size) lay out like one batch")
+        }
+    }
+
+    @Test("two pins take lanes 0 and 1, in pin order")
+    func twoPinsTakeLanesInOrder() {
+        let commits = [
+            commit("y2", ["y1"]), commit("y1", ["b"]), commit("x1", ["b"]), commit("o1", ["b"]), commit("b", []),
+        ]
+        var layout = GraphLayout(pinned: ["x1", "y2"])
+        let rows = layout.append(commits)
+        #expect(rows.map(\.lane) == [1, 1, 0, 2, 0])
+        expectConnected(rows)
+
+        // A pinned tip on a lower pin's chain stays there; its own lane is left empty.
+        var overlapping = GraphLayout(pinned: ["a2", "a1"])
+        #expect(overlapping.append([commit("a2", ["a1"]), commit("a1", ["b"]), commit("b", [])]).map(\.lane) == [0, 0, 0])
+    }
+
+    @Test("graph fixture: no pins lays out exactly as before")
+    func noPinsIsUnchanged() async throws {
+        let copy = try await Fixtures.copy()
+        defer { copy.remove() }
+        let repo = copy.repo("graph")
+        let env = try await GitInvocation.readEnvironment(profile: nil, base: copy.base, runner: copy.runner, cwd: repo)
+        let head = try await copy.git(["rev-parse", "HEAD"], in: repo)
+        let stashes = try await StashWorktreeReader.stashes(runner: copy.runner, cwd: repo, env: env)
+        var pages: [[Commit]] = []
+        for try await page in LogReader.pages(runner: copy.runner, cwd: repo, env: env, pageSize: 4) { pages.append(page) }
+
+        var results: [([GraphRow], [GraphHungRow])] = []
+        for var layout in [GraphLayout(), GraphLayout(pinned: [])] {
+            var rows = layout.append([GraphSyntheticRow(kind: .wip, id: "wip", base: head)])
+            layout.hang(stashes.map { GraphSyntheticRow(kind: .stash, id: $0.hash, base: $0.base) })
+            for page in pages { rows += layout.append(page) }
+            results.append((rows, layout.hung))
+        }
+        #expect(results[0].0 == results[1].0)
+        #expect(results[0].1 == results[1].1)
+        #expect(results[0].0.count == pages.joined().count + 1)
     }
 
     // MARK: - Helpers

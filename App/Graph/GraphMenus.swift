@@ -1,7 +1,8 @@
 // The repo's context menus, built once as `MenuEntry` lists and shown both by the graph (an `NSMenu`) and by the sidebar
 // and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset,
 // interactive rebase from here, squash the selected commits, copy),
-// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…), the Remote card's menus,
+// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…; hide, solo and pin in the
+// graph), the Local and Remote cards' Hide Stale Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
 // (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, and what a double-click
 // checks out.
@@ -351,6 +352,7 @@ enum RepoMenus {
         if let upstream {
             entries.append(deleteRemote(upstream, session))
         }
+        entries += visibility(ref, canHide: !isCurrent, session)
         entries += [.separator, .action("Copy Branch Name") { copy(name) }]
         return entries
     }
@@ -385,7 +387,29 @@ enum RepoMenus {
         if let branch {
             entries += [.separator, deleteRemote(branch, session)]
         }
+        entries += visibility(ref, canHide: true, session)
         entries += [.separator, .action("Copy Branch Name") { copy(name) }]
+        return entries
+    }
+
+    /// The graph's view of a branch (`ref`, a full ref name): Hide / Show, Solo / Unsolo, Pin to Left / Unpin. A
+    /// branch hidden as stale shows only once "Hide Stale Branches" is off.
+    private static func visibility(_ ref: String, canHide: Bool, _ session: RepoSession) -> [MenuEntry] {
+        var entries: [MenuEntry] = [.separator]
+        if session.isHidden(ref) {
+            let stale = session.view.hideStale && session.isStale(ref) && !session.isPinned(ref)
+            entries.append(.action("Show", enabled: !stale,
+                                   toolTip: stale ? "Hidden as a stale branch: turn off Hide Stale Branches" : nil) {
+                session.show(ref)
+            })
+        } else if canHide {
+            entries.append(.action("Hide") { session.hide(ref) })
+        }
+        entries += [
+            session.isSoloed(ref) ? .action("Unsolo") { session.unsolo(ref) } : .action("Solo") { session.solo(ref) },
+            session.isPinned(ref)
+                ? .action("Unpin") { session.unpin(ref) } : .action("Pin to Left") { session.pin(ref) },
+        ]
         return entries
     }
 
@@ -425,6 +449,15 @@ enum RepoMenus {
         }
         entries += [.separator, .action("Copy Tag Name") { copy(name) }]
         return entries
+    }
+
+    /// The Local and Remote cards' menus: Hide Stale Branches (checked while on), then Show All Branches.
+    static func branchView(_ session: RepoSession) -> [MenuEntry] {
+        let hideStale = session.view.hideStale
+        return [
+            .action("Hide Stale Branches", checked: hideStale) { session.setHideStale(!hideStale) },
+            .action("Show All Branches", enabled: session.hiddenCount > 0 || session.isSoloActive) { session.showAll() },
+        ]
     }
 
     // MARK: Remotes

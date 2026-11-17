@@ -232,6 +232,7 @@ private struct CommitListPanel: View {
             // ⌘F (Edit › Find…): the search bar slides up from the card's bottom edge over the graph, which neither
             // moves nor resizes (it keeps its identity).
             graph
+                .overlay(alignment: .topTrailing) { GraphVisibilityChip(session: session) }
                 .overlay(alignment: .bottom) {
                     if session.graphSearch.isOpen {
                         GraphSearchBar(search: session.graphSearch)

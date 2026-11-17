@@ -1,8 +1,9 @@
 // The command palette's rows for one window, copied when it opens (task 8.5): Undo / Redo, the toolbar's repo actions and their
-// Pull ▾ / Push ▾ menus, "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…,
-// the Settings pages and the tab position, then the repo's menu operations (working tree, the selected commit, the
-// stashes, each branch, remote branch and tag, the remotes). Every repo row runs the same `MenuEntry` or
-// `ToolbarAction` the menus and buttons run, so its confirmations, forms and enabled state are theirs.
+// Pull ▾ / Push ▾ menus, Show All Branches and Hide / Show Stale Branches, "Checkout <branch>" for every local and
+// remote branch, the window's tabs, Open Repository…, the Settings pages and the tab position, then the repo's menu
+// operations (working tree, the selected commit, the stashes, each branch, remote branch and tag, the remotes). Every
+// repo row runs the same `MenuEntry` or `ToolbarAction` the menus and buttons run, so its confirmations, forms and
+// enabled state are theirs.
 import AppKit
 import HistqCore
 
@@ -83,8 +84,8 @@ enum PaletteCommands {
         return snapshot
     }
 
-    /// Undo and Redo (named and enabled as the toolbar's), the toolbar's buttons (enabled as they are), then the Pull ▾
-    /// and Push ▾ menus.
+    /// Undo and Redo (named and enabled as the toolbar's), the toolbar's buttons (enabled as they are), the Pull ▾
+    /// and Push ▾ menus, then Show All Branches and Hide / Show Stale Branches.
     private static func repository(_ session: RepoSession, into snapshot: inout PaletteSnapshot) {
         for isRedo in [false, true] {
             let availability = session.historyAvailability(redo: isRedo)
@@ -105,6 +106,13 @@ enum PaletteCommands {
                      systemImage: ToolbarAction.pull.systemImage)
         snapshot.add(RepoMenus.push(session), detail: "Push ▾", section: .repository,
                      systemImage: ToolbarAction.push.systemImage)
+        snapshot.add("Show All Branches", detail: "Graph", section: .repository, systemImage: "eye",
+                     enabled: session.hiddenCount > 0 || session.isSoloActive) { session.showAll() }
+        let hideStale = session.view.hideStale
+        snapshot.add(hideStale ? "Show Stale Branches" : "Hide Stale Branches", detail: "Graph › Older than 90 days",
+                     section: .repository, systemImage: hideStale ? "eye" : "eye.slash") {
+            session.setHideStale(!hideStale)
+        }
     }
 
     /// Every local branch but the current one, then every remote branch, checked out as the sidebar's double-click
