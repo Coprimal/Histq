@@ -6,7 +6,7 @@ import SwiftUI
 
 struct GeneralSettings: View {
     @AppStorage(PrefKey.pullMode.rawValue, store: Preferences.defaults) private var pullMode = "fastForward"
-    @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 0
+    @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 3
     @AppStorage(PrefKey.pruneOnFetch.rawValue, store: Preferences.defaults) private var pruneOnFetch = false
     @AppStorage(PrefKey.mergeTool.rawValue, store: Preferences.defaults) private var mergeTool = ""
     @AppStorage(PrefKey.gitPath.rawValue, store: Preferences.defaults) private var gitPath = ""
@@ -41,14 +41,13 @@ struct GeneralSettings: View {
                 }
                 SettingsDivider()
                 LabeledContent {
-                    CapsuleTabs(selection: $autoFetchMinutes, tabs: [0, 5, 10, 30],
+                    CapsuleTabs(selection: $autoFetchMinutes, tabs: [0, 3, 5, 10, 30],
                                 title: { $0 == 0 ? Text("Off") : Text("\($0) min") }, compact: true)
                         .fixedSize()
                 } label: {
                     Text("Fetch automatically")
-                    SettingsHint("Fetches all remotes of each open tab at this interval. Off by default: a fetch runs "
-                        + "the repo's own network settings (a credential helper, a local remote's upload-pack) "
-                        + "without a click.")
+                    SettingsHint("Fetches all remotes of each open tab at this interval, every 3 minutes by default. "
+                        + "The repo's own hooks and credential helpers never run in an automatic fetch.")
                 }
                 SettingsDivider()
                 SettingsSwitchRow(title: "Prune on fetch",

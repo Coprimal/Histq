@@ -167,7 +167,7 @@ enum PrefKey: String, CaseIterable {
         case .rowDensity: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"
-        case .autoFetchMinutes: 0
+        case .autoFetchMinutes: 3
         case .pruneOnFetch: false
         case .mergeTool: ""
         case .gitPath: ""

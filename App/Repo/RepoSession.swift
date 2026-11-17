@@ -948,7 +948,7 @@ final class RepoSession: Identifiable {
     /// intervals count; any other value (a hand-written default) reads as off, so it can never fetch in a tight loop.
     private func scheduleAutoFetch() {
         let stored = Preferences.defaults.integer(forKey: PrefKey.autoFetchMinutes.rawValue)
-        let minutes = [5, 10, 30].contains(stored) ? stored : 0
+        let minutes = [3, 5, 10, 30].contains(stored) ? stored : 0
         guard minutes != autoFetchMinutes else { return }
         autoFetchMinutes = minutes
         autoFetchTask?.cancel()
