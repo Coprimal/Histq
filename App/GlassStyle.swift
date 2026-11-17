@@ -120,6 +120,9 @@ enum Palette {
     /// #238636 / #6E7681
     static let graphPullOpenFill = srgb(0x238636)
     static let graphPullDraftFill = srgb(0x6E7681)
+    /// The pull request icon on a badge without its chip: a bright green that reads on the dark badge fills (user,
+    /// 2026-11-17). #50FA7B
+    static let graphPullOpenIcon = srgb(0x50FA7B)
     /// The faded ("ghost") badge of the branch a selected commit is on, and its line to the node: drawn whole at this
     /// opacity.
     static let graphGhostAlpha: CGFloat = 0.4

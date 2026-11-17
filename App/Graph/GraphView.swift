@@ -198,9 +198,11 @@ final class GraphTableView: NSTableView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        controller?.beginPress(at: point, modifiers: event.modifierFlags)
+        defer { controller?.endPress() }
         // A pull request chip opens its pull request at once; the row's selection, its detail and a badge drag are
         // left alone (a row select would close the pull request again).
-        if event.clickCount == 1, (delegate as? GraphTableController)?.openPullRequest(at: point) == true { return }
+        if event.clickCount == 1, controller?.openPullRequest(at: point) == true { return }
         mouseDownPoint = point
         if showsOpenHand { NSCursor.closedHand.set() }
         super.mouseDown(with: event)
@@ -225,13 +227,18 @@ final class GraphTableView: NSTableView {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        updateCursor(at: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        updateCursor(at: point)
+        controller?.hoverRefs(at: point)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         updateCursor(at: nil)
+        controller?.hoverRefs(at: nil)
     }
+
+    private var controller: GraphTableController? { delegate as? GraphTableController }
 
     private func updateCursor(at point: NSPoint?) {
         let hand = point.map { (delegate as? GraphTableController)?.canDragBadge(at: $0) == true } ?? false
@@ -243,8 +250,23 @@ final class GraphTableView: NSTableView {
         showsOpenHand = hand
     }
 
+    // No mouse moves during a drag: the row under it shows its badge stack here (on every move: the table validates a
+    // drop only when its proposed row changes), so a badge hidden behind "+N" is a drop target too.
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        controller?.hoverRefs(at: convert(sender.draggingLocation, from: nil))
+        return super.draggingUpdated(sender)
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        super.draggingExited(sender)
+        controller?.hoverRefs(at: nil)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
-        (delegate as? GraphTableController)?.menu(at: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        controller?.beginPress(at: point, modifiers: event.modifierFlags)
+        defer { controller?.endPress() }
+        return controller?.menu(at: point)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -452,6 +474,13 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private static let badgeType = NSPasteboard.PasteboardType("com.math2it.histq.branch-badge")
     /// The badge being dragged.
     private var dragged: RefBadge?
+    /// The hover stack of a row's badges (`hoverRefs`), the row and the cell it covers.
+    private var stackOverlay: RefBadgeCellView?
+    private var stackRow = -1
+    private weak var coveredCell: RefBadgeCellView?
+    /// While a press on a stacked badge is tracked: the row under it, the stack's row, which it is for, and the
+    /// table's selection and the event's modifier keys when it began.
+    private var pressRow: (row: Int, stack: Int, selection: IndexSet, modifiers: NSEvent.ModifierFlags)?
 
     func attach(_ table: NSTableView) {
         self.table = table
@@ -465,10 +494,17 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         table.setDraggingSourceOperationMask(.generic, forLocal: true)
         NotificationCenter.default.addObserver(
             self, selector: #selector(avatarsChanged(_:)), name: AvatarStore.didChange, object: nil)
+        // A scroll moves the rows under a still pointer: the hover stack would stay on the wrong row.
+        if let clip = table.enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(scrolled(_:)), name: NSView.boundsDidChangeNotification, object: clip)
+        }
         #if DEBUG
         if let request = AppState.launchFlag("-HistqColumnDrag") { debugColumnDrag(request) }
         if let request = AppState.launchFlag("-HistqGraphWidth") { debugGraphWidth(request) }
         if let request = AppState.launchFlag("-HistqDensityAfter") { debugDensityAfter(request) }
+        if let request = AppState.launchFlag("-HistqHoverRefs") { debugHoverRefs(request) }
         #endif
     }
 
@@ -526,6 +562,34 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             + widths.sorted().map(String.init).joined(separator: ","))
     }
 
+    private static var didHoverRefs = false
+
+    /// DEBUG `-HistqHoverRefs <ref>`: once the table shows rows, hovers the refs cell of the row with that ref as the
+    /// pointer would (`hoverRefs`), so a background shot shows its badge stack. Logs `hover-refs row=<n> stack=<0|1>`.
+    /// Once per launch.
+    private func debugHoverRefs(_ name: String) {
+        guard !Self.didHoverRefs else { return }
+        Self.didHoverRefs = true
+        Task { @MainActor [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, let table = self.table else { return }
+                guard table.window != nil, self.rowCount > 0 else { continue }
+                try? await Task.sleep(for: .milliseconds(500))
+                let column = table.column(withIdentifier: GraphColumn.refs.identifier)
+                guard let row = (0..<self.rowCount).first(where: { row in
+                    guard case .commit(let index) = self.log.entry(at: row) else { return false }
+                    return self.badges[self.log.commits[index].hash]?.contains { $0.name == name } == true
+                }), column >= 0 else { return }
+                table.scrollRowToVisible(row)
+                let rect = table.frameOfCell(atColumn: column, row: row)
+                self.hoverRefs(at: NSPoint(x: rect.midX, y: rect.midY))
+                UITiming.probe("hover-refs", "row=\(row) stack=\(self.stackOverlay?.superview != nil ? 1 : 0)")
+                return
+            }
+        }
+    }
+
     private static var didColumnDrag = false
 
     /// DEBUG `-HistqColumnDrag <column>:<dx>`: once the table shows rows, moves the border right of `<column>`
@@ -576,6 +640,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // Once the column has its new width: every row view and cell the table keeps (on screen, just around it,
             // and reused ones) is made again with the new metrics, row height, highlight and lane folding.
             densityChanged = false
+            hideStack()
             table?.reloadData()
         }
         if view.dimming.token != dimming.token {
@@ -639,6 +704,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // load completes, so it does not narrow and widen again on every refresh.
             let lanes = Self.lanes(in: new)
             logLanes = new.isComplete ? lanes : max(lanes, logLanes)
+            hideStack()
             table.reloadData()
             if let anchor {
                 restoreScroll(anchor, in: table)
@@ -869,10 +935,15 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             let ghostBadge = ghost(at: row, commit: commit)
             // After the row's own badges (a detached HEAD, tags): when the column is short, the hint gives way first.
             if let ghostBadge { cell.badges.append(ghostBadge) }
-            // Every name in full, also those cut, shown as an icon or behind "+N".
-            cell.toolTip = cell.badges.isEmpty ? nil : cell.badges.map(\.name).joined(separator: "\n")
             cell.color = graphRow.color
             cell.metrics = metrics
+            // A reloaded row keeps its hover stack, made again from its new badges (a click on the stack selects
+            // the row, which may reload it); a cell reused for another row gives it up.
+            if row == stackRow {
+                showStack(cell, row: row)
+            } else if cell === coveredCell {
+                hideStack()
+            }
             cell.needsDisplay = true
             return cell
         case .graph:
@@ -1049,15 +1120,15 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// click on another worktree's WIP row opens that worktree (only a click: arrows never open tabs).
     @objc func clicked(_ sender: Any?) {
         reportSelection()
-        guard let table, case .worktree(let path)? = item(at: table.clickedRow),
-              table.selectedRowIndexes == IndexSet(integer: table.clickedRow)
+        guard let table, case .worktree(let path)? = item(at: clickedRow),
+              table.selectedRowIndexes == IndexSet(integer: clickedRow)
         else { return }
         view?.onOpenWorktree(path)
     }
 
     /// Checks out the double-clicked row (the hook); the first click of the pair has already selected it.
     @objc func doubleClicked(_ sender: Any?) {
-        guard let table, let item = item(at: table.clickedRow) else { return }
+        guard let item = item(at: clickedRow) else { return }
         view?.onActivate(item)
     }
 
@@ -1126,16 +1197,14 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// The menu of the row at `point` (in the table), with the badge under it; nil outside the rows.
     func menu(at point: NSPoint) -> NSMenu? {
-        guard let table, let view else { return nil }
-        let row = table.row(at: point)
-        guard let item = item(at: row) else { return nil }
+        guard let view, let item = item(at: routedRow(at: point)) else { return nil }
         let entries = view.menuEntries(item, badge(at: point))
         return entries.isEmpty ? nil : MenuBuilder.menu(entries)
     }
 
     /// Opens the pull request whose chip is at `point` (in the table); false when there is none.
     func openPullRequest(at point: NSPoint) -> Bool {
-        guard let table, let view, let cell = cell(at: point),
+        guard let table, let view, let cell = badgeView(at: point),
               let pull = cell.pullRequest(at: cell.convert(point, from: table))
         else { return false }
         view.onOpenPullRequest(pull.number)
@@ -1144,14 +1213,14 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// True when a drag at `point` (in the table) drags a branch badge: on one, but not on its pull request chip.
     func canDragBadge(at point: NSPoint) -> Bool {
-        guard let table, let cell = cell(at: point), cell.pullRequest(at: cell.convert(point, from: table)) == nil
+        guard let table, let cell = badgeView(at: point), cell.pullRequest(at: cell.convert(point, from: table)) == nil
         else { return false }
         return badge(at: point)?.sidebarItem?.branchName != nil
     }
 
-    /// The badge drawn at `point` (in the table).
+    /// The badge drawn at `point` (in the table): in the hover stack when it is on one of its badges.
     private func badge(at point: NSPoint) -> RefBadge? {
-        guard let table, let cell = cell(at: point) else { return nil }
+        guard let table, let cell = badgeView(at: point) else { return nil }
         return cell.badge(at: cell.convert(point, from: table))
     }
 
@@ -1160,7 +1229,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// Only a branch badge drags (its row would otherwise start a row drag, which the graph does not have): a drag
     /// anywhere else keeps the table's own drag-to-select.
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-        guard let point = (tableView as? GraphTableView)?.mouseDownPoint, tableView.row(at: point) == row,
+        // The row under the press, or the stack's own row (a drag of a stacked badge): one item for the drag.
+        guard dragged == nil, let point = (tableView as? GraphTableView)?.mouseDownPoint,
+              row == tableView.row(at: point) || row == routedRow(at: point),
               let badge = badge(at: point), let item = badge.sidebarItem, item.branchName != nil
         else { return nil }
         dragged = badge
@@ -1174,7 +1245,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                    forRowIndexes rowIndexes: IndexSet)
     {
         guard let badge = dragged, let point = (tableView as? GraphTableView)?.mouseDownPoint,
-              let cell = cell(at: point)
+              let cell = badgeView(at: point)
         else { return }
         let image = cell.dragImage(of: badge, scale: tableView.window?.backingScaleFactor ?? 2)
         session.draggingFormation = .none
@@ -1198,7 +1269,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     {
         let point = tableView.convert(info.draggingLocation, from: nil)
         guard dropTarget(at: point) != nil else { return [] }
-        tableView.setDropRow(tableView.row(at: point), dropOperation: .on)
+        tableView.setDropRow(routedRow(at: point), dropOperation: .on)
         return .generic
     }
 
@@ -1226,6 +1297,118 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         return target
     }
 
+    // MARK: Badge stack
+
+    /// Shows the hovered row's badges whole, one under the other, as GitKraken does, while the pointer is on its refs
+    /// cell or on the stack's badges, when the cell does not show them all whole; the badge under the pointer is lit.
+    /// The table keeps the events and routes those on a stacked badge to it (`badgeView`, `routedRow`): a click
+    /// selects the stack's row, a right-click opens the badge's menu, a branch badge drags and takes drops.
+    func hoverRefs(at point: NSPoint?) {
+        guard let table, let point else { return hideStack() }
+        if let stackOverlay, stackOverlay.superview != nil {
+            let index = stackIndex(at: point)
+            if index != nil || table.row(at: point) == stackRow && cell(at: point) != nil {
+                stackOverlay.hovered = index.flatMap { stackOverlay.badges[$0].isGhost ? nil : $0 }
+                return
+            }
+        }
+        guard let cell = cell(at: point), !cell.showsAllBadges else { return hideStack() }
+        hideStack()
+        showStack(cell, row: table.row(at: point))
+        stackOverlay?.hovered = stackIndex(at: point)
+    }
+
+    /// Lays the stack over `row`, whose refs cell is `cell` (also a cell just made for it by a reload: its badges may
+    /// have changed), and hides that cell's own badges.
+    private func showStack(_ cell: RefBadgeCellView, row: Int) {
+        guard let table else { return }
+        let column = table.column(withIdentifier: GraphColumn.refs.identifier)
+        guard column >= 0, row >= 0, row < table.numberOfRows else { return hideStack() }
+        let cellRect = table.frameOfCell(atColumn: column, row: row)
+        let overlay = stackOverlay ?? RefBadgeCellView()
+        if row != stackRow || overlay.badges != cell.badges { overlay.hovered = nil }
+        overlay.badges = cell.badges
+        overlay.color = cell.color
+        overlay.metrics = metrics
+        let size = overlay.stackSize(rowHeight: cellRect.height, lineEnd: cellRect.width)
+        // Near the bottom of the view the stack grows up from the row, so it is not cut.
+        let visible = table.visibleRect
+        let bottom = visible.maxY - (table.enclosingScrollView?.contentInsets.bottom ?? 0)
+        let upward = cellRect.minY + size.height > bottom && cellRect.maxY - size.height >= visible.minY
+        overlay.stack = RefBadgeCellView.Stack(rowHeight: cellRect.height, upward: upward, lineEnd: cellRect.width)
+        overlay.frame = CGRect(x: cellRect.minX, y: upward ? cellRect.maxY - size.height : cellRect.minY,
+                               width: size.width, height: size.height)
+        // Above the row views, also those added since it was last shown.
+        table.addSubview(overlay, positioned: .above, relativeTo: nil)
+        overlay.needsDisplay = true
+        if coveredCell !== cell { coveredCell?.isCovered = false }
+        cell.isCovered = true
+        coveredCell = cell
+        stackRow = row
+        stackOverlay = overlay
+    }
+
+    func hideStack() {
+        stackOverlay?.removeFromSuperview()
+        stackOverlay?.hovered = nil
+        coveredCell?.isCovered = false
+        coveredCell = nil
+        stackRow = -1
+    }
+
+    /// The stack's badge at `point` (in the table), when the stack is shown and `point` is on one of its badges.
+    private func stackIndex(at point: NSPoint) -> Int? {
+        guard let table, let overlay = stackOverlay, overlay.superview != nil else { return nil }
+        return overlay.badgeIndex(at: overlay.convert(point, from: table))
+    }
+
+    /// The view whose badges are at `point` (in the table): the stack on one of its badges, else the refs cell.
+    private func badgeView(at point: NSPoint) -> RefBadgeCellView? {
+        stackIndex(at: point) != nil ? stackOverlay : cell(at: point)
+    }
+
+    /// The row an event at `point` (in the table) is for: the stack's row on one of its badges.
+    private func routedRow(at point: NSPoint) -> Int {
+        stackIndex(at: point) != nil ? stackRow : table?.row(at: point) ?? -1
+    }
+
+    /// A mouse down (or a right-click) at `point`, with the event's `modifiers`: on a stacked badge it is for the
+    /// stack's row until `endPress`. On the stack's own refs cell, off its badges, the stack stays (as for a hover), so
+    /// the badges it covers stay hidden and answer no click, menu or drag; the row selects as usual. Elsewhere the
+    /// stack goes away.
+    func beginPress(at point: NSPoint, modifiers: NSEvent.ModifierFlags) {
+        dragged = nil
+        pressRow = nil
+        if stackIndex(at: point) != nil {
+            pressRow = (row: table?.row(at: point) ?? -1, stack: stackRow,
+                        selection: table?.selectedRowIndexes ?? IndexSet(), modifiers: modifiers)
+        } else if table?.row(at: point) != stackRow || cell(at: point) == nil {
+            hideStack()
+        }
+    }
+
+    func endPress() { pressRow = nil }
+
+    /// The clicked row, the stack's own for a click on a stacked badge.
+    private var clickedRow: Int { pressRow?.stack ?? table?.clickedRow ?? -1 }
+
+    /// A press on a stacked badge selects the stack's row, not the row under it: with Command it toggles that row in
+    /// the selection the press began with, with Shift it adds it, else it selects it alone. The table may ask again
+    /// as the pointer drags, so the answer comes from the press's start, never from the current selection.
+    func tableView(_ tableView: NSTableView, selectionIndexesForProposedSelection proposed: IndexSet) -> IndexSet {
+        guard let pressRow, pressRow.row != pressRow.stack else { return proposed }
+        guard pressRow.row >= 0 else { return IndexSet(integer: pressRow.stack) }
+        var selection = pressRow.selection
+        if pressRow.modifiers.contains(.command) {
+            if selection.remove(pressRow.stack) == nil { selection.insert(pressRow.stack) }
+            return selection
+        }
+        if pressRow.modifiers.contains(.shift) { return selection.union(IndexSet(integer: pressRow.stack)) }
+        return IndexSet(integer: pressRow.stack)
+    }
+
+    @objc private func scrolled(_ notification: Notification) { hideStack() }
+
     private func cell(at point: NSPoint) -> RefBadgeCellView? {
         guard let table else { return nil }
         let column = table.column(withIdentifier: GraphColumn.refs.identifier)
@@ -1241,6 +1424,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// A graph column resize also redraws its cells on screen: its nodes fold (`GraphMetrics.drawnX`)
     /// point by point with its width.
     func tableViewColumnDidResize(_ notification: Notification) {
+        hideStack()
         refreshHighlights()
         let resized = notification.userInfo?["NSTableColumn"] as? NSTableColumn
         if resized?.identifier == GraphColumn.graph.identifier { forEachGraphCell { $0.needsDisplay = true } }
