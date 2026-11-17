@@ -3,8 +3,8 @@
 import AppKit
 import SwiftUI
 
-/// Sizes of the tab strip. The tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the row
-/// scrolls. The vertical tabs (`VerticalTabsPanel`) use the same drag threshold, slot and dot.
+/// Sizes of the tab strip. The unpinned tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the
+/// row scrolls. A pinned tab is `pinnedTabWidth` wide. The vertical tabs (`VerticalTabsPanel`) use the same drag threshold, slot and dot.
 enum TabStripMetrics {
     /// Tall enough that New Tab and the tab list sit inside the row, clear of the sheet under it.
     static let tabHeight: CGFloat = 34
@@ -26,6 +26,14 @@ enum TabStripMetrics {
     static let slot: CGFloat = 16
     /// The profile color dot before the tab's name.
     static let dot: CGFloat = 8
+    /// The square a tab's emoji or a pinned tab's circle fills (`TabIcon`): the same as `slot`, so an emoji takes the
+    /// slot before the name and the name stays centered.
+    static let icon: CGFloat = 16
+    /// A pinned tab: its icon alone. At least 2 × `tabRadius`, so the selected tab's top arcs (`TabSheetShape`) fit.
+    static let pinnedTabWidth: CGFloat = 44
+    /// The profile color dot on a tab's icon's lower-right corner, and the white ring around it (outside the color).
+    static let iconDot: CGFloat = 6
+    static let iconDotRing: CGFloat = 1.5
     /// How far a press moves before it reorders the tab.
     static let dragThreshold: CGFloat = 5
     /// A tab group's line: under its chip and tabs, around its selected tab (and the vertical tabs' bar).
@@ -98,8 +106,9 @@ struct TabStripButtons: View {
     }
 }
 
-/// The tabs with a small gap: equal widths, no fill (a subtle one on hover), and the selected tab's sheet-colored
-/// shape that slides to the next selection. A tab group (a repo's worktrees, `WindowModel.tabGroups`) has its name chip
+/// The tabs with a small gap: the pinned tabs first, narrow (`pinnedTabWidth`, their icon alone), then the others in
+/// equal widths; no fill (a subtle one on hover), and the selected tab's sheet-colored shape that slides to the next
+/// selection. A tab group (a repo's worktrees, `WindowModel.tabGroups`) has its name chip
 /// before its first tab, its color as one line under the chip and its tabs (`TabGroupLine`, open where the selected
 /// tab stands, live during a drag), and as the selected tab's outline.
 private struct TabTrack: View {
@@ -120,20 +129,27 @@ private struct TabTrack: View {
         GeometryReader { proxy in
             let groups = model.tabGroups
             // A collapsed group's tabs take no room.
-            let hidden = groups.filter { model.collapsedGroups.contains($0.key) }.reduce(0) { $0 + $1.range.count }
-            let count = model.tabs.count - hidden
+            let hidden = Set(groups.filter { model.collapsedGroups.contains($0.key) }.flatMap(\.range))
+            let shown = model.tabs.indices.filter { !hidden.contains($0) }
+            let pinned = CGFloat(shown.filter { model.tabs[$0].pinned }.count)
+            let count = shown.count
+            let unpinned = CGFloat(count) - pinned
             let chips = groups.reduce(0) { $0 + TabStripMetrics.groupChipWidth($1.name) }
             let items = count + groups.count
             let gaps = TabStripMetrics.gap * CGFloat(max(items - 1, 0)) + 2 * TabStripMetrics.flare
+            let pinnedWidth = pinned * TabStripMetrics.pinnedTabWidth
+            // The unpinned tabs share what the pinned ones, the chips and the gaps leave.
             let tabWidth = min(TabStripMetrics.maxTabWidth,
                                max(TabStripMetrics.minTabWidth,
-                                   (proxy.size.width - gaps - chips) / CGFloat(max(count, 1))))
-            let rowWidth = tabWidth * CGFloat(count) + chips + gaps
+                                   (proxy.size.width - gaps - chips - pinnedWidth) / max(unpinned, 1)))
+            let rowWidth = tabWidth * unpinned + pinnedWidth + chips + gaps
             ScrollViewReader { scroller in
                 ScrollView(.horizontal, showsIndicators: false) {
                     row(layout: TabGroupLayout(tabs: model.tabs, groups: groups,
                                                collapsed: model.collapsedGroups, tabExtent: tabWidth,
                                                gap: TabStripMetrics.gap,
+                                               extent: { model.tabs[$0].pinned ? TabStripMetrics.pinnedTabWidth
+                                                   : tabWidth },
                                                headerExtent: { TabStripMetrics.groupChipWidth($0.name) }))
                 }
                 .scrollDisabled(rowWidth <= proxy.size.width)
@@ -176,7 +192,8 @@ private struct TabTrack: View {
                     TabGroupChip(group: group, collapsed: layout.collapsed.contains(group.key),
                                  width: layout.headerExtents[group.key] ?? 0,
                                  span: layout.span(of: group.key), opening: opening,
-                                 openingWidth: layout.tabExtent + 2 * TabStripMetrics.flare,
+                                 openingWidth: (selected.map(layout.extent(of:)) ?? layout.tabExtent)
+                                     + 2 * TabStripMetrics.flare,
                                  onToggle: { withAnimation(animation) { model.toggleGroup(group.key) } })
                         .padding(.horizontal, TabStripMetrics.flare)
                         .offset(x: chipX - (current.headers[group.key] ?? 0))
@@ -198,13 +215,14 @@ private struct TabTrack: View {
         let profile = model.profile(of: tab)
         let group = layout.groupKey[index]
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
-        return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
+        return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji, pinned: tab.pinned,
+                       pinColor: tab.pinColor, profileColor: profile?.color,
                        profileName: profile?.name, groupName: group.map(RepoGroupKey.name(of:)),
                        groupColor: group.map(TabGroupColors.line),
                        selected: selected, dragged: dragged, namespace: namespace,
                        onSelect: { model.selectTab(id: tab.id) },
                        onClose: { close(tab.id) })
-            .frame(width: layout.tabExtent, height: TabStripMetrics.tabHeight)
+            .frame(width: layout.extent(of: index), height: TabStripMetrics.tabHeight)
             // The tab itself, not its flares' room, which overlaps its neighbors'.
             .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
             .padding(.horizontal, TabStripMetrics.flare)
@@ -267,7 +285,8 @@ private struct TabTrack: View {
 
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
 /// Tabs to the Right (Below), each off when it has no tab to close, then Reveal in Finder (the tab's repo or worktree
-/// folder; off for a Welcome tab or a missing folder) and Set Alias…, off for a Welcome tab.
+/// folder; off for a Welcome tab or a missing folder), Set Alias…, Set Emoji… and Pin Tab / Unpin Tab (Pin Group /
+/// Unpin Group for a tab of a worktree group, which pins with it), these three off for a Welcome tab.
 @MainActor
 enum TabMenu {
     static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
@@ -275,6 +294,8 @@ enum TabMenu {
         let tab = model.tabs[index]
         let isRepo = tab.repoURL != nil
         let revealable = isRepo && !tab.isMissing
+        let grouped = model.tabGroups.contains { $0.range.contains(index) }
+        let pinTitle = (tab.pinned ? "Unpin " : "Pin ") + (grouped ? "Group" : "Tab")
         return [
             .action("Close Tab") { close(id, model) },
             .action("Close Other Tabs", enabled: model.tabs.count > 1) { model.closeOtherTabs(id) },
@@ -288,6 +309,12 @@ enum TabMenu {
             },
             .action("Set Alias…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to name.") {
                 model.presentModal(.tabAlias(tabID: id))
+            },
+            .action("Set Emoji…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to mark.") {
+                model.presentModal(.tabEmoji(tabID: id))
+            },
+            .action(pinTitle, enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to pin.") {
+                model.setPinned(!tab.pinned, for: id)
             },
         ] + profile(id, tab, revealable, model)
     }
@@ -384,10 +411,18 @@ private struct TabGroupLine: Shape {
 }
 
 /// One tab: its name with its profile's color dot right before it, centered and cut with "…", and a close button
-/// while hovered.
+/// while hovered. A tab with an emoji shows it in the slot before the name (the name alone stays centered), with the
+/// profile dot on the emoji's corner. A pinned tab shows only its icon (`TabIcon`: the emoji, else its circle), with no
+/// close button; its tooltip carries the name.
 struct TabItem: View {
     let title: String
     let help: String
+    /// The tab's emoji (`WindowModel.Tab.emoji`); nil for none.
+    let emoji: String?
+    /// A pinned tab: its icon alone, no name and no close button.
+    let pinned: Bool
+    /// A pinned tab's circle color (`TabIcon.circleColor`), shown when it has no emoji.
+    let pinColor: Int?
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
@@ -403,12 +438,73 @@ struct TabItem: View {
     @State private var hovered = false
 
     var body: some View {
+        label
+            .padding(.horizontal, 6)
+            .frame(maxHeight: .infinity)
+            .background {
+                if selected {
+                    // The sheet's opaque fill, flares included (outside the tab's frame): the tab and the sheet read as
+                    // one shape. No edge, which would draw a line where they meet.
+                    TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare)
+                        .fill(Palette.sheet)
+                        .overlay {
+                            // A grouped tab's outline in the group's color, its flares meeting the group's line
+                            // (`TabGroupLine`); inset half the line so the strip does not clip it.
+                            if let groupColor {
+                                TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare,
+                                              closed: false)
+                                    .stroke(groupColor, lineWidth: TabStripMetrics.groupLine)
+                                    .padding(.vertical, TabStripMetrics.groupLine / 2)
+                            }
+                        }
+                        .padding(.horizontal, -TabStripMetrics.flare)
+                        .matchedGeometryEffect(id: "selectedTab", in: namespace)
+                } else {
+                    Capsule(style: .circular)
+                        .fill(hovered || dragged ? Palette.tabFill : .clear)
+                        .padding(.bottom, 3)
+                }
+            }
+            .contentShape(Capsule(style: .circular))
+            .animation(Motion.hover, value: hovered)
+            .onHover { hovered = $0 }
+            // A pinned tab shows no name: its tooltip leads with it (an alias the path does not show).
+            .help(pinned && help != title ? "\(title)\n\(help)" : help)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(title)
+            .accessibilityValue([pinned ? "Pinned" : nil, groupName.map { "Group \($0)" },
+                                 profileName.map { "Profile \($0)" }]
+                .compactMap(\.self).joined(separator: ", "))
+            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction(.default, onSelect)
+    }
+
+    /// A pinned tab's icon alone, centered; else the name between the leading slot (empty, or the emoji) and the close
+    /// button's slot.
+    @ViewBuilder private var label: some View {
+        if pinned {
+            TabIcon(emoji: emoji, circleColor: emoji == nil ? TabIcon.circleColor(pinColor) : nil,
+                    profileColor: profileColor, profileName: profileName)
+                .frame(maxWidth: .infinity)
+        } else {
+            titled
+        }
+    }
+
+    /// The name, centered, with the profile dot before it (on the emoji instead when the tab has one).
+    private var titled: some View {
         HStack(spacing: 4) {
-            // Balances the close button's slot, so the name stays centered.
-            Color.clear.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+            if let emoji {
+                // The emoji in the slot that balances the close button's, so the name stays centered.
+                TabIcon(emoji: emoji, circleColor: nil, profileColor: profileColor, profileName: profileName)
+                    .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+            } else {
+                // Balances the close button's slot, so the name stays centered.
+                Color.clear.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+            }
             // The dot right before the name, centered with it.
             HStack(spacing: 2) {
-                if let profileColor {
+                if emoji == nil, let profileColor {
                     Circle()
                         .fill(ProfileColors.color(profileColor))
                         .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
@@ -437,41 +533,6 @@ struct TabItem: View {
                 Color.clear.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
             }
         }
-        .padding(.horizontal, 6)
-        .frame(maxHeight: .infinity)
-        .background {
-            if selected {
-                // The sheet's opaque fill, flares included (outside the tab's frame): the tab and the sheet read as
-                // one shape. No edge, which would draw a line where they meet.
-                TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare)
-                    .fill(Palette.sheet)
-                    .overlay {
-                        // A grouped tab's outline in the group's color, its flares meeting the group's line
-                        // (`TabGroupLine`); inset half the line so the strip does not clip it.
-                        if let groupColor {
-                            TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare, closed: false)
-                                .stroke(groupColor, lineWidth: TabStripMetrics.groupLine)
-                                .padding(.vertical, TabStripMetrics.groupLine / 2)
-                        }
-                    }
-                    .padding(.horizontal, -TabStripMetrics.flare)
-                    .matchedGeometryEffect(id: "selectedTab", in: namespace)
-            } else {
-                Capsule(style: .circular)
-                    .fill(hovered || dragged ? Palette.tabFill : .clear)
-                    .padding(.bottom, 3)
-            }
-        }
-        .contentShape(Capsule(style: .circular))
-        .animation(Motion.hover, value: hovered)
-        .onHover { hovered = $0 }
-        .help(help)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(title)
-        .accessibilityValue([groupName.map { "Group \($0)" }, profileName.map { "Profile \($0)" }]
-            .compactMap(\.self).joined(separator: ", "))
-        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction(.default, onSelect)
     }
 
     /// A small round highlight on hover, darker while pressed. The vertical tabs' rows use it too.
@@ -494,6 +555,67 @@ struct TabItem: View {
                     .onHover { hovered = $0 }
             }
         }
+    }
+}
+
+/// A tab's icon in a `size` square: its emoji, else a circle in `circleColor` (a pinned tab's), else nothing (the square
+/// stays), with the profile's color dot on its lower-right corner in a white ring. The top tabs and the vertical tabs
+/// share it.
+struct TabIcon: View {
+    let emoji: String?
+    /// The circle drawn when there is no emoji; nil for none.
+    let circleColor: Color?
+    /// The profile's `#RRGGBB`; nil without a profile (no dot).
+    let profileColor: String?
+    let profileName: String?
+    var size: CGFloat = TabStripMetrics.icon
+
+    /// The emoji's font size as a share of `size`: an emoji glyph is drawn smaller than its point size, so this fills
+    /// the square about as the circle does. Tuned against a zoomed shot.
+    static let emojiScale: CGFloat = 0.8
+    /// Around the dot, to hover for the profile's name, not just the small dot.
+    private static let dotHoverMargin: CGFloat = 3
+    /// How far the dot's center sits inside the icon's corner.
+    private static let dotInset: CGFloat = 2.5
+
+    var body: some View {
+        ZStack {
+            if let emoji {
+                Text(emoji)
+                    .font(.system(size: size * Self.emojiScale))
+                    .lineLimit(1)
+                    .fixedSize()
+            } else if let circleColor {
+                Circle().fill(circleColor)
+            }
+        }
+        .frame(width: size, height: size)
+        .overlay(alignment: .bottomTrailing) {
+            if let profileColor {
+                let ring = TabStripMetrics.iconDot / 2 + TabStripMetrics.iconDotRing
+                // The aligned dot's center stands its radius and margin inside the corner; move it out to `dotInset`.
+                let shift = ring + Self.dotHoverMargin - Self.dotInset
+                Circle()
+                    .fill(ProfileColors.color(profileColor))
+                    .frame(width: TabStripMetrics.iconDot, height: TabStripMetrics.iconDot)
+                    .padding(TabStripMetrics.iconDotRing)
+                    .overlay(Circle().strokeBorder(Color.white, lineWidth: TabStripMetrics.iconDotRing))
+                    .padding(Self.dotHoverMargin)
+                    .contentShape(Rectangle())
+                    .help("Profile \(profileName ?? "")")
+                    .offset(x: shift, y: shift)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    /// A pinned tab's circle color: its `pinColor` in `Palette.graphLanes`, wrapped into range (a hand-edited
+    /// `session.json` may hold any number); the first lane when it has none.
+    static func circleColor(_ pinColor: Int?) -> Color? {
+        let lanes = Palette.graphLanes
+        guard !lanes.isEmpty else { return nil }
+        let index = ((pinColor ?? 0) % lanes.count + lanes.count) % lanes.count
+        return Color(nsColor: lanes[index])
     }
 }
 
