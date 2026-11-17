@@ -338,20 +338,35 @@ struct RemoteInfo: Hashable, Sendable {
 struct UndoStatus: Equatable, Sendable {
     var undo: String?
     var redo: String?
+    /// What Undo and Redo do while the merge, rebase, cherry-pick or revert in progress is stopped: its resolved files.
+    var resolveUndo: String?
+    var resolveRedo: String?
     var isUnreadable = false
 
     init() {}
 
-    /// Reads the journal file (off the main actor: file I/O).
-    nonisolated init(_ journal: UndoJournal) {
+    /// Reads the journal file without the stage and unstage entries the index moved on from, which Undo and Redo skip
+    /// (`UndoJournal.load(_:)`), so the titles name what they will do (off the main actor: file I/O and git).
+    nonisolated init(_ journal: UndoJournal, ops: GitOperations) async {
         do {
-            let state = try journal.load()
+            let state = try await journal.load(ops)
             undo = state.nextUndo?.title
             redo = state.nextRedo?.title
+            resolveUndo = state.nextResolveUndo?.title
+            resolveRedo = state.nextResolveRedo?.title
         } catch {
             isUnreadable = true
         }
     }
+}
+
+/// What a write did, for its toast.
+enum WriteOutcome: Equatable, Sendable {
+    case done
+    /// A pull stopped on conflicts; git holds the local changes until it is continued or aborted.
+    case autostashPending
+    /// A stash apply or pop: whether it applied cleanly and undo can take it back.
+    case stash(GitOperations.StashApplyOutcome, pop: Bool)
 }
 
 /// A user operation in flight: what the action bar shows while it runs.
@@ -1618,10 +1633,13 @@ final class RepoSession: Identifiable {
         // rereads the refs).
         async let newRemotes = refs ? readRemotes(backend, cwd: cwd, env: env) : nil
         // Every journaled write moves a ref or comes with one (each write rereads the refs), so the journal is read
-        // with them.
-        let newUndo = refs ? UndoStatus(backend.journal) : nil
+        // with them; and with the status, since an index change made outside Histq (a terminal `git add`) makes the
+        // stage entries on top stale.
+        async let newUndo = status || refs
+            ? UndoStatus(backend.journal, ops: GitOperations(runner: backend.runner, cwd: cwd, env: env)) : nil
         return (
-            try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes, newUndo
+            try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes,
+            await newUndo
         )
     }
 
@@ -3078,56 +3096,6 @@ final class RepoSession: Identifiable {
         return nil
     }
 
-    /// Writes a resolution into the working tree: atomically (a temporary file renamed over the old one, so a crash
-    /// never leaves half a file and a symlink is replaced, not followed), keeping the old file's permissions. nil
-    /// deletes the file. `path` must stay inside `cwd`: no absolute path, no `..`, no folder that is a symlink out.
-    private nonisolated static func writeResolution(_ content: Data?, to path: String, cwd: URL) throws {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !path.isEmpty, !path.hasPrefix("/"), parts.first != ".git",
-            !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty })
-        else {
-            throw ConflictWriteError.outsideRepository(path)
-        }
-        let file = cwd.appending(path: path, directoryHint: .notDirectory)
-        // Each parent folder is checked with lstat, from the repo root down, and created when missing: a folder that
-        // is a symlink (planted by an untrusted repo, or not created yet when a resolved path is checked) could
-        // otherwise send the write outside the repository.
-        var folder = cwd
-        for part in parts.dropLast() {
-            folder = folder.appending(path: String(part), directoryHint: .isDirectory)
-            var info = stat()
-            if lstat(folder.path, &info) != 0 {
-                guard errno == ENOENT, mkdir(folder.path, 0o755) == 0 else {
-                    throw ConflictWriteError.outsideRepository(path)
-                }
-            } else if info.st_mode & S_IFMT != S_IFDIR {
-                throw ConflictWriteError.outsideRepository(path)
-            }
-        }
-        let fm = FileManager.default
-        // attributesOfItem does not follow a symlink at the file itself; the atomic write and the removal replace or
-        // remove that link, never its target.
-        let attributes = try? fm.attributesOfItem(atPath: file.path)
-        guard let content else {
-            if attributes != nil { try fm.removeItem(at: file) }
-            return
-        }
-        try content.write(to: file, options: .atomic)
-        if attributes?[.type] as? FileAttributeType == .typeRegular, let mode = attributes?[.posixPermissions] {
-            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
-        }
-    }
-
-    private enum ConflictWriteError: LocalizedError {
-        case outsideRepository(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .outsideRepository(let path): "\(path) is not a file inside this repository."
-            }
-        }
-    }
-
     #if DEBUG
     /// Whether `-HistqResolve` already ran in this launch.
     private static var launchResolveDone = false
@@ -3338,7 +3306,13 @@ final class RepoSession: Identifiable {
         if isRunning(.undo) || isRunning(.redo) { return (false, "\(verb): running…") }
         // The toolbar stays live above a modal: an undo there would change the state a confirmation or form describes.
         if hasModal { return (false, "\(verb): close the open dialog first") }
-        if repoState?.isOperationInProgress == true { return (false, UndoError.operationInProgress.message) }
+        if repoState?.isOperationInProgress == true {
+            // Only a file resolved during this operation can be taken back (`UndoJournal.step` checks it is the same).
+            guard let title = redo ? undoStatus.resolveRedo : undoStatus.resolveUndo else {
+                return (false, UndoError.operationInProgress.message)
+            }
+            return (true, "\(verb) \(title)")
+        }
         if undoStatus.isUnreadable { return (false, UndoError.unreadableJournal.message) }
         if let title = redo ? undoStatus.redo : undoStatus.undo { return (true, "\(verb) \(title)") }
         if !redo, let lastNotUndoable { return (false, lastNotUndoable.reason) }
@@ -3694,9 +3668,9 @@ final class RepoSession: Identifiable {
     /// Runs a user-initiated write of the WIP panel with the write environment (the login shell's PATH, for hooks
     /// and signing tools), off the main actor, then rereads the status and the refs (also when it failed: it may have
     /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel. Returns a pull's
-    /// outcome (`.autostashPending`: it stopped on conflicts with git holding the local changes).
+    /// outcome (`.autostashPending`: it stopped on conflicts with git holding the local changes) or a stash apply's.
     @discardableResult
-    func perform(_ write: Write) async throws -> GitOperations.PullOutcome {
+    func perform(_ write: Write) async throws -> WriteOutcome {
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
@@ -3714,7 +3688,7 @@ final class RepoSession: Identifiable {
                 removeRebaseFilesIfDone()
             }
         }
-        let outcome: GitOperations.PullOutcome
+        let outcome: WriteOutcome
         do {
             outcome = try await Self.run(write, profile: profile, backend: backend, cwd: url)
         } catch GitError.autostashKept(let hash) where { if case .commit = write { true } else { false } }() {
@@ -3744,12 +3718,12 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// Returns the pull's outcome (`.done` for every other write).
+    /// Returns the pull's or the stash apply's outcome (`.done` for every other write).
     @concurrent
     private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws
-        -> GitOperations.PullOutcome
+        -> WriteOutcome
     {
-        var outcome = GitOperations.PullOutcome.done
+        var outcome = WriteOutcome.done
         let base = await GitToolchain.writeBase()
         // The profile's GitHub token, from the Keychain off the main actor (cached), for network writes alone: their
         // operations hand it to git only when the gate lets them (`GitInvocation.networkToken`).
@@ -3783,7 +3757,8 @@ final class RepoSession: Identifiable {
             try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
-        case .pull(let mode, let autostash): outcome = try await ops.pull(mode, autostash: autostash)
+        case .pull(let mode, let autostash):
+            if try await ops.pull(mode, autostash: autostash) == .autostashPending { outcome = .autostashPending }
         case .push(let branch, let remote, let remoteBranch, let setUpstream, let lease):
             try await ops.push(
                 branch: branch, to: remote, as: remoteBranch, setUpstream: setUpstream, forceWithLease: lease)
@@ -3820,8 +3795,8 @@ final class RepoSession: Identifiable {
         case .reset(let revision, let mode): try await ops.reset(to: revision, mode: mode)
 
         case .stashPush(let message): try await ops.stashPush(message: message, includeUntracked: true)
-        case .stashApply(let hash): try await ops.stashApply(hash)
-        case .stashPop(let hash): try await ops.stashPop(hash)
+        case .stashApply(let hash): outcome = .stash(try await ops.stashApply(hash), pop: false)
+        case .stashPop(let hash): outcome = .stash(try await ops.stashPop(hash), pop: true)
         case .stashDrop(let hash): try await ops.stashDrop(hash)
         case .stashPaths(let paths): try await ops.stashPush(message: nil, includeUntracked: true, paths: paths)
         case .stashRestoreFile(let hash, let path, let untracked):
@@ -3831,11 +3806,9 @@ final class RepoSession: Identifiable {
             try await ops.createTag(name, at: revision, message: message)
         case .deleteTag(let name): try await ops.deleteTag(name)
 
-        case .resolveConflict(let path, let content):
-            try writeResolution(content, to: path, cwd: cwd)
-            try await ops.stage([path])
+        case .resolveConflict(let path, let content): try await ops.resolve(path: path, content: content)
         case .writeConflictChunks(let path, let content):
-            try writeResolution(content, to: path, cwd: cwd)
+            try GitOperations.writeResolution(content, to: path, cwd: cwd)
         case .mergeTool(let path, let tool):
             let runner = backend.runner
             let args = ["--literal-pathspecs", "mergetool", "--no-prompt"] + (tool.map { ["--tool=\($0)"] } ?? [])
@@ -3885,6 +3858,11 @@ final class RepoSession: Identifiable {
                 if outcome == .autostashPending {
                     postToast(.warning("\(title) stopped on conflicts",
                                        detail: "Changes come back after continue or abort."))
+                } else if case .stash(let stash, let pop) = outcome, !stash.undoable {
+                    // Undo would skip it and take back the operation before it.
+                    postToast(.warning(title, detail: stash.applied
+                        ? "Applied, but this apply cannot be undone."
+                        : "Applied with conflicts: this apply cannot be undone." + (pop ? " The stash is kept." : "")))
                 } else if stopped {
                     postToast(.stopped(title))
                 } else if case .applyPatch = write {

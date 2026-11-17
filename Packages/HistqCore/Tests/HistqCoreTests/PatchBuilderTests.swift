@@ -2,7 +2,8 @@
 // file's changed lines puts exactly those lines in the index and unstaging reverses it, line by line; a
 // file without a final newline round-trips through stage, unstage and discard; a path with a tab, a quote,
 // a space and non-ASCII bytes survives the diff parser and a rebuilt patch header; and a read on a partial
-// clone that misses an object throws the typed error the UI turns into a user-initiated fetch.
+// clone that misses an object throws the typed error the UI turns into a user-initiated fetch. An opt-in benchmark
+// (`HISTQ_STAGE_BENCH=1`) times staging and unstaging one file through journaled operations (task 5.2).
 import Foundation
 import HistqCore
 import Testing
@@ -169,5 +170,28 @@ struct PatchBuilderTests {
         }
         // Control: the full repo reads the same objects.
         #expect(try await !DiffReader.file(at: "HEAD", path: "README.md", runner: fx.copy.runner, cwd: fx.repo, env: fx.readEnv).isEmpty)
+    }
+
+    @Test(
+        "benchmark: stage and unstage one file 20 times through journaled operations",
+        .enabled(if: ProcessInfo.processInfo.environment["HISTQ_STAGE_BENCH"] == "1"))
+    func stageTiming() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        // A journal file, so the operations journal what they can (without one, `journaled` skips it).
+        let journal = UndoJournal(file: fx.copy.folder.appending(path: "state/undo/graph.json"))
+        let ops = GitOperations(runner: fx.copy.runner, cwd: fx.repo, env: fx.writeEnv, journal: journal)
+
+        let clock = ContinuousClock()
+        var rounds: [Duration] = []
+        for _ in 0..<20 {
+            let start = clock.now
+            try await ops.stage(["README.md"])
+            try await ops.unstage(["README.md"])
+            rounds.append(clock.now - start)
+        }
+        let median = rounds.sorted()[rounds.count / 2]
+        print("stageTiming: median stage + unstage of one file \(median) (20 rounds)")
+        #expect(try await fx.changedLines(["--cached"], "README.md").isEmpty)
     }
 }

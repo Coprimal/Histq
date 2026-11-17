@@ -198,24 +198,32 @@ public struct GitOperations: Sendable {
 
     // MARK: - Stage, unstage, discard
 
-    /// Stages `paths` (new, modified and deleted files).
+    /// Stages `paths` (new, modified and deleted files). Undo puts the index back as it was.
     public func stage(_ paths: [String]) async throws {
         try requirePaths(paths)
-        try await write(["--literal-pathspecs", "add", "-A", "--"] + paths)
+        try await journaled(.stage, "Stage changes", mode: .index) { ops in
+            try await ops.exec(["--literal-pathspecs", "add", "-A", "--"] + paths)
+        }
     }
 
     public func stageAll() async throws {
-        try await write(["add", "-A"])
+        try await journaled(.stage, "Stage all changes", mode: .index) { ops in
+            try await ops.exec(["add", "-A"])
+        }
     }
 
     /// Resets the index entries of `paths` to HEAD (works on an unborn branch too).
     public func unstage(_ paths: [String]) async throws {
         try requirePaths(paths)
-        try await write(["--literal-pathspecs", "reset", "-q", "--"] + paths)
+        try await journaled(.unstage, "Unstage changes", mode: .index) { ops in
+            try await ops.exec(["--literal-pathspecs", "reset", "-q", "--"] + paths)
+        }
     }
 
     public func unstageAll() async throws {
-        try await write(["reset", "-q"])
+        try await journaled(.unstage, "Unstage all changes", mode: .index) { ops in
+            try await ops.exec(["reset", "-q"])
+        }
     }
 
     /// Discards the unstaged changes of tracked `paths` (the working tree takes the index version).
@@ -674,6 +682,40 @@ public struct GitOperations: Sendable {
         try await reset(to: "HEAD~1", mode: .soft)
     }
 
+    // MARK: - Conflicts
+
+    /// Resolves the conflicted `path` (relative to `cwd`): writes `content` to it (`writeResolution`; nil deletes it)
+    /// and stages it, in one lane. While a merge, rebase, cherry-pick or revert is stopped, undo puts the conflict back
+    /// (`UndoJournal.stepResolve`) as long as that operation is still at the same stop.
+    public func resolve(path: String, content: Data?) async throws {
+        try await lane { ops in
+            let start = await ops.journal?.beginResolve(path, ops: ops)
+            try Self.writeResolution(content, to: path, cwd: ops.cwd)
+            try await ops.exec(["--literal-pathspecs", "add", "-A", "--", path])
+            if let start { await ops.journal?.finishResolve(start, title: "Resolve \(path)", ops: ops) }
+        }
+    }
+
+    /// Writes a resolution into the working tree: atomically (a temporary file renamed over the old one, so a crash
+    /// never leaves half a file and a symlink is replaced, not followed), keeping the old file's permissions. nil
+    /// deletes the file. `path` must stay inside `cwd` (`UndoJournal.safeFile`: no absolute path, no `..`, no `.git`,
+    /// no folder that is a symlink out; missing folders are created).
+    public static func writeResolution(_ content: Data?, to path: String, cwd: URL) throws {
+        let file = try UndoJournal.safeFile(path, in: cwd)
+        let fm = FileManager.default
+        // attributesOfItem does not follow a symlink at the file itself; the atomic write and the removal replace or
+        // remove that link, never its target.
+        let attributes = try? fm.attributesOfItem(atPath: file.path)
+        guard let content else {
+            if attributes != nil { try fm.removeItem(at: file) }
+            return
+        }
+        try content.write(to: file, options: .atomic)
+        if attributes?[.type] as? FileAttributeType == .typeRegular, let mode = attributes?[.posixPermissions] {
+            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+        }
+    }
+
     // MARK: - Continue, abort, skip
 
     /// A continue that completes the operation makes it undoable as a whole (back to before it started).
@@ -705,23 +747,50 @@ public struct GitOperations: Sendable {
     // MARK: - Stashes
 
     /// Stashes the working tree and index (`-u`: untracked files too). With `paths`, only their changes leave the
-    /// working tree (git still records the whole index in the stash).
+    /// working tree (git still records the whole index in the stash). Undo puts the touched paths back as they were
+    /// and drops the stash (`UndoJournal.finishStashSave`).
     public func stashPush(message: String? = nil, includeUntracked: Bool = true, paths: [String] = []) async throws {
         let args = ["stash", "push"] + (includeUntracked ? ["-u"] : []) + (message.map { ["--message=\($0)"] } ?? [])
-        try await write(paths.isEmpty ? args : ["--literal-pathspecs"] + args + ["--"] + paths)
+        let push = paths.isEmpty ? args : ["--literal-pathspecs"] + args + ["--"] + paths
+        try await lane { ops in
+            let start = await ops.journal?.beginStashSave(ops)
+            try await ops.exec(push)
+            if let start { await ops.journal?.finishStashSave(start, ops: ops) }
+        }
+    }
+
+    /// What a `stash apply` or `pop` did.
+    public struct StashApplyOutcome: Equatable, Sendable {
+        /// It applied without conflicts. false: it left conflicted files to resolve (a pop then kept the stash).
+        public var applied: Bool
+        /// Undo can take it back: the journal recorded it (`UndoJournal.finishStashApply`).
+        public var undoable: Bool
     }
 
     /// The stash ops take the stash's commit hash; a hash no longer listed throws `GitOperationError.stashNotFound`.
-    public func stashPop(_ hash: String) async throws {
+    /// Undo puts the paths the stash touched back as they were and, for a pop, stores the stash back.
+    @discardableResult
+    public func stashPop(_ hash: String) async throws -> StashApplyOutcome {
         try await stash("pop", hash)
     }
 
-    public func stashApply(_ hash: String) async throws {
+    @discardableResult
+    public func stashApply(_ hash: String) async throws -> StashApplyOutcome {
         try await stash("apply", hash)
     }
 
+    /// Undo stores the stash back at the top, with its message.
     public func stashDrop(_ hash: String) async throws {
-        try await stash("drop", hash)
+        try await lane { ops in
+            let stashes = try await ops.stashList()
+            guard let position = stashes.firstIndex(where: { $0.hash == hash }) else {
+                throw GitOperationError.stashNotFound(hash)
+            }
+            try await ops.exec(["stash", "drop", "--end-of-options", "stash@{\(position)}"])
+            ops.journal?.recordStash(
+                .stashDrop, title: "Drop stash", stash: UndoJournal.StashRef(hash: hash, message: stashes[position].message),
+                paths: nil)
+        }
     }
 
     /// Writes `path` as the stash `hash` has it into the working tree (the index stays); `untracked`: from the stash's
@@ -732,17 +801,42 @@ public struct GitOperations: Sendable {
             ["--literal-pathspecs", "restore", "--source=\(hash)\(untracked ? "^3" : "")", "--worktree", "--", path])
     }
 
-    /// One `stash <verb>` of the stash whose commit is `hash`, its `stash@{n}` looked up in the lane.
-    private func stash(_ verb: String, _ hash: String) async throws {
-        try await lane { ops in _ = try await ops.exec(["stash", verb, "--end-of-options", try await ops.stashRef(hash)]) }
+    /// One `stash apply` or `pop` of the stash whose commit is `hash`, its `stash@{n}` looked up in the lane. One that
+    /// stops on conflicts returns `applied: false` instead of throwing; one git refused (nothing applied) throws.
+    private func stash(_ verb: String, _ hash: String) async throws -> StashApplyOutcome {
+        try await lane { ops in
+            let ref = try await ops.stashRef(hash)
+            // `:/`: the whole worktree, also when `cwd` is a subfolder.
+            let unmerged = { (try? await ops.exec(["ls-files", "--unmerged", "--", ":/"]))?.stdout.isEmpty == false }
+            let wasUnmerged = await unmerged()
+            let start = await ops.journal?.beginStashApply(hash, ops: ops)
+            do {
+                try await ops.exec(["stash", verb, "--end-of-options", ref])
+            } catch {
+                guard !wasUnmerged, await unmerged() else { throw error }
+                return StashApplyOutcome(applied: false, undoable: false)
+            }
+            guard let start, let journal = ops.journal else { return StashApplyOutcome(applied: true, undoable: false) }
+            return StashApplyOutcome(
+                applied: true, undoable: await journal.finishStashApply(start, pop: verb == "pop", ops: ops))
+        }
     }
 
     /// `stash@{n}` of the stash whose commit is `hash`, from `stash list` (git takes no bare sha as a stash
     /// reference). Only call it from inside `lane`, so the index cannot go stale.
     private func stashRef(_ hash: String) async throws -> String {
-        let hashes = try await exec(["stash", "list", "--format=%H"]).text.split(separator: "\n")
-        guard let index = hashes.firstIndex(where: { $0 == hash }) else { throw GitOperationError.stashNotFound(hash) }
+        guard let index = try await stashList().firstIndex(where: { $0.hash == hash }) else {
+            throw GitOperationError.stashNotFound(hash)
+        }
         return "stash@{\(index)}"
+    }
+
+    /// The stashes, `stash@{0}` first: commit hash and reflog message (what `stash store -m` takes). Inside `lane`.
+    func stashList() async throws -> [(hash: String, message: String)] {
+        try await exec(["stash", "list", "--format=%H %gs"]).text.split(separator: "\n").map { line in
+            let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+            return (String(parts[0]), parts.count > 1 ? String(parts[1]) : "")
+        }
     }
 
     /// The commit `refs/stash` points to; nil without stashes. Inside `lane`.
@@ -813,17 +907,22 @@ public struct GitOperations: Sendable {
     // MARK: - Tags
 
     /// A lightweight tag, or an annotated one when `message` is given (passed on stdin).
+    /// Undo deletes it; undo of a delete puts back the same ref value (an annotated tag's own object).
     public func createTag(_ name: String, at revision: String, message: String? = nil) async throws {
         try await validateTagName(name)
-        if let message {
-            try await write(["tag", "-a", "--file=-", "--end-of-options", name, revision], stdin: Data(message.utf8))
-        } else {
-            try await write(["tag", "--end-of-options", name, revision])
+        try await journaled(.createTag, "Create tag \(name)", mode: .index, refs: ["refs/tags/\(name)"]) { ops in
+            if let message {
+                try await ops.exec(["tag", "-a", "--file=-", "--end-of-options", name, revision], stdin: Data(message.utf8))
+            } else {
+                try await ops.exec(["tag", "--end-of-options", name, revision])
+            }
         }
     }
 
     public func deleteTag(_ name: String) async throws {
-        try await write(["tag", "-d", "--end-of-options", name])
+        try await journaled(.deleteTag, "Delete tag \(name)", mode: .index, refs: ["refs/tags/\(name)"]) { ops in
+            try await ops.exec(["tag", "-d", "--end-of-options", name])
+        }
     }
 
     public func pushTag(_ name: String, to remote: String) async throws {
@@ -966,7 +1065,7 @@ public struct GitOperations: Sendable {
     }
 
     /// Runs an undoable operation in the lane between the journal's before- and after-snapshots (when there is a
-    /// journal). `refs` are the branches it creates, deletes or renames (the journal adds HEAD's branch itself).
+    /// journal). `refs` are the branches or tags it creates, deletes or renames (the journal adds HEAD's branch itself).
     /// `completesOperation`: a commit, continue or skip, which may complete a merge, rebase, cherry-pick or revert
     /// that stopped earlier (it then becomes undoable as a whole). A stopped pull's auto-stash that git keeps in
     /// `refs/stash` during the operation throws `GitError.autostashKept`. `before` runs in the lane before the

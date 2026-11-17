@@ -38,6 +38,8 @@ public enum UndoError: Error, Equatable, Sendable {
     case unsafePath(String)
     /// The journal file holds something that is not a journal Histq wrote.
     case unreadableJournal
+    /// Git cannot bring a resolved file's conflict back (`checkout -m`): it has no record of it, or a side deleted it.
+    case conflictGone
 
     /// A sentence for the UI.
     public var message: String {
@@ -51,6 +53,8 @@ public enum UndoError: Error, Equatable, Sendable {
         case .objectsMissing: "Git has cleaned up the objects this operation needs (git gc), so it can no longer be undone or redone."
         case .unsafePath(let path): "\"\(path)\" would be written outside the repository."
         case .unreadableJournal: "The undo history of this repository cannot be read."
+        case .conflictGone:
+            "Git cannot bring back this file's conflict (it has no record of it, or one side deleted the file), so its resolution cannot be undone."
         }
     }
 }
@@ -60,6 +64,8 @@ public struct UndoJournal: Sendable {
     public enum Kind: String, Codable, Sendable {
         case commit, amend, checkout, reset, merge, rebase, cherryPick, revert
         case createBranch, deleteBranch, renameBranch, discard
+        case createTag, deleteTag, stage, unstage
+        case stashSave, stashDrop, stashApply, stashPop, resolve
     }
 
     /// Operations that change something the journal cannot take back, with the reason for the greyed Undo tooltip.
@@ -112,9 +118,9 @@ public struct UndoJournal: Sendable {
     }
 
     struct RefValue: Codable, Equatable, Sendable {
-        /// A full local branch ref, `refs/heads/<name>`.
+        /// A full local branch ref, `refs/heads/<name>`, or a tag ref, `refs/tags/<name>`.
         var name: String
-        /// nil when the branch does not exist.
+        /// nil when the branch or tag does not exist (an annotated tag's own object id, not its commit).
         var oid: String?
         /// Only recorded for branches the operation creates, deletes or renames.
         var upstream: Upstream?
@@ -154,6 +160,36 @@ public struct UndoJournal: Sendable {
         var removesUntracked: Bool
     }
 
+    /// The stash a stash entry saved or dropped: its commit and its reflog message (`stash store -m` puts both back).
+    struct StashRef: Codable, Equatable, Sendable {
+        var hash: String
+        var message: String
+    }
+
+    /// One path's stage-0 index entry and worktree file (its bytes as a blob from `hash-object -w --no-filters`);
+    /// nil when absent.
+    struct PathState: Codable, Equatable, Sendable {
+        struct IndexEntry: Codable, Equatable, Sendable {
+            var mode: String
+            var blob: String
+        }
+        struct File: Codable, Equatable, Sendable {
+            var blob: String
+            var kind: UntrackedFile.FileKind
+        }
+        /// The index modes recorded: a gitlink (submodule) is left out.
+        static let modes: Set<String> = ["100644", "100755", "120000"]
+        var index: IndexEntry?
+        var file: File?
+    }
+
+    /// A path a stash save, apply or pop touched (top-level relative), before and after it.
+    struct StashedPath: Codable, Equatable, Sendable {
+        var path: String
+        var before: PathState
+        var after: PathState
+    }
+
     public struct Entry: Codable, Identifiable, Sendable {
         public let id: UUID
         public let kind: Kind
@@ -164,6 +200,13 @@ public struct UndoJournal: Sendable {
         let before: Snapshot
         let after: Snapshot
         let content: Content?
+        /// Stash kinds only (optional, so older journal files still decode). Their step uses these and not
+        /// `before`/`after` (see `recordStash`).
+        var stash: StashRef?
+        /// The paths a stash save, apply or pop touched.
+        var paths: [StashedPath]?
+        /// A stash pop: whether it dropped the stash (undo stores it back, redo drops it again).
+        var dropped: Bool?
 
         /// Undo and redo leave the index as it is (a commit, an amend, a soft reset, a branch create, delete or
         /// rename): files staged since then are no reason to refuse, so only HEAD and the branches are compared, and
@@ -182,6 +225,24 @@ public struct UndoJournal: Sendable {
         var operation: String
     }
 
+    /// A stopped merge, rebase, cherry-pick or revert, told apart from its next stop or the next run of the same kind
+    /// without `pending` (nil when it started outside Histq): `RepoState.Operation`, the commit it stopped at and HEAD.
+    struct OperationKey: Codable, Equatable, Sendable {
+        var operation: String
+        /// `MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`, the first that exists.
+        var stop: String?
+        var head: String?
+    }
+
+    /// The files resolved during the operation `operation` (kind `.resolve`, one path each: `after` the resolved
+    /// state, `before` the conflicted file `checkout -m` wrote back, set by undo). Their own lists: they never touch
+    /// `pending` or the main lists, and they are forgotten once the operation moved on.
+    struct Resolves: Codable, Sendable {
+        var operation: OperationKey
+        var undo: [Entry] = []
+        var redo: [Entry] = []
+    }
+
     /// The journal file's content.
     public struct State: Codable, Sendable {
         var version = 1
@@ -190,9 +251,14 @@ public struct UndoJournal: Sendable {
         /// `redo.last` is redone next.
         public internal(set) var redo: [Entry] = []
         var pending: Pending?
+        /// Optional, so older journal files still decode.
+        var resolves: Resolves?
 
         public var nextUndo: Entry? { undo.last }
         public var nextRedo: Entry? { redo.last }
+        /// What Undo and Redo step while an operation is in progress (`load(_ ops:)` leaves out another operation's).
+        public var nextResolveUndo: Entry? { resolves?.undo.last }
+        public var nextResolveRedo: Entry? { resolves?.redo.last }
     }
 
     /// The journal file (its folder is created on first write).
@@ -303,18 +369,156 @@ public struct UndoJournal: Sendable {
         try? save(state)
     }
 
-    /// Forgets the pending operation (it was aborted).
+    /// Forgets the pending operation and its resolved files (it was aborted).
     func clearPending() {
-        guard var state = try? load(), state.pending != nil else { return }
+        guard var state = try? load(), state.pending != nil || state.resolves != nil else { return }
         state.pending = nil
+        state.resolves = nil
         try? save(state)
     }
 
-    private func append(_ entry: Entry, to state: inout State) {
+    private func append(_ entry: Entry, to state: inout State, keepingPending: Bool = false) {
         state.undo.append(entry)
         if state.undo.count > limit { state.undo.removeFirst(state.undo.count - limit) }
         state.redo = []
-        state.pending = nil
+        if !keepingPending { state.pending = nil }
+    }
+
+    // MARK: - Recording stashes (inside the operation's write lane)
+
+    /// What a stash save starts from: every path `status` lists with its state, the stash list and the operation in
+    /// progress.
+    struct StashStart: Sendable {
+        var states: [String: PathState]
+        var stashes: [String]
+        var operation: RepoState.Operation
+    }
+
+    /// Takes the state of every path `status` lists right before a `stash push` (the paths it touches are only known
+    /// after it; a superset). nil when it cannot be taken: the push still runs, not undoable.
+    func beginStashSave(_ cwdOps: GitOperations) async -> StashStart? {
+        guard let ops = try? await Self.topLevel(cwdOps).ops,
+            let operation = try? await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation,
+            let stashes = try? await ops.stashList(),
+            let changed = try? await Self.changedPaths(ops),
+            let states = try? await Self.pathStates(changed, write: true, ops: ops)
+        else { return nil }
+        return StashStart(states: states, stashes: stashes.map(\.hash), operation: operation)
+    }
+
+    /// Records the stash a `stash push` saved, with the before- and after-state of every path it touched. Records
+    /// nothing unless exactly one new stash is on top (an empty push adds none; one that ended a stopped pull's merge
+    /// adds git's auto-stash above it), the operation in progress is the same, and every touched path was recorded
+    /// before (a folder, a submodule or a conflict never is).
+    func finishStashSave(_ start: StashStart, ops cwdOps: GitOperations) async {
+        guard let ops = try? await Self.topLevel(cwdOps).ops,
+            let stashes = try? await ops.stashList(), let stash = stashes.first,
+            stashes.dropFirst().map(\.hash) == start.stashes,
+            (try? await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation) == start.operation,
+            let touched = try? await Self.stashTouched(stash.hash, ops: ops), !touched.isEmpty,
+            let after = try? await Self.pathStates(Array(touched), write: true, ops: ops)
+        else { return }
+        var paths: [StashedPath] = []
+        for path in touched.sorted() {
+            guard let old = start.states[path], let new = after[path] else { return }
+            paths.append(StashedPath(path: path, before: old, after: new))
+        }
+        recordStash(
+            .stashSave, title: "Stash changes", stash: StashRef(hash: stash.hash, message: stash.message), paths: paths)
+    }
+
+    /// What a stash apply or pop starts from: the stash, the paths it touches with their state, and the status.
+    struct StashApplyStart: Sendable {
+        var stash: StashRef
+        var paths: [String: PathState]
+        var status: [String: String]
+    }
+
+    /// Takes the state of every path the stash `hash` touches (its working tree against its base, and its untracked
+    /// files; never `stash show`, which follows `diff.renames` and `stash.showIncludeUntracked`) and the status, right
+    /// before a `stash apply` or `pop`. nil when one of them cannot be recorded (a conflict, a submodule, a folder):
+    /// the apply still runs, not undoable.
+    func beginStashApply(_ hash: String, ops cwdOps: GitOperations) async -> StashApplyStart? {
+        guard let ops = try? await Self.topLevel(cwdOps).ops,
+            let stash = try? await ops.stashList().first(where: { $0.hash == hash }),
+            let touched = try? await Self.stashTouched(hash, index: false, ops: ops), !touched.isEmpty,
+            let paths = try? await Self.pathStates(Array(touched), write: true, ops: ops), paths.count == touched.count,
+            let status = try? await Self.statusRecords(ops)
+        else { return nil }
+        return StashApplyStart(stash: StashRef(hash: stash.hash, message: stash.message), paths: paths, status: status)
+    }
+
+    /// Records a clean `stash apply` or `pop` with the before- and after-state of every path it touched; returns
+    /// whether it did. Records nothing when the index has conflicts or a path outside the recorded ones changed
+    /// (merge-ort follows renames: the stash's edit of `a.txt` can land in `b.txt`), so undo never misses a change.
+    func finishStashApply(_ start: StashApplyStart, pop: Bool, ops cwdOps: GitOperations) async -> Bool {
+        guard let ops = try? await Self.topLevel(cwdOps).ops,
+            let status = try? await Self.statusRecords(ops),
+            !status.values.contains(where: { $0.hasPrefix("u ") }),
+            Set(start.status.keys).union(status.keys).allSatisfy({
+                start.paths[$0] != nil || start.status[$0] == status[$0]
+            }),
+            let after = try? await Self.pathStates(Array(start.paths.keys), write: true, ops: ops),
+            let stashes = try? await ops.stashList()
+        else { return false }
+        var paths: [StashedPath] = []
+        for (path, old) in start.paths.sorted(by: { $0.key < $1.key }) {
+            guard let new = after[path] else { return false }
+            paths.append(StashedPath(path: path, before: old, after: new))
+        }
+        return recordStash(
+            pop ? .stashPop : .stashApply, title: pop ? "Pop stash" : "Apply stash", stash: start.stash, paths: paths,
+            dropped: pop ? !stashes.contains { $0.hash == start.stash.hash } : nil)
+    }
+
+    /// Records a stash save, drop, apply or pop as its own entry: `refs/stash` is in no snapshot, so `finish`'s
+    /// "changed nothing" guard does not apply, and the pending operation stays (a stash can be saved, dropped or
+    /// applied while a merge is stopped). Its step never reads `before`/`after`: both are HEAD-less, with the stash
+    /// commit as `index`. Returns whether the journal was written.
+    @discardableResult
+    func recordStash(_ kind: Kind, title: String, stash: StashRef, paths: [StashedPath]?, dropped: Bool? = nil) -> Bool {
+        var state = (try? load()) ?? State()
+        let unused = Snapshot(head: Head(ref: nil, commit: nil), refs: [], index: stash.hash)
+        append(Entry(
+            id: UUID(), kind: kind, title: title, date: Date(), mode: .index, before: unused, after: unused,
+            content: nil, stash: stash, paths: paths, dropped: dropped), to: &state, keepingPending: true)
+        return (try? save(state)) != nil
+    }
+
+    // MARK: - Recording resolves (inside the operation's write lane)
+
+    /// The operation in progress and the conflicted `path` (relative to `ops.cwd`) from the top level, right before it
+    /// is resolved. nil when it cannot be undone: no operation (a conflicting stash pop), or the path is not unmerged
+    /// with both sides (`checkout -m` cannot rebuild a conflict where one side deleted the file).
+    func beginResolve(_ path: String, ops cwdOps: GitOperations) async -> (key: OperationKey, path: String)? {
+        guard let top = try? await Self.topLevel(cwdOps), let key = try? await Self.operationKey(top.ops),
+            let unmerged = try? await top.ops.exec(
+                ["--literal-pathspecs", "ls-files", "-u", "-z", "--", top.prefix + path]).text
+        else { return nil }
+        // `<mode> <blob> <stage>\t<path>` records.
+        let stages = Set(unmerged.split(separator: "\0").compactMap {
+            $0.split(separator: "\t").first?.split(separator: " ").last
+        })
+        guard stages.contains("2"), stages.contains("3") else { return nil }
+        return (key, top.prefix + path)
+    }
+
+    /// Records the resolved state of the path `beginResolve` returned (its blobs stored) as a resolve entry of that
+    /// operation, never through `append`: `pending` and the main lists stay as they are.
+    func finishResolve(_ start: (key: OperationKey, path: String), title: String, ops cwdOps: GitOperations) async {
+        guard let ops = try? await Self.topLevel(cwdOps).ops,
+            let resolved = try? await Self.pathStates([start.path], write: true, ops: ops)[start.path]
+        else { return }
+        var state = (try? load()) ?? State()
+        var resolves = state.resolves.flatMap { $0.operation == start.key ? $0 : nil } ?? Resolves(operation: start.key)
+        let unused = Snapshot(head: Head(ref: nil, commit: nil), refs: [], index: String(repeating: "0", count: 40))
+        resolves.undo.append(Entry(
+            id: UUID(), kind: .resolve, title: title, date: Date(), mode: .index, before: unused, after: unused,
+            content: nil, paths: [StashedPath(path: start.path, before: PathState(), after: resolved)]))
+        if resolves.undo.count > limit { resolves.undo.removeFirst(resolves.undo.count - limit) }
+        resolves.redo = []
+        state.resolves = resolves
+        try? save(state)
     }
 
     // MARK: - Undo and redo (inside the write lane)
@@ -324,6 +528,18 @@ public struct UndoJournal: Sendable {
     /// Moves the repository from the entry's after-state back to its before-state (undo) or forward again (redo).
     func step(_ direction: Direction, ops: GitOperations) async throws -> Entry {
         var state = try load()
+        // While an operation is in progress only its resolve entries step; another operation's are forgotten.
+        let key = try await Self.operationKey(ops)
+        if state.resolves?.operation != key { state.resolves = nil }
+        if key != nil {
+            guard var resolves = state.resolves else { throw UndoError.operationInProgress }
+            let entry = try await Self.stepResolve(direction, in: &resolves, ops: try await Self.topLevel(ops).ops)
+            state.resolves = resolves
+            try save(state)
+            return entry
+        }
+        // Saved only with the step: a refusal leaves the skipped entries in the file.
+        await Self.dropStale(direction, from: &state, ops: ops)
         guard let entry = direction == .undo ? state.undo.last : state.redo.last else {
             throw direction == .undo ? UndoError.nothingToUndo : UndoError.nothingToRedo
         }
@@ -332,9 +548,10 @@ public struct UndoJournal: Sendable {
         let (from, to) = direction == .undo ? (entry.after, entry.before) : (entry.before, entry.after)
         let names = to.refs.map(\.name)
 
-        // Check everything first, so a refusal changes nothing.
-        if try await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).isOperationInProgress {
-            throw UndoError.operationInProgress
+        // Check everything first, so a refusal changes nothing (no operation is in progress: checked above).
+        if [.stashSave, .stashDrop, .stashApply, .stashPop].contains(entry.kind) {
+            try await Self.stepStash(direction, entry, ops: try await Self.topLevel(ops).ops)
+            return try save(stepped: entry, direction, state)
         }
         // `write-tree` fails on an index with conflicts (after a conflicting stash pop): not the recorded state.
         guard let current = try? await Self.capture(ops, names: names, upstreamOf: []),
@@ -367,7 +584,12 @@ public struct UndoJournal: Sendable {
         if direction == .undo, let content = entry.content {
             try await Self.restore(content, ops: root)
         }
+        return try save(stepped: entry, direction, state)
+    }
 
+    /// Moves the stepped `entry` to the other list and saves the history.
+    private func save(stepped entry: Entry, _ direction: Direction, _ state: State) throws -> Entry {
+        var state = state
         if direction == .undo {
             state.undo.removeLast()
             state.redo.append(entry)
@@ -379,7 +601,162 @@ public struct UndoJournal: Sendable {
         return entry
     }
 
+    /// Undo and redo of a stash save, drop, apply or pop (`ops` at the worktree's top level). Checks everything
+    /// first, so a refusal changes nothing: the stash is listed when this step drops it and not listed when it stores
+    /// it back (`stash store` would list it twice), every touched path is in the state this step starts from, and git
+    /// still has the stash commit and every recorded blob. The stash is stored back before the files lose the content
+    /// it holds, and dropped only once they have it back; an apply (or a pop that kept its stash) leaves the list
+    /// alone. Paths go back one by one (index and file), never with `stash apply --index`: a partial stash holds the
+    /// whole index, which conflicts when another file is staged; and only the recorded paths move, so a staged edit in
+    /// another hunk of an applied file (its recorded index entry) and every other file stay as they are.
+    private static func stepStash(_ direction: Direction, _ entry: Entry, ops: GitOperations) async throws {
+        guard let stash = entry.stash, entry.kind == .stashDrop || entry.paths?.isEmpty == false else {
+            throw UndoError.unreadableJournal
+        }
+        let paths = entry.paths ?? []
+        // Undo of a drop or of a pop that dropped, and redo of a save, put the stash back; their opposites remove it.
+        let moves = entry.kind != .stashApply && (entry.kind != .stashPop || entry.dropped == true)
+        let stores = moves && (entry.kind == .stashSave) == (direction == .redo)
+        let position = try await ops.stashList().firstIndex { $0.hash == stash.hash }
+        guard !moves || (position == nil) == stores else { throw UndoError.repositoryChanged }
+        let current = try await pathStates(paths.map(\.path), write: false, ops: ops)
+        guard paths.allSatisfy({ current[$0.path] == (direction == .undo ? $0.after : $0.before) }) else {
+            throw UndoError.repositoryChanged
+        }
+        let blobs = paths.flatMap { [$0.before, $0.after] }.flatMap { [$0.index?.blob, $0.file?.blob].compactMap(\.self) }
+        try await requireObjects(commit: stash.hash, blobs: blobs, ops: ops)
+        let targets = try paths.map { path in
+            (path: path.path, state: direction == .undo ? path.before : path.after,
+             url: try safeFile(path.path, in: ops.cwd))
+        }.filter { current[$0.path] != $0.state }
+
+        if stores { try await ops.exec(["stash", "store", "--message=\(stash.message)", stash.hash]) }
+        if !targets.isEmpty {
+            // Mode 0 removes an entry; its object id only needs the repository's length (`validate()` checks it).
+            let null = String(repeating: "0", count: stash.hash.count)
+            let info = targets.map { "\($0.state.index?.mode ?? "0") \($0.state.index?.blob ?? null)\t\($0.path)\0" }
+            try await ops.exec(["update-index", "-z", "--index-info"], stdin: Data(info.joined().utf8))
+            for target in targets {
+                var info = stat()
+                if lstat(target.url.path, &info) == 0, info.st_mode & S_IFMT != S_IFDIR {
+                    try FileManager.default.removeItem(at: target.url)
+                }
+                if let file = target.state.file {
+                    try await writeFile(file.blob, kind: file.kind, to: target.url, ops: ops)
+                }
+            }
+        }
+        if moves, let position, !stores {
+            try await ops.exec(["stash", "drop", "--end-of-options", "stash@{\(position)}"])
+        }
+    }
+
+    /// Undo and redo of a resolved file (`ops` at the worktree's top level), moving the entry between the lists of
+    /// `resolves`. Undo runs only while the index entry and the file are still the resolved ones, and puts the
+    /// conflict back from git's resolve-undo record (`checkout -m`; `git add` writes it, the commit ends it), refusing
+    /// with `conflictGone` when git has none or cannot use it. Redo runs only while the path is still unmerged and the
+    /// file is the one undo left (so no edit is overwritten), then writes the resolved file back and stages it.
+    private static func stepResolve(
+        _ direction: Direction, in resolves: inout Resolves, ops: GitOperations
+    ) async throws -> Entry {
+        guard var entry = direction == .undo ? resolves.undo.last : resolves.redo.last else {
+            throw direction == .undo ? UndoError.nothingToUndo : UndoError.nothingToRedo
+        }
+        try entry.validate()
+        guard entry.kind == .resolve, let path = entry.paths?.first, entry.paths?.count == 1 else {
+            throw UndoError.unreadableJournal
+        }
+        let unmerged = { try await ops.exec(["--literal-pathspecs", "ls-files", "-u", "-z", "--", path.path]).stdout }
+        if direction == .undo {
+            guard try await pathStates([path.path], write: false, ops: ops)[path.path] == path.after else {
+                throw UndoError.repositoryChanged
+            }
+            let record = try await ops.exec(["--literal-pathspecs", "ls-files", "--resolve-undo", "-z", "--", path.path])
+            guard !record.stdout.isEmpty else { throw UndoError.conflictGone }
+            do {
+                try await ops.exec(["--literal-pathspecs", "checkout", "-m", "--", path.path])
+            } catch {
+                throw UndoError.conflictGone
+            }
+            // An older git may exit 0 without bringing the stages back.
+            guard try await !unmerged().isEmpty else { throw UndoError.conflictGone }
+            let conflicted = PathState(index: nil, file: try await fileState(path.path, ops: ops))
+            entry.paths = [StashedPath(path: path.path, before: conflicted, after: path.after)]
+            resolves.undo.removeLast()
+            resolves.redo.append(entry)
+        } else {
+            guard try await !unmerged().isEmpty, try await fileState(path.path, ops: ops) == path.before.file else {
+                throw UndoError.repositoryChanged
+            }
+            let blobs = [path.after.index?.blob, path.after.file?.blob].compactMap(\.self)
+            let input = Data(blobs.map { $0 + "\n" }.joined().utf8)
+            if !blobs.isEmpty, try await ops.exec(["cat-file", "--batch-check"], stdin: input).text.contains(" missing") {
+                throw UndoError.objectsMissing
+            }
+            let url = try safeFile(path.path, in: ops.cwd)
+            var info = stat()
+            if lstat(url.path, &info) == 0, info.st_mode & S_IFMT != S_IFDIR { try FileManager.default.removeItem(at: url) }
+            if let file = path.after.file { try await writeFile(file.blob, kind: file.kind, to: url, ops: ops) }
+            try await ops.exec(["--literal-pathspecs", "add", "-A", "--", path.path])
+            resolves.redo.removeLast()
+            resolves.undo.append(entry)
+        }
+        return entry
+    }
+
+    /// The recorded history as Undo and Redo see it: stage and unstage entries the index moved on from are left out
+    /// (`dropStale`), so the next titles name what Undo and Redo will do. Only reads (the file and the index), so it
+    /// may run outside the write lane.
+    public func load(_ ops: GitOperations) async throws -> State {
+        var state = try load()
+        // Read only when there are some: the history is read with every status refresh.
+        if let resolves = state.resolves, (try? await Self.operationKey(ops)) != resolves.operation {
+            state.resolves = nil
+        }
+        await Self.dropStale(.undo, from: &state, ops: ops)
+        await Self.dropStale(.redo, from: &state, ops: ops)
+        return state
+    }
+
+    /// Drops the stage and unstage entries on top of `direction`'s list whose index is no longer the current one:
+    /// something Histq does not journal (line staging, a terminal `git add`) changed the index since. They recorded
+    /// only the index, so they are left out instead of refused, which would block every entry under them; the index
+    /// itself is not touched.
+    static func dropStale(_ direction: Direction, from state: inout State, ops: GitOperations) async {
+        while let entry = direction == .undo ? state.undo.last : state.redo.last,
+            entry.kind == .stage || entry.kind == .unstage,
+            await indexDiffers(from: direction == .undo ? entry.after.index : entry.before.index, ops: ops)
+        {
+            if direction == .undo { state.undo.removeLast() } else { state.redo.removeLast() }
+        }
+    }
+
+    /// Whether the index differs from `tree` (`diff-index`, which writes nothing). True when git cannot compare (the
+    /// tree was pruned: that entry cannot be stepped anyway); false for a tree that is no object id, which
+    /// `validate()` then refuses.
+    private static func indexDiffers(from tree: String, ops: GitOperations) async -> Bool {
+        // The journal is untrusted: only an object id reaches git.
+        guard GitOperations.isObjectID(tree) else { return false }
+        let result = try? await ops.exec(
+            ["diff-index", "--cached", "--quiet", "--ignore-submodules=none", tree, "--"], allowedExitCodes: [0, 1])
+        return result?.exitCode != 0
+    }
+
     // MARK: - Snapshots
+
+    /// The operation in progress (`OperationKey`); nil when there is none.
+    static func operationKey(_ ops: GitOperations) async throws -> OperationKey? {
+        let operation = try await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation
+        guard operation != .none else { return nil }
+        func oid(_ name: String) async throws -> String? {
+            trimmed(try await ops.exec(["rev-parse", "-q", "--verify", name], allowedExitCodes: [0, 1]).text)
+        }
+        var stop: String?
+        for name in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] where stop == nil {
+            stop = try await oid(name)
+        }
+        return OperationKey(operation: String(describing: operation), stop: stop, head: try await oid("HEAD"))
+    }
 
     static func headRef(_ ops: GitOperations) async throws -> String? {
         let text = try await ops.exec(["symbolic-ref", "-q", "HEAD"], allowedExitCodes: [0, 1]).text
@@ -488,6 +865,95 @@ public struct UndoJournal: Sendable {
         return (root, lines.count > 1 ? lines[1] : "")
     }
 
+    /// Every path `status` lists (staged, unstaged and untracked files, a rename as its two paths), top-level relative.
+    static func changedPaths(_ ops: GitOperations) async throws -> [String] {
+        try await statusRecords(ops).keys.filter { !$0.hasSuffix("/") }
+    }
+
+    /// Every `status` record by its path (top-level relative; a nested repository as `dir/`).
+    static func statusRecords(_ ops: GitOperations) async throws -> [String: String] {
+        let output = try await ops.exec(["status", "--porcelain=v2", "-z", "--untracked-files=all", "--no-renames"])
+        let records = output.text.split(separator: "\0").compactMap { record -> (String, String)? in
+            // `1 XY sub mH mI mW hH hI <path>`, `u XY sub m1 m2 m3 mW h1 h2 h3 <path>`, `? <path>`.
+            let fields: Int? = switch record.first {
+            case "1": 8
+            case "u": 10
+            case "?": 1
+            default: nil
+            }
+            guard let fields else { return nil }
+            let parts = record.split(separator: " ", maxSplits: fields, omittingEmptySubsequences: false)
+            return parts.count == fields + 1 ? (String(parts[fields]), String(record)) : nil
+        }
+        return Dictionary(records) { first, _ in first }
+    }
+
+    /// The state of each of `paths` (top-level relative; `write`: the file blobs are stored). A path left out cannot
+    /// be recorded: a conflict, a submodule or another mode, a folder, or one `lstat` cannot read.
+    static func pathStates(_ paths: [String], write: Bool, ops: GitOperations) async throws -> [String: PathState] {
+        var index: [String: PathState.IndexEntry] = [:]
+        var skipped = Set<String>()
+        // `<mode> <blob> <stage>\t<path>`, matched by exact path (a pathspec `a` would also match `a/b`).
+        for record in try await ops.exec(["ls-files", "--stage", "-z"]).text.split(separator: "\0") {
+            let parts = record.split(separator: "\t", maxSplits: 1)
+            let fields = parts.first?.split(separator: " ") ?? []
+            guard parts.count == 2, fields.count == 3 else { continue }
+            let path = String(parts[1])
+            if fields[2] == "0", PathState.modes.contains(String(fields[0])) {
+                index[path] = PathState.IndexEntry(mode: String(fields[0]), blob: String(fields[1]))
+            } else {
+                skipped.insert(path)
+            }
+        }
+        var states: [String: PathState] = [:]
+        var files: [(path: String, kind: UntrackedFile.FileKind)] = []
+        for path in paths where !skipped.contains(path) {
+            var info = stat()
+            guard lstat(ops.cwd.appending(path: path, directoryHint: .notDirectory).path, &info) == 0 else {
+                if errno == ENOENT || errno == ENOTDIR { states[path] = PathState(index: index[path], file: nil) }
+                continue
+            }
+            switch info.st_mode & S_IFMT {
+            case S_IFLNK: files.append((path, .symlink))
+            case S_IFREG: files.append((path, info.st_mode & 0o111 != 0 ? .executable : .regular))
+            default: continue
+            }
+        }
+        for (file, blob) in zip(files, try await hashes(of: files, write: write, ops: ops)) {
+            states[file.path] = PathState(index: index[file.path], file: PathState.File(blob: blob, kind: file.kind))
+        }
+        return states
+    }
+
+    /// The worktree file at `path` (top-level relative) as `pathStates` records it, its blob not stored; nil when
+    /// absent (or a folder). Also for an unmerged path, which `pathStates` leaves out.
+    static func fileState(_ path: String, ops: GitOperations) async throws -> PathState.File? {
+        var info = stat()
+        guard lstat(ops.cwd.appending(path: path, directoryHint: .notDirectory).path, &info) == 0 else { return nil }
+        let kind: UntrackedFile.FileKind
+        switch info.st_mode & S_IFMT {
+        case S_IFLNK: kind = .symlink
+        case S_IFREG: kind = info.st_mode & 0o111 != 0 ? .executable : .regular
+        default: return nil
+        }
+        return PathState.File(blob: try await hashes(of: [(path, kind)], write: false, ops: ops)[0], kind: kind)
+    }
+
+    /// The paths the stash `hash` touched (top-level relative): its working tree and (`index`) index against its
+    /// base, and its untracked files. A partial stash holds the whole index, so this can include staged files it left
+    /// as they were.
+    static func stashTouched(_ hash: String, index: Bool = true, ops: GitOperations) async throws -> Set<String> {
+        var lists = [try await ops.exec(["diff-tree", "-r", "--name-only", "-z", "--no-renames", "\(hash)^1", hash]).text]
+        if index {
+            lists.append(
+                try await ops.exec(["diff-tree", "-r", "--name-only", "-z", "--no-renames", "\(hash)^1", "\(hash)^2"]).text)
+        }
+        if try await ops.exec(["rev-parse", "-q", "--verify", "\(hash)^3"], allowedExitCodes: [0, 1]).exitCode == 0 {
+            lists.append(try await ops.exec(["ls-tree", "-r", "--name-only", "-z", "\(hash)^3"]).text)
+        }
+        return Set(lists.flatMap { $0.split(separator: "\0").map(String.init) })
+    }
+
     // MARK: - Checks
 
     /// The after-state of a discard: the tracked paths match the index and the removed untracked files are gone.
@@ -561,6 +1027,15 @@ public struct UndoJournal: Sendable {
         }
     }
 
+    /// Refuses when `git gc` pruned the stash `commit` or one of `blobs`, or when the journal names another type.
+    private static func requireObjects(commit: String, blobs: [String], ops: GitOperations) async throws {
+        let input = ([commit] + blobs).map { $0 + "\n" }.joined()
+        let output = try await ops.exec(["cat-file", "--batch-check=%(objecttype)"], stdin: Data(input.utf8)).text
+        let types = output.split(separator: "\n").map(String.init)
+        if types.contains(where: { $0.hasSuffix(" missing") }) { throw UndoError.objectsMissing }
+        guard types == ["commit"] + Array(repeating: "blob", count: blobs.count) else { throw UndoError.unreadableJournal }
+    }
+
     // MARK: - Moving refs, HEAD and files
 
     /// One `update-ref --stdin` transaction, each change checked against the current value; then the upstream of
@@ -607,17 +1082,23 @@ public struct UndoJournal: Sendable {
                 ["--literal-pathspecs", "restore", "--source=\(stash)", "--worktree", "--"] + content.paths)
         }
         for file in content.untracked {
-            let url = try safeFile(file.path, in: ops.cwd)
-            let data = try await ops.exec(["cat-file", "blob", file.blob]).stdout
-            switch file.kind {
-            case .symlink:
-                try FileManager.default.createSymbolicLink(
-                    atPath: url.path, withDestinationPath: String(decoding: data, as: UTF8.self))
-            case .regular, .executable:
-                try data.write(to: url, options: .atomic)
-                try FileManager.default.setAttributes(
-                    [.posixPermissions: file.kind == .executable ? 0o755 : 0o644], ofItemAtPath: url.path)
-            }
+            try await writeFile(file.blob, kind: file.kind, to: try safeFile(file.path, in: ops.cwd), ops: ops)
+        }
+    }
+
+    /// Writes the blob `blob` as a file of `kind` at `url` (from `safeFile`; a symlink needs the place free).
+    private static func writeFile(
+        _ blob: String, kind: UntrackedFile.FileKind, to url: URL, ops: GitOperations
+    ) async throws {
+        let data = try await ops.exec(["cat-file", "blob", blob]).stdout
+        switch kind {
+        case .symlink:
+            try FileManager.default.createSymbolicLink(
+                atPath: url.path, withDestinationPath: String(decoding: data, as: UTF8.self))
+        case .regular, .executable:
+            try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: kind == .executable ? 0o755 : 0o644], ofItemAtPath: url.path)
         }
     }
 
@@ -677,15 +1158,15 @@ extension UndoJournal.Entry {
     /// must look like what Histq writes before any of it reaches git.
     func validate() throws {
         func validObject(_ oid: String?) -> Bool { oid.map(GitOperations.isObjectID) ?? true }
-        func validRef(_ name: String) -> Bool {
-            name.hasPrefix("refs/heads/") && !name.unicodeScalars.contains {
+        func validRef(_ name: String, tags: Bool = false) -> Bool {
+            (name.hasPrefix("refs/heads/") || tags && name.hasPrefix("refs/tags/")) && !name.unicodeScalars.contains {
                 $0.value <= 0x20 || $0.value == 0x7F
             }
         }
         for snapshot in [before, after] {
             guard GitOperations.isObjectID(snapshot.index), validObject(snapshot.head.commit),
-                snapshot.head.ref.map(validRef) ?? true,
-                snapshot.refs.allSatisfy({ validRef($0.name) && validObject($0.oid) })
+                snapshot.head.ref.map({ validRef($0) }) ?? true,
+                snapshot.refs.allSatisfy({ validRef($0.name, tags: true) && validObject($0.oid) })
             else { throw UndoError.unreadableJournal }
         }
         for upstream in (before.refs + after.refs).compactMap(\.upstream) {
@@ -702,15 +1183,38 @@ extension UndoJournal.Entry {
                 throw UndoError.unsafePath(unsafe.path)
             }
         }
+        // Stash ids are full length: `stepStash` builds the null id of `update-index` from one.
+        func validFull(_ oid: String) -> Bool { GitOperations.isObjectID(oid) && (oid.count == 40 || oid.count == 64) }
+        if let stash {
+            guard validFull(stash.hash), !stash.message.contains(where: { $0.isNewline || $0 == "\0" }) else {
+                throw UndoError.unreadableJournal
+            }
+        }
+        for path in paths ?? [] {
+            for state in [path.before, path.after] {
+                guard state.index.map({ UndoJournal.PathState.modes.contains($0.mode) && validFull($0.blob) }) ?? true,
+                    state.file.map({ validFull($0.blob) }) ?? true
+                else { throw UndoError.unreadableJournal }
+            }
+            // A NUL would end the path early in `update-index -z` input.
+            guard UndoJournal.isSafePath(path.path), !path.path.contains("\0") else {
+                throw UndoError.unsafePath(path.path)
+            }
+        }
     }
 
     /// The checks of `validate()` that need git: every branch is a name `git branch` accepts (its short name builds
-    /// the `branch.<name>.*` config keys) and every upstream's `merge` passes `git check-ref-format`.
+    /// the `branch.<name>.*` config keys), every tag one `git tag` accepts, and every upstream's `merge` passes
+    /// `git check-ref-format`.
     func validateNames(_ ops: GitOperations) async throws {
         let snapshots = [before, after]
         let names = Set(snapshots.flatMap { snapshot in snapshot.refs.map(\.name) + [snapshot.head.ref].compactMap(\.self) })
         for name in names {
-            guard let short = name.dropFirstPrefix("refs/heads/"), (try? await ops.validateBranchName(short)) != nil else {
+            if let short = name.dropFirstPrefix("refs/heads/"), (try? await ops.validateBranchName(short)) != nil {
+                continue
+            }
+            // `validate()` already keeps tags out of HEAD.
+            guard let short = name.dropFirstPrefix("refs/tags/"), (try? await ops.validateTagName(short)) != nil else {
                 throw UndoError.unreadableJournal
             }
         }

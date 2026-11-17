@@ -42,6 +42,10 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Stash Changes in a file or folder from the WIP file menus; other staged files stay staged but are also saved in that stash.
 - Apply This File from a stash's file menu, which asks first when the file has local changes.
 - Undo of a Stash & Checkout whose stash held staged changes refuses, because bringing the stash back stages them again.
+- Undo and redo for staging and unstaging whole files (Stage, Unstage, Stage All, Unstage All; not single lines or hunks).
+- Undo and redo for stash save, drop, apply and pop: undoing a drop or a pop puts the stash back with its message.
+- Undo and redo for creating and deleting local tags.
+- Undo of resolving a conflicted file in the conflict editor while the merge, rebase, cherry-pick or revert is still stopped: the file's conflict comes back.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.
@@ -55,6 +59,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - A click on another worktree's changes row in the graph shows its unstaged and staged files instead of opening it in a tab; a double-click in the Worktrees card or Open in New Tab opens it.
 - The graph's WIP rows show how many files are edited, added and deleted, with GitKraken's icons, instead of "3 unstaged".
 - Another worktree's changes row sits right above that worktree's last commit, as in GitKraken, instead of at the top of the graph.
+- Cmd-Z right after staging a file now unstages it, instead of undoing the operation before it.
+- A stash apply or pop that stops on conflicts shows a warning toast ("Applied with conflicts: this apply cannot be undone") instead of a failure; the conflicted files are in the WIP panel.
 
 ## [0.1.0] - YYYY-MM-DD
 
