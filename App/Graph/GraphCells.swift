@@ -181,14 +181,8 @@ final class RefBadgeCellView: NSView {
     /// 12 pt, scaled down to 15; at 10.5 pt they stayed 14). A Lucide icon (24 pt) is tinted the same color.
     @MainActor private static func symbol(_ name: String) -> NSImage? {
         if let cached = symbols[name] { return cached }
-        if name == pullBadgeIcon {
-            let image = NSImage.icon(pullIcon, accessibilityDescription: nil, size: 24)
-                .map { tinted($0, color: Palette.graphPullOpenIcon) }
-            symbols[name] = image
-            return image
-        }
         if name.hasPrefix("lucide-") {
-            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map { tinted($0) }
+            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map(tinted)
             symbols[name] = image
             return image
         }
@@ -207,12 +201,11 @@ final class RefBadgeCellView: NSView {
 
     @MainActor private static var symbols: [String: NSImage?] = [:]
 
-    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color (or `color`): it would draw
-    /// black.
-    private static func tinted(_ template: NSImage, color: NSColor = Palette.graphBadgeText) -> NSImage {
+    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color: it would draw black.
+    private static func tinted(_ template: NSImage) -> NSImage {
         NSImage(size: template.size, flipped: false) { rect in
             template.draw(in: rect)
-            color.setFill()
+            Palette.graphBadgeText.setFill()
             rect.fill(using: .sourceAtop)
             return true
         }
@@ -244,14 +237,12 @@ final class RefBadgeCellView: NSView {
 
     /// The pull request icon, in the chip and, on a badge drawn without it, at the badge's right end.
     private static let pullIcon = "lucide-git-pull-request-arrow"
-    /// `pullIcon` in green (user, 2026-11-17), at a badge's right end; the chip's stays in the text color on its fill.
-    private static let pullBadgeIcon = "pull-request-green"
 
     /// `icons` with the pull request icon last, for a badge drawn without its chip (user, 2026-11-17: it always
     /// shows, as the laptop and the cloud do; the chip with "#N" only on a whole badge, as in the hover stack).
     private static func iconsWithPull(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
         let all = icons(badge)
-        return badge.pullRequest == nil ? all : (all.leading, all.trailing + [pullBadgeIcon])
+        return badge.pullRequest == nil ? all : (all.leading, all.trailing + [pullIcon])
     }
 
     /// The icons a badge always keeps (user, 2026-11-16: the laptop and the cloud never give way; 2026-11-17: nor the
