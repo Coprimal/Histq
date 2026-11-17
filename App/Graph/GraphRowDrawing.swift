@@ -42,8 +42,6 @@ struct GraphMetrics: Equatable {
     var bendRadius: CGFloat { (nodeDiameter / 3).rounded() }
     /// The band's, the selection's and the badges' inset from the row's top and bottom.
     var bandInset: CGFloat { (rowHeight - bandHeight) / 2 }
-    /// A stash node's box side: about 0.7 of the node, kept even so the box's edges sit on whole points.
-    var stashSide: CGFloat { 2 * (nodeDiameter * 0.35).rounded() }
 
     /// The center of `lane`, from the graph column's left edge.
     func x(lane: Int) -> CGFloat { leading + CGFloat(lane) * laneWidth + laneWidth / 2 }
@@ -85,7 +83,7 @@ enum GraphNodeStyle: Equatable {
     case merge
     /// The working tree's changes: a dashed circle.
     case wip
-    /// A stash: a small box.
+    /// A stash: a dashed square around a tray, as GitKraken.
     case stash
 }
 
@@ -110,18 +108,16 @@ enum GraphRowDrawing {
         defer { context.restoreGState() }
         context.clip(to: bounds)
 
-        let lanes = Palette.graphLanes
-        let colorCount = lanes.count
         let width = bounds.width
         let nodeX = bounds.minX + metrics.drawnX(lane: row.lane, width: width)
         let midY = bounds.midY
-        let laneColor = lanes[row.color % colorCount]
+        let laneColor = Palette.graphLane(row.color)
 
         // The band, from the node to the column's edge, ending in a 2 pt bar in the lane color (gk's message marker).
         let band = CGRect(x: nodeX, y: midY - metrics.bandHeight / 2,
                           width: max(0, bounds.maxX - nodeX), height: metrics.bandHeight)
         if band.width > 0 {
-            Palette.graphLaneBands[row.color % colorCount].setFill()
+            Palette.graphLaneBand(row.color).setFill()
             context.fill(band)
             laneColor.setFill()
             context.fill(CGRect(x: bounds.maxX - 2, y: band.minY, width: 2, height: band.height))
@@ -165,7 +161,7 @@ enum GraphRowDrawing {
             }
         }
 
-        drawNode(node, color: laneColor, band: Palette.graphLaneBands[row.color % colorCount], avatar: avatar,
+        drawNode(node, color: laneColor, band: Palette.graphLaneBand(row.color), avatar: avatar,
                  center: CGPoint(x: nodeX, y: midY), metrics: metrics, context: context)
     }
 
@@ -180,7 +176,7 @@ enum GraphRowDrawing {
         let toX = bounds.minX + metrics.drawnX(lane: segment.to, width: bounds.width)
         let midY = bounds.midY
         let radius = min(metrics.bendRadius, abs(toX - fromX), bounds.height / 2)
-        Palette.graphLanes[segment.color % Palette.graphLanes.count].setStroke()
+        Palette.graphLane(segment.color).setStroke()
         if segment.isDashed { context.setLineDash(phase: 0, lengths: [3, 3]) }
         switch (segment.shape, top) {
         case (.bendIn, _):
@@ -230,9 +226,10 @@ enum GraphRowDrawing {
             context.setLineDash(phase: 0, lengths: [])
             context.setLineWidth(metrics.lineWidth)
         case .stash:
-            let side = metrics.stashSide
-            let rect = CGRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side)
-            let path = CGPath(roundedRect: rect, cornerWidth: 3, cornerHeight: 3, transform: nil)
+            // The WIP circle's size, as a square.
+            let rect = CGRect(x: center.x - diameter / 2 + 1, y: center.y - diameter / 2 + 1,
+                              width: diameter - 2, height: diameter - 2)
+            let path = CGPath(roundedRect: rect, cornerWidth: 2, cornerHeight: 2, transform: nil)
             Palette.graphSurface.setFill()
             context.addPath(path)
             context.fillPath()
@@ -241,13 +238,17 @@ enum GraphRowDrawing {
             context.fillPath()
             color.setStroke()
             context.setLineWidth(1.5)
+            context.setLineDash(phase: 0, lengths: [2.5, 2.5])
             context.addPath(path)
             context.strokePath()
-            // The box's lid.
-            context.move(to: CGPoint(x: rect.minX + 3, y: rect.midY - 1))
-            context.addLine(to: CGPoint(x: rect.maxX - 3, y: rect.midY - 1))
-            context.strokePath()
+            context.setLineDash(phase: 0, lengths: [])
             context.setLineWidth(metrics.lineWidth)
+            if let tray = trayIcon(color: color, nodeDiameter: diameter) {
+                let size = tray.size
+                tray.draw(in: CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                                     width: size.width, height: size.height),
+                          from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
         case .commit(let initials):
             let rect = CGRect(x: center.x - diameter / 2, y: center.y - diameter / 2, width: diameter, height: diameter)
             color.setFill()
@@ -266,6 +267,19 @@ enum GraphRowDrawing {
                 text.draw(at: CGPoint(x: center.x - size.width / 2, y: center.y - size.height / 2))
             }
         }
+    }
+
+    /// The stash node's tray symbols, by color and node size: one per lane color.
+    private static var trayCache: [String: NSImage] = [:]
+
+    private static func trayIcon(color: NSColor, nodeDiameter: CGFloat) -> NSImage? {
+        let key = "\(color)|\(nodeDiameter)"
+        if let cached = trayCache[key] { return cached }
+        let config = NSImage.SymbolConfiguration(pointSize: (nodeDiameter * 0.5).rounded(), weight: .semibold)
+            .applying(.init(paletteColors: [color]))
+        let image = NSImage(systemSymbolName: "tray", accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        trayCache[key] = image
+        return image
     }
 
     /// The initials' strings, by initials and node size: a few hundred at most in any repo.
@@ -311,5 +325,17 @@ final class GraphCellView: NSView {
         GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef,
                              refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha, avatar: avatar, metrics: metrics,
                              logLanes: logLanes, in: bounds, context: context)
+    }
+}
+
+extension Palette {
+    /// A `GraphRow` or `GraphSegment` color: its lane color, or the stash grey.
+    static func graphLane(_ color: Int) -> NSColor {
+        color == GraphLayout.stashColor ? graphStash : graphLanes[color % graphLanes.count]
+    }
+
+    /// The band of a row of `color`.
+    static func graphLaneBand(_ color: Int) -> NSColor {
+        color == GraphLayout.stashColor ? graphStashBand : graphLaneBands[color % graphLaneBands.count]
     }
 }

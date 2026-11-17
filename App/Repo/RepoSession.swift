@@ -62,14 +62,16 @@ enum GitToolchain {
 }
 
 /// The log of a repo with its graph rows, in `git log --all --topo-order` order. `rows[i]` is `commits[i]`'s row; the
-/// rows above the commits (WIP, stashes) are in `syntheticRows`.
+/// rows above the commits (WIP, worktrees) are in `syntheticRows`, the stash rows in `hung`, each right above its base.
 struct LogSnapshot: Sendable {
     var commits: [Commit] = []
     var rows: [GraphRow] = []
     /// Laid out before the commits, shown above them: the WIP row when the working tree has changes, then one row per
-    /// stash, newest first.
+    /// other worktree with changes; once the log is complete, the stashes whose base is not in it (without a line).
     var syntheticRows: [GraphRow] = []
-    /// What `syntheticRows` were laid out from (`RepoSession.syntheticRows(status:stashes:)`).
+    /// The stash rows, each laid out right above its base commit, newest first among one base; top first.
+    var hung: [GraphHungRow] = []
+    /// What the synthetic rows were laid out from (`RepoSession.syntheticRows(status:stashes:worktrees:)`).
     var synthetic: [GraphSyntheticRow] = []
     /// The stashes of the stash rows, newest first.
     var stashes: [Stash] = []
@@ -82,6 +84,57 @@ struct LogSnapshot: Sendable {
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
     /// inserts the rows a snapshot of the same load adds and reloads for a new one.
     var generation = 0
+
+    /// What a table row of the graph shows.
+    enum Entry {
+        case synthetic(GraphSyntheticRow, GraphRow)
+        /// `commits[index]`.
+        case commit(Int)
+    }
+
+    /// The graph's table rows: the top rows, then the commits with the stash rows between them.
+    var rowCount: Int { syntheticRows.count + hung.count + commits.count }
+
+    func entry(at row: Int) -> Entry? {
+        guard row >= 0 else { return nil }
+        if row < syntheticRows.count {
+            let graphRow = syntheticRows[row]
+            guard case .synthetic(let synthetic) = graphRow.node else { return nil }
+            return .synthetic(synthetic, graphRow)
+        }
+        let position = row - syntheticRows.count
+        var above = 0
+        for (offset, hung) in hung.enumerated() {
+            let at = hung.above + offset
+            if at == position { return .synthetic(hung.synthetic, hung.row) }
+            if at > position { break }
+            above += 1
+        }
+        let index = position - above
+        return index < commits.count ? .commit(index) : nil
+    }
+
+    /// The graph row drawn at table row `row`.
+    func graphRow(at row: Int) -> GraphRow? {
+        switch entry(at: row) {
+        case .synthetic(_, let graphRow): graphRow
+        case .commit(let index): rows[index]
+        case nil: nil
+        }
+    }
+
+    /// The table row of `commits[index]`.
+    func row(ofCommit index: Int) -> Int {
+        syntheticRows.count + index + hung.prefix { $0.above <= index }.count
+    }
+
+    /// The table row of the first synthetic row that matches.
+    func row(where matches: (GraphSyntheticRow) -> Bool) -> Int? {
+        if let top = syntheticRows.firstIndex(where: { if case .synthetic(let s) = $0.node { matches(s) } else { false } }) {
+            return top
+        }
+        return hung.firstIndex { matches($0.synthetic) }.map { syntheticRows.count + hung[$0].above + $0 }
+    }
 }
 
 /// Which branch each commit of a log snapshot is on (`BranchAttribution.claims`), for the graph's faded badge:
@@ -1372,9 +1425,9 @@ final class RepoSession: Identifiable {
         return Self.syntheticRows(status: status, stashes: stashes, worktrees: log.worktrees) != log.synthetic
     }
 
-    /// The rows above the commits: the WIP row when the working tree has changes (hanging from HEAD), then one per other
-    /// worktree with changes (hanging from its HEAD), then the stashes (each hanging from the commit it was made on),
-    /// newest first.
+    /// The synthetic rows: the WIP row when the working tree has changes (hanging from HEAD), then one per other
+    /// worktree with changes (hanging from its HEAD), both above the commits, then the stashes (each right above the
+    /// commit it was made on), newest first.
     nonisolated static func syntheticRows(status: WorkingStatus, stashes: [Stash], worktrees: [WorktreeInfo])
         -> [GraphSyntheticRow]
     {
@@ -1484,15 +1537,14 @@ final class RepoSession: Identifiable {
         firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
-        let pages = LogReader.pages(runner: backend.runner, cwd: cwd, env: env)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
-        async let stashes = StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
-        var layout = GraphLayout()
         var snapshot = LogSnapshot(generation: generation)
-        snapshot.stashes = try await stashes
+        // Read first: the log also reads the stashes' bases, which no branch may hold any more.
+        snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        let pages = LogReader.pages(runner: backend.runner, cwd: cwd, env: env, alsoFrom: snapshot.stashes.map(\.base))
         snapshot.worktrees = worktrees
         snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
-        snapshot.syntheticRows = layout.append(snapshot.synthetic)
+        var (layout, top) = beginLayout(&snapshot)
         var isFirst = true
         for try await page in pages {
             for (offset, commit) in page.enumerated() {
@@ -1500,14 +1552,27 @@ final class RepoSession: Identifiable {
             }
             snapshot.commits += page
             snapshot.rows += layout.append(page)
+            snapshot.hung = layout.hung
             if isFirst {
                 isFirst = false
                 await firstPage(snapshot)
             }
         }
         try Task.checkCancellation()
+        snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
         snapshot.isComplete = true
         return snapshot
+    }
+
+    /// Lays out `snapshot.synthetic`'s WIP and worktree rows at the top and hangs its stashes above their bases. Returns
+    /// the layout to feed the commits, and the top rows' layout: the stashes whose base never came are laid out with it
+    /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are).
+    nonisolated private static func beginLayout(_ snapshot: inout LogSnapshot) -> (layout: GraphLayout, top: GraphLayout) {
+        var layout = GraphLayout()
+        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind != .stash })
+        let top = layout
+        layout.hang(snapshot.synthetic.filter { $0.kind == .stash })
+        return (layout, top)
     }
 
     // MARK: Worktrees
@@ -1642,9 +1707,12 @@ final class RepoSession: Identifiable {
         snapshot.worktrees = worktrees
         snapshot.synthetic = log.synthetic.filter { $0.kind == .wip } + worktreeRows(worktrees)
             + log.synthetic.filter { $0.kind == .stash }
-        var layout = GraphLayout()
-        snapshot.syntheticRows = layout.append(snapshot.synthetic)
+        var (layout, top) = beginLayout(&snapshot)
         snapshot.rows = layout.append(log.commits)
+        snapshot.hung = layout.hung
+        if log.isComplete {
+            snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
+        }
         return snapshot
     }
 

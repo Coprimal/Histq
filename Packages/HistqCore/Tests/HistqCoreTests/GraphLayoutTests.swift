@@ -1,6 +1,6 @@
 // Key feature tests for GraphLayout (task 3.1): a merge's second parent opens a lane that is freed after
 // the join and reused later, pages lay out like one batch, the `graph` fixture stays narrow with its
-// first-parent chain in one color and its stashes hanging from their bases, and (only with
+// first-parent chain in one color and its stashes right above their bases, and (only with
 // HISTQ_BIG_FIXTURE) 50k commits parse and lay out in under 2 s.
 import Foundation
 import HistqCore
@@ -50,11 +50,15 @@ struct GraphLayoutTests {
         #expect(stashes.count == 2)
 
         var layout = GraphLayout()
-        var rows = layout.append(
-            [GraphSyntheticRow(kind: .wip, id: "wip", base: head)]
-                + stashes.map { GraphSyntheticRow(kind: .stash, id: $0.hash, base: $0.base) })
+        var rows = layout.append([GraphSyntheticRow(kind: .wip, id: "wip", base: head)])
+        layout.hang(stashes.map { GraphSyntheticRow(kind: .stash, id: $0.hash, base: $0.base) })
         for try await page in LogReader.pages(runner: copy.runner, cwd: repo, env: env, pageSize: 4) {
             rows += layout.append(page)
+        }
+        #expect(layout.waiting.isEmpty, "every stash's base came")
+        // As the graph shows them: each hung row right above its base commit (after the WIP row).
+        for (offset, hung) in layout.hung.enumerated() {
+            rows.insert(hung.row, at: 1 + hung.above + offset)
         }
         expectConnected(rows)
         let index = { (hash: String) in rows.firstIndex { $0.node.hash == hash } }
@@ -78,10 +82,13 @@ struct GraphLayoutTests {
         #expect(Set(chainRows.map { rows[$0].lane }).count == 1, "and one lane")
         #expect(rows[0].lane == rows[chainRows[0]].lane, "WIP sits on HEAD's lane")
 
-        for (offset, stash) in stashes.enumerated() {
-            let row = offset + 1
-            #expect(rows[row].node == .synthetic(GraphSyntheticRow(kind: .stash, id: stash.hash, base: stash.base)))
-            #expect(lineEnd(rows, from: row) == index(stash.base), "stash@{\(stash.index)} hangs from its base")
+        for stash in stashes {
+            let node = GraphRow.Node.synthetic(GraphSyntheticRow(kind: .stash, id: stash.hash, base: stash.base))
+            let row = try #require(rows.firstIndex { $0.node == node })
+            let base = try #require(index(stash.base))
+            #expect(lineEnd(rows, from: row) == base, "stash@{\(stash.index)} hangs from its base")
+            #expect(rows[(row + 1)..<base].allSatisfy { if case .synthetic = $0.node { true } else { false } },
+                    "stash@{\(stash.index)} sits right above its base")
         }
     }
 

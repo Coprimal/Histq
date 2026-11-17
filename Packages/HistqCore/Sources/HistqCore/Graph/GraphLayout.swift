@@ -21,7 +21,7 @@ public struct GraphSegment: Sendable, Hashable {
     public let shape: Shape
     public let from: Int
     public let to: Int
-    /// Index into the lane palette, `0..<GraphLayout.colorCount`.
+    /// Index into the lane palette, `0..<GraphLayout.colorCount`, or `GraphLayout.stashColor`.
     public let color: Int
     /// The line between a synthetic row (WIP, stash) and its base commit.
     public let isDashed: Bool
@@ -78,14 +78,26 @@ public struct GraphRow: Sendable, Hashable {
     public let width: Int
 }
 
-/// The resumable layout state. Feed synthetic rows first (they are placed above the commits), then every
-/// `LogReader` page in order; each call returns the rows for what it was given. The state is a value: a
-/// copy can be kept and resumed later.
+/// A synthetic row laid out just above its base commit (`GraphLayout.hang`).
+public struct GraphHungRow: Sendable, Hashable {
+    /// The index of the base commit among every commit the layout was fed: the row sits right above it.
+    public let above: Int
+    public let synthetic: GraphSyntheticRow
+    public let row: GraphRow
+}
+
+/// The resumable layout state. Feed the synthetic rows that sit at the top first, hang the ones that sit
+/// above their base commit, then feed every `LogReader` page in order; each call returns the rows for what
+/// it was given, and hung rows land in `hung` as their base comes. The state is a value: a copy can be kept
+/// and resumed later.
 ///
 /// A parent that never gets a row (shallow or partial history, a record the parser dropped, a synthetic
 /// row fed after its base) keeps its lane open to the end; a duplicate hash is laid out as a new tip.
 public struct GraphLayout: Sendable {
     public static let colorCount = 8
+    /// The color of a stash row and its line to its base: outside the lane palette (the app draws it grey), so a
+    /// stash never takes a branch's color, and the commit it hangs from never takes the stash's.
+    public static let stashColor = colorCount
 
     /// Which kind of edge a lane is waiting along; when several lanes wait for the same commit, the node
     /// continues the most important one so a branch's first-parent chain keeps its lane and color.
@@ -102,22 +114,26 @@ public struct GraphLayout: Sendable {
 
     private var lanes: [Lane?] = []
     private var nextColor = 0
+    /// Hung rows whose base has not come yet, in the order they were hung.
+    public private(set) var waiting: [GraphSyntheticRow] = []
+    private var waitingBases: Set<String> = []
+    /// The hung rows laid out so far, top first.
+    public private(set) var hung: [GraphHungRow] = []
+    /// Commits laid out so far.
+    private var placed = 0
 
     public init() {}
 
     /// Lays out synthetic rows, each on a new lane that leads down to its base commit.
     public mutating func append(_ synthetic: [GraphSyntheticRow]) -> [GraphRow] {
-        synthetic.map { row in
-            let lane = freeSlot()
-            let color = newColor()
-            let top = passingSegments()
-            if let base = row.base {
-                lanes[lane] = Lane(waitingFor: base, color: color, edge: .synthetic)
-            }
-            trimFreeSlots()
-            let bottom = passingSegments()
-            return makeRow(.synthetic(row), lane: lane, color: color, top: top, bottom: bottom)
-        }
+        synthetic.map { place($0) }
+    }
+
+    /// Hangs synthetic rows above their base commit: each is laid out (into `hung`) right before that commit's
+    /// row, in the order given. A row without a base, or whose base never comes, stays in `waiting`.
+    public mutating func hang(_ synthetic: [GraphSyntheticRow]) {
+        waiting += synthetic
+        for row in synthetic { if let base = row.base { waitingBases.insert(base) } }
     }
 
     /// Lays out one page of commits (in `--topo-order`, children before parents).
@@ -125,9 +141,28 @@ public struct GraphLayout: Sendable {
         var rows: [GraphRow] = []
         rows.reserveCapacity(commits.count)
         for commit in commits {
+            if !waitingBases.isEmpty, waitingBases.remove(commit.hash) != nil {
+                for row in waiting where row.base == commit.hash {
+                    hung.append(GraphHungRow(above: placed, synthetic: row, row: place(row)))
+                }
+                waiting.removeAll { $0.base == commit.hash }
+            }
             rows.append(place(commit))
+            placed += 1
         }
         return rows
+    }
+
+    private mutating func place(_ row: GraphSyntheticRow) -> GraphRow {
+        let lane = freeSlot()
+        let color = row.kind == .stash ? Self.stashColor : newColor()
+        let top = passingSegments()
+        if let base = row.base {
+            lanes[lane] = Lane(waitingFor: base, color: color, edge: .synthetic)
+        }
+        trimFreeSlots()
+        let bottom = passingSegments()
+        return makeRow(.synthetic(row), lane: lane, color: color, top: top, bottom: bottom)
     }
 
     private mutating func place(_ commit: Commit) -> GraphRow {
@@ -137,16 +172,18 @@ public struct GraphLayout: Sendable {
         var top: [GraphSegment] = []
         for index in lanes.indices {
             guard let lane = lanes[index], lane.waitingFor == commit.hash else { continue }
-            if best == nil || lane.edge < best! {
+            // Among the lines of synthetic rows, a WIP's (colored) wins over a stash's (grey).
+            if best == nil || lane.edge < best! || (lane.edge == best! && lanes[node]!.color == Self.stashColor) {
                 node = index
                 best = lane.edge
             }
         }
         let color: Int
-        if node >= 0 {
+        if node >= 0, lanes[node]!.color != Self.stashColor {
             color = lanes[node]!.color
         } else {
-            node = freeSlot()
+            // A tip, or a commit only stashes hang from: a color of its own.
+            if node < 0 { node = freeSlot() }
             color = newColor()
         }
         for index in lanes.indices {

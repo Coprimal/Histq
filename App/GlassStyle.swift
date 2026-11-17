@@ -107,6 +107,9 @@ enum Palette {
     static let graphLanes: [NSColor] = laneValues
     /// The faint band from a node to the graph column's edge: its lane color at 0.16.
     static let graphLaneBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.16) }
+    /// A stash row's node, band and line to its base, outside the lane colors: a neutral grey. #8E8E93 / at 0.16
+    static let graphStash = srgb(0x8E8E93)
+    static let graphStashBand = graphStash.withAlphaComponent(0.16)
     /// A branch badge's fill: its row's lane color at 0.38.
     static let graphBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.38) }
     /// Text and icons on a badge. White 0.92

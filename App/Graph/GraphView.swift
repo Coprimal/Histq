@@ -629,11 +629,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let old = log
         let new = view.log
         if new.generation != old.generation || new.syntheticRows.count != old.syntheticRows.count
-            || new.commits.count < old.commits.count
+            || new.commits.count < old.commits.count || new.hung.count < old.hung.count
         {
             // A new load (or a new layout): every row may have changed. A reload of a log already on screen keeps the
             // top visible row where it was (rows above it may have come or gone) and does not scroll to the selection.
-            let anchor = old.syntheticRows.count + old.commits.count > 0 ? scrollAnchor(table) : nil
+            let anchor = old.rowCount > 0 ? scrollAnchor(table) : nil
             log = new
             // A load's first pages may need fewer lanes than the whole log: the column keeps the last log's until the
             // load completes, so it does not narrow and widen again on every refresh.
@@ -652,10 +652,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         } else if new.rows.count > old.rows.count {
             logLanes = max(logLanes, Self.lanes(of: new.rows[old.rows.count...]))
         }
-        if new.commits.count > old.commits.count {
-            // Later pages of the same load: the rows above are unchanged.
-            let first = old.syntheticRows.count + old.commits.count
-            table.insertRows(at: IndexSet(integersIn: first..<rowCount), withAnimation: [])
+        if new.rowCount > old.rowCount {
+            // Later pages of the same load: the rows above are unchanged (a stash row comes with its base's page).
+            table.insertRows(at: IndexSet(integersIn: old.rowCount..<rowCount), withAnimation: [])
         }
         if reloadVisible {
             let visible = table.rows(in: table.visibleRect)
@@ -665,7 +664,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
-    private var rowCount: Int { log.syntheticRows.count + log.commits.count }
+    private var rowCount: Int { log.rowCount }
 
     /// The most lanes one of `rows` draws in.
     private static func lanes(of rows: ArraySlice<GraphRow>) -> Int {
@@ -674,7 +673,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// The most lanes a row of `log` draws in.
     private static func lanes(in log: LogSnapshot) -> Int {
-        max(lanes(of: log.syntheticRows[...]), lanes(of: log.rows[...]))
+        max(lanes(of: log.syntheticRows[...]), lanes(of: log.rows[...]), lanes(of: log.hung.map(\.row)[...]))
     }
 
     // MARK: Graph column width
@@ -801,17 +800,16 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     // MARK: Rows
 
     private func item(at row: Int) -> GraphItem? {
-        guard row >= 0 else { return nil }
-        if row < log.syntheticRows.count {
-            let synthetic = log.synthetic[row]
+        switch log.entry(at: row) {
+        case .synthetic(let synthetic, _):
             switch synthetic.kind {
             case .wip: return .wip
             case .stash: return .stash(synthetic.id)
             case .worktreeWIP: return .worktree(synthetic.id)
             }
+        case .commit(let index): return .commit(log.commits[index].hash)
+        case nil: return nil
         }
-        let index = row - log.syntheticRows.count
-        return index < log.commits.count ? .commit(log.commits[index].hash) : nil
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rowCount }
@@ -831,10 +829,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// the node's center, within the graph column.
     private func highlightStartX(forRow row: Int, in table: NSTableView) -> CGFloat {
         let column = table.column(withIdentifier: GraphColumn.graph.identifier)
-        guard column >= 0, row >= 0, row < rowCount else { return 0 }
+        guard column >= 0, let graphRow = log.graphRow(at: row) else { return 0 }
         let rect = table.rect(ofColumn: column)
-        let isSynthetic = row < log.syntheticRows.count
-        let graphRow = isSynthetic ? log.syntheticRows[row] : log.rows[row - log.syntheticRows.count]
         // From the node's center, as GitKraken: the node hides the highlight's left end (no corner beside it).
         let nodeX = rect.minX + metrics.drawnX(lane: graphRow.lane, width: rect.width)
         return min(max(nodeX, rect.minX), rect.maxX)
@@ -852,12 +848,15 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let tableColumn, let column = GraphColumn(rawValue: tableColumn.identifier.rawValue),
-              row >= 0, row < rowCount
+              let entry = log.entry(at: row)
         else { return nil }
-        let isSynthetic = row < log.syntheticRows.count
-        let graphRow = isSynthetic ? log.syntheticRows[row] : log.rows[row - log.syntheticRows.count]
-        let commit = isSynthetic ? nil : log.commits[row - log.syntheticRows.count]
-        let synthetic = isSynthetic ? log.synthetic[row] : nil
+        let graphRow: GraphRow
+        let commit: Commit?
+        let synthetic: GraphSyntheticRow?
+        switch entry {
+        case .synthetic(let source, let drawn): (graphRow, commit, synthetic) = (drawn, nil, source)
+        case .commit(let index): (graphRow, commit, synthetic) = (log.rows[index], log.commits[index], nil)
+        }
 
         switch column {
         case .refs:
@@ -961,8 +960,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         guard column >= 0, visible.length > 0 else { return }
         let changed = notification.userInfo?[AvatarStore.emailKey] as? String
         for row in visible.location..<NSMaxRange(visible) {
-            let index = row - log.syntheticRows.count
-            guard index >= 0, index < log.commits.count else { continue }
+            guard case .commit(let index) = log.entry(at: row) else { continue }
             let commit = log.commits[index]
             if let changed, !AvatarStore.matches(email: commit.authorEmail, name: commit.authorName, changed: changed) {
                 continue
@@ -1019,8 +1017,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// branch, the cloud for a remote one (named as a remote branch's own badge is).
     private func wantedGhost() -> Ghost? {
         guard let table, table.selectedRowIndexes.count == 1, let row = table.selectedRowIndexes.first else { return nil }
-        let index = row - log.syntheticRows.count
-        guard index >= 0, index < log.commits.count else { return nil }
+        guard case .commit(let index) = log.entry(at: row) else { return nil }
         let hash = log.commits[index].hash
         let hasBranch = badges[hash]?.contains { if case .branch = $0.kind { true } else { false } } ?? false
         guard !hasBranch, let name = branchMap.branch(at: index, in: log) else { return nil }
@@ -1089,18 +1086,18 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private func row(of item: GraphItem) -> Int? {
         switch item {
         case .wip:
-            return log.synthetic.firstIndex { $0.kind == .wip }
+            return log.row { $0.kind == .wip }
         case .stash(let hash):
-            return log.synthetic.firstIndex { $0.kind == .stash && $0.id == hash }
+            return log.row { $0.kind == .stash && $0.id == hash }
         case .commit(let hash):
             // The log's index first: a search move to a commit far down a 50,000-commit log stays instant.
             let index = log.commitIndex[hash].flatMap {
                 log.commits.indices.contains($0) && log.commits[$0].hash == hash ? $0 : nil
             }
                 ?? log.commits.firstIndex { $0.hash == hash }
-            return index.map { $0 + log.syntheticRows.count }
+            return index.map { log.row(ofCommit: $0) }
         case .worktree(let path):
-            return log.synthetic.firstIndex { $0.kind == .worktreeWIP && $0.id == path }
+            return log.row { $0.kind == .worktreeWIP && $0.id == path }
         }
     }
 

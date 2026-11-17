@@ -54,15 +54,21 @@ public enum LogReader {
     /// may be shorter; an empty repository yields no page). `env` must be the read environment built by
     /// `GitInvocation.readEnvironment` for this `cwd`. The stream throws `GitError` when git fails. Ending
     /// the iteration early stops git; a cancelled consumer's loop ends without an error.
+    ///
+    /// `alsoFrom`: commit hashes whose history is read too, e.g. the stashes' bases, so a stash made on a
+    /// commit no branch holds any more still has its base in the log, as GitKraken shows it. Anything but a
+    /// hex hash is left out, so it can never be read as an option.
     public static func pages(
-        runner: GitRunner, cwd: URL, env: [String: String], pageSize: Int = defaultPageSize
+        runner: GitRunner, cwd: URL, env: [String: String], pageSize: Int = defaultPageSize,
+        alsoFrom hashes: [String] = []
     ) -> AsyncThrowingStream<[Commit], Error> {
+        let command = arguments + hashes.filter { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [Commit].self)
         let task = Task {
             do {
                 var page: [Commit] = []
                 page.reserveCapacity(pageSize)
-                let lines = await runner.stream(arguments, cwd: cwd, env: env, delimiter: 0)
+                let lines = await runner.stream(command, cwd: cwd, env: env, delimiter: 0)
                 for try await line in lines where line.source == .stdout {
                     guard let commit = LogParser.parse(Substring(line.text)) else { continue }
                     page.append(commit)

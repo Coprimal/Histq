@@ -6,29 +6,33 @@ import AppKit
 import HistqCore
 import SwiftUI
 
-/// Which graph rows dim while a search has matches: the rows of commits that do not match, and the WIP, worktree and
-/// stash rows above them. `token` is new for each value, so the graph compares it, never the bitmap.
+/// Which graph rows dim while a search has matches: the rows of commits that do not match, the stash rows that do not
+/// match, and the WIP and worktree rows. `token` is new for each value, so the graph compares it, never the bitmap.
 struct GraphDimming: Sendable {
     var token = 0
     /// The log snapshot the bitmap was computed for.
     var logGeneration = -1
     /// `matched[i]`: `commits[i]` matches. nil while nothing dims (no query, or no match).
     var matched: [Bool]?
+    /// The matching stashes, by hash.
+    var matchedStashes: Set<String> = []
 
     /// Whether `row` of `log` draws its text dimmed. Rows of commits the search has not seen yet (a later page) and
     /// any row of another snapshot do not.
     func isDimmed(row: Int, in log: LogSnapshot) -> Bool {
         guard let matched, logGeneration == log.generation else { return false }
-        let index = row - log.syntheticRows.count
-        guard index >= 0 else { return true }
-        return index < matched.count ? !matched[index] : false
+        switch log.entry(at: row) {
+        case .commit(let index): return index < matched.count ? !matched[index] : false
+        case .synthetic(let synthetic, _): return !(synthetic.kind == .stash && matchedStashes.contains(synthetic.id))
+        case nil: return false
+        }
     }
 }
 
-/// A repo tab's graph search. Each query change searches the log off the main actor (`CommitSearch`, on an index of
-/// the log built once per snapshot) and cancels the search before it; a new log snapshot searches again. A typed query
-/// goes to its first match at or after the selected row (wrapping to the first), as GitKraken does; a new log keeps
-/// the current match when its commit is still there.
+/// A repo tab's graph search. Each query change searches the log's commits and stash messages off the main actor
+/// (`CommitSearch`, on an index of the log built once per snapshot) and cancels the search before it; a new log snapshot
+/// searches again. A typed query goes to its first match at or after the selected row (wrapping to the first), as
+/// GitKraken does; a new log keeps the current match when its row is still there.
 @Observable
 @MainActor
 final class GraphSearch {
@@ -42,8 +46,10 @@ final class GraphSearch {
         }
     }
 
-    /// The matching commits' indices in `log.commits`, in log order, for `searchedGeneration`'s snapshot.
-    private(set) var matches: [Int] = []
+    /// The matching commits and stashes, top row first, for `searched`'s snapshot.
+    private(set) var matches: [GraphItem] = []
+    /// `matches`' table rows in that snapshot.
+    @ObservationIgnored private var matchRows: [Int] = []
     /// `matches`' index of the current match; nil until the search goes to one.
     private(set) var current: Int?
     /// `matches` belong to the current query.
@@ -63,6 +69,14 @@ final class GraphSearch {
     private struct LogKey: Equatable {
         let generation: Int
         let count: Int
+        /// The table rows: a stash whose base is not in the log gets its row only once the log is complete.
+        let rows: Int
+
+        init(_ log: LogSnapshot) {
+            generation = log.generation
+            count = log.commits.count
+            rows = log.rowCount
+        }
     }
 
     /// The log snapshot `matches` were computed on.
@@ -73,8 +87,8 @@ final class GraphSearch {
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     /// New for each search; a result of an older one is dropped.
     @ObservationIgnored private var generation = 0
-    /// The current match's commit, kept across a new log.
-    @ObservationIgnored private var currentHash: String?
+    /// The current match, kept across a new log.
+    @ObservationIgnored private var currentItem: GraphItem?
     /// The typed query has not gone to a match yet (no log, no match in the pages read so far, or a new log landed
     /// before its result): the next result, also of a new log, still goes to its first match.
     @ObservationIgnored private var pendingJump = false
@@ -104,7 +118,7 @@ final class GraphSearch {
 
     /// A new log snapshot: searches it again while a query is typed. Called by the session for every `log` change.
     func logDidChange() {
-        guard isOpen, let log = session?.log.value, LogKey(generation: log.generation, count: log.commits.count) != searched
+        guard isOpen, let log = session?.log.value, LogKey(log) != searched
         else { return }
         search(jump: pendingJump)
     }
@@ -132,11 +146,15 @@ final class GraphSearch {
 
     // MARK: Searching
 
-    /// The index of `log`'s commits: the one being built for this snapshot, else a new build off the main actor.
+    /// The index of `log`'s commits, then its stashes (as commits with the stash's message): the one being built for
+    /// this snapshot, else a new build off the main actor.
     private func index(for log: LogSnapshot) -> Task<CommitSearch.Index, Never> {
-        let key = LogKey(generation: log.generation, count: log.commits.count)
+        let key = LogKey(log)
         if key == indexKey, let indexTask { return indexTask }
-        let commits = log.commits
+        let commits = log.commits + log.stashes.map {
+            Commit(hash: $0.hash, parents: [], authorName: "", authorEmail: "", authorDate: $0.date,
+                   committerDate: $0.date, subject: $0.message, body: "")
+        }
         let task = Task.detached(priority: .userInitiated) {
             let start = DispatchTime.now().uptimeNanoseconds
             let index = CommitSearch.Index(commits)
@@ -160,8 +178,9 @@ final class GraphSearch {
         if jump || blank { pendingJump = !blank }
         guard !blank, let log = session?.log.value else {
             matches = []
+            matchRows = []
             current = nil
-            currentHash = nil
+            currentItem = nil
             searched = nil
             isFresh = true
             if dimming.matched != nil { dimming = GraphDimming(token: dimming.token &+ 1) }
@@ -169,66 +188,94 @@ final class GraphSearch {
         }
         isFresh = false
         let generation = generation
-        let key = LogKey(generation: log.generation, count: log.commits.count)
+        let key = LogKey(log)
         let indexTask = index(for: log)
         searchTask = Task.detached(priority: .userInitiated) { [weak self] in
             let index = await indexTask.value
             guard !Task.isCancelled else { return }
-            let found = CommitSearch.matches(in: index, query: query)
+            let found = Self.placed(CommitSearch.matches(in: index, query: query), in: log)
             guard !Task.isCancelled else { return }
-            var matched: [Bool]?
-            if !found.isEmpty {
-                var bitmap = [Bool](repeating: false, count: key.count)
-                for commit in found where commit < key.count { bitmap[commit] = true }
-                matched = bitmap
-            }
-            await self?.adopt(found, matched: matched, key: key, generation: generation, jump: jump)
+            await self?.adopt(found, key: key, generation: generation, jump: jump)
         }
     }
 
-    private func adopt(_ found: [Int], matched: [Bool]?, key: LogKey, generation: Int, jump: Bool) {
-        guard generation == self.generation, let log = session?.log.value, log.generation == key.generation,
-              log.commits.count >= key.count
-        else { return }
-        matches = found
+    /// A search's matches as the graph shows them.
+    private struct Found: Sendable {
+        var items: [GraphItem] = []
+        var rows: [Int] = []
+        var matched: [Bool]?
+        var stashes: Set<String> = []
+    }
+
+    /// The index's matches (`log.commits`, then `log.stashes`) top row first, with their rows; a stash without a row
+    /// yet (its base not read yet) is left out.
+    private nonisolated static func placed(_ found: [Int], in log: LogSnapshot) -> Found {
+        var placed: [(row: Int, item: GraphItem)] = []
+        var bitmap = [Bool](repeating: false, count: log.commits.count)
+        var stashes: Set<String> = []
+        for item in found {
+            if item < log.commits.count {
+                bitmap[item] = true
+                placed.append((log.row(ofCommit: item), .commit(log.commits[item].hash)))
+            } else if log.stashes.indices.contains(item - log.commits.count) {
+                let hash = log.stashes[item - log.commits.count].hash
+                guard let row = log.row(where: { $0.kind == .stash && $0.id == hash }) else { continue }
+                stashes.insert(hash)
+                placed.append((row, .stash(hash)))
+            }
+        }
+        // Commits come in row order; a stash's row is among them.
+        if !stashes.isEmpty { placed.sort { $0.row < $1.row } }
+        return Found(items: placed.map(\.item), rows: placed.map(\.row), matched: placed.isEmpty ? nil : bitmap,
+                     stashes: stashes)
+    }
+
+    private func adopt(_ found: Found, key: LogKey, generation: Int, jump: Bool) {
+        guard generation == self.generation, let log = session?.log.value, LogKey(log) == key else { return }
+        matches = found.items
+        matchRows = found.rows
         searched = key
         isFresh = true
-        dimming = GraphDimming(token: dimming.token &+ 1, logGeneration: key.generation, matched: matched)
+        dimming = GraphDimming(token: dimming.token &+ 1, logGeneration: key.generation, matched: found.matched,
+                               matchedStashes: found.stashes)
         if jump {
             current = nil
-            currentHash = nil
-            if found.isEmpty {
+            currentItem = nil
+            if found.items.isEmpty {
                 // The whole log has no match: a later log (a refresh) does not move the selection on its own.
-                if log.isComplete, log.commits.count == key.count { pendingJump = false }
+                if log.isComplete { pendingJump = false }
                 return logResult()
             }
             go(to: firstAtOrAfterSelection())
         } else {
-            current = currentHash.flatMap { hash in found.firstIndex { log.commits[$0].hash == hash } }
-            if current == nil { currentHash = nil }
+            current = currentItem.flatMap { found.items.firstIndex(of: $0) }
+            if current == nil { currentItem = nil }
             logResult()
         }
     }
 
-    /// `matches`' index of the first match at or after the selected row (a WIP or stash row is above every commit),
-    /// else the first match.
+    /// `matches`' index of the first match at or after the selected row (the WIP row is above every match), else the
+    /// first match.
     private func firstAtOrAfterSelection() -> Int {
         guard let session, let log = session.log.value else { return 0 }
-        var anchor = 0
-        if case .commit(let hash)? = session.graphSelection.first { anchor = log.commitIndex[hash] ?? 0 }
-        return matches.firstIndex { $0 >= anchor } ?? 0
+        let anchor: Int? = switch session.graphSelection.first {
+        case .commit(let hash): log.commitIndex[hash].map { log.row(ofCommit: $0) }
+        case .stash(let hash): log.row { $0.kind == .stash && $0.id == hash }
+        default: nil
+        }
+        return matchRows.firstIndex { $0 >= anchor ?? 0 } ?? 0
     }
 
     /// Selects match `position` as a click on its row does, and asks the graph to centre it.
     private func go(to position: Int) {
         guard let session, let log = session.log.value, matches.indices.contains(position),
-              log.generation == searched?.generation, matches[position] < log.commits.count
+              LogKey(log) == searched
         else { return }
-        let hash = log.commits[matches[position]].hash
+        let item = matches[position]
         current = position
-        currentHash = hash
+        currentItem = item
         pendingJump = false
-        if session.graphSelection != [.commit(hash)] { session.selectGraph([.commit(hash)]) }
+        if session.graphSelection != [item] { session.selectGraph([item]) }
         revealToken &+= 1
         logResult()
     }
@@ -237,7 +284,15 @@ final class GraphSearch {
     /// shows it; 0 and `-` without a current match).
     private func logResult() {
         UITiming.find("\(query) matches=\(matches.count) current=\(current.map { $0 + 1 } ?? 0) "
-            + "commit=\(currentHash ?? "-")")
+            + "commit=\(currentItem.map(Self.hash) ?? "-")")
+    }
+
+    private static func hash(_ item: GraphItem) -> String {
+        switch item {
+        case .commit(let hash), .stash(let hash): hash
+        case .wip: "wip"
+        case .worktree(let path): path
+        }
     }
 }
 
@@ -297,7 +352,7 @@ struct GraphSearchBar: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            TextField("Find commits", text: $search.query, prompt: Text("Find commit message or hash"))
+            TextField("Find commits", text: $search.query, prompt: Text("Find commit or stash message, or hash"))
                 .textFieldStyle(.plain)
                 .labelsHidden()
                 .autocorrectionDisabled()
