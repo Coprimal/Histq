@@ -336,6 +336,17 @@ private struct DetailPanel: View {
     }
 
     var body: some View {
+        VStack(spacing: SectionCardMetrics.spacing) {
+            // Reads the status itself, so a status read redraws the notice and not the detail.
+            WorkingChangesNotice(session: session)
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .coordinateSpace(.named(FilesLayoutLog.coordinateSpace))
+    }
+
+    @ViewBuilder private var content: some View {
         Group {
             switch session.detail {
             case .idle, .loading:
@@ -360,8 +371,6 @@ private struct DetailPanel: View {
                     }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .coordinateSpace(.named(FilesLayoutLog.coordinateSpace))
     }
 
     /// The loading selection's cards. A tab that just opened shows the WIP's while its status is unknown or dirty.
@@ -421,6 +430,51 @@ private struct DetailPanel: View {
         case .failed: "History unavailable"
         case .idle, .loading: "Counting commits…"
         }
+    }
+}
+
+/// Over a commit's or a stash's detail while the working tree has changes (as GitKraken): how many files changed and
+/// a View Changes button that selects the WIP row. Nothing for the WIP itself or a clean tree.
+private struct WorkingChangesNotice: View {
+    let session: RepoSession
+
+    var body: some View {
+        if let count {
+            let tone = Color.accentColor
+            SectionCard(nil, contentPadding: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "pencil.line")
+                        .foregroundStyle(tone)
+                        .font(.system(size: 15))
+                        .accessibilityHidden(true)
+                    // Two lines, so a narrow panel keeps the count whole.
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(count == 1 ? "1 file change" : "\(count) file changes")
+                            .font(.body.weight(.semibold))
+                        Text("in working directory")
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
+                    .accessibilityElement(children: .combine)
+                    Spacer(minLength: 8)
+                    Button("View Changes") { session.selectGraph([.wip]) }
+                        .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                        .help("Show the working directory's changes")
+                }
+            }
+            .modifier(NoticeTint(tone: tone))
+        }
+    }
+
+    /// The changed files, for a commit or a stash (or a ref loading as its commit); nil otherwise or when clean.
+    private var count: Int? {
+        switch session.selection {
+        case .commit, .stash, .ref: break
+        case .overview, .wip, .multiple, .worktree: return nil
+        }
+        guard let count = session.status.value?.entries.count, count > 0 else { return nil }
+        return count
     }
 }
 
