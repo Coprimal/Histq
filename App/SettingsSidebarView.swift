@@ -36,8 +36,9 @@ struct SettingsModal: View {
             Spacer(minLength: 0)
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
             }
             .buttonStyle(RowIconButtonStyle())
             .help("Close Settings (Esc)")
