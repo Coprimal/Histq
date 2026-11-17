@@ -25,6 +25,9 @@ struct IntegrationsSettings: View {
     @State private var copied = false
     /// The way to connect picked at the top of the account group; each shows only its own rows.
     @State private var method: ConnectMethod = .signIn
+    /// The GitHub CLI's accounts on the typed host (`gh auth status --json`), read off the main thread while the GitHub
+    /// CLI method shows; nil while loading or when this gh cannot list them (Import then takes the active account).
+    @State private var cliAccounts: [CLIAccount]?
 
     private enum ConnectMethod: Hashable, CaseIterable {
         case signIn, token, cli
@@ -335,15 +338,56 @@ struct IntegrationsSettings: View {
     }
 
     private func cliRow(_ profile: Profile) -> some View {
-        LabeledContent {
-            Button("Import") { importFromCLI(profile) }
-                .buttonStyle(RowTextButtonStyle(formRow: true))
-                .disabled(draftHost == nil || isBusy)
+        let accounts = cliAccounts ?? []
+        return LabeledContent {
+            Group {
+                if accounts.count > 1 {
+                    // Several gh accounts on this host (gh auth switch): pick the one to import, active or not.
+                    Menu {
+                        ForEach(accounts, id: \.login) { account in
+                            Button(account.active ? "\(account.login) (active)" : account.login) {
+                                importFromCLI(profile, user: account.login)
+                            }
+                            .disabled(account.state != "success")
+                        }
+                    } label: {
+                        HStack(spacing: MenuChevron.gap) {
+                            Text("Import")
+                            MenuChevron()
+                        }
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 12, menu: true))
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                } else {
+                    Button("Import") { importFromCLI(profile, user: nil) }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                }
+            }
+            .disabled(draftHost == nil || isBusy)
         } label: {
             Text("GitHub CLI")
-            SettingsHint("Uses the token of gh auth login for this host (gh auth token --hostname "
-                + "\(draftHost ?? "<host>")).")
+            if accounts.count > 1 {
+                SettingsHint("Pick one of gh's \(accounts.count) accounts for this host (gh auth token --hostname "
+                    + "\(draftHost ?? "<host>") --user <login>).")
+            } else {
+                SettingsHint("Uses the token of gh auth login for this host (gh auth token --hostname "
+                    + "\(draftHost ?? "<host>")).")
+            }
         }
+        .task(id: draftHost) { await loadCLIAccounts(host: draftHost) }
+    }
+
+    /// Lists gh's accounts on `host`, a moment after the host field stops changing (one gh run, not one per key).
+    private func loadCLIAccounts(host: String?) async {
+        cliAccounts = nil
+        guard let host else { return }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        let accounts = await Self.cliAccounts(host: host)
+        guard !Task.isCancelled else { return }
+        cliAccounts = accounts
     }
 
     /// "Sign in with GitHub": the device flow's button, or the hint when this build has no OAuth App client ID.
@@ -454,10 +498,11 @@ struct IntegrationsSettings: View {
         connect(profile.id, host: host, status: "Checking the token with GitHub…") { token }
     }
 
-    private func importFromCLI(_ profile: Profile) {
+    /// `user`: the gh account to import, nil for the host's active one.
+    private func importFromCLI(_ profile: Profile, user: String?) {
         guard let host = draftHost, !isBusy else { return }
         connect(profile.id, host: host, status: "Reading the GitHub CLI's token…") {
-            try await Self.cliToken(host: host)
+            try await Self.cliToken(host: host, user: user)
         }
     }
 
@@ -546,10 +591,17 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// `gh auth token --hostname <host>`, run directly (no shell) from the fixed PATH, then the login shell's. Its
-    /// stdout is the token: only returned, never logged or put in an error (errors carry gh's stderr only).
+    /// One account of `gh auth status --json hosts` (which never holds the token).
+    struct CLIAccount: Decodable, Hashable, Sendable {
+        let login: String
+        let active: Bool
+        /// "success" when gh's token for it works.
+        let state: String
+    }
+
+    /// `gh <args>`, run directly (no shell) from the fixed PATH, then the login shell's.
     @concurrent
-    private nonisolated static func cliToken(host: String) async throws -> String {
+    private nonisolated static func runGH(_ args: [String], timeout: Duration) async throws -> GitResult {
         let base = await GitToolchain.writeBase()
         let folders = (GitExecutable.fixedPath + ":" + (base["PATH"] ?? "")).split(separator: ":")
         guard let gh = folders.lazy.filter({ $0.hasPrefix("/") })
@@ -559,10 +611,30 @@ struct IntegrationsSettings: View {
         var env = base
         env["GH_PROMPT_DISABLED"] = "1"
         env["NO_COLOR"] = "1"
+        return try await GitRunner(executable: gh).run(
+            args, cwd: URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory),
+            env: env, timeout: timeout, allowedExitCodes: Set(0...255))
+    }
+
+    /// gh's accounts on `host`, active first; nil when gh is missing, fails, or is too old for `--json`.
+    @concurrent
+    private nonisolated static func cliAccounts(host: String) async -> [CLIAccount]? {
+        struct Status: Decodable { let hosts: [String: [CLIAccount]] }
+        guard let result = try? await runGH(["auth", "status", "--json", "hosts", "--hostname", host],
+                                            timeout: .seconds(20)),
+              result.exitCode == 0,
+              let status = try? JSONDecoder().decode(Status.self, from: Data(result.text.utf8))
+        else { return nil }
+        return status.hosts.values.flatMap { $0 }.sorted { $0.active && !$1.active }
+    }
+
+    /// `gh auth token --hostname <host> [--user <user>]`. Its stdout is the token: only returned, never logged or put
+    /// in an error (errors carry gh's stderr only).
+    @concurrent
+    private nonisolated static func cliToken(host: String, user: String?) async throws -> String {
         // gh may wait on its own Keychain prompt; a minute, then it is stopped.
-        let result = try await GitRunner(executable: gh).run(
-            ["auth", "token", "--hostname", host], cwd: URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory),
-            env: env, timeout: .seconds(60), allowedExitCodes: Set(0...255))
+        let result = try await runGH(
+            ["auth", "token", "--hostname", host] + (user.map { ["--user", $0] } ?? []), timeout: .seconds(60))
         guard result.exitCode == 0 else {
             throw CLIError.failed(result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines))
         }
