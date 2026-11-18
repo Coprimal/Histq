@@ -376,7 +376,7 @@ private struct CommitInfoCard: View {
                 description = ""
             }
         } accessory: {
-            HStack(spacing: 6) {
+            HStack(spacing: 10) {
                 copyButton
                 if isHeadEditable || isRewordCandidate {
                     Button(action: editTapped) {
