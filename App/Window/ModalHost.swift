@@ -27,8 +27,8 @@ enum WindowModal: Identifiable {
     case tabEmoji(tabID: UUID)
     /// A tab group's name › Rename Group… for the group `key` (`TabGroupNames`).
     case groupName(key: String)
-    /// The palette's File History…: a search of the tab `tabID`'s tracked files.
-    case fileHistory(tabID: UUID)
+    /// The palette's File History… (or Blame… when `blame`): a search of the tab `tabID`'s tracked files.
+    case fileSearch(tabID: UUID, blame: Bool)
 
     var id: String {
         switch self {
@@ -37,7 +37,7 @@ enum WindowModal: Identifiable {
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
         case .groupName(let key): "group name \(key)"
-        case .fileHistory(let id): "file history \(id)"
+        case .fileSearch(let id, let blame): "file search \(id) \(blame)"
         }
     }
 }
@@ -84,7 +84,7 @@ struct ModalHost: View {
         /// A click on the scrim cancels a confirmation, which has nothing to lose; a form keeps its input.
         var closesOnScrimTap: Bool {
             switch self {
-            case .window(.confirmation), .window(.fileHistory), .confirmation, .conflictSave, .conflictLeave: true
+            case .window(.confirmation), .window(.fileSearch), .confirmation, .conflictSave, .conflictLeave: true
             default: false
             }
         }
@@ -182,9 +182,9 @@ struct ModalHost: View {
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
         case .window(.groupName(let key)):
             GroupNameModal(key: key) { model.closeModal() }
-        case .window(.fileHistory(let tabID)):
+        case .window(.fileSearch(let tabID, let blame)):
             if let session = model.sessions[tabID] {
-                FileHistorySearchModal(session: session) { model.closeModal() }
+                FileSearchModal(session: session, blame: blame) { model.closeModal() }
             }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,

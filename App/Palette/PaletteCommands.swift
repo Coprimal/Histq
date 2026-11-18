@@ -14,7 +14,7 @@ enum PaletteSection: String, Sendable {
     case tabs = "Tabs"
     case app = "Histq"
     case operations = "Operations"
-    /// The File History… modal's rows (`FileHistorySearchModal`), not the palette's.
+    /// The File History… and Blame… modal's rows (`FileSearchModal`), not the palette's.
     case files = "Files"
 }
 
@@ -78,12 +78,15 @@ enum PaletteCommands {
         let session = model.actionSession
         if let session {
             repository(session, into: &snapshot)
-            // A search of the tab's tracked files; the pick opens its history as File History does.
+            // A search of the tab's tracked files; the pick opens its history or blame as File History and Blame do.
             if let tabID = model.selectedTabID {
-                snapshot.add("File History…", detail: "Search the repo's files", section: .repository,
-                             systemImage: "clock.arrow.circlepath") { [weak model] in
-                    UITiming.select("file search")
-                    model?.presentModal(.fileHistory(tabID: tabID))
+                for (blame, title, image) in [(false, "File History…", "clock.arrow.circlepath"),
+                                              (true, "Blame…", "person.text.rectangle")] {
+                    snapshot.add(title, detail: "Search the repo's files", section: .repository,
+                                 systemImage: image) { [weak model] in
+                        UITiming.select("file search")
+                        model?.presentModal(.fileSearch(tabID: tabID, blame: blame))
+                    }
                 }
             }
             checkouts(session, into: &snapshot)

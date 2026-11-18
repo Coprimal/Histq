@@ -1,13 +1,15 @@
-// The palette's File History…: a small modal with one field that searches the tab's tracked files (`git ls-files` in
+// The palette's File History… and Blame…: a small modal with one field that searches the tab's tracked files (`git ls-files` in
 // its worktree). The card shows in the frame of the palette row; the files are read meanwhile, and a dropdown of the
 // best matches shows under the field as soon as something is typed, ranked like the palette's rows
-// (`CommandPaletteModel`). Up and Down move the highlight, Return or a click opens the file's history, as its File
-// History menu item does, and closes the modal.
+// (`CommandPaletteModel`). Up and Down move the highlight, Return or a click opens the file's history or blame, as its
+// File History and Blame menu items do, and closes the modal.
 import AppKit
 import SwiftUI
 
-struct FileHistorySearchModal: View {
+struct FileSearchModal: View {
     let session: RepoSession
+    /// Blame… (the file's blame at the working tree); else File History… (its history from HEAD).
+    let blame: Bool
     let onClose: () -> Void
 
     @State private var query = ""
@@ -20,8 +22,9 @@ struct FileHistorySearchModal: View {
     private static let listHeight: CGFloat = 260
 
     var body: some View {
-        ModalCard(title: "File History", subtitle: "Type a file name of \(session.url.lastPathComponent).",
-                  systemImage: "clock.arrow.circlepath", width: 520) {
+        ModalCard(title: blame ? "Blame" : "File History",
+                  subtitle: "Type a file name of \(session.url.lastPathComponent).",
+                  systemImage: blame ? "person.text.rectangle" : "clock.arrow.circlepath", width: 520) {
             VStack(spacing: PanelContainerMetrics.padding) {
                 TextField("File", text: $query, prompt: Text("Search files"))
                     .textFieldStyle(.modal)
@@ -106,10 +109,11 @@ struct FileHistorySearchModal: View {
             var snapshot = PaletteSnapshot()
             for path in paths {
                 snapshot.add((path as NSString).lastPathComponent, detail: path, section: .files,
-                             systemImage: "doc.text") { [session, onClose] in
+                             systemImage: "doc.text") { [session, blame, onClose] in
                     // The modal first: `selectTool` may ask before leaving the conflict editor.
                     onClose()
-                    session.selectTool(.fileHistory(path: path, rev: nil, follow: false))
+                    session.selectTool(blame ? .blame(path: path, rev: nil)
+                        : .fileHistory(path: path, rev: nil, follow: false))
                 }
             }
             files = CommandPaletteModel(snapshot: snapshot, query: query)

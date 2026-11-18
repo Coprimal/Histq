@@ -157,7 +157,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqDoubleClick toolbar\|toolbargap\|tabrow` | Double-clicks that window row; logs `click`, `dblclick` and `zoom`. |
 | `-HistqToolbarFrames YES` | Logs the repo and branch dropdowns' frames (`toolbar`). |
 | `-HistqOpenPalette "<query>"` / `-HistqPaletteRun` | Opens the command palette with that query; runs its first row. |
-| `-HistqFileSearch "<query>"` | Types that query in the File History… modal when it opens (`-HistqOpenPalette "File History" -HistqPaletteRun`). |
+| `-HistqFileSearch "<query>"` | Types that query in the File History… or Blame… modal when it opens (`-HistqOpenPalette "File History" -HistqPaletteRun`). |
 | `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell. |
 | `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows (dimmed), as their header's eye button does. |
 | `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
