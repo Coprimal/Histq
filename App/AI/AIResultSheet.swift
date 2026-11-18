@@ -22,6 +22,10 @@ enum AIJob: Equatable, Sendable {
     /// `onApply`) replaces it with the whole answer.
     case improveMessage(hash: String, message: String)
     case resolution(AIResolutionTarget)
+    /// The Create Pull Request form's Generate: `base` and `head` are the remote-tracking refs GitHub compares (full
+    /// refs); the template is read at `templateRef` (the default branch's, else the base). Apply (the form's
+    /// `onApply`) fills the title and the description.
+    case pullRequest(base: String, head: String, templateRef: String)
 
     var title: String {
         switch self {
@@ -30,6 +34,7 @@ enum AIJob: Equatable, Sendable {
         case .explainWorkingChanges: "Explain the uncommitted changes"
         case .improveMessage: "Improve message"
         case .resolution(let target): "Resolve conflict \(target.conflict + 1) of \(target.path)"
+        case .pullRequest: "Pull request description"
         }
     }
 
@@ -41,13 +46,14 @@ enum AIJob: Equatable, Sendable {
         case .explainWorkingChanges: "explain-wip"
         case .improveMessage: "improve-message"
         case .resolution: "resolution"
+        case .pullRequest: "pull-request"
         }
     }
 
     /// Whether the answer can be applied (an explanation is only shown and copied).
     var canApply: Bool {
         switch self {
-        case .commitMessage, .resolution, .improveMessage: true
+        case .commitMessage, .resolution, .improveMessage, .pullRequest: true
         case .explainCommit, .explainWorkingChanges: false
         }
     }
@@ -83,6 +89,7 @@ enum AIJobError: Error, CustomStringConvertible {
     case allIgnored
     case fileIgnored
     case aiIgnoreUnreadable
+    case noCommits
 
     var description: String {
         switch self {
@@ -92,6 +99,7 @@ enum AIJobError: Error, CustomStringConvertible {
         case .fileIgnored: "This file is excluded by .aiignore; nothing was sent."
         case .aiIgnoreUnreadable:
             "The .aiignore file can't be read (symlink, not a file, or over 64 KB); nothing was sent."
+        case .noCommits: "The head branch has no commits past the base."
         }
     }
 }
@@ -272,6 +280,7 @@ struct AIResultSheet: View {
             summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
         case .improveMessage: "Replace the row's new message"
+        case .pullRequest: "Fill the pull request's title and description"
         default: ""
         }
     }
@@ -338,7 +347,7 @@ struct AIResultSheet: View {
         case .explainCommit, .explainWorkingChanges:
             Text(Self.markdown(text))
                 .textSelection(.enabled)
-        case .commitMessage, .improveMessage:
+        case .commitMessage, .improveMessage, .pullRequest:
             Text(verbatim: text)
                 .textSelection(.enabled)
         }
@@ -393,7 +402,7 @@ struct AIResultSheet: View {
             } else {
                 onClose()
             }
-        case .explainCommit, .explainWorkingChanges, .improveMessage:
+        case .explainCommit, .explainWorkingChanges, .improveMessage, .pullRequest:
             break
         }
     }
@@ -431,7 +440,7 @@ struct AIResultSheet: View {
                 AIStub.log("resolution conflict \(target.conflict) region \(target.region) manual-regions \(manual) "
                     + "changed-regions \(changed) unresolved \(before.unresolvedCount)->\(after.unresolvedCount) "
                     + "line-break \(AIStub.quoted(target.lineBreak)) output \(AIStub.quoted(after.outputLines[region.output].joined()))")
-            case .explainCommit, .explainWorkingChanges, .improveMessage:
+            case .explainCommit, .explainWorkingChanges, .improveMessage, .pullRequest:
                 break
             }
         case .failed(let message):

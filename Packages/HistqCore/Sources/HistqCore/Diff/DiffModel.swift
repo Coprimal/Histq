@@ -195,11 +195,13 @@ public enum DiffReader {
 
     /// Which diff `patchText` reads: the same ones as `staged`, `unstaged` and `commit`, plus
     /// `stagedAgainstParent`, the index against HEAD's parent: what an amend would commit, so the last commit's
-    /// changes and the staged ones together (against the empty tree when HEAD is a root commit).
+    /// changes and the staged ones together (against the empty tree when HEAD is a root commit); and `branch`, what
+    /// `head` changed since it left `base` (`<base>...<head>`, against their merge base), as a pull request shows it.
     public enum PatchSource: Sendable, Equatable {
         case staged, unstaged
         case commit(String)
         case stagedAgainstParent
+        case branch(base: String, head: String)
     }
 
     /// A diff as patch text, with the same arguments as the parsed loaders (so the same hardening): the AI prompts
@@ -213,6 +215,7 @@ public enum DiffReader {
         case .commit(let revision): commitArguments(revision, paths: [], context: nil)
         case .stagedAgainstParent:
             stagedArguments(paths: [], context: nil, base: try await amendBase(runner: runner, cwd: cwd, env: env))
+        case .branch(let base, let head): branchArguments(base: base, head: head)
         }
         return try await run(args, runner: runner, cwd: cwd, env: env).text
     }
@@ -252,6 +255,12 @@ public enum DiffReader {
         ["--literal-pathspecs", "diff-tree", "-r", "-p", "--root", "--diff-merges=first-parent", "--no-commit-id"]
             + formatOptions
             + contextOption(context) + ["--end-of-options", revision, "--"] + paths
+    }
+
+    /// Three dots: `head` against its merge base with `base`, so commits made on `base` since do not show.
+    static func branchArguments(base: String, head: String) -> [String] {
+        ["--literal-pathspecs", "diff"] + formatOptions
+            + ["--ignore-submodules=dirty", "--end-of-options", "\(base)...\(head)", "--"]
     }
 
     static func fileArguments(at revision: String, path: String) -> [String] {

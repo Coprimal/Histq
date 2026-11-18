@@ -15,6 +15,7 @@
 // `-HistqAI <hook>[,apply][,cancel][,regenerate][,undo]` (stub runs only) clicks one AI button once it can run:
 // `generate` (commit box), `explain-wip` (commit box), `explain` (commit details), `improve-message` (a reword row
 // of the rebase sheet, with `-HistqRewordRow <n>`; its prompt is a commit message's, so it gets the same answer),
+// `pr-describe` (Create Pull Request form, Generate; a title line, a blank line and a short Markdown body),
 // `resolve` (conflict editor), `test` (Settings › AI, Test Connection), `load-models` (Settings › AI, Load models),
 // `resolve-all` (conflict editor, Suggest All: logs `batch finished ok=<n> failed=<m>` once every region ended; with
 // `apply` it clicks Apply N and logs
@@ -156,6 +157,9 @@ enum AIStub {
         if system.contains("Write a git commit message") {
             answer = "Add a canned change from the AI stub\n\nWritten by the DEBUG AI stub (-HistqAIStub); no "
                 + "provider was called.\n"
+        } else if system.contains("Write a pull request title") {
+            answer = "Add a canned pull request from the AI stub\n\n## Summary\n\nWritten by the **DEBUG AI stub** "
+                + "(-HistqAIStub); no provider was called.\n\n- The prompt held \(user.utf8.count) bytes.\n"
         } else if system.contains("Resolve one git merge conflict") {
             // LF only, as models usually answer: Apply must convert it to a CRLF file's line breaks.
             answer = (terminated(block(in: user, token: token, label: "A: ours"))

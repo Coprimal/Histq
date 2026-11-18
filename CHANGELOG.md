@@ -41,6 +41,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Conflict editor: Undo AI puts the conflict editor back as it was before Apply from Suggest Resolution or Suggest All, in one step.
 - Suggest Resolution and Suggest All are unavailable, with the reason, for a file matched by `.aiignore` or when `.aiignore` can't be read.
 - Interactive rebase: Improve next to a reworded commit's message asks AI for a better message from the commit's diff and its current message; Apply puts it in the row.
+- Create Pull Request: Generate next to Description writes the title and description with AI from the branch's commit messages, its diff against the base and the repository's pull request template; Apply fills the form.
+- Settings › AI › Pull requests: Custom instructions, as for commit messages, with Reset to Default.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

@@ -51,6 +51,7 @@ public struct AIPrompt: Sendable, Equatable {
         case commitMessage
         case explanation
         case resolution
+        case pullRequest
     }
 
     public let kind: Kind
@@ -72,6 +73,7 @@ public struct AIPrompt: Sendable, Equatable {
         case .commitMessage: 1024
         case .explanation: 4096
         case .resolution: 8192
+        case .pullRequest: 2048
         }
     }
 
@@ -81,14 +83,14 @@ public struct AIPrompt: Sendable, Equatable {
     }
 
     /// The text of the first complete answer block; text outside it is ignored. Its marker lines must stand on lines
-    /// of their own. A commit message or an explanation is trimmed and must not be empty. A resolution is kept
+    /// of their own. A commit message, an explanation or a pull request is trimmed and must not be empty. A resolution is kept
     /// byte for byte (indentation and the final newline included; empty means "delete both sides") and is refused
     /// when a line starts with a conflict marker. A block without its end marker (a reply cut off by the token cap
     /// or a cancel) is `missingAnswer`: a partial resolution or message must never be applied.
     public func answer(from reply: String) throws(AIAnswerError) -> String {
         guard let block = answerBlock(in: reply, requireEnd: true) else { throw .missingAnswer }
         switch kind {
-        case .commitMessage, .explanation:
+        case .commitMessage, .explanation, .pullRequest:
             var text = block.trimmingCharacters(in: .whitespacesAndNewlines)
             if summaryOnly, let first = text.split(whereSeparator: \.isNewline).first {
                 text = first.trimmingCharacters(in: .whitespaces)
@@ -275,6 +277,41 @@ public enum AIPrompts {
                     instructions, for: "conflict resolutions",
                     except: "the answer stays the region's final text only, with no conflict markers"),
             request: "Resolve this conflict region.", data: data, token: token)
+    }
+
+    /// A pull request title and description for a branch: the full messages of its commits (each cut to 2,000
+    /// characters, the whole block to 4 × `maxMessageCharacters`), its diff against the merge base with the base
+    /// branch (`DiffReader.PatchSource.branch`) and the repository's pull request template (nil or blank adds no block
+    /// and no rule). The answer is the title on its first line, a blank line, then a Markdown body. `instructions`
+    /// (Settings › AI) is added after the default rules but keeps that layout; blank adds nothing.
+    public static func pullRequest(
+        commitMessages: [String], diff: String, template: String?, language: AIResponseLanguage = .english,
+        instructions: String = "", budget: Int = diffBudget, token: () -> String = randomToken
+    ) -> AIPrompt {
+        let messages = commitMessages.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2_000)) }
+            .filter { !$0.isEmpty }
+        let template = template.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        var task = """
+            Write a pull request title and description for the branch in the data blocks below.
+            - First line: the title, a short summary of the change, at most 72 characters, in plain text.
+            - Then a blank line and the description in Markdown.
+            - Describe the intent of the change and why it was made, not a list of the files it touches.
+            - Never invent issue numbers, links or test results.
+            """
+        if template != nil {
+            task += "\n- The description fills in the sections of the pull request template; keep its headings."
+        }
+        task += instructionsRule(
+            instructions, for: "their pull requests",
+            except: "the title stays on the first line, followed by a blank line and the description")
+        var data: [(label: String, content: String)] = [
+            ("commit messages", String(messages.joined(separator: "\n\n---\n\n").prefix(maxMessageCharacters * 4))),
+        ]
+        if let template { data.append(("pull request template", template)) }
+        data.append(("branch diff", budgeted(diff, budget: budget)))
+        return make(
+            kind: .pullRequest, task: task, request: "Write the pull request title and description for this branch.",
+            data: data, languageRule: languageRule(language, answer: "the title and description"), token: token)
     }
 
     private static let explainRules = """

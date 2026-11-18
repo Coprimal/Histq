@@ -4,7 +4,8 @@
 // is refused. One key feature test checks that an oversized diff is cut per file with a note and stays in budget;
 // the resolution text tests check that an applied answer gets the file's line breaks and never a final newline the
 // file did not have. The language tests check that the default prompts are unchanged and that another language adds
-// one fixed rule line.
+// one fixed rule line. The pull request test checks that its commit messages, template and diff go only into data
+// blocks, with exact labels.
 import Foundation
 import HistqCore
 import Testing
@@ -315,6 +316,51 @@ struct AIPromptsTests {
         let blank = AIPrompts.commitMessage(
             stagedDiff: diff, branch: " ", recentSubjects: ["", " "], currentMessage: " \n", token: { "histq-1" })
         #expect(blank == plain, "blank context adds nothing")
+    }
+
+    // MARK: - Pull request
+
+    @Test("commit messages, template and diff go only into data blocks; without a template there is no template block")
+    func pullRequestDataOnlyInDataBlocks() {
+        let messages = ["Add the okapi importer\n\nIt reads okapi files.", "Fix the axolotl parser"]
+        let template = "## Capybara checklist\n- [ ] Tested\n"
+        let diff = "diff --git a/f b/f\n+tapir\n"
+        let prompt = AIPrompts.pullRequest(
+            commitMessages: messages, diff: diff, template: template, language: .english, instructions: "",
+            token: { "histq-1" })
+
+        var outside = prompt.user
+        while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
+              let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        for value in ["okapi", "axolotl", "Capybara", "tapir"] {
+            #expect(prompt.user.contains(value))
+            #expect(!outside.contains(value) && !prompt.system.contains(value), "\(value) outside a data block")
+        }
+        func labels(_ prompt: AIPrompt) -> [String] {
+            prompt.user.components(separatedBy: "BEGIN DATA histq-1 (").dropFirst().map { String($0.prefix { $0 != ")" }) }
+        }
+        #expect(labels(prompt) == ["commit messages", "pull request template", "branch diff"])
+        #expect(prompt.system.hasPrefix(
+            "You are the AI assistant of Histq, a git client.\n\nWrite a pull request title and description"))
+        #expect(prompt.maxTokens == 2048)
+
+        let noTemplate = AIPrompts.pullRequest(
+            commitMessages: messages, diff: diff, template: nil, language: .english, instructions: "",
+            token: { "histq-1" })
+        #expect(labels(noTemplate) == ["commit messages", "branch diff"])
+        #expect(!noTemplate.system.contains("template"), "no template rule without a template")
+        let blank = AIPrompts.pullRequest(
+            commitMessages: messages, diff: diff, template: " \n", language: .english, instructions: " ",
+            token: { "histq-1" })
+        #expect(blank == noTemplate, "a blank template and blank instructions add nothing")
+
+        let long = AIPrompts.pullRequest(
+            commitMessages: [String(repeating: "m", count: 2_500)], diff: diff, template: nil, language: .english,
+            instructions: "", token: { "histq-1" })
+        #expect(long.user.contains(String(repeating: "m", count: 2_000) + "\nEND DATA histq-1\n"))
+        #expect(!long.user.contains(String(repeating: "m", count: 2_001)))
     }
 
     // MARK: - Diff budget

@@ -170,6 +170,8 @@ enum PrefKey: String, CaseIterable {
     case aiExplainInstructions
     /// The user's own instructions added to the Suggest Resolution prompt (empty: none).
     case aiConflictInstructions
+    /// The user's own instructions added to the pull request Generate prompt (empty: none).
+    case aiPullRequestInstructions
     /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
     case toastLevel
 
@@ -210,7 +212,7 @@ enum PrefKey: String, CaseIterable {
         case .aiResponseLanguage: "english"
         case .aiCommitLanguage: "english"
         case .aiCommitSummaryOnly: false
-        case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions: ""
+        case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
         case .toastLevel: "all"
         }
     }

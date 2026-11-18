@@ -2644,6 +2644,7 @@ final class RepoSession: Identifiable {
         case .commitMessage, .improveMessage: .aiCommitInstructions
         case .explainCommit, .explainWorkingChanges: .aiExplainInstructions
         case .resolution: .aiConflictInstructions
+        case .pullRequest: .aiPullRequestInstructions
         }
         let instructions = Preferences.defaults.string(forKey: instructionsKey.rawValue) ?? ""
         let branch = currentBranch
@@ -2694,7 +2695,8 @@ final class RepoSession: Identifiable {
     /// (`AIPrompts.filtered`), cut to the prompt's budget. `instructions` are the job's own (Settings › AI); `branch`
     /// (taken at the click) and the last commit subjects go only into a commit message's prompt. A resolution's text
     /// was taken at the click; it is never translated. Its intent (`resolutionIntent`) is read here, after the
-    /// `.aiignore` check.
+    /// `.aiignore` check. A pull request's: the full messages of its last 50 commits (`noCommits` without one), the
+    /// branch diff (`PatchSource.branch`) and the template at `templateRef`, in the commit messages' language.
     @concurrent
     private nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
@@ -2743,6 +2745,21 @@ final class RepoSession: Identifiable {
             return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b,
                                                intent: await resolutionIntent(target, backend: backend, cwd: cwd),
                                                instructions: instructions)
+        case .pullRequest(let base, let head, let templateRef):
+            let env = try await backend.readEnvironment(cwd: cwd)
+            let log = try await backend.runner.run(
+                ["log", "-z", "--no-show-signature", "--format=%B", "--max-count=50", "--end-of-options",
+                 "\(base)..\(head)", "--"], cwd: cwd, env: env)
+            let messages = log.text.split(separator: "\0").map(String.init)
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !messages.isEmpty else { throw AIJobError.noCommits }
+            let diff = try await DiffReader.patchText(
+                .branch(base: base, head: head), runner: backend.runner, cwd: cwd, env: env)
+            let filtered = try aiFiltered(diff, worktree: worktree)
+            let template = await PullRequestTemplate.read(
+                ref: templateRef, runner: backend.runner, cwd: cwd, env: env, ignore: try aiIgnore(worktree: worktree))
+            return AIPrompts.pullRequest(commitMessages: messages, diff: filtered, template: template,
+                                         language: languages.commit, instructions: instructions)
         }
     }
 

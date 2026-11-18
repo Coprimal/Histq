@@ -209,6 +209,8 @@ struct AISettings: View {
     private var explainInstructions = ""
     @AppStorage(PrefKey.aiConflictInstructions.rawValue, store: Preferences.defaults)
     private var conflictInstructions = ""
+    @AppStorage(PrefKey.aiPullRequestInstructions.rawValue, store: Preferences.defaults)
+    private var pullRequestInstructions = ""
 
     private enum TestState: Equatable {
         case idle
@@ -238,12 +240,14 @@ struct AISettings: View {
             commitMessageGroup
             explanationsGroup
             conflictResolutionGroup
+            pullRequestGroup
             providerGroup
             providerDetailsGroup
         } skeleton: {
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 2)
+            SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 2)
@@ -531,7 +535,7 @@ struct AISettings: View {
         }
     }
 
-    // MARK: Explanations and conflict resolution
+    // MARK: Explanations, conflict resolution and pull requests
 
     private var explanationsGroup: some View {
         SettingsGroup("Explanations") {
@@ -548,6 +552,15 @@ struct AISettings: View {
                                hint: "Added to Histq's prompt for Suggest Resolution. "
                                    + "Sent to the provider with the conflict region.",
                                placeholder: "Prefer the current branch's naming")
+        }
+    }
+
+    private var pullRequestGroup: some View {
+        SettingsGroup("Pull requests") {
+            instructionsEditor($pullRequestInstructions,
+                               hint: "Added to Histq's prompt for Generate in Create Pull Request. "
+                                   + "Sent to the provider with the branch's commits, diff and template.",
+                               placeholder: "Keep the description to a few short bullet points")
         }
     }
 
