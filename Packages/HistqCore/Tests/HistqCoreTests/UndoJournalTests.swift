@@ -11,9 +11,11 @@
 // stores the stash back once; a conflicting apply or pop, or one whose edit lands in a file renamed since, records
 // nothing (a pop keeps its stash), and one during a stopped merge keeps the merge's pending undo; undo refuses once a
 // commit was made outside Histq or a stashed or applied file was edited, and refuses a tampered journal (a path into
-// `.git`, an upstream that is no remote name, a bad tag name or hash, a short stash hash) unchanged. On the `conflict`
-// fixture: undo of a resolved file brings back its stages and markers and redo resolves it again, undo refuses once the
-// resolved file was edited, and resolves undone and redone during a merge Histq started keep the merge's own undo.
+// `.git`, an upstream that is no remote name, a bad tag name or hash, a short stash hash) unchanged. A message edit of
+// HEAD keeps its tree, parents, author and the uncommitted changes and is undone; one of a stale hash throws, and one
+// with commit.gpgSign on signs (a failing gpg.program makes it throw). On the `conflict` fixture: undo of a resolved
+// file brings back its stages and markers and redo resolves it again, undo refuses once the resolved file was edited,
+// and resolves undone and redone during a merge Histq started keep the merge's own undo.
 import Foundation
 import HistqCore
 import Testing
@@ -104,6 +106,67 @@ struct UndoJournalTests {
         #expect(undone.kind == .commit)
         #expect(try await fx.state() == before)
         #expect(try fx.journal.load().nextRedo?.id == undone.id)
+    }
+
+    @Test("a message edit of HEAD keeps its tree, parents, author and the uncommitted changes; undo puts HEAD back")
+    func editHeadMessageKeepsChanges() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        try Data("1.0.2\n".utf8).write(to: fx.repo.appending(path: "VERSION"))
+        try await fx.git(["add", "--", "VERSION"])
+        let guide = String(decoding: try fx.bytes("docs/guide.md"), as: UTF8.self)
+        try Data((guide + "unstaged\n").utf8).write(to: fx.repo.appending(path: "docs/guide.md"))
+        let before = try await fx.state()
+        let head = before[0]
+        let authorFormat = ["log", "-1", "--format=%an%x00%ae%x00%ad", "--date=raw"]
+        let author = try await fx.git(authorFormat)
+        let tree = try await fx.git(["rev-parse", "HEAD^{tree}"])
+        let parents = try await fx.git(["log", "-1", "--format=%P"])
+        // HEAD's author is not the repo's identity, so a copied author is not just the default one.
+        let fields = author.split(separator: "\0").map(String.init)
+        #expect(try await !fx.git(["var", "GIT_AUTHOR_IDENT"]).hasPrefix("\(fields[0]) <\(fields[1])>"))
+
+        try await fx.ops.editHeadMessage(head, message: "Edited subject\n\nBody")
+        #expect(try await fx.git(["log", "-1", "--format=%s"]) == "Edited subject")
+        #expect(try await fx.git(["rev-parse", "HEAD"]) != head)
+        #expect(try await fx.git(["rev-parse", "HEAD^{tree}"]) == tree)
+        #expect(try await fx.git(["log", "-1", "--format=%P"]) == parents)
+        #expect(try await fx.git(authorFormat) == author)
+        #expect(Array(try await fx.state().dropFirst()) == Array(before.dropFirst()), "staged and unstaged stay as they were")
+        #expect(try fx.journal.load().nextUndo?.kind == .amend)
+
+        try await fx.ops.undo()
+        #expect(try await fx.state() == before)
+    }
+
+    @Test("a message edit of a commit that is no longer HEAD throws and changes nothing")
+    func editHeadMessageRefusesStaleHash() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        let parent = try await fx.git(["rev-parse", "HEAD~1"])
+        let before = try await fx.state()
+
+        await #expect(throws: (any Error).self) { try await fx.ops.editHeadMessage(parent, message: "Edited subject") }
+        #expect(try await fx.state() == before)
+    }
+
+    @Test("a message edit of HEAD signs when commit.gpgSign is true (commit-tree alone ignores it)")
+    func editHeadMessageSignsByDefault() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        // The fixture base turns signing off at command scope (key 0); turn it on there, and make signing fail.
+        var base = fx.copy.base
+        #expect(base["GIT_CONFIG_KEY_0"] == "commit.gpgSign")
+        base["GIT_CONFIG_VALUE_0"] = "true"
+        try await fx.git(["config", "gpg.program", "false"])
+        let ops = GitOperations(
+            runner: fx.copy.runner, cwd: fx.repo, env: GitInvocation.environment(profile: nil, base: base),
+            networkTimeout: .seconds(30), journal: fx.journal)
+        let before = try await fx.state()
+
+        // Guards: `.profileDefault` reads commit.gpgSign and passes --gpg-sign, so the failing gpg.program runs.
+        await #expect(throws: (any Error).self) { try await ops.editHeadMessage(before[0], message: "Edited subject") }
+        #expect(try await fx.state() == before)
     }
 
     @Test("undo of a discard of everything brings back the tracked and untracked files and the index")

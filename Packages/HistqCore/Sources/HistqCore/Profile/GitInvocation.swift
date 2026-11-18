@@ -612,14 +612,16 @@ public enum GitInvocation {
         return stride(from: 0, to: fields.count - 1, by: 2).allSatisfy { userScopes.contains(fields[$0]) }
     }
 
-    /// The read environment for a read run in `cwd`: lists the filter and diff drivers configured there first.
+    /// The read environment for a read run in `cwd`: lists the filter and diff drivers configured there first (both
+    /// listings at once).
     public static func readEnvironment(profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL)
         async throws -> [String: String]
     {
         let listingEnv = environment(profile: profile, base: base, access: .read(filterDrivers: []))
-        let filters = try await filterDrivers(runner: runner, cwd: cwd, env: listingEnv)
-        let diffs = try await diffDrivers(runner: runner, cwd: cwd, env: listingEnv)
-        return environment(profile: profile, base: base, access: .read(filterDrivers: filters, diffDrivers: diffs))
+        async let filters = filterDrivers(runner: runner, cwd: cwd, env: listingEnv)
+        async let diffs = diffDrivers(runner: runner, cwd: cwd, env: listingEnv)
+        return try await environment(
+            profile: profile, base: base, access: .read(filterDrivers: filters, diffDrivers: diffs))
     }
 
     /// The filter driver names (`filter.<name>.*`) of every config scope git reads in `cwd`, including

@@ -159,19 +159,26 @@ public enum DiffReader {
     /// The working tree against the index (unstaged changes). `env` must be the read environment built by
     /// `GitInvocation.readEnvironment` for this `cwd`; `paths` limits the diff (literal, root-relative);
     /// `context` sets the context lines (git's default 3 when nil; at least 1, since git apply misplaces a
-    /// context-free hunk; a huge value gives the full file).
+    /// context-free hunk; a huge value gives the full file); `ignoringWhitespace` passes `-w` (a diff that only
+    /// changed whitespace prints nothing; its hunks are for reading, not for building patches).
     /// Throws `GitError`, or `DiffReadError.missingObjects` on a partial clone.
     public static func unstaged(
-        runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [], context: Int? = nil
+        runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [], context: Int? = nil,
+        ignoringWhitespace: Bool = false
     ) async throws -> [FileDiff] {
-        try await load(unstagedArguments(paths: paths, context: context), runner: runner, cwd: cwd, env: env)
+        try await load(
+            unstagedArguments(paths: paths, context: context, ignoringWhitespace: ignoringWhitespace), runner: runner,
+            cwd: cwd, env: env)
     }
 
     /// The index against HEAD (staged changes; against the empty tree on an unborn branch).
     public static func staged(
-        runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [], context: Int? = nil
+        runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [], context: Int? = nil,
+        ignoringWhitespace: Bool = false
     ) async throws -> [FileDiff] {
-        try await load(stagedArguments(paths: paths, context: context), runner: runner, cwd: cwd, env: env)
+        try await load(
+            stagedArguments(paths: paths, context: context, ignoringWhitespace: ignoringWhitespace), runner: runner,
+            cwd: cwd, env: env)
     }
 
     /// A commit against its first parent (a root commit against the empty tree). A merge commit (and a stash)
@@ -179,21 +186,23 @@ public enum DiffReader {
     /// file list: a combined diff (`--cc`) would drop every file the merge took from one side without edits.
     public static func commit(
         _ revision: String, runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [],
-        context: Int? = nil
+        context: Int? = nil, ignoringWhitespace: Bool = false
     ) async throws -> [FileDiff] {
         try await load(
-            commitArguments(revision, paths: paths, context: context), runner: runner, cwd: cwd, env: env)
+            commitArguments(revision, paths: paths, context: context, ignoringWhitespace: ignoringWhitespace),
+            runner: runner, cwd: cwd, env: env)
     }
 
     /// `base` against `head` (two commit-ishes), or against the working tree when `head` is nil. A worktree compare
     /// leaves untracked files out (`git diff <base>` only sees tracked ones). `paths` takes a rename's both paths.
     public static func compare(
         base: String, head: String?, runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [],
-        context: Int? = nil
+        context: Int? = nil, ignoringWhitespace: Bool = false
     ) async throws -> [FileDiff] {
         try await load(
-            compareArguments(base: base, head: head, paths: paths, context: context), runner: runner, cwd: cwd,
-            env: env)
+            compareArguments(base: base, head: head, paths: paths, context: context,
+                             ignoringWhitespace: ignoringWhitespace),
+            runner: runner, cwd: cwd, env: env)
     }
 
     /// The files `compare` diffs, as git's raw `--name-status -z` output (the app parses it like a commit's file
@@ -258,27 +267,34 @@ public enum DiffReader {
         "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "--no-relative", "-M",
     ]
 
-    static func unstagedArguments(paths: [String], context: Int?) -> [String] {
-        ["--literal-pathspecs", "diff"] + formatOptions + contextOption(context) + ["--ignore-submodules=dirty", "--"]
-            + paths
+    static func unstagedArguments(paths: [String], context: Int?, ignoringWhitespace: Bool = false) -> [String] {
+        ["--literal-pathspecs", "diff"] + formatOptions + contextOption(context) + whitespaceOption(ignoringWhitespace)
+            + ["--ignore-submodules=dirty", "--"] + paths
     }
 
     /// `base`: the commit or tree to diff the index against (HEAD when nil).
-    static func stagedArguments(paths: [String], context: Int?, base: String? = nil) -> [String] {
+    static func stagedArguments(
+        paths: [String], context: Int?, base: String? = nil, ignoringWhitespace: Bool = false
+    ) -> [String] {
         ["--literal-pathspecs", "diff", "--cached"] + formatOptions + contextOption(context)
-            + ["--ignore-submodules=dirty"] + (base.map { ["--end-of-options", $0] } ?? []) + ["--"] + paths
+            + whitespaceOption(ignoringWhitespace) + ["--ignore-submodules=dirty"] + (base.map { ["--end-of-options", $0] } ?? []) + ["--"] + paths
     }
 
-    static func commitArguments(_ revision: String, paths: [String], context: Int?) -> [String] {
+    static func commitArguments(
+        _ revision: String, paths: [String], context: Int?, ignoringWhitespace: Bool = false
+    ) -> [String] {
         // `-m --first-parent` would not do: diff-tree ignores `--first-parent` and prints every parent's diff.
         ["--literal-pathspecs", "diff-tree", "-r", "-p", "--root", "--diff-merges=first-parent", "--no-commit-id"]
             + formatOptions
-            + contextOption(context) + ["--end-of-options", revision, "--"] + paths
+            + contextOption(context) + whitespaceOption(ignoringWhitespace) + ["--end-of-options", revision, "--"]
+            + paths
     }
 
     /// `head` nil passes `base` only: git diffs it against the working tree.
-    public static func compareArguments(base: String, head: String?, paths: [String], context: Int?) -> [String] {
-        ["--literal-pathspecs", "diff"] + formatOptions + contextOption(context)
+    public static func compareArguments(
+        base: String, head: String?, paths: [String], context: Int?, ignoringWhitespace: Bool = false
+    ) -> [String] {
+        ["--literal-pathspecs", "diff"] + formatOptions + contextOption(context) + whitespaceOption(ignoringWhitespace)
             + ["--end-of-options", base] + (head.map { [$0] } ?? []) + ["--"] + paths
     }
 
@@ -301,6 +317,11 @@ public enum DiffReader {
 
     private static func contextOption(_ context: Int?) -> [String] {
         context.map { ["-U\(max(1, $0))"] } ?? []
+    }
+
+    /// `-w`: every whitespace change ignored, inside a line and at its ends.
+    private static func whitespaceOption(_ ignoring: Bool) -> [String] {
+        ignoring ? ["-w"] : []
     }
 
     // MARK: Running

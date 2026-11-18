@@ -102,9 +102,10 @@ struct CommitDetailPanel: View {
         }
     }
 
-    /// This commit's file whose diff panel2 shows, drawn as selected.
+    /// This commit's file whose diff or blame panel2 shows, drawn as selected.
     private var openPath: String? {
-        session.openFile?.source == .commit(commit.hash) ? session.openFile?.path : nil
+        session.openFile?.source == .commit(commit.hash) ? session.openFile?.path
+            : session.blamePath(in: .commit(commit.hash))
     }
 }
 
@@ -116,6 +117,9 @@ private enum CommitDetailMetrics {
     static let messageMinHeight: CGFloat = 44 + 2 * messagePadding
     /// The padding inside the message's box.
     static let messagePadding: CGFloat = 10
+    /// The inline message editor's height at least (summary, description, the pushed note and the buttons), so it is
+    /// never cut in a small window.
+    static let editorMinHeight: CGFloat = 220
 }
 
 /// The box that sets the commit message (subject and body) apart from the card's other rows: a faint fill, a 1 pt
@@ -315,6 +319,13 @@ private struct CommitInfoCard: View {
     /// The card's height at most: a longer message scrolls inside it.
     let maxHeight: CGFloat
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
+    /// The inline message editor (HEAD only) is open, with its draft; `saving` while the edit runs.
+    @State private var editing = false
+    @State private var summary = ""
+    @State private var description = ""
+    @State private var saving = false
+    @State private var copied = false
+    @FocusState private var summaryFocused: Bool
 
     var body: some View {
         SectionCard(commit.isStash ? "Stash" : "Commit",
@@ -324,19 +335,25 @@ private struct CommitInfoCard: View {
             CappedMessageLayout(
                 maxHeight: maxHeight - SectionCardMetrics.headerHeight - SectionCardMetrics.accessoryGap
                     - SettingsMetrics.cardPadding,
-                minMessageHeight: CommitDetailMetrics.messageMinHeight, spacing: 10
+                minMessageHeight: editing ? CommitDetailMetrics.editorMinHeight : CommitDetailMetrics.messageMinHeight,
+                spacing: 10
             ) {
-                // As tall as the message up to its cap, then a scroll view of that height.
-                ViewThatFits(in: .vertical) {
-                    message
-                    CardScrollView {
+                // One view either way: the layout needs exactly two.
+                if editing {
+                    editor
+                } else {
+                    // As tall as the message up to its cap, then a scroll view of that height.
+                    ViewThatFits(in: .vertical) {
                         message
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        CardScrollView {
+                            message
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        // Each commit's message starts at its top.
+                        .id(commit.hash)
                     }
-                    // Each commit's message starts at its top.
-                    .id(commit.hash)
+                    .modifier(MessageBox())
                 }
-                .modifier(MessageBox())
                 VStack(alignment: .leading, spacing: 10) {
                     PersonRow(role: "Author", name: commit.authorName, email: commit.authorEmail,
                               date: format(commit.authorDate))
@@ -350,16 +367,230 @@ private struct CommitInfoCard: View {
             }
             .padding(.top, SectionCardMetrics.accessoryGap)
             .onChange(of: token, initial: true) { UITiming.contentInfo(timingDetail) }
+            .onChange(of: commit.hash) {
+                editing = false
+                saving = false
+                summary = ""
+                description = ""
+            }
         } accessory: {
-            // AI (task 12.3): opens the result card; nothing is sent before the click.
-            AIHookButton(title: "Explain", systemImage: "sparkles",
-                         help: commit.isStash ? "Explain this stash with AI" : "Explain this commit with AI",
-                         seam: "explain", small: true) {
-                let message = commit.body.isEmpty ? commit.subject : commit.subject + "\n\n" + commit.body
-                session.startAI(.explainCommit(hash: commit.hash, message: message))
+            HStack(spacing: 6) {
+                copyButton
+                if isHeadEditable || isRewordCandidate {
+                    Button(action: editTapped) {
+                        Image(systemName: "pencil")
+                            .font(.callout)
+                            .foregroundStyle(editing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    }
+                    .buttonStyle(RowIconButtonStyle(isOn: editing))
+                    .disabled(saving)
+                    .help("Edit message")
+                    .accessibilityLabel("Edit message")
+                }
+                // AI (task 12.3): opens the result card; nothing is sent before the click.
+                AIHookButton(title: "Explain", systemImage: "sparkles",
+                             help: commit.isStash ? "Explain this stash with AI" : "Explain this commit with AI",
+                             seam: "explain", small: true) {
+                    session.startAI(.explainCommit(hash: commit.hash, message: fullMessage))
+                }
+            }
+        }
+        #if DEBUG
+        .task(id: commit.hash) { await debugEditMessage() }
+        #endif
+    }
+
+    /// The subject, a blank line and the body (when there is one).
+    private var fullMessage: String {
+        commit.body.isEmpty ? commit.subject : commit.subject + "\n\n" + commit.body
+    }
+
+    /// Copies the message; shows a check for a moment (the sha row's copy button).
+    private var copyButton: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(fullMessage, forType: .string)
+            copied = true
+        } label: {
+            // Both icons stay laid out so the button keeps one width when it swaps to the check.
+            ZStack {
+                Image(systemName: "square.on.square").opacity(copied ? 0 : 1)
+                Image(systemName: "checkmark").opacity(copied ? 1 : 0)
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .help("Copy message")
+        .accessibilityLabel("Copy message")
+        .task(id: copied) {
+            guard copied, (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
+            copied = false
+        }
+    }
+
+    /// HEAD of the checked-out branch, not a stash, no merge, rebase, cherry-pick or revert in progress: its message
+    /// is edited in place.
+    private var isHeadEditable: Bool {
+        !commit.isStash && session.refs.value?.head.commit == commit.hash && session.currentBranch != nil
+            && session.repoState?.isOperationInProgress != true
+    }
+
+    /// A cheap check for an older commit the rebase sheet may reword (one parent, on a branch); whether it is on the
+    /// current branch's first-parent line is read only on click (`rebaseUnavailableReason` walks the log).
+    private var isRewordCandidate: Bool {
+        !commit.isStash && commit.parents.count == 1 && session.refs.value?.head.commit != commit.hash
+            && session.currentBranch != nil && session.repoState?.isOperationInProgress != true
+    }
+
+    /// An open editor closes first (even if HEAD moved meanwhile). HEAD: opens the editor in this frame, filled from
+    /// the shown message (no read). An older commit: the rebase sheet with its row on reword, or a toast saying why
+    /// it cannot.
+    private func editTapped() {
+        if editing {
+            editing = false
+        } else if isHeadEditable {
+            summary = commit.subject
+            description = commit.body
+            editing = true
+        } else if isRewordCandidate {
+            if let reason = session.rebaseUnavailableReason(from: commit.hash) {
+                session.postToast(.warning("Edit Message", detail: reason))
+            } else {
+                session.openInteractiveRebase(from: commit.hash, reword: true)
             }
         }
     }
+
+    /// The summary, a blank line and the description (when there is one), trimmed.
+    private var draftMessage: String {
+        let summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        return description.isEmpty ? summary : summary + "\n\n" + description
+    }
+
+    private var canSave: Bool {
+        !saving && !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && draftMessage != fullMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The checked-out branch is in sync with its upstream: the edited commit is already on the remote.
+    private var isPushed: Bool {
+        guard let branch = session.refs.value?.localBranches.first(where: \.isHead) else { return false }
+        return branch.upstream != nil && !branch.upstreamGone && branch.ahead == 0
+    }
+
+    /// The inline editor in the message's place: summary, description, the pushed note, Cancel and Update Message.
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Summary", text: $summary)
+                .textFieldStyle(.settings)
+                .labelsHidden()
+                .focused($summaryFocused)
+                // Next run-loop turn, once the field is in the window.
+                .onAppear { DispatchQueue.main.async { summaryFocused = true } }
+                .onKeyPress(.escape) {
+                    editing = false
+                    return .handled
+                }
+            TextEditor(text: $description)
+                .font(.body)
+                .settingsTextEditor()
+                .frame(height: 72)
+                .overlay(alignment: .topLeading) {
+                    if description.isEmpty {
+                        Text("Description")
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .onKeyPress(.escape) {
+                    editing = false
+                    return .handled
+                }
+            if isPushed {
+                Text("Already pushed: a force push will be needed.")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                Button("Cancel") { editing = false }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(saving)
+                Button(action: save) {
+                    HStack(spacing: 6) {
+                        if saving { ProgressView().controlSize(.mini) }
+                        Text("Update Message")
+                    }
+                }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!canSave)
+                .help("Update Message (⌘↩)")
+            }
+        }
+        .disabled(saving)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Rewrites HEAD's message (the WIP box's commit path): a success toast and the editor closes, or the failure
+    /// toast and the editor keeps the text. The selection then moves to the new HEAD.
+    private func save() {
+        guard canSave else { return }
+        let hash = commit.hash
+        let write = RepoSession.Write.editMessage(commit: hash, message: draftMessage)
+        let title = "Edit Message"
+        saving = true
+        Task {
+            do {
+                try await session.perform(write)
+                session.postToast(.success(title))
+                editing = false
+                // A pushed commit stays in the log (its remote branch), so the selection does not drop by itself.
+                if session.graphSelection == [.commit(hash)], let head = session.refs.value?.head.commit, head != hash {
+                    session.selectGraph([.commit(head)])
+                }
+            } catch {
+                // Only in its toast, not in the card too.
+                session.report(OperationFailure(title: title, write: write, error: error,
+                                                message: RepoSession.writeMessage(for: error)))
+            }
+            saving = false
+        }
+    }
+
+    #if DEBUG
+    /// DEBUG `-HistqEditMessage open|save:<summary>` (QA): once the `-HistqSelect` commit's card shows and the refs
+    /// and the log are read, `open` presses Edit; `save:<summary>` opens the editor, sets the summary and presses
+    /// Update Message. Once per launch.
+    private func debugEditMessage() async {
+        guard !Self.debugEditMessageDone, let spec = AppState.launchFlag("-HistqEditMessage"),
+              let target = AppState.launchSelection?.value
+        else { return }
+        for _ in 0..<300 {
+            if session.refs.value != nil, session.log.value != nil, session.graphSelection == [.commit(target)] {
+                break
+            }
+            guard (try? await Task.sleep(for: .milliseconds(100))) != nil else { return }
+        }
+        guard !Self.debugEditMessageDone, session.graphSelection == [.commit(target)] else { return }
+        Self.debugEditMessageDone = true
+        if spec == "open" {
+            editTapped()
+        } else if spec.hasPrefix("save:") {
+            if !editing { editTapped() }
+            guard editing else { return }
+            summary = String(spec.dropFirst("save:".count))
+            save()
+        }
+    }
+
+    private static var debugEditMessageDone = false
+    #endif
 
     private var message: some View {
         VStack(alignment: .leading, spacing: 6) {

@@ -770,16 +770,22 @@ final class GraphTextCellView: NSView {
 
     private var textWidth: CGFloat { max(0, bounds.width - 2 * Style.padding) }
 
+    /// On a selected row every tone draws in full white, brighter than the label colors.
+    private var isRowSelected: Bool { (superview as? NSTableRowView)?.isSelected ?? false }
+
     private var attributedText: NSAttributedString {
-        let attributes = switch (tone, isItalic) {
+        let selected = isRowSelected
+        var attributes = switch (tone, isItalic) {
         case (.primary, false): Style.primary
         case (.secondary, false): Style.secondary
         case (.primary, true): Style.primaryItalic
         case (.secondary, true): Style.secondaryItalic
         }
+        if selected { attributes[.foregroundColor] = NSColor.white }
         guard let changes else { return NSAttributedString(string: text, attributes: attributes) }
         let combined = NSMutableAttributedString(string: text, attributes: attributes)
-        let counts = tone == .primary ? Style.primary : Style.secondary
+        var counts = tone == .primary ? Style.primary : Style.secondary
+        if selected { counts[.foregroundColor] = NSColor.white }
         for (count, glyph) in [(changes.edited, Style.edited), (changes.added, Style.added),
                                (changes.deleted, Style.deleted)] where count > 0 {
             combined.append(NSAttributedString(string: "   ", attributes: counts))
@@ -838,10 +844,17 @@ final class GraphTextCellView: NSView {
 
 // MARK: - Row and header
 
-/// A graph row: the selection is a neutral square fill (no accent, no white text, no edge) from the row's node to the
-/// table's right edge, as tall as the band and the node (`GraphMetrics.bandHeight`), as in GitKraken; drawn under the
-/// cells so the lanes stay on top.
+/// A graph row: the selection is a neutral square fill (no accent, no edge) from the row's node to the table's right
+/// edge, as tall as the band and the node (`GraphMetrics.bandHeight`), as in GitKraken; drawn under the cells so the
+/// lanes stay on top. Its text cells draw in full white while it is selected.
 final class GraphRowView: NSTableRowView {
+    override var isSelected: Bool {
+        didSet {
+            guard isSelected != oldValue else { return }
+            for cell in subviews where cell is GraphTextCellView { cell.needsDisplay = true }
+        }
+    }
+
     /// Where the selection starts, in the row's coordinates: the node's left edge (set by the table's controller on
     /// every reuse and column resize).
     var highlightStartX: CGFloat = 0 {

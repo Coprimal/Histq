@@ -14,6 +14,8 @@ enum PaletteSection: String, Sendable {
     case tabs = "Tabs"
     case app = "Histq"
     case operations = "Operations"
+    /// The File History… and Blame… modal's rows (`FileSearchModal`), not the palette's.
+    case files = "Files"
 }
 
 /// One palette row: what the list shows and searches. A value, so the ranking runs off the main actor; its action
@@ -76,6 +78,17 @@ enum PaletteCommands {
         let session = model.actionSession
         if let session {
             repository(session, into: &snapshot)
+            // A search of the tab's tracked files; the pick opens its history or blame as File History and Blame do.
+            if let tabID = model.selectedTabID {
+                for (blame, title, image) in [(false, "File History…", "clock.arrow.circlepath"),
+                                              (true, "Blame…", "person.text.rectangle")] {
+                    snapshot.add(title, detail: "Search the repo's files", section: .repository,
+                                 systemImage: image) { [weak model] in
+                        UITiming.select("file search")
+                        model?.presentModal(.fileSearch(tabID: tabID, blame: blame))
+                    }
+                }
+            }
             checkouts(session, into: &snapshot)
         }
         tabs(model, into: &snapshot)

@@ -196,6 +196,40 @@ public struct GitOperations: Sendable {
         }
     }
 
+    /// Replaces the message of `commit`, which must still be HEAD (else git refuses), keeping its tree, parents and
+    /// author. Only the message changes: the index and working tree are left as they are. Git hooks do not run.
+    /// `commit-tree` ignores `commit.gpgSign`, so with `.profileDefault` it is read here (the profile's config
+    /// included) and the new commit is signed when it is true.
+    public func editHeadMessage(_ commit: String, message: String, signing: CommitSigning = .profileDefault) async throws {
+        guard Self.isObjectID(commit) else { throw GitOperationError.invalidObjectID(commit) }
+        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GitOperationError.unsupported("an empty commit message")
+        }
+        let text = message.hasSuffix("\n") ? message : message + "\n"
+        try await journaled(.amend, "Edit message of \"\(Self.subject(message))\"", mode: .index) { ops in
+            let info = try await ops.exec(
+                ["log", "-1", "--no-show-signature", "--format=%P%x00%an%x00%ae%x00%ad", "--date=raw",
+                 "--end-of-options", commit, "--"]
+            ).text.trimmingCharacters(in: .newlines)
+            let fields = info.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+            guard fields.count == 4 else { throw GitOperationError.invalidObjectID(commit) }
+            let parents = fields[0].split(separator: " ").flatMap { ["-p", String($0)] }
+            let author = ["GIT_AUTHOR_NAME": fields[1], "GIT_AUTHOR_EMAIL": fields[2], "GIT_AUTHOR_DATE": "@" + fields[3]]
+            var signFlags = Self.signingFlags(signing)
+            if case .profileDefault = signing {
+                let gpgSign = try await ops.exec(
+                    ["config", "--type=bool", "--get", "commit.gpgSign"], allowedExitCodes: [0, 1]
+                ).text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if gpgSign == "true" { signFlags = ["--gpg-sign"] }
+            }
+            let new = try await ops.exec(
+                ["commit-tree"] + signFlags + parents + ["-F", "-", "\(commit)^{tree}"],
+                stdin: Data(text.utf8), extraEnv: author
+            ).text.trimmingCharacters(in: .whitespacesAndNewlines)
+            try await ops.exec(["update-ref", "-m", "commit (amend): \(Self.subject(message))", "HEAD", new, commit])
+        }
+    }
+
     // MARK: - Stage, unstage, discard
 
     /// Stages `paths` (new, modified and deleted files). Undo puts the index back as it was.

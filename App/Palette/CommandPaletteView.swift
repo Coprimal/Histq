@@ -232,8 +232,8 @@ private struct CommandPaletteGroup: Identifiable {
 }
 
 /// One row: the sidebar's capsule row (hover, pressed, the selected highlight), its icon and title, the detail at the
-/// trailing edge. A disabled row is dimmed.
-private struct CommandPaletteRow: View {
+/// trailing edge. A disabled row is dimmed. Also the File History… modal's rows.
+struct CommandPaletteRow: View {
     let item: PaletteItem
     let isSelected: Bool
     let onActivate: () -> Void

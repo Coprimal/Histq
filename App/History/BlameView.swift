@@ -1,7 +1,8 @@
-// A file's blame in panel2, in place of the graph: the header card (back, the file, the revision or "Working Tree"),
-// then one card with the file's lines in a fixed-row-height table. Each line has a gutter (the short sha, author and
-// date of the commit that last changed it, on the first line of each run of lines from that commit), its number and
-// its text in syntax colors. A click on a gutter selects that commit in panel3 and keeps the blame open.
+// A file's blame in panel2, in place of the graph: one card whose header is the blame's row (a "Blame" badge,
+// "folder / name", the revision or "Working Tree", wrap and close), then the file's lines in a table. Each line has a
+// gutter (the short sha, message, author and date of the commit that last changed it, on the first line of each run of
+// lines from that commit), its number and its text in syntax colors. A click on a gutter selects that commit in
+// panel3 and keeps the blame open.
 //
 // The blame loads off the main actor (`RepoSession.selectTool`); its rows (with their tokens) are built off the main
 // actor too, then the table only draws the rows on screen. Until both are done the card holds skeleton rows.
@@ -9,14 +10,17 @@ import AppKit
 import HistqCore
 import SwiftUI
 
-/// Panel2 while a file's blame is open: the header card at once, then the lines (skeletons until loaded).
+/// Panel2 while a file's blame is open: the card and its header at once, then the lines (skeletons until loaded).
 struct BlameView: View {
     let session: RepoSession
     let path: String
     /// The blamed commit-ish; nil for the working tree.
     let rev: String?
     @Environment(WindowModel.self) private var model
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
+    @AppStorage(PrefKey.blameWrapLines.rawValue, store: Preferences.defaults) private var wrapLines = false
     /// The rows of the last loaded blame, for the tool select (`toolToken`) they were built for.
     @State private var built: BlameRows?
 
@@ -24,26 +28,26 @@ struct BlameView: View {
         let groups: [BlameGroup]? = if case .loaded(.blame(let groups)) = session.toolState { groups } else { nil }
         // Set once the blame is in: its rows are built then, off the main actor.
         let readyToken = groups == nil ? nil : session.toolToken
-        VStack(spacing: SectionCardMetrics.spacing) {
-            header
+        SectionCard(nil, contentPadding: 0) {
+            BlameHeader(session: session, path: path, rev: rev, wrapLines: $wrapLines)
             Group {
                 if case .failed(let message) = session.toolState {
-                    DiffNoticeCard(title: "Blame", systemImage: "exclamationmark.triangle", message: message)
+                    notice(FileNotice(systemImage: "exclamationmark.triangle", message: message))
                         .onAppear { UITiming.content("\(session.toolDetail) failed") }
                 } else if case .loaded(.binary) = session.toolState {
-                    DiffNoticeCard(title: "Binary file", systemImage: "doc.zipper",
-                                   message: "Histq does not show the contents of binary files.")
+                    notice(FileNotice(systemImage: "doc.zipper",
+                                      message: "Histq does not show the contents of binary files."))
                         .onAppear { UITiming.content(session.toolDetail) }
                 } else if case .loaded(.tooLarge(let bytes)) = session.toolState {
-                    DiffNoticeCard(
-                        title: "Large file", systemImage: "doc.badge.clock",
+                    notice(FileNotice(
+                        systemImage: "doc.badge.clock",
                         message: "This file is \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)), "
                             + "over the \(ByteCountFormatter.string(fromByteCount: Int64(RepoSession.fileSizeLimit), countStyle: .file)) "
                             + "Histq blames."
-                    )
+                    ))
                     .onAppear { UITiming.content(session.toolDetail) }
                 } else if let built, readyToken == built.token {
-                    BlameCard(session: session, blame: built, dateFormat: dateFormat)
+                    BlameLines(session: session, blame: built, dateFormat: dateFormat, wrapLines: wrapLines)
                         .onAppear { UITiming.content(session.toolDetail) }
                 } else {
                     PlaceholderCard(
@@ -66,112 +70,143 @@ struct BlameView: View {
         }
     }
 
-    /// Back, the file's name and folder, and the blamed revision.
-    private var header: some View {
+    /// A notice in place of the lines, at the card's insets.
+    private func notice(_ notice: some View) -> some View {
+        notice
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, SettingsMetrics.cardPadding + extraPadding)
+            .padding(.bottom, SettingsMetrics.cardPadding + extraVerticalPadding)
+    }
+}
+
+/// The blame card's header, at the open file's row's insets and height (`DiffFileHeader`): the "Blame" badge,
+/// "folder / name" (the folder secondary, truncating from its head), the blamed revision, the wrap switch and close
+/// (Esc, back to the graph).
+private struct BlameHeader: View {
+    let session: RepoSession
+    let path: String
+    let rev: String?
+    @Binding var wrapLines: Bool
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
+
+    var body: some View {
         let name = (path as NSString).lastPathComponent
         let folder = (path as NSString).deletingLastPathComponent
-        return SectionCard(nil, contentPadding: 8) {
+        HStack(spacing: 12) {
             HStack(spacing: 8) {
-                Button {
-                    session.closeFile()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(RowIconButtonStyle())
-                .keyboardShortcut(.cancelAction)
-                .help("Back to the Graph (Esc)")
-                .accessibilityLabel("Back to the graph")
-                .padding(.leading, 4)
-                IconImage("person.text.rectangle")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                HStack(spacing: 4) {
-                    Text(name)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
+                Text("Blame")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+                    .fixedSize()
+                HStack(spacing: 0) {
                     if !folder.isEmpty {
-                        Text(folder)
+                        // Every "/" gets one space on each side, as the one before the name (`DiffFileHeader`).
+                        Text(folder.replacing("/", with: " / ") + " /")
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.head)
                     }
+                    Text(folder.isEmpty ? name : " " + name)
+                        .lineLimit(1)
+                        .layoutPriority(1)
                 }
                 .help(path)
-                Text("Blame")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Group {
-                    if let rev {
-                        Text(GitOperations.isObjectID(rev) ? String(rev.prefix(7)) : rev)
-                            .font(.callout.monospaced())
-                            .help(rev)
-                    } else {
-                        Text("Working Tree")
-                    }
-                }
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.trailing, 8)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Blame of \(path)")
             }
-            .frame(height: 32)
+            Spacer(minLength: 0)
+            Group {
+                if let rev {
+                    Text(GitOperations.isObjectID(rev) ? String(rev.prefix(7)) : rev)
+                        .font(.callout.monospaced())
+                        .help(rev)
+                } else {
+                    Text("Working Tree")
+                }
+            }
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            Button {
+                wrapLines.toggle()
+            } label: {
+                IconImage("lucide-wrap-text", size: 16)
+                    .foregroundStyle(wrapLines ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(RowIconButtonStyle())
+            .help(wrapLines ? "Don't Wrap Lines" : "Wrap Lines")
+            .accessibilityLabel("Wrap lines")
+            .accessibilityValue(wrapLines ? "On" : "Off")
+            Button {
+                session.closeFile()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(RowIconButtonStyle())
+            .keyboardShortcut(.cancelAction)
+            .help("Close the Blame (Esc)")
+            .accessibilityLabel("Close the blame")
         }
+        .padding(.horizontal, SettingsMetrics.cardPadding + extraPadding)
+        .frame(height: 40)
+        .padding(.top, extraVerticalPadding * 2 / 3)
     }
 }
 
-/// The lines' card: the table fills it and scrolls.
-private struct BlameCard: View {
+/// The loaded lines: the table fills the card and scrolls.
+private struct BlameLines: View {
     let session: RepoSession
     let blame: BlameRows
     let dateFormat: String
+    let wrapLines: Bool
 
     var body: some View {
         let selectedHash: String? = if case .commit(let hash) = session.selection { hash } else { nil }
-        SectionCard("Lines", systemImage: "doc.text", count: blame.rows.count, contentPadding: 0) {
-            if blame.rows.isEmpty {
-                Text("Empty file.")
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
-            } else {
-                BlameTable(blame: blame, selectedHash: selectedHash, dateFormat: dateFormat,
-                           onSelect: { [session] hash in session.selectKeepingTool(hash) },
-                           onClose: { [session] in session.closeFile() })
-                    .frame(maxHeight: .infinity)
-            }
+        if blame.rows.isEmpty {
+            Text("Empty file.")
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            BlameTable(blame: blame, selectedHash: selectedHash, dateFormat: dateFormat, wrapLines: wrapLines,
+                       onSelect: { [session] hash in session.selectKeepingTool(hash) },
+                       onClose: { [session] in session.closeFile() })
+                .frame(maxHeight: .infinity)
         }
     }
 }
 
-/// The blame's skeleton: the lines card with rows of gutter bars, a line number and a text bar.
+/// The blame's skeleton under its header: rows of gutter bars, a line number and a text bar.
 private struct BlamePlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
 
     var body: some View {
-        SectionCard("Lines", systemImage: "doc.text", countIsLoading: true, contentPadding: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Self.widths.indices, id: \.self) { index in
-                    HStack(spacing: 10) {
-                        SkeletonLine(width: 44, height: 9)
-                        SkeletonLine(width: 90, height: 9)
-                        SkeletonLine(width: 84, height: 9)
-                        SkeletonLine(width: 20, height: 9)
-                        SkeletonLine(fraction: Self.widths[index], height: 10)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: DiffLayout.lineHeight)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Self.widths.indices, id: \.self) { index in
+                HStack(spacing: 10) {
+                    SkeletonLine(width: 44, height: 9)
+                    SkeletonLine(width: 140, height: 9)
+                    SkeletonLine(width: 60, height: 9)
+                    SkeletonLine(width: 84, height: 9)
+                    SkeletonLine(width: 20, height: 9)
+                    SkeletonLine(fraction: Self.widths[index], height: 10)
                 }
+                .padding(.horizontal, 10)
+                .frame(height: DiffLayout.lineHeight)
             }
-            .padding(.bottom, 8)
-            // The loaded card fills panel2: so does its skeleton.
-            .frame(maxHeight: .infinity, alignment: .top)
         }
+        .padding(.bottom, 8)
+        // The loaded lines fill the card: so do their skeletons.
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -187,6 +222,8 @@ struct BlameRow: Sendable {
     let line: Int
     let text: String
     let tokens: [SyntaxToken]
+    /// Its width in characters (a tab counts as `DiffLayout.tabWidth`): a line that fits needs no measuring to wrap.
+    let columns: Int
 }
 
 /// A loaded blame's rows, for the tool select `token` they were built for.
@@ -215,10 +252,11 @@ enum BlameRowBuilder {
             for (offset, line) in group.lines.enumerated() {
                 let text = DiffRowBuilder.display(line.text)
                 let tokens = SyntaxScanner.scan(line: text, state: &state, language: language)
-                rows.append(BlameRow(group: index, isFirst: offset == 0, line: line.finalLine, text: text,
-                                     tokens: tokens))
                 let tabs = text.utf16.count { $0 == 0x09 }
-                longest = max(longest, text.utf16.count + tabs * (DiffLayout.tabWidth - 1))
+                let columns = text.utf16.count + tabs * (DiffLayout.tabWidth - 1)
+                rows.append(BlameRow(group: index, isFirst: offset == 0, line: line.finalLine, text: text,
+                                     tokens: tokens, columns: columns))
+                longest = max(longest, columns)
                 largest = max(largest, line.finalLine)
             }
         }
@@ -229,11 +267,13 @@ enum BlameRowBuilder {
 // MARK: - Table
 
 /// The blame's table. `blame.token` and `dateFormat` say which rows it shows; `selectedHash` marks the gutter of that
-/// commit's lines. A click on a committed line's gutter calls `onSelect` with its commit; Esc calls `onClose`.
+/// commit's lines; `wrapLines` wraps long lines at the card's width instead of scrolling sideways. A click on a
+/// committed line's gutter calls `onSelect` with its commit; Esc calls `onClose`.
 private struct BlameTable: NSViewRepresentable {
     let blame: BlameRows
     let selectedHash: String?
     let dateFormat: String
+    let wrapLines: Bool
     let onSelect: @MainActor (String) -> Void
     let onClose: @MainActor () -> Void
 
@@ -262,7 +302,7 @@ private struct BlameTable: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
-        // Lines never wrap: a long line scrolls sideways.
+        // Unless lines wrap, a long line scrolls sideways.
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
 
@@ -275,23 +315,32 @@ private struct BlameTable: NSViewRepresentable {
     }
 }
 
-/// Column positions of the blame's rows: the gutter (sha, author, date), the line number, then the text. The content
-/// width fits the longest line, so the table scrolls sideways instead of wrapping.
+/// Column positions of the blame's rows: the gutter (sha, message, author, date), the line number, then the text. The
+/// content width fits the longest line, so the table scrolls sideways unless lines wrap.
 private struct BlameLayout {
     @MainActor static let shaFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
     @MainActor static let authorFont = NSFont.systemFont(ofSize: 11)
     static let padding: CGFloat = 8
-    static let authorWidth: CGFloat = 110
+    static let messageWidth: CGFloat = 170
+    static let authorWidth: CGFloat = 72
+    /// Right of a wrapped line's text.
+    static let trailingPadding: CGFloat = 12
 
     let shaWidth: CGFloat
     let dateWidth: CGFloat
     let numberWidth: CGFloat
     let contentWidth: CGFloat
 
-    var authorX: CGFloat { Self.padding + shaWidth + Self.padding }
+    var messageX: CGFloat { Self.padding + shaWidth + Self.padding }
+    var authorX: CGFloat { messageX + Self.messageWidth + Self.padding }
     var dateX: CGFloat { authorX + Self.authorWidth + Self.padding }
     var gutterWidth: CGFloat { dateX + dateWidth + Self.padding }
     var textX: CGFloat { gutterWidth + numberWidth + Self.padding }
+
+    /// The text's width when lines wrap in a column `column` wide (a few characters at least).
+    @MainActor func wrapWidth(column: CGFloat) -> CGFloat {
+        max(DiffLayout.charWidth * 8, column - textX - Self.trailingPadding)
+    }
 
     @MainActor init(blame: BlameRows, formatter: DateFormatter) {
         shaWidth = ("0000000" as NSString).size(withAttributes: [.font: Self.shaFont]).width
@@ -302,8 +351,9 @@ private struct BlameLayout {
             .max()?.rounded(.up) ?? 0
         let digits = max(3, String(blame.largestLine).count)
         numberWidth = CGFloat(digits) * DiffLayout.charWidth + 14
-        contentWidth = Self.padding + shaWidth + Self.padding + Self.authorWidth + Self.padding + dateWidth
-            + Self.padding + numberWidth + Self.padding + CGFloat(blame.longest) * DiffLayout.charWidth + 24
+        contentWidth = Self.padding + shaWidth + Self.padding + Self.messageWidth + Self.padding + Self.authorWidth
+            + Self.padding + dateWidth + Self.padding + numberWidth + Self.padding
+            + CGFloat(blame.longest) * DiffLayout.charWidth + 24
     }
 
     init() {
@@ -314,12 +364,18 @@ private struct BlameLayout {
     }
 }
 
-/// The blame table: its one column is as wide as the longest line or the card, whichever is wider. Esc asks to go
-/// back; a click on a gutter selects its commit (no row selection).
+/// The blame table: its one column is as wide as the longest line or the card, whichever is wider (as wide as the card
+/// when lines wrap). Esc asks to go back; a click on a gutter selects its commit (no row selection).
 private final class BlameTableView: NSTableView {
     var contentWidth: CGFloat = 0 {
         didSet { if contentWidth != oldValue { tile() } }
     }
+    /// Lines wrap at the card's width: a new width measures the rows' heights again.
+    var wrapLines = false {
+        didSet { if wrapLines != oldValue { tile() } }
+    }
+    /// The column width the rows' heights were last measured at, while lines wrap.
+    private var measuredWidth: CGFloat = 0
     var gutterWidth: CGFloat = 0 {
         didSet { if gutterWidth != oldValue { window?.invalidateCursorRects(for: self) } }
     }
@@ -334,11 +390,27 @@ private final class BlameTableView: NSTableView {
         window.makeFirstResponder(self)
     }
 
+    /// A new card width fits the column again (and measures wrapped rows again): the table is not told otherwise.
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: nil)
+        guard let clip = superview as? NSClipView else { return }
+        clip.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(clipResized),
+                                               name: NSView.frameDidChangeNotification, object: clip)
+    }
+
+    @objc private func clipResized(_ note: Notification) { tile() }
+
     override func tile() {
         super.tile()
         guard let clip = enclosingScrollView?.contentView, let column = tableColumns.first else { return }
-        let width = max(contentWidth, clip.bounds.width)
+        let width = wrapLines ? clip.bounds.width : max(contentWidth, clip.bounds.width)
         if abs(column.width - width) > 0.5 { column.width = width }
+        if wrapLines, abs(measuredWidth - width) > 0.5, numberOfRows > 0 {
+            measuredWidth = width
+            noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<numberOfRows))
+        }
     }
 
     override func resetCursorRects() {
@@ -379,6 +451,7 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
         let token: Int
         let dateFormat: String
         let selectedHash: String?
+        let wrapLines: Bool
     }
 
     private var shown: Shown?
@@ -400,7 +473,8 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
     func update(_ view: BlameTable) {
         self.view = view
         guard let table else { return }
-        let key = Shown(token: view.blame.token, dateFormat: view.dateFormat, selectedHash: view.selectedHash)
+        let key = Shown(token: view.blame.token, dateFormat: view.dateFormat, selectedHash: view.selectedHash,
+                        wrapLines: view.wrapLines)
         guard key != shown else { return }
         if shown?.token != key.token || shown?.dateFormat != key.dateFormat {
             blame = view.blame
@@ -410,7 +484,8 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
             table.gutterWidth = layout.gutterWidth
         }
         shown = key
-        // Fixed-height rows: only the rows on screen are made again, the scroll offset stays.
+        table.wrapLines = view.wrapLines
+        // Only the rows on screen are made again, the scroll offset stays.
         table.reloadData()
     }
 
@@ -444,11 +519,26 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
         cell.isSeparated = data.isFirst && row > 0
         cell.isMarked = group.isCommitted && group.hash == shown?.selectedHash
         cell.layout = layout
+        cell.wrapLines = shown?.wrapLines ?? false
         cell.toolTip = group.isCommitted
             ? "\(group.hash.prefix(7)) \(group.summary)\n\(group.authorName), \(formatter.string(from: group.authorDate))"
             : "Not Committed Yet"
         cell.needsDisplay = true
         return cell
+    }
+
+    /// One line's height, or as many as the line takes wrapped at the column's width; a line that fits is not
+    /// measured.
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard shown?.wrapLines == true, let blame, blame.rows.indices.contains(row),
+              let width = tableView.tableColumns.first?.width else { return DiffLayout.lineHeight }
+        let data = blame.rows[row]
+        let textWidth = layout.wrapWidth(column: width)
+        if CGFloat(data.columns) * DiffLayout.charWidth <= textWidth { return DiffLayout.lineHeight }
+        let size = NSAttributedString(string: data.text, attributes: BlameLineCellView.wrappedText)
+            .boundingRect(with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
+                          options: [.usesLineFragmentOrigin])
+        return max(DiffLayout.lineHeight, size.height.rounded(.up))
     }
 
     /// No row selection: a click either selects a commit (gutter) or does nothing.
@@ -471,6 +561,22 @@ private final class BlameLineCellView: NSView {
     /// A line of the selected commit.
     var isMarked = false
     var layout = BlameLayout()
+    /// The text wraps at the cell's width.
+    var wrapLines = false
+
+    /// A wrapped line's text: each line `DiffLayout.lineHeight` tall, the glyphs centered in it as an unwrapped line's
+    /// (`BlameTableController` measures the rows' heights with it too).
+    @MainActor static let wrappedText: [NSAttributedString.Key: Any] = {
+        let style = NSMutableParagraphStyle()
+        style.tabStops = []
+        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
+        style.lineBreakMode = .byWordWrapping
+        style.minimumLineHeight = DiffLayout.lineHeight
+        style.maximumLineHeight = DiffLayout.lineHeight
+        let natural = NSLayoutManager().defaultLineHeight(for: DiffLayout.font)
+        return [.font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: style,
+                .baselineOffset: (DiffLayout.lineHeight - natural) / 2]
+    }()
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -504,6 +610,11 @@ private final class BlameLineCellView: NSView {
         static let sha: [NSAttributedString.Key: Any] = [
             .font: BlameLayout.shaFont, .foregroundColor: Palette.diffLineNumber,
         ]
+        static let message: [NSAttributedString.Key: Any] = {
+            let style = NSMutableParagraphStyle()
+            style.lineBreakMode = .byTruncatingTail
+            return [.font: BlameLayout.authorFont, .foregroundColor: NSColor.labelColor, .paragraphStyle: style]
+        }()
         static let author: [NSAttributedString.Key: Any] = {
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byTruncatingTail
@@ -535,6 +646,8 @@ private final class BlameLineCellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let row, let group else { return }
         let height = bounds.height
+        // The gutter and the number sit on the first line of a wrapped row.
+        let lineHeight = DiffLayout.lineHeight
         let gutter = NSRect(x: 0, y: 0, width: layout.gutterWidth, height: height)
         if !group.isCommitted {
             Palette.conflictAFill.setFill()
@@ -547,16 +660,20 @@ private final class BlameLineCellView: NSView {
             Style.separator.setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill(using: .sourceOver)
         }
-        let smallY = (height - DiffLayout.numberFont.boundingRectForFont.height) / 2
+        let smallY = (lineHeight - DiffLayout.numberFont.boundingRectForFont.height) / 2
         if row.isFirst {
             if group.isCommitted {
                 NSString(string: String(group.hash.prefix(7)))
                     .draw(at: NSPoint(x: BlameLayout.padding, y: smallY), withAttributes: Style.sha)
+                // Truncated with "…": the row's tooltip has the whole message.
+                NSString(string: group.summary).draw(
+                    in: NSRect(x: layout.messageX, y: smallY, width: BlameLayout.messageWidth, height: lineHeight),
+                    withAttributes: Style.message)
                 NSString(string: group.authorName).draw(
-                    in: NSRect(x: layout.authorX, y: smallY, width: BlameLayout.authorWidth, height: height),
+                    in: NSRect(x: layout.authorX, y: smallY, width: BlameLayout.authorWidth, height: lineHeight),
                     withAttributes: Style.author)
                 NSString(string: date).draw(
-                    in: NSRect(x: layout.dateX, y: smallY, width: layout.dateWidth, height: height),
+                    in: NSRect(x: layout.dateX, y: smallY, width: layout.dateWidth, height: lineHeight),
                     withAttributes: Style.date)
             } else {
                 NSString(string: "Not Committed Yet")
@@ -564,15 +681,20 @@ private final class BlameLineCellView: NSView {
             }
         }
         NSString(string: "\(row.line)").draw(
-            in: NSRect(x: layout.gutterWidth, y: smallY, width: layout.numberWidth - 8, height: height),
+            in: NSRect(x: layout.gutterWidth, y: smallY, width: layout.numberWidth - 8, height: lineHeight),
             withAttributes: Style.number)
 
-        let textY = (height - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2
-        let text = NSMutableAttributedString(string: row.text, attributes: Style.text)
+        let text = NSMutableAttributedString(string: row.text, attributes: wrapLines ? Self.wrappedText : Style.text)
         let length = text.length
         for token in row.tokens where NSMaxRange(token.range) <= length {
             text.addAttribute(.foregroundColor, value: Style.color(token.kind), range: token.range)
         }
-        text.draw(at: NSPoint(x: layout.textX, y: textY))
+        if wrapLines {
+            text.draw(with: NSRect(x: layout.textX, y: 0, width: layout.wrapWidth(column: bounds.width), height: height),
+                      options: [.usesLineFragmentOrigin])
+        } else {
+            let textY = (lineHeight - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2
+            text.draw(at: NSPoint(x: layout.textX, y: textY))
+        }
     }
 }

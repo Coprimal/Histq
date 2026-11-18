@@ -27,6 +27,8 @@ enum WindowModal: Identifiable {
     case tabEmoji(tabID: UUID)
     /// A tab group's name › Rename Group… for the group `key` (`TabGroupNames`).
     case groupName(key: String)
+    /// The palette's File History… (or Blame… when `blame`): a search of the tab `tabID`'s tracked files.
+    case fileSearch(tabID: UUID, blame: Bool)
 
     var id: String {
         switch self {
@@ -35,6 +37,7 @@ enum WindowModal: Identifiable {
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
         case .groupName(let key): "group name \(key)"
+        case .fileSearch(let id, let blame): "file search \(id) \(blame)"
         }
     }
 }
@@ -81,7 +84,7 @@ struct ModalHost: View {
         /// A click on the scrim cancels a confirmation, which has nothing to lose; a form keeps its input.
         var closesOnScrimTap: Bool {
             switch self {
-            case .window(.confirmation), .confirmation, .conflictSave, .conflictLeave: true
+            case .window(.confirmation), .window(.fileSearch), .confirmation, .conflictSave, .conflictLeave: true
             default: false
             }
         }
@@ -179,6 +182,10 @@ struct ModalHost: View {
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
         case .window(.groupName(let key)):
             GroupNameModal(key: key) { model.closeModal() }
+        case .window(.fileSearch(let tabID, let blame)):
+            if let session = model.sessions[tabID] {
+                FileSearchModal(session: session, blame: blame) { model.closeModal() }
+            }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
                               isDestructive: confirmation.isDestructive, secondary: confirmation.secondary?.button,
@@ -187,7 +194,11 @@ struct ModalHost: View {
             } onCancel: {
                 session.confirmation = nil
             } onSecondary: {
-                if let secondary = confirmation.secondary {
+                if case .pull(let mode, _)? = confirmation.secondary?.write {
+                    // The rejected push's Pull: an operation of its own (its title, button and auto-stash question).
+                    session.confirmation = nil
+                    session.pull(mode)
+                } else if let secondary = confirmation.secondary {
                     accept(confirmation, session, write: secondary.write, remember: "never")
                 }
             }
@@ -262,14 +273,13 @@ private struct TabAliasModal: View {
         ModalCard(title: "Set an alias for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
                   subtitle: "The tab shows this name instead of the folder's. Leave it empty to show the folder's name.",
                   width: 420) {
-            ModalSection {
-                TextField("Alias", text: $alias, prompt: Text(tab?.repoURL?.lastPathComponent ?? "Alias"))
-                    .textFieldStyle(.settings)
-                    .labelsHidden()
-                    .autocorrectionDisabled()
-                    .focused($fieldFocused)
-                    .onSubmit(save)
-            }
+            TextField("Alias", text: $alias, prompt: Text(tab?.repoURL?.lastPathComponent ?? "Alias"))
+                .textFieldStyle(.modal)
+                .labelsHidden()
+                .autocorrectionDisabled()
+                .focused($fieldFocused)
+                .onSubmit(save)
+                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             Button("Cancel", action: onClose)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -305,14 +315,13 @@ private struct GroupNameModal: View {
                   subtitle: "The group's name shows this instead of the folder's, in every window. Leave it empty to "
                       + "show the folder's name.",
                   width: 420) {
-            ModalSection {
-                TextField("Name", text: $name, prompt: Text(folder))
-                    .textFieldStyle(.settings)
-                    .labelsHidden()
-                    .autocorrectionDisabled()
-                    .focused($fieldFocused)
-                    .onSubmit(save)
-            }
+            TextField("Name", text: $name, prompt: Text(folder))
+                .textFieldStyle(.modal)
+                .labelsHidden()
+                .autocorrectionDisabled()
+                .focused($fieldFocused)
+                .onSubmit(save)
+                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             Button("Cancel", action: onClose)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -349,22 +358,21 @@ private struct TabEmojiModal: View {
         ModalCard(title: "Set an emoji for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
                   subtitle: "The tab shows this emoji at its left, and a pinned tab shows only it. Leave it empty for none.",
                   width: 420) {
-            ModalSection {
-                HStack(spacing: 8) {
-                    TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
-                        .textFieldStyle(.settings)
-                        .labelsHidden()
-                        .autocorrectionDisabled()
-                        .focused($fieldFocused)
-                        .onSubmit(save)
-                        .onChange(of: emoji) { _, new in
-                            let kept = TabEmoji.normalized(new) ?? ""
-                            if kept != new { emoji = kept }
-                        }
-                    Button("Choose…", action: choose)
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                }
+            HStack(spacing: 8) {
+                TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
+                    .textFieldStyle(.modal)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .onSubmit(save)
+                    .onChange(of: emoji) { _, new in
+                        let kept = TabEmoji.normalized(new) ?? ""
+                        if kept != new { emoji = kept }
+                    }
+                Button("Choose…", action: choose)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
             }
+            .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             if tab?.emoji != nil {
                 Button("Remove", action: remove)

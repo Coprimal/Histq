@@ -244,9 +244,9 @@ struct WIPPanel: View {
         .disabled(disabled || busy.contains(key))
     }
 
-    /// The WIP file whose diff panel2 shows, drawn as selected in both lists.
+    /// The WIP file whose diff or blame panel2 shows, drawn as selected in both lists.
     private var openWIPPath: String? {
-        session.openFile?.source == .wip ? session.openFile?.path : nil
+        session.openFile?.source == .wip ? session.openFile?.path : session.blamePath(in: .wip)
     }
 
     // MARK: Writes

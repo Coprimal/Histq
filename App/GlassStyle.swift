@@ -76,6 +76,9 @@ enum Palette {
     static let sheetCardOpaque = srgb(0x252527)
     /// Controls on a card, a step above `surface`. #3A3A3C
     static let inputSurface = color(srgb(0x3A3A3C))
+    /// The field of a single-input modal (`.textFieldStyle(.modal)`): darker than the modal's `bgCard`, set into it; also
+    /// the track of `CapsuleTabs(compact:)` on a card, so it does not blend into the card's fill. #1A1A1C
+    static let modalInput = color(srgb(0x1A1A1C))
     /// The 1 pt edge of cards and panels.
     static let surfaceBorder = color(.white.withAlphaComponent(0.08))
     /// The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom.
@@ -299,7 +302,7 @@ struct RaisedButtonStyle: ButtonStyle {
 extension EnvironmentValues {
     /// Inside a `ModalCard`'s footer: its `formRow` buttons take the footer's larger size (`ModalFooterMetrics`).
     @Entry var isModalFooter = false
-    /// The fill of the cards (`GlassCard`) and capsule tracks: `Palette.sheetCard` on the page's sheet, `surface` in
+    /// The fill of the cards (`GlassCard`) and the sidebar's tab track: `Palette.sheetCard` on the page's sheet, `surface` in
     /// the modals and the vertical tabs.
     @Entry var cardSurface = Palette.surface
     /// Added to a `SectionCard`'s padding around its header and its body (not to a body without padding, such as the
@@ -376,24 +379,29 @@ struct RowTextButtonStyle: ButtonStyle {
 }
 
 /// The icon buttons of a row: a round highlight on hover, darker and a bit smaller while pressed, dimmed when
-/// disabled. The highlight reaches past the label without changing the row's layout.
+/// disabled. The highlight reaches past the label without changing the row's layout. A switch that is on keeps the
+/// selected fill.
 struct RowIconButtonStyle: ButtonStyle {
     /// A capsule highlight, for a label wider than an icon (an icon and a menu chevron).
     var capsule = false
+    /// A switch that is on (Ignore Whitespace, Wrap Lines).
+    var isOn = false
 
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration, capsule: capsule)
+        Highlight(configuration: configuration, capsule: capsule, isOn: isOn)
     }
 
     private struct Highlight: View {
         let configuration: ButtonStyleConfiguration
         let capsule: Bool
+        let isOn: Bool
         @State private var hovered = false
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
-            let fill = configuration.isPressed ? Palette.pressedFill : hovered && isEnabled ? Palette.hoverFill : .clear
+            let fill = configuration.isPressed ? Palette.pressedFill : hovered && isEnabled ? Palette.hoverFill
+                : isOn ? Palette.selectedFill : .clear
             configuration.label
                 .background {
                     if capsule {
@@ -631,11 +639,16 @@ struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
 /// gets its label's width plus an equal share of the rest (`ContentWidthRow`), inset `fillInset` from its edge so the
 /// pill floats inside it; with `systemImage`, each tab shows its icon and title, or its icon alone when the title
 /// does not fit (never truncated). Every shape is a true capsule (`.circular`: radius = half the height), so the pill and the track are concentric.
+/// A compact track on a card is `Palette.modalInput`, set into the card (its fill is the card's own, so it blended in);
+/// the sidebar's `fillsWidth` track keeps `cardSurface`, a step darker than the panel it sits on. `small`: a compact
+/// track a little lower, for a card header (the open file's Diff / Full file, a PR's Comment / Review), so it clears
+/// the header's edges.
 struct CapsuleTabs<Tab: Hashable>: View {
     @Binding var selection: Tab
     let tabs: [Tab]
     let title: (Tab) -> Text
     var compact = false
+    var small = false
     /// A tab's tooltip (and its accessibility label when it has an icon).
     var help: ((Tab) -> String)?
     var fillsWidth = false
@@ -644,9 +657,6 @@ struct CapsuleTabs<Tab: Hashable>: View {
     /// With `compact`: the track is filled lighter than the card it sits on (`Palette.inputSurface`), so it reads as a
     /// control on a dark card instead of vanishing into the card's own color (a pull request's tabs, user 2026-11-17).
     var raisedTrack = false
-    /// With `compact`: 20 pt tabs inset 3 pt in a 26 pt track, so it fits a `SectionCard` header (32 pt) without
-    /// making it taller (the pull request's Comment / Review choice).
-    var small = false
     @Namespace private var namespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -669,10 +679,10 @@ struct CapsuleTabs<Tab: Hashable>: View {
         }
         // Also animates a selection set from code (menus, shortcuts).
         .animation(animation, value: selection)
-        .modifier(SurfaceTrack(compact: compact, fillsWidth: fillsWidth, raised: raisedTrack, small: small))
+        .modifier(SurfaceTrack(compact: compact, small: small, fillsWidth: fillsWidth, raised: raisedTrack))
     }
 
-    /// The gap between a `fillsWidth` (or `compact`, not `small`) track's edge and its tabs, on every side.
+    /// The gap between a `fillsWidth` (or `compact`) track's edge and its tabs, on every side.
     static var fillInset: CGFloat { 6 }
 
     /// The `fillsWidth` row (user, 2026-11-13): each tab as wide as its label plus the same padding, then an equal share
@@ -711,9 +721,9 @@ struct CapsuleTabs<Tab: Hashable>: View {
     /// Before macOS 26 the toolbar draws no capsule around its items; a form never does.
     private struct SurfaceTrack: ViewModifier {
         let compact: Bool
+        let small: Bool
         let fillsWidth: Bool
         let raised: Bool
-        let small: Bool
         @Environment(\.cardSurface) private var surface
 
         func body(content: Content) -> some View {
@@ -721,8 +731,9 @@ struct CapsuleTabs<Tab: Hashable>: View {
                 content
             } else {
                 content
-                    .padding((fillsWidth || compact) && !small ? CapsuleTabs.fillInset : 3)
-                    .background(Capsule(style: .circular).fill(raised ? Palette.inputSurface : surface))
+                    .padding(small ? 4 : fillsWidth || compact ? CapsuleTabs.fillInset : 3)
+                    .background(Capsule(style: .circular).fill(raised ? Palette.inputSurface
+                        : compact && !fillsWidth ? Palette.modalInput : surface))
                     .overlay(Capsule(style: .circular).strokeBorder(Palette.surfaceBorder, lineWidth: 1)
                         .allowsHitTesting(false))
             }
@@ -742,7 +753,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
         let action: () -> Void
         @State private var hovered = false
         /// A toolbar button's highlight; a form row's control when compact; a card header's when small.
-        private var height: CGFloat { small ? 20 : compact ? 24 : 28 }
+        private var height: CGFloat { small ? 22 : compact ? 24 : 28 }
 
         var body: some View {
             Button(action: action) {
@@ -1120,6 +1131,29 @@ struct SettingsTextFieldStyle: @MainActor TextFieldStyle {
 
 extension TextFieldStyle where Self == SettingsTextFieldStyle {
     static var settings: SettingsTextFieldStyle { SettingsTextFieldStyle() }
+}
+
+/// The one field of a single-input modal (Set Alias…, Rename Group…, Set Emoji…): `.textFieldStyle(.modal)`, straight
+/// on the modal's container with no card around it (user, 2026-11-18). Larger than `.settings`, on a darker fill, with
+/// no focus ring: the caret shows the focus.
+@MainActor
+struct ModalTextFieldStyle: @MainActor TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        configuration
+            .textFieldStyle(.plain)
+            .font(.system(size: 15))
+            .focusEffectDisabled()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(minHeight: 38)
+            .background(shape.fill(Palette.modalInput))
+            .overlay(shape.strokeBorder(Palette.surfaceBorder, lineWidth: 1))
+    }
+}
+
+extension TextFieldStyle where Self == ModalTextFieldStyle {
+    static var modal: ModalTextFieldStyle { ModalTextFieldStyle() }
 }
 
 extension View {

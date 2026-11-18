@@ -1,102 +1,47 @@
-// A file's history in panel2, in place of the graph: the header card (back, the file, "Follow renames"), then one card
-// with the commits that changed it, newest first. A click on a commit selects it (panel3) and opens the file's diff at
-// that commit over the history; Back or Esc there shows the history again as it was (it stays mounted, RepoLayoutView).
+// A file's history in panel 1, in place of the sidebar: one card with the commits that changed it, newest first. A
+// click on a commit selects it (panel 3) and opens the file's diff at that commit in panel 2 (the newest opens when the
+// history loads); a file clicked in panel 3 shows that file's history. Panel 2's controls card has "Follow renames" and
+// close: close or Esc shows the graph and the sidebar again (RepoLayoutView).
 // The history loads off the main actor (`RepoSession.selectTool`); until then the card holds skeleton rows.
 import HistqCore
 import SwiftUI
 
-/// Panel2 while a file's history is open: the header card at once, then the commits (skeletons until loaded).
+/// Panel 1 while a file's history shows: the commits (skeletons until loaded).
 struct FileHistoryView: View {
     let session: RepoSession
-    /// The open tool (`.fileHistory` of `path`, `rev`, `follow`): a row's diff returns to it.
+    /// The file history (`.fileHistory` of `path`, `rev`, `follow`): a row's diff keeps it in panel 1.
     let tool: RepoTool
-    let path: String
-    let rev: String?
-    let follow: Bool
     @Environment(WindowModel.self) private var model
 
-    var body: some View {
-        VStack(spacing: SectionCardMetrics.spacing) {
-            header
-            Group {
-                switch session.toolState {
-                case .loaded(.history(let entries)):
-                    HistoryCard(session: session, tool: tool, path: path, entries: entries)
-                        .onAppear { UITiming.content(session.toolDetail) }
-                case .failed(let message):
-                    DiffNoticeCard(title: "File History", systemImage: "exclamationmark.triangle", message: message)
-                        .onAppear { UITiming.content("\(session.toolDetail) failed") }
-                default:
-                    PlaceholderCard(
-                        token: session.toolToken, detail: session.toolDetail,
-                        isCurrent: { [model, session, tool] in
-                            model.selectedSession === session && session.openTool == tool
-                        }
-                    ) {
-                        HistoryPlaceholder()
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        }
+    private var path: String {
+        if case .fileHistory(let path, _, _) = tool { path } else { "" }
     }
 
-    /// Back, the file's name and folder, and the "Follow renames" switch (reads the history again).
-    private var header: some View {
-        let name = (path as NSString).lastPathComponent
-        let folder = (path as NSString).deletingLastPathComponent
-        return SectionCard(nil, contentPadding: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    session.closeFile()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(RowIconButtonStyle())
-                .keyboardShortcut(.cancelAction)
-                .help("Back to the Graph (Esc)")
-                .accessibilityLabel("Back to the graph")
-                .padding(.leading, 4)
-                IconImage("clock.arrow.circlepath")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                HStack(spacing: 4) {
-                    Text(name)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
-                    if !folder.isEmpty {
-                        Text(folder)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
+    var body: some View {
+        Group {
+            switch session.toolState {
+            case .loaded(.history(let entries)):
+                HistoryCard(session: session, tool: tool, path: path, entries: entries)
+                    .onAppear { UITiming.content(session.toolDetail) }
+            case .failed(let message):
+                DiffNoticeCard(title: "File History", systemImage: "exclamationmark.triangle", message: message)
+                    .onAppear { UITiming.content("\(session.toolDetail) failed") }
+            default:
+                PlaceholderCard(
+                    token: session.toolToken, detail: session.toolDetail,
+                    isCurrent: { [model, session, tool] in
+                        model.selectedSession === session && session.historyTool == tool
                     }
+                ) {
+                    HistoryPlaceholder()
                 }
-                .help(path)
-                Text("History")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Toggle("Follow renames", isOn: Binding(
-                    get: { follow },
-                    set: { session.selectTool(.fileHistory(path: path, rev: rev, follow: $0)) }))
-                    .toggleStyle(CompactSwitch())
-                    .help("Also list the commits before the file was renamed (slower)")
-                Text("Follow renames")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.trailing, 8)
             }
-            .frame(height: 32)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
-/// The commits of the history, one row each, in a card that fills panel2 and scrolls.
+/// The commits of the history, one row each, in a card that fills panel 1 and scrolls.
 private struct HistoryCard: View {
     let session: RepoSession
     let tool: RepoTool
@@ -122,7 +67,7 @@ private struct HistoryCard: View {
                             HistoryRow(entry: entry, date: formatter.string(from: entry.commit.authorDate),
                                        renamed: entry.path != path,
                                        selected: session.selection == .commit(entry.commit.hash)) {
-                                open(entry)
+                                session.openHistoryEntry(entry, of: tool)
                             }
                         }
                     }
@@ -131,19 +76,11 @@ private struct HistoryCard: View {
             }
         }
     }
-
-    /// Selects the commit the way a graph click does (panel3 switches at once), then opens the file's diff at that
-    /// commit over the history; closing the diff returns to `tool`.
-    private func open(_ entry: FileHistoryEntry) {
-        let hash = entry.commit.hash
-        session.selectGraph([.commit(hash)])
-        let file = FileChange(letter: entry.status ?? "M", path: entry.path, originalPath: entry.oldPath)
-        session.selectFile(FileTarget(source: .commit(hash), file: file), returnTool: tool)
-    }
 }
 
-/// A commit of the history: the author's avatar, the summary (and the file's path then, when a rename changed it),
-/// the author, the short sha and the date. A neutral capsule when its commit is selected, a hover capsule otherwise.
+/// A commit of the history in two lines: the author's avatar, the summary and the short sha, then the date, the author
+/// (and the file's path then, when a rename changed it). A neutral fill when its commit is selected, a hover fill
+/// otherwise.
 private struct HistoryRow: View {
     let entry: FileHistoryEntry
     let date: String
@@ -156,44 +93,49 @@ private struct HistoryRow: View {
     @State private var avatarRevision = 0
     @Environment(\.displayScale) private var displayScale
 
-    private static let avatarSize: CGFloat = 16
+    static let avatarSize: CGFloat = 24
+    static let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
 
     var body: some View {
         let commit = entry.commit
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             avatar
                 .id(avatarRevision)
-            Text(commit.subject)
-                .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.85))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            if renamed {
-                Text(entry.path)
-                    .font(.settingsCaption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text(commit.subject)
+                        .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 8)
+                    Text(String(commit.hash.prefix(7)))
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 6) {
+                    Text(date)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
+                    Text("by \(commit.authorName)")
+                        .lineLimit(1)
+                    if renamed {
+                        Text(entry.path)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    }
+                }
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 8)
-            Text(commit.authorName)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(maxWidth: 140, alignment: .trailing)
-            Text(String(commit.hash.prefix(7)))
-                .font(.callout.monospaced())
-                .foregroundStyle(.secondary)
-            Text(date)
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .fixedSize()
         }
         .padding(.horizontal, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
-        .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
-        .contentShape(Capsule())
+        .background(Self.shape.fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
+        .overlay(Self.shape.strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
+        .contentShape(Self.shape)
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .onTapGesture(perform: action)
@@ -225,7 +167,8 @@ private struct HistoryRow: View {
     }
 }
 
-/// The history's skeleton: the commits card with rows of an avatar circle, a summary bar and the meta bars.
+/// The history's skeleton: the commits card with two-line rows of an avatar circle, a summary bar and the sha, then
+/// the meta bars.
 private struct HistoryPlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
 
@@ -234,19 +177,55 @@ private struct HistoryPlaceholder: View {
                     contentPadding: SidebarMetrics.cardPadding) {
             VStack(spacing: SidebarMetrics.rowSpacing) {
                 ForEach(Self.widths.indices, id: \.self) { index in
-                    HStack(spacing: 8) {
-                        SkeletonLine(width: 16, height: 16)
-                        SkeletonLine(fraction: Self.widths[index], height: 10)
-                        SkeletonLine(width: 80, height: 10)
-                        SkeletonLine(width: 52, height: 10)
-                        SkeletonLine(width: 96, height: 10)
+                    HStack(spacing: 10) {
+                        SkeletonLine(width: HistoryRow.avatarSize, height: HistoryRow.avatarSize)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                SkeletonLine(fraction: Self.widths[index], height: 10)
+                                Spacer(minLength: 8)
+                                SkeletonLine(width: 52, height: 10)
+                            }
+                            SkeletonLine(width: 150, height: 8)
+                        }
                     }
                     .padding(.horizontal, 10)
-                    .frame(height: SidebarItemStyle.height)
+                    .padding(.vertical, 8)
                 }
             }
-            // The loaded card fills panel2: so does its skeleton.
+            // The loaded card fills panel 1: so does its skeleton.
             .frame(maxHeight: .infinity, alignment: .top)
+        }
+    }
+}
+
+/// Panel 2 while a file history shows and no commit's diff is open yet: the controls card (Follow renames, close), then
+/// the diff's skeleton while the history loads (its newest commit opens then), or why there is no diff (no commit
+/// changed the file, a failed read).
+struct FileHistoryDiffPlaceholder: View {
+    let session: RepoSession
+    let path: String
+
+    var body: some View {
+        VStack(spacing: SectionCardMetrics.spacing) {
+            DiffControlsCard(session: session, target: nil)
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch session.toolState {
+        case .loaded(.history(let entries)) where entries.isEmpty:
+            DiffNoticeCard(title: "File History", systemImage: "clock.arrow.circlepath",
+                           message: "No commit changed \((path as NSString).lastPathComponent).")
+        case .failed(let message):
+            DiffNoticeCard(title: "File History", systemImage: "exclamationmark.triangle", message: message)
+        default:
+            SectionCard(nil, contentPadding: 0) {
+                DiffPlaceholder()
+            }
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading")
         }
     }
 }

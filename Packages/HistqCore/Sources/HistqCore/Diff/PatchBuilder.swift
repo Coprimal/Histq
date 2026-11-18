@@ -1,6 +1,6 @@
 // Builds a patch for selected lines of a FileDiff and applies it to the index or the working tree:
 // stage (`apply --cached` of an unstaged diff), unstage (`apply --cached -R` of a staged diff), discard
-// (`apply -R` of an unstaged diff).
+// (`apply -R` of an unstaged diff), revert (`apply -R` of a commit's diff onto the working tree).
 //
 // The side the patch is applied to must stay exactly as git printed it, so unselected lines are rewritten
 // by direction: forward (stage) drops unselected `+` lines and turns unselected `-` lines into context;
@@ -19,6 +19,9 @@ public enum PatchBuilder {
         case unstage
         /// Reverts selected lines of an unstaged diff in the working tree.
         case discard
+        /// Reverts selected lines of a commit's diff in the working tree: always the lines alone (a plain
+        /// modification header), never the commit's add, delete or rename of the file.
+        case revert
 
         var isReverse: Bool { self != .stage }
 
@@ -27,7 +30,7 @@ public enum PatchBuilder {
             switch self {
             case .stage: ["apply", "--cached", "--whitespace=nowarn"]
             case .unstage: ["apply", "--cached", "-R", "--whitespace=nowarn"]
-            case .discard: ["apply", "-R", "--whitespace=nowarn"]
+            case .discard, .revert: ["apply", "-R", "--whitespace=nowarn"]
             }
         }
     }
@@ -74,7 +77,7 @@ public enum PatchBuilder {
             }
         }
         if body.isEmpty { throw BuildError.emptySelection }
-        let whole = Set(file.changedLineIDs).isSubset(of: selection)
+        let whole = action != .revert && Set(file.changedLineIDs).isSubset(of: selection)
         return header(for: file, whole: whole, reverse: reverse) + body
     }
 

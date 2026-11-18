@@ -130,12 +130,18 @@ enum PrefKey: String, CaseIterable {
     case nativeTabsOnTop
     /// Repo layout panel widths, encoded by `RepoLayoutView`; empty = the layout's defaults.
     case panelWidths
+    /// The file history's commit list (panel 1 while a file history shows), in points; 0 = the layout's default.
+    case historyPanelWidth
     /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked" or "focus". Global, like `panelWidths`.
     case layoutPreset
     /// Stacked's split: the graph's share of panel 2's height above the bottom pane, 0...1. Global.
     case stackedSplit
     /// The preset leaving Focus returns to: "classic" or "stacked" (never "focus"), set when Focus turns on. Global.
     case presetBeforeFocus
+    /// A repo tab shows its sidebar (panel 1) and its detail (panel 3): the toolbar's Sidebar and Detail toggles.
+    /// Global, like `layoutPreset`; Focus hides both whatever they are.
+    case showSidebar
+    case showDetail
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
     /// The graph's Commit message, Author and Time columns show (Branch / Tag and Graph always do).
@@ -166,6 +172,12 @@ enum PrefKey: String, CaseIterable {
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The file diffs ignore whitespace changes (`git diff -w`); their hunks are then read-only.
+    case diffIgnoreWhitespace
+    /// The file diffs wrap long lines instead of scrolling sideways.
+    case diffWrapLines
+    /// The blame wraps long lines instead of scrolling sideways; its header switches it.
+    case blameWrapLines
     /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
     case aiShowFeatures
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
@@ -213,9 +225,11 @@ enum PrefKey: String, CaseIterable {
         case .tabGroupNames: [String: String]()
         case .nativeTabsOnTop: false
         case .panelWidths: ""
+        case .historyPanelWidth: 0.0
         case .layoutPreset: "classic"
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
+        case .showSidebar, .showDetail: true
         case .graphColumnWidths: ""
         case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
         case .terminalFontName: ""
@@ -229,6 +243,8 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .diffIgnoreWhitespace, .diffWrapLines: false
+        case .blameWrapLines: false
         case .aiShowFeatures: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
@@ -278,9 +294,10 @@ enum LayoutPreset: String {
         defaults.set(next.rawValue, forKey: PrefKey.layoutPreset.rawValue)
     }
 
-    /// View › Reset Layout: the default panel widths and Stacked split, and Classic.
+    /// View › Reset Layout: the default panel widths (the file history's too) and Stacked split, both side panels shown, and Classic.
     static func reset() {
-        for key in [PrefKey.panelWidths, .stackedSplit, .layoutPreset, .presetBeforeFocus] {
+        for key in [PrefKey.panelWidths, .historyPanelWidth, .stackedSplit, .layoutPreset, .presetBeforeFocus,
+                    .showSidebar, .showDetail] {
             Preferences.defaults.removeObject(forKey: key.rawValue)
         }
     }
@@ -291,7 +308,7 @@ enum LayoutPreset: String {
 struct SelectRequest: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
         case tab, wip, commit, commits, branch, branchclick, worktree, openworktree, file, conflict, commitfile,
-            settings, sidebar, pr, issue, prbadge
+            history, settings, sidebar, pr, issue, prbadge
     }
 
     let kind: Kind
@@ -372,6 +389,8 @@ enum UITiming {
     static func probe(_ event: String, _ detail: String) { record(event, detail) }
     /// DEBUG `-HistqSelectWalk`: `walk start <n> every <ms> ms`, then `walk done`.
     static func walk(_ detail: String) { record("walk", detail) }
+    /// A commit's file diff was read: `file-load <path> env=<ms> size=<ms> diff=<ms> rows=<ms>`.
+    static func fileLoad(_ detail: String) { record("file-load", detail) }
     /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
     static func toolbar(_ detail: String) { record("toolbar", detail) }
     /// The graph search (⌘F) landed on a result or moved to a match: `find <query> matches=<m> current=<n>

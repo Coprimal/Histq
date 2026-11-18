@@ -131,6 +131,8 @@ timings. In a state-dir run, Debug builds append `<ms since launch> <event> <det
   `branch-map-start <log generation>` when a branch attribution starts; `refresh-read <ms>` when a refresh has read
   the status and refs; `graph-reload <generation> <ms>` when the graph table reloads for a new generation; `mem
   footprint=<MB> peak=<MB>` after every `log-complete`.
+- `file-load <path> env=<ms> size=<ms> diff=<ms> rows=<ms>`: the steps of a commit file's diff read (a click, or the
+  prefetch of a file history's neighbouring rows).
 - `content-info` (a commit's info card is on screen; its files may still load) and `layout <detail> <state>
   filesTop=<y> filesBottom=<y> panelBottom=<y>` (the Files card edges, for `placeholder`, `pending` or `loaded`).
 - `find <query> matches=<m> current=<n> commit=<sha>` (Cmd-F search), `graph-col` (the graph column fitted to its
@@ -154,6 +156,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqBackground YES` | Never activates the app; windows stay behind others and are never key. |
 | `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `commits:<sha>,<sha\|wip>` (full shas), `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
 | `-HistqSelectWalk <n>[,<ms>]` | Selects the first n commits `ms` apart (default 250), walks back up, then logs `walk done`. |
+| `-HistqHistoryWalk <n>[,<ms>]` | With `-HistqSelect history:<path>`: clicks the first n history rows `ms` apart (default 250), walks back up, then logs `walk done`. |
 | `-HistqSelectAfter <path>` | Then selects that WIP file (with or without `-HistqResolve`), to drive the conflict editor's leave prompt. |
 | `-HistqWindowSize <w>x<h>` / `-HistqTabbedWindows <n>` | Size of new windows; spreads the repositories over n native-tab windows. |
 | `-HistqTabPosition left\|top` / `-HistqAvatarMode real\|generated\|initials` / `-HistqLayout classic\|stacked\|focus` | Overrides the preference. |
@@ -164,6 +167,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqDoubleClick toolbar\|toolbargap\|tabrow` | Double-clicks that window row; logs `click`, `dblclick` and `zoom`. |
 | `-HistqToolbarFrames YES` | Logs the repo and branch dropdowns' frames (`toolbar`). |
 | `-HistqOpenPalette "<query>"` / `-HistqPaletteRun` | Opens the command palette with that query; runs its first row. |
+| `-HistqFileSearch "<query>"` | Types that query in the File History… or Blame… modal when it opens (`-HistqOpenPalette "File History" -HistqPaletteRun`). |
 | `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell. |
 | `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows (dimmed), as their header's eye button does. |
 | `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
@@ -180,6 +184,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqOperation continue\|abort\|skip` | Presses the operation banner's button. |
 | `-HistqOpenRebase <rev>` / `-HistqOpenSquash "<rev>,<rev>"` / `-HistqStartRebase` | Opens the interactive rebase or squash sheet; starts it. |
 | `-HistqRewordRow <n>` | With `-HistqOpenRebase`, switches row n (1-based) to Reword once the sheet has loaded. |
+| `-HistqEditMessage open\|save:<summary>` | With `-HistqSelect commit:<sha>`, presses the commit card's Edit button once (HEAD: the inline editor; an older commit: the rebase sheet with that row on Reword); `save:` also sets the summary and presses Update Message. |
 | `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |
