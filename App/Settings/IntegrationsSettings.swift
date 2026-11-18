@@ -661,6 +661,7 @@ struct IntegrationsSettings: View {
     /// connects the shown profile (adding a "QA" profile when there is none) to github.com as `<login>` with a fake
     /// token in the in-memory Keychain, without asking GitHub. For QA shots of the connected state.
     private func debugFakeLogin() {
+        debugFakeTokens()
         guard !isLoading, !Self.debugFakeLoginDone, let login = AppState.launchFlag("-HistqGitHubFakeLogin"),
               AppState.isStateDirMode, KeychainStore.shared.isInMemory, let store = library.store
         else { return }
@@ -675,5 +676,23 @@ struct IntegrationsSettings: View {
     }
 
     private static var debugFakeLoginDone = false
+
+    /// DEBUG `-HistqGitHubFakeTokens YES` (in-memory Keychain only): a fake token for every profile that already has a
+    /// GitHub account in `profiles.json`, on its own host, so the page shows each one connected.
+    private func debugFakeTokens() {
+        guard !isLoading, !Self.debugFakeTokensDone, AppState.launchFlag("-HistqGitHubFakeTokens") == "YES",
+              AppState.isStateDirMode, KeychainStore.shared.isInMemory, let store = library.store
+        else { return }
+        Self.debugFakeTokensDone = true
+        let accounts = store.profiles.compactMap { profile in profile.github.map { (profile.id, $0.host) } }
+        Task {
+            for (id, host) in accounts {
+                try? await GitHubTokens.save("histq_qa_fake_token", profileID: id, host: host)
+            }
+            if let shown = store.profile(id: profileID ?? UUID()) ?? store.profiles.first { await checkToken(shown) }
+        }
+    }
+
+    private static var debugFakeTokensDone = false
     #endif
 }

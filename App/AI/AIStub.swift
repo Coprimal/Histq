@@ -155,7 +155,7 @@ enum AIStub {
         guard let parts = prompt(body: body) else { return "OK" }
         let (system, user) = (parts.system, parts.user)
         guard let token = boundary(system: system) else { return "OK" }
-        let answer: String
+        var answer: String
         if system.contains("Write a git commit message") {
             answer = "Add a canned change from the AI stub\n\nWritten by the DEBUG AI stub (-HistqAIStub); no "
                 + "provider was called.\n"
@@ -171,10 +171,26 @@ enum AIStub {
             answer = "This change was explained by the **DEBUG AI stub**.\n\n- No provider was called.\n- The "
                 + "prompt held \(user.utf8.count) bytes.\n"
         }
+        var reasonText = "The stub keeps side A, then side B."
+        if let custom = customAnswer {
+            answer = custom.answer
+            reasonText = custom.reason ?? reasonText
+        }
         let reason = system.contains("BEGIN REASON")
-            ? "BEGIN REASON \(token)\nThe stub keeps side A, then side B.\nEND REASON \(token)\n" : ""
+            ? "BEGIN REASON \(token)\n\(reasonText)\nEND REASON \(token)\n" : ""
         return "Here is the answer.\n\(reason)BEGIN ANSWER \(token)\n\(terminated(answer))END ANSWER \(token)\n"
     }
+
+    /// `-HistqAIStubAnswer <file.json>` (`{"answer": "…", "reason": "…"}`, reason optional): the text every chat request
+    /// gets instead of the canned one, for screenshots without stub wording.
+    private static let customAnswer: (answer: String, reason: String?)? = {
+        guard isEnabled, let path = AppState.launchFlag("-HistqAIStubAnswer"),
+              let data = FileManager.default.contents(atPath: path),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let answer = object["answer"]
+        else { return nil }
+        return (answer, object["reason"])
+    }()
 
     /// The prompt's boundary token, from its system prompt's answer rule.
     private static func boundary(system: String) -> String? {
