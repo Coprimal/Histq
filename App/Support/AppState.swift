@@ -137,6 +137,8 @@ enum PrefKey: String, CaseIterable {
     /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked", "focus" or "columns". Global, like
     /// `panelWidths`.
     case layoutPreset
+    /// The cards on the page's sheet draw their 1 pt `Palette.sheetCardBorder` edge; off, no edge.
+    case cardBorders
     /// Stacked's split: the graph's share of panel 2's height above the bottom pane, 0...1. Global.
     case stackedSplit
     /// The preset leaving Focus returns to: "classic", "stacked" or "columns" (never "focus"), set when Focus turns
@@ -253,6 +255,7 @@ enum PrefKey: String, CaseIterable {
         case .layoutPreset: "classic"
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
+        case .cardBorders: true
         case .columnsWidths: ""
         case .showSidebar, .showDetail: true
         case .sidebarSectionOrder, .hiddenSidebarSections: ""

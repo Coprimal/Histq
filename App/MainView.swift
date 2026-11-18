@@ -56,6 +56,7 @@ struct MainView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// General › Tab position, applied live.
     @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
+    @AppStorage(PrefKey.cardBorders.rawValue, store: Preferences.defaults) private var cardBorders = true
 
     var body: some View {
         let tabsOnLeft = TabPosition.resolved(tabPosition) == .left
@@ -78,6 +79,7 @@ struct MainView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .environment(\.cardSurface, Palette.sheetCard)
+                .environment(\.cardBorder, cardBorders ? Palette.sheetCardBorder : .clear)
                 .environment(\.cardExtraPadding, PageSheetMetrics.cardExtraPadding)
                 .environment(\.cardExtraVerticalPadding, PageSheetMetrics.cardExtraVerticalPadding)
                 .background(Palette.sheet)

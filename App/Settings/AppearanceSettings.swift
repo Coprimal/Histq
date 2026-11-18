@@ -7,6 +7,7 @@ import SwiftUI
 struct AppearanceSettings: View {
     @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
     @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var layoutPreset = "classic"
+    @AppStorage(PrefKey.cardBorders.rawValue, store: Preferences.defaults) private var cardBorders = true
     @AppStorage(PrefKey.defaultTabEmoji.rawValue, store: Preferences.defaults) private var tabEmoji = ""
     @AppStorage(PrefKey.defaultTabIconColor.rawValue, store: Preferences.defaults) private var tabIconColor = -1
     @FocusState private var emojiFocused: Bool
@@ -99,6 +100,9 @@ struct AppearanceSettings: View {
                     SettingsHint("Stacked: a file opens under the graph. Columns: a file opens in a 4th column. "
                         + "Focus (⌥⌘F): the sidebar and detail panel hide.")
                 }
+                SettingsDivider()
+                SettingsSwitchRow(title: "Card borders", hint: "A thin light edge around each card.",
+                                  isOn: $cardBorders)
             }
             SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {
                 let order = sidebarOrder

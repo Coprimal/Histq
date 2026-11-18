@@ -71,6 +71,8 @@ enum Palette {
     static let sheet = color(.white.withAlphaComponent(0.09))
     /// The cards on the sheet: a step darker, at 0.9 so the sheet's glass shows a little through them. #232325 at 0.9
     static let sheetCard = color(srgb(0x232325).withAlphaComponent(0.9))
+    /// The 1 pt edge of the cards on the sheet: lighter than the sheet around them, so each card stands out. White 0.14
+    static let sheetCardBorder = color(.white.withAlphaComponent(0.14))
     /// What a `sheetCard` looks like on the sheet, for AppKit views that must paint opaque inside a card (the graph's
     /// header and hollow nodes, the terminal, a pull request's page). #252527
     static let sheetCardOpaque = srgb(0x252527)
@@ -305,6 +307,8 @@ extension EnvironmentValues {
     /// The fill of the cards (`GlassCard`) and the sidebar's tab track: `Palette.sheetCard` on the page's sheet, `surface` in
     /// the modals and the vertical tabs.
     @Entry var cardSurface = Palette.surface
+    /// The 1 pt edge of the cards (`GlassCard`): `Palette.sheetCardBorder` on the page's sheet, `surfaceBorder` elsewhere.
+    @Entry var cardBorder = Palette.surfaceBorder
     /// Added to a `SectionCard`'s padding around its header and its body (not to a body without padding, such as the
     /// graph's table): roomier cards on the page's sheet, the modals' cards as they were. Left and right, then top and
     /// bottom.
@@ -929,6 +933,7 @@ struct GlassCard: ViewModifier {
     var cornerRadius: CGFloat = 14
     var raised = false
     @Environment(\.cardSurface) private var surface
+    @Environment(\.cardBorder) private var border
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -943,7 +948,7 @@ struct GlassCard: ViewModifier {
         } else {
             content
                 .background(shape.fill(surface))
-                .overlay(shape.strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
+                .overlay(shape.strokeBorder(border, lineWidth: 1).allowsHitTesting(false))
         }
     }
 }
