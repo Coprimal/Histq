@@ -315,7 +315,7 @@ struct DiffLayout {
     @MainActor static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     @MainActor static let charWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
     static let lineHeight: CGFloat = 18
-    static let hunkHeight: CGFloat = 28
+    static let hunkHeight: CGFloat = 36
     /// Spaces per tab.
     static let tabWidth = 4
     static let signWidth: CGFloat = 16
