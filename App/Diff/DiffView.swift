@@ -292,7 +292,8 @@ private struct DiffFileHeader: View {
     }
 
     private func folderText(_ folder: String) -> some View {
-        Text("\(folder) /")
+        // Every "/" gets one space on each side, as the one before the name.
+        Text(folder.replacing("/", with: " / ") + " /")
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
@@ -304,7 +305,7 @@ private struct DiffFileHeader: View {
             Image(systemName: file.systemImage)
                 .foregroundStyle(file.tint)
                 .accessibilityHidden(true)
-            HStack(spacing: 4) {
+            HStack(spacing: 0) {
                 if !file.folder.isEmpty {
                     // Whole, else truncated from its head while that still shows a few letters, else hidden: the
                     // name keeps its width.
@@ -318,7 +319,8 @@ private struct DiffFileHeader: View {
                     }
                     .frame(idealWidth: Self.folderFitWidth, alignment: .leading)
                 }
-                Text(file.name)
+                // A space, not stack spacing, after the folder's "/": the same gap as around its other "/".
+                Text(file.folder.isEmpty ? file.name : " " + file.name)
                     .lineLimit(1)
                     .layoutPriority(1)
             }
