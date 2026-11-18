@@ -47,6 +47,10 @@ enum Palette {
     /// The fill of a destructive confirmation's button (Delete Branch, Discard): a deep red, so its white label reads
     /// at 5.9:1 like the primary blue's. #C0282D
     static let destructiveFill = color(srgb(0xC0282D))
+    /// The WIP panel's Stage All button: a green, under a white label. #2E9E5B
+    static let stageAllFill = color(srgb(0x2E9E5B))
+    /// The WIP panel's Unstage All button: a light red, under a white label. #E0706C
+    static let unstageAllFill = color(srgb(0xE0706C))
     /// A primary button's label shadow: lifts the white text off the blue so it stands out more (user, 2026-11-13).
     static let onPrimaryShadow = Color.black.opacity(0.4)
     static let switchOffFill = color(.white.withAlphaComponent(0.22))
@@ -322,10 +326,12 @@ struct RowTextButtonStyle: ButtonStyle {
     /// With `prominent`: the red `Palette.destructiveFill` (a confirmation's Delete), not the blue.
     var destructive = false
     var compact = false
+    /// A colored fill under a white label (the WIP panel's Stage All / Unstage All), as `prominent` but in this color.
+    var fill: Color?
 
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration, formRow: formRow, prominent: prominent, destructive: destructive,
-                  compact: compact)
+        Highlight(configuration: configuration, formRow: formRow, prominent: prominent || fill != nil,
+                  destructive: destructive, compact: compact, fill: fill)
     }
 
     private struct Highlight: View {
@@ -334,6 +340,7 @@ struct RowTextButtonStyle: ButtonStyle {
         let prominent: Bool
         let destructive: Bool
         let compact: Bool
+        let fill: Color?
         @State private var hovered = false
         @Environment(\.isEnabled) private var isEnabled
         @Environment(\.isModalFooter) private var isModalFooter
@@ -350,7 +357,8 @@ struct RowTextButtonStyle: ButtonStyle {
                 .frame(height: footer ? ModalFooterMetrics.buttonHeight : formRow ? 24 : nil)
                 .background(
                     Capsule()
-                        .fill(prominent ? AnyShapeStyle(destructive ? Palette.destructiveFill : Palette.primaryFill)
+                        .fill(prominent
+                              ? AnyShapeStyle(fill ?? (destructive ? Palette.destructiveFill : Palette.primaryFill))
                               : AnyShapeStyle(Palette.inputSurface))
                         .overlay(Capsule().fill(
                             configuration.isPressed ? Palette.pressedOverlay : hovered && isEnabled ? Palette.hoverFill : .clear)))

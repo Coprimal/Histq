@@ -150,7 +150,7 @@ struct WIPPanel: View {
         } accessory: {
             HStack(spacing: 10) {
                 FileListModeToggle()
-                headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty) {
+                headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty, fill: Palette.stageAllFill) {
                     run(.stageAll, busy: .stageAll, part: .unstaged)
                 }
             }
@@ -194,7 +194,8 @@ struct WIPPanel: View {
         } accessory: {
             HStack(spacing: 10) {
                 FileListModeToggle()
-                headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty) {
+                headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty,
+                             fill: Palette.unstageAllFill) {
                     run(.unstageAll, busy: .unstageAll, part: .staged)
                 }
             }
@@ -228,8 +229,8 @@ struct WIPPanel: View {
         .frame(width: 16, height: 16)
     }
 
-    private func headerButton(_ title: String, busy key: Busy, disabled: Bool, action: @escaping () -> Void)
-        -> some View
+    private func headerButton(_ title: String, busy key: Busy, disabled: Bool, fill: Color,
+                              action: @escaping () -> Void) -> some View
     {
         Button(action: action) {
             HStack(spacing: 4) {
@@ -237,7 +238,7 @@ struct WIPPanel: View {
                 Text(title)
             }
         }
-        .buttonStyle(RowTextButtonStyle())
+        .buttonStyle(RowTextButtonStyle(fill: fill))
         .disabled(disabled || busy.contains(key))
     }
 
