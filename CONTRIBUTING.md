@@ -171,7 +171,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |
-| `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. Stub only. |
+| `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. `-HistqPRAction reply` posts "QA reply" to the first review thread, `resolve` resolves the first unresolved thread and `unresolve` unresolves the first resolved one. Stub only. |
 | `-HistqPRMergeable true\|false\|null` | Whether the stub's PR #1 merges: `true` (default, `clean`), `false` (conflicts, `dirty`) or `null` (GitHub still checking, `unknown`; the detail asks again up to 3 times, 3 s apart, and logs `pr 1 mergeable <value>` in `timing.log` for each answer). Stub only. |
 | `-HistqOpenCreatePR <branch>` / `-HistqCreatePRSubmit YES` | Opens the Create Pull Request form; fills and submits it. Stub only. |
 | `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |

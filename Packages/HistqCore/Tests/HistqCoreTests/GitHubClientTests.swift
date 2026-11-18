@@ -376,6 +376,146 @@ struct GitHubClientTests {
         }
     }
 
+    // MARK: - Review threads
+
+    @Test("review comments decode with file, line, reply root, review and HTML; a reply POSTs to the root's /replies")
+    func reviewCommentsAndReply() async throws {
+        let stub = StubServer { request in
+            if request.httpMethod == "POST" {
+                return .init(status: 201, body: #"{"id": 12, "in_reply_to_id": 10, "path": "a.swift", "body": "Done"}"#)
+            }
+            return .init(body: """
+                [{"id": 10, "pull_request_review_id": 701, "path": "a.swift", "line": 4, "side": "RIGHT",
+                  "body": "Why?", "body_html": "<p>Why?</p>", "created_at": "2026-11-01T10:00:00Z",
+                  "user": {"id": 1, "login": "octo"}},
+                 {"id": 11, "pull_request_review_id": 702, "in_reply_to_id": 10, "path": "a.swift", "line": null,
+                  "original_line": 4, "body_html": "<p>Because</p>"}]
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let comments = try await client.reviewComments(of: 7, in: repo)
+        let reply = try await client.replyToReviewComment(rootID: 10, on: 7, in: repo, body: "Done")
+
+        #expect(comments.map(\.path) == ["a.swift", "a.swift"])
+        #expect(comments.map(\.line) == [4, nil])
+        #expect(comments.map(\.inReplyToID) == [nil, 10])
+        #expect(comments.map(\.pullRequestReviewID) == [701, 702])
+        #expect(comments.map(\.bodyHTML) == ["<p>Why?</p>", "<p>Because</p>"])
+        #expect(reply.id == 12)
+        let requests = stub.requests
+        #expect(requests.map { $0.httpMethod } == ["GET", "POST"])
+        #expect(requests.map { $0.url?.path() } == [
+            "/repos/octo/hello/pulls/7/comments", "/repos/octo/hello/pulls/7/comments/10/replies",
+        ])
+        let body = try #require(JSONSerialization.jsonObject(with: requests.last?.httpBody ?? Data()) as? [String: Any])
+        #expect(body["body"] as? String == "Done")
+        for request in requests {
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        }
+    }
+
+    @Test("thread states come from the host's GraphQL endpoint with the token; owner, name and number go in variables",
+          arguments: [
+              ("github.com", "https://api.github.com/graphql", #"{"fullDatabaseId": "10"}"#),
+              ("github.com", "https://api.github.com/graphql", #"{"fullDatabaseId": 10}"#),
+              ("ghe.example.com", "https://ghe.example.com/api/graphql", #"{"databaseId": 10}"#),
+          ])
+    func reviewThreadStatesUseGraphQLVariables(host: String, endpoint: String, rootComment: String) async throws {
+        // Also: github.com is asked for `fullDatabaseId` alone, a BigInt it sends as a string or a number, and
+        // Enterprise for `databaseId` alone; each row's root id decodes to the same REST id.
+        let stub = StubServer { _ in
+            .init(body: """
+                {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                  "nodes": [{"id": "PRRT_1", "isResolved": true, "isOutdated": false, "viewerCanResolve": false,
+                             "viewerCanUnresolve": true, "comments": {"nodes": [\(rootComment)]}}],
+                  "pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}
+                """)
+        }
+        let client = try GitHubClient(host: host, token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: host, owner: "octo", name: "hello")
+
+        let states = try await client.reviewThreadStates(of: 4242, in: repo)
+
+        #expect(states == [GitHubReviewThreadState(
+            id: "PRRT_1", isResolved: true, isOutdated: false, viewerCanResolve: false, viewerCanUnresolve: true,
+            rootCommentID: 10)])
+        let request = try #require(stub.requests.first)
+        #expect(stub.requests.count == 1)
+        #expect(request.httpMethod == "POST")
+        #expect(request.url?.absoluteString == endpoint)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+        let variables = try #require(body["variables"] as? [String: Any])
+        #expect(variables["owner"] as? String == "octo")
+        #expect(variables["name"] as? String == "hello")
+        #expect(variables["number"] as? Int == 4242)
+        let query = try #require(body["query"] as? String)
+        for value in ["octo", "hello", "4242"] {
+            #expect(!query.contains(value), "\(value) is in the query text")
+        }
+        #expect(query.contains("fullDatabaseId") == (host == "github.com"))
+        #expect(query.contains("databaseId") == (host != "github.com"))
+    }
+
+    @Test("a GraphQL answer with errors throws its first message, even with status 200")
+    func graphQLErrorsThrow() async throws {
+        let stub = StubServer { _ in
+            .init(body: """
+                {"data": null, "errors": [{"message": "Could not resolve to a node with the global id of 'PRRT_x'"},
+                                          {"message": "second"}]}
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+
+        await #expect(throws: GitHubError.graphQL(
+            message: "Could not resolve to a node with the global id of 'PRRT_x'")) {
+            try await client.setReviewThread("PRRT_x", resolved: true)
+        }
+        let body = try #require(
+            JSONSerialization.jsonObject(with: stub.requests.first?.httpBody ?? Data()) as? [String: Any])
+        #expect((body["variables"] as? [String: Any])?["threadId"] as? String == "PRRT_x")
+        #expect((body["query"] as? String)?.contains("PRRT_x") == false)
+    }
+
+    @Test("no inline comment is lost: replies join their root's review, and a comment without a review stays")
+    func reviewThreadsGroup() throws {
+        // Also: a review that only holds a reply is reported, and states join by root id. The reply comes before its
+        // root, and the states come in the other order than the threads.
+        let json = """
+            [{"id": 11, "pull_request_review_id": 702, "in_reply_to_id": 10, "path": "a.swift", "line": 4,
+              "created_at": "2026-11-01T11:00:00Z"},
+             {"id": 20, "pull_request_review_id": 701, "path": "b.swift", "line": 9,
+              "created_at": "2026-11-01T10:01:00Z"},
+             {"id": 10, "pull_request_review_id": 701, "path": "a.swift", "line": 4,
+              "created_at": "2026-11-01T10:00:00Z"},
+             {"id": 30, "pull_request_review_id": null, "path": "c.swift", "line": 1,
+              "created_at": "2026-11-01T09:00:00Z"}]
+            """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let comments = try decoder.decode([GitHubReviewComment].self, from: Data(json.utf8))
+        let states = [
+            GitHubReviewThreadState(id: "PRRT_20", isResolved: false, isOutdated: false, viewerCanResolve: true,
+                                    viewerCanUnresolve: false, rootCommentID: 20),
+            GitHubReviewThreadState(id: "PRRT_10", isResolved: true, isOutdated: false, viewerCanResolve: false,
+                                    viewerCanUnresolve: true, rootCommentID: 10),
+        ]
+
+        let grouped = GitHubReviewThread.group(comments, states: states)
+
+        #expect(Array(grouped.threadsByReview.keys) == [701])
+        let threads = try #require(grouped.threadsByReview[701])
+        #expect(threads.map(\.id) == [10, 20])
+        #expect(threads.first?.comments.map(\.id) == [10, 11])
+        #expect(grouped.replyOnlyReviewIDs == [702])
+        #expect(threads.map { $0.state?.id } == ["PRRT_10", "PRRT_20"])
+        #expect(threads.map { $0.state?.isResolved } == [true, false])
+        #expect(grouped.unattached.map(\.id) == [30])
+        #expect(grouped.unattached.first?.reviewID == nil)
+    }
+
     // MARK: - Remote URLs
 
     @Test("remote URLs resolve to host/owner/repo, Enterprise scp-style ones included", arguments: [

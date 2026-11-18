@@ -2,14 +2,16 @@
 // DEBUG `-HistqGitHubStub YES`: the PRs tab, the PR and issue details and the create form without GitHub. `GitHubStore`
 // then uses the repository `stub/stub` on github.com (the fixtures' origin is a local bare repo, which names no GitHub
 // repo), a fake token, and a `URLSession` whose only protocol is `GitHubStubProtocol`: it answers every request from
-// the JSON below (PR #1's merge, a 409 when it is not pinned to its head, review, comment and close/reopen, issue #2's
-// comment and close/reopen, and a create that always makes PR #3 with its reviewers, labels and assignees succeed) and
-// 404 for anything else, so a stub run never reaches the network. The data: user `stub`, open pull request #1 "Add
-// feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 1 comment, 1 check run) by `stub`, mergeable
-// as `-HistqPRMergeable true|false|null` says (default true), open issue #2 assigned to `stub` with 1 comment, the
-// repository's labels, assignable users and collaborators (`stub`, `reviewer`), default branch `main`, and the Welcome
-// clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has GitHub's shapes (search results are
-// issue-shaped), so the stub exercises the same decoding as the real API.
+// the JSON below (PR #1's merge, a 409 when it is not pinned to its head, review, comment, close/reopen and a reply to
+// a review thread's root, issue #2's comment and close/reopen, a create that always makes PR #3 with its reviewers,
+// labels and assignees succeed, and on `/graphql` the review threads' states and resolve/unresolve, by operation name)
+// and 404 for anything else, so a stub run never reaches the network. The data: user `stub`, open pull request #1 "Add
+// feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 1 comment, 1 check run) by `stub` with two
+// review threads on `feature.txt` in review 701 (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10,
+// resolved), mergeable as `-HistqPRMergeable true|false|null` says (default true), open issue #2 assigned to `stub`
+// with 1 comment, the repository's labels, assignable users and collaborators (`stub`, `reviewer`), default branch
+// `main`, and the Welcome clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has GitHub's shapes (search
+// results are issue-shaped), so the stub exercises the same decoding as the real API.
 import Foundation
 import HistqCore
 
@@ -60,6 +62,12 @@ enum GitHubStub {
         case ("POST", "\(repo)/pulls/3/requested_reviewers"): return (201, pull(3, full: true))
         case ("POST", "\(repo)/issues/3/labels"): return (200, "[\(labels)]")
         case ("POST", "\(repo)/issues/3/assignees"): return (201, pull(3, full: true))
+        // GitHub refuses a reply to a reply or to an unknown comment: only the two roots take one.
+        case let ("POST", path) where path.hasPrefix("\(repo)/pulls/1/comments/") && path.hasSuffix("/replies"):
+            let root = Int(path.split(separator: "/").dropLast().last ?? "")
+            guard let root, [811, 813].contains(root) else { return notFound }
+            return (201, reviewComment(814, review: 703, root: root, body: "Thanks, done.", at: "17:00"))
+        case ("POST", "/graphql"): return graphQL(body)
         case ("GET", _): break
         default: return notFound
         }
@@ -72,10 +80,13 @@ enum GitHubStub {
         case "\(repo)/pulls": return (200, "[\(pull(1, full: false))]")
         case "\(repo)/pulls/1": return (200, pull(1, full: true))
         case "\(repo)/pulls/1/reviews": return (200, "[\(review)]")
+        case "\(repo)/pulls/1/comments": return (200, reviewComments)
         case "\(repo)/pulls/1/commits": return (200, commits)
         case "\(repo)/pulls/1/files": return (200, files)
         case "\(repo)/pulls/3": return (200, pull(3, full: true))
-        case "\(repo)/pulls/3/reviews", "\(repo)/pulls/3/files", "\(repo)/issues/3/comments": return (200, "[]")
+        case "\(repo)/pulls/3/reviews", "\(repo)/pulls/3/comments", "\(repo)/pulls/3/files",
+             "\(repo)/issues/3/comments":
+            return (200, "[]")
         case "\(repo)/pulls/3/commits": return (200, "[\(createdCommit)]")
         case "\(repo)/issues": return (200, "[\(issue), \(pullAsIssue)]")
         case "\(repo)/issues/1": return (200, pullAsIssue)
@@ -200,6 +211,76 @@ enum GitHubStub {
          "html_url": "https://github.com/stub/stub/pull/1#issuecomment-801",
          "created_at": "2026-11-12T14:00:00Z", "updated_at": "2026-11-12T14:00:00Z"}
         """
+
+    /// PR #1's inline review comments on `feature.txt`, as GitHub lists them: thread A (root 811 on lines 4-6,
+    /// unresolved) with `stub`'s reply 812, which GitHub files in a review of its own (702, left out of `/reviews` so
+    /// the timeline keeps its entries), and thread B (root 813 on line 10, resolved), both roots in review 701.
+    private static let reviewComments = "[" + [
+        reviewComment(811, review: 701, root: nil, body: "Could the three steps be one sentence?", at: "14:55"),
+        reviewComment(812, review: 702, root: 811, body: "I kept the list: it reads better.", at: "16:00"),
+        reviewComment(813, review: 701, root: nil, body: "Show the output flag in the usage too.", at: "14:57"),
+    ].joined(separator: ", ") + "]"
+
+    /// A comment of thread A (root 811: lines 4-6, the numbered list) or B (root 813: line 10, the usage line), by
+    /// `reviewer` for a root and `stub` for a reply. Its `diff_hunk` is GitHub's: the file patch's hunk header, then
+    /// its rows down to the commented line; a reply repeats its root's lines and hunk.
+    private static func reviewComment(_ id: Int, review: Int, root: Int?, body: String, at time: String) -> String {
+        let onList = (root ?? id) == 811
+        let lines = onList
+            ? #""start_line": 4, "original_start_line": 4, "start_side": "RIGHT", "line": 6, "original_line": 6"#
+            : #""start_line": null, "original_start_line": null, "start_side": null, "line": 10, "original_line": 10"#
+        let hunk = onList ? listHunk : listHunk + #"\n+\n+Usage:\n+\n+    feature --input file"#
+        let reply = root.map { #" "in_reply_to_id": \#($0),"# } ?? ""
+        return """
+            {"id": \(id), "pull_request_review_id": \(review),\(reply) "path": "feature.txt", \(lines),
+             "side": "RIGHT", "diff_hunk": "\(hunk)", "commit_id": "\(headSHA)", "original_commit_id": "\(headSHA)",
+             "user": \(root == nil ? reviewer : user), "body": "\(body)", "body_html": "<p>\(body)</p>",
+             "html_url": "https://github.com/stub/stub/pull/1#discussion_r\(id)",
+             "created_at": "2026-11-12T\(time):00Z", "updated_at": "2026-11-12T\(time):00Z"}
+            """
+    }
+
+    /// `feature.txt`'s hunk in `files` down to new line 6, the end of the numbered list.
+    private static let listHunk = #"@@ -1,5 +1,14 @@\n # Feature\n-TODO: write the feature\n-old line"#
+        + #"\n-another old line\n+The feature does three things:\n+\n+1. reads the input\n+2. checks it"#
+        + #"\n+3. writes the output"#
+
+    /// The GraphQL node ids of threads A and B.
+    private static let threadA = "PRRT_stub811", threadB = "PRRT_stub813"
+
+    /// GitHub's GraphQL API, matched by the operation's name in the query: `ReviewThreadStates` (the two threads'
+    /// states, joined on their roots' ids, so another PR's empty comments join none) and a resolve or unresolve of
+    /// thread A or B, which succeeds without changing anything. Like GitHub, an unknown operation or thread gets 200
+    /// with `errors`.
+    private static func graphQL(_ body: Data?) -> (status: Int, body: String) {
+        let request = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let query = request?["query"] as? String ?? ""
+        // `contains` is case-sensitive, so neither operation's name is in the other's: the order does not matter.
+        let unresolve = query.contains("UnresolveReviewThread")
+        if unresolve || query.contains("ResolveReviewThread") {
+            let id = (request?["variables"] as? [String: Any])?["threadId"] as? String
+            guard let id, [threadA, threadB].contains(id) else {
+                return (200, #"{"data": null, "errors": [{"message": "Could not resolve to a node with this id."}]}"#)
+            }
+            let field = unresolve ? "unresolveReviewThread" : "resolveReviewThread"
+            return (200, #"{"data": {"\#(field)": {"thread": {"isResolved": \#(!unresolve)}}}}"#)
+        }
+        guard query.contains("ReviewThreadStates") else {
+            return (200, #"{"data": null, "errors": [{"message": "Unknown operation."}]}"#)
+        }
+        // GitHub lets the viewer resolve only an unresolved thread and unresolve only a resolved one. The roots' ids
+        // are in `fullDatabaseId`, the only id github.com is asked for, a string for A and a number for B, so both
+        // threads joining proves each form decodes.
+        let nodes = [(threadA, "\"811\"", false), (threadB, "813", true)].map { id, root, resolved in
+            """
+            {"id": "\(id)", "isResolved": \(resolved), "isOutdated": false, "viewerCanResolve": \(!resolved),
+             "viewerCanUnresolve": \(resolved),
+             "comments": {"nodes": [{"fullDatabaseId": \(root)}]}}
+            """
+        }.joined(separator: ", ")
+        return (200, #"{"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [\#(nodes)], "#
+            + #""pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}"#)
+    }
 
     private static let checkRun = """
         {"id": 901, "name": "build", "status": "completed", "conclusion": "success",

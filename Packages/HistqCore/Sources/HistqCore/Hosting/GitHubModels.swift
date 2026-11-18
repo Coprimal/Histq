@@ -206,6 +206,75 @@ public struct GitHubReview: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// An inline comment of a pull request review, on a file and a line (`GET .../pulls/<n>/comments`). A reply has
+/// `inReplyToID` set to its thread's root comment; the root's `pullRequestReviewID` is the review the thread
+/// belongs to. Only `id` and `path` are required: GitHub may leave out or null the rest, and one missing field
+/// must not make every thread of the pull request fail to decode.
+public struct GitHubReviewComment: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var pullRequestReviewID: Int?
+    /// The root comment of the thread this reply belongs to; nil for a root comment.
+    public var inReplyToID: Int?
+    public var path: String
+    /// The line in the current diff, or the last line of a multi-line comment. It may be nil (an outdated comment),
+    /// where `originalLine`, the line in the diff the comment was written on, takes over.
+    public var line: Int?
+    public var originalLine: Int?
+    /// The first line of a multi-line comment; nil for a single line.
+    public var startLine: Int?
+    public var originalStartLine: Int?
+    /// `LEFT` (the old file) or `RIGHT` (the new file).
+    public var side: String?
+    /// The diff hunk the comment was written on, ending at the commented line.
+    public var diffHunk: String?
+    public var body: String?
+    public var bodyHTML: String?
+    public var user: GitHubUser?
+    public var createdAt: Date?
+    public var htmlURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, path, line, side, body, user
+        case pullRequestReviewID = "pull_request_review_id"
+        case inReplyToID = "in_reply_to_id"
+        case originalLine = "original_line"
+        case startLine = "start_line"
+        case originalStartLine = "original_start_line"
+        case diffHunk = "diff_hunk"
+        case bodyHTML = "body_html"
+        case createdAt = "created_at"
+        case htmlURL = "html_url"
+    }
+}
+
+/// The state of a pull request's review thread, from GitHub's GraphQL API: REST has a thread's comments but not
+/// whether it is resolved. `rootCommentID` joins it to the thread's root `GitHubReviewComment`.
+public struct GitHubReviewThreadState: Sendable, Equatable, Identifiable {
+    /// The thread's GraphQL node id, which resolving and unresolving take.
+    public var id: String
+    public var isResolved: Bool
+    /// The diff changed under the thread since it was written.
+    public var isOutdated: Bool
+    /// Whether the token's user may resolve or unresolve it (GitHub allows it to writers and the author).
+    public var viewerCanResolve: Bool
+    public var viewerCanUnresolve: Bool
+    /// The REST `id` of the thread's first comment (GraphQL's `fullDatabaseId`, else `databaseId`); nil when GitHub
+    /// leaves both out.
+    public var rootCommentID: Int?
+
+    public init(
+        id: String, isResolved: Bool, isOutdated: Bool, viewerCanResolve: Bool, viewerCanUnresolve: Bool,
+        rootCommentID: Int? = nil
+    ) {
+        self.id = id
+        self.isResolved = isResolved
+        self.isOutdated = isOutdated
+        self.viewerCanResolve = viewerCanResolve
+        self.viewerCanUnresolve = viewerCanUnresolve
+        self.rootCommentID = rootCommentID
+    }
+}
+
 /// A commit of a pull request (`GET .../pulls/<n>/commits`).
 public struct GitHubCommit: Codable, Sendable, Equatable, Identifiable {
     public var sha: String

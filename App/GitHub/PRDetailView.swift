@@ -56,8 +56,30 @@ struct PRReviewer: Identifiable, Sendable {
     var id: String { login }
 }
 
-/// Everything the detail shows, read in one load. Commits, files and checks may fail on their own (a token without
-/// the checks permission still reads the pull request): their tab then says why.
+/// The pull request's review threads, grouped by `GitHubReviewThread.group`: their comments come from REST and only
+/// whether each is resolved from GraphQL, so a GraphQL failure, or states that join no thread, leave the threads
+/// without a state and say why.
+struct PRThreads: Sendable {
+    /// The threads of each review (its id), each review's oldest root first.
+    let byReview: [Int: [GitHubReviewThread]]
+    /// The reviews that only hold replies to other reviews' threads: GitHub hides them from the timeline.
+    let replyOnlyReviewIDs: Set<Int>
+    /// The threads whose root has no review, shown at the end of the timeline.
+    let unattached: [GitHubReviewThread]
+    /// Why resolving is unavailable: the GraphQL load failed, or its states joined none of the threads. nil when
+    /// the states loaded and joined, even only some of the threads, or when there are no threads.
+    let resolveUnavailable: String?
+    /// The GraphQL load failed, which `resolveUnavailable` alone does not tell from states that joined nothing.
+    let statesFailed: Bool
+
+    /// Every thread in one stable order: by review id, each review's own order, then the unattached ones.
+    var all: [GitHubReviewThread] {
+        byReview.keys.sorted().flatMap { byReview[$0] ?? [] } + unattached
+    }
+}
+
+/// Everything the detail shows, read in one load. Commits, files, checks and threads may fail on their own (a token
+/// without the checks permission still reads the pull request): their tab or part then says why.
 struct PullRequestDetail: Sendable {
     let loadID: Int
     /// Replaced alone by the model's re-poll while GitHub still computes whether the branch merges.
@@ -69,6 +91,7 @@ struct PullRequestDetail: Sendable {
     let commits: Loadable<[GitHubCommit]>
     let files: Loadable<[PRFile]>
     let checks: Loadable<[GitHubCheckRun]>
+    let threads: Loadable<PRThreads>
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -81,6 +104,10 @@ enum PullRequestAction: Equatable, Sendable {
     case review(HostedReviewEvent, body: String)
     case comment(String)
     case setOpen(Bool)
+    /// `rootID`: the thread's root comment, the only one GitHub takes a reply to.
+    case reply(rootID: Int, body: String)
+    /// `threadID`: the thread's GraphQL node id (`GitHubReviewThreadState.id`).
+    case resolve(threadID: String, resolved: Bool)
 
     var progressTitle: String {
         switch self {
@@ -88,6 +115,8 @@ enum PullRequestAction: Equatable, Sendable {
         case .review: "Submitting the review…"
         case .comment: "Commenting…"
         case .setOpen(let open): open ? "Reopening…" : "Closing…"
+        case .reply: "Replying…"
+        case .resolve(_, let resolved): resolved ? "Resolving…" : "Unresolving…"
         }
     }
 
@@ -97,6 +126,8 @@ enum PullRequestAction: Equatable, Sendable {
         case .review: "The review was not submitted"
         case .comment: "The comment was not posted"
         case .setOpen(let open): open ? "Reopen failed" : "Close failed"
+        case .reply: "The reply was not posted"
+        case .resolve(_, let resolved): resolved ? "Resolve failed" : "Unresolve failed"
         }
     }
 
@@ -107,6 +138,8 @@ enum PullRequestAction: Equatable, Sendable {
         case .review: "The review of #\(number) was not submitted"
         case .comment: "The comment on #\(number) was not posted"
         case .setOpen(let open): open ? "Reopen of #\(number) failed" : "Close of #\(number) failed"
+        case .reply: "The reply on #\(number) was not posted"
+        case .resolve(_, let resolved): resolved ? "Resolve on #\(number) failed" : "Unresolve on #\(number) failed"
         }
     }
 
@@ -117,6 +150,8 @@ enum PullRequestAction: Equatable, Sendable {
         case .review(let event, _): "review-\(event.rawValue.lowercased())"
         case .comment: "comment"
         case .setOpen(let open): open ? "reopen" : "close"
+        case .reply: "reply"
+        case .resolve(_, let resolved): resolved ? "resolve" : "unresolve"
         }
     }
 }
@@ -179,6 +214,11 @@ final class PullRequestDetailModel {
     var draft = ""
     var reviewEvent: HostedReviewEvent = .approve
     var mergeMethod: HostedMergeMethod = .merge
+    /// Each review thread's reply box, by the thread's root comment id. Kept across a reload, so a reply typed while
+    /// another action reloads the detail stays.
+    var replyDrafts: [Int: String] = [:]
+    /// The threads the user expanded (true) or collapsed (false) against their default, by root comment id.
+    var threadExpanded: [Int: Bool] = [:]
     /// The actions running on GitHub, by pull request: one at a time for each. An action belongs to the pull request it
     /// started on, not to the detail, which may show another one by the time it returns.
     private(set) var busy: [Int: PullRequestAction] = [:]
@@ -210,9 +250,31 @@ final class PullRequestDetailModel {
     case "reopen": .setOpen(true)
     default: nil
     }
+    /// DEBUG `-HistqPRAction reply|resolve|unresolve`: like `launchAction`, on a review thread of the first load,
+    /// which picks it (`threadLaunchAction(_:in:)`): only with `-HistqGitHubStub YES` too.
+    private static var threadLaunchActionName: String? = GitHubStub.isEnabled
+        ? AppState.launchFlag("-HistqPRAction").flatMap { ["reply", "resolve", "unresolve"].contains($0) ? $0 : nil }
+        : nil
     /// `merge-stale-closed`: the detail closes while the merge runs, so its failure is another detail's (the PRs tab's
     /// notice).
     private static let closesAfterLaunchAction = AppState.launchFlag("-HistqPRAction") == "merge-stale-closed"
+
+    /// `reply` posts "QA reply" to the first thread, `resolve` resolves the first unresolved one and `unresolve`
+    /// unresolves the first resolved one, whatever `viewerCanResolve` says (the stub answers both); nil when no
+    /// thread fits.
+    private static func threadLaunchAction(_ name: String, in detail: PullRequestDetail) -> PullRequestAction? {
+        let threads = detail.threads.value?.all ?? []
+        switch name {
+        case "reply":
+            return threads.first.map { .reply(rootID: $0.id, body: "QA reply") }
+        case "resolve", "unresolve":
+            let resolved = name == "resolve"
+            return threads.lazy.compactMap(\.state).first { $0.isResolved != resolved }
+                .map { .resolve(threadID: $0.id, resolved: resolved) }
+        default:
+            return nil
+        }
+    }
     #endif
 
     /// Loads pull request `number`; `quiet` keeps the shown detail until the new one is in (after an action).
@@ -226,6 +288,8 @@ final class PullRequestDetailModel {
             composer = .comment
             draft = ""
             reviewEvent = .approve
+            replyDrafts = [:]
+            threadExpanded = [:]
             actionError = nil
         }
         self.number = number
@@ -244,12 +308,19 @@ final class PullRequestDetailModel {
             case .success(let detail):
                 state = .loaded(detail)
                 Self.logMergeable(detail.pull)
+                Self.logThreads(detail)
                 if quiet { UITiming.content("pr \(number) reloaded") }
                 #if DEBUG
                 if let action = Self.launchAction {
                     Self.launchAction = nil
                     perform(action, on: number, github: github)
                     if Self.closesAfterLaunchAction { close() }
+                }
+                if let name = Self.threadLaunchActionName {
+                    Self.threadLaunchActionName = nil
+                    if let action = Self.threadLaunchAction(name, in: detail) {
+                        perform(action, on: number, github: github)
+                    }
                 }
                 #endif
                 let names = detail.files.value?.map(\.id) ?? []
@@ -289,6 +360,18 @@ final class PullRequestDetailModel {
     /// The timing log's `pr <n> mergeable true|false|null`, once for each answer (QA of the re-poll).
     private static func logMergeable(_ pull: GitHubPullRequest) {
         UITiming.content("pr \(pull.number) mergeable \(pull.mergeable.map { "\($0)" } ?? "null")")
+    }
+
+    /// The timing log's `pr <n> threads <count> resolved <k> states <joined>/<count>|unavailable` once the threads
+    /// loaded (QA of the REST and GraphQL parts and their join): `joined` counts the threads that got a state, so a
+    /// failed join shows; `unavailable` when GraphQL failed.
+    private static func logThreads(_ detail: PullRequestDetail) {
+        guard let threads = detail.threads.value else { return }
+        let all = threads.all
+        let resolved = all.count { $0.state?.isResolved == true }
+        let joined = all.count { $0.state != nil }
+        let states = threads.statesFailed ? "unavailable" : "\(joined)/\(all.count)"
+        UITiming.content("pr \(detail.pull.number) threads \(all.count) resolved \(resolved) states \(states)")
     }
 
     /// The detail closed (Esc, another selection): an answer still on its way is dropped.
@@ -332,7 +415,8 @@ final class PullRequestDetailModel {
             }
             switch action {
             case .comment, .review: if self.number == number { draft = "" }
-            case .merge, .setOpen: break
+            case .reply(let rootID, _): if self.number == number { replyDrafts[rootID] = nil }
+            case .merge, .setOpen, .resolve: break
             }
             github.refreshNow()
             if showing { load(number, github: github, quiet: true) }
@@ -355,6 +439,8 @@ final class PullRequestDetailModel {
         async let reviews = client.reviews(of: number, in: repository)
         async let commits = part { try await client.pullRequestCommits(number, in: repository) }
         async let files = part { try await client.pullRequestFiles(number, in: repository) }
+        async let reviewComments = part { try await client.reviewComments(of: number, in: repository) }
+        async let threadStates = part { try await client.reviewThreadStates(of: number, in: repository) }
         do {
             let pull = try await pullRequest
             async let checks = part { try await client.checkRuns(for: pull.head.sha, in: repository) }
@@ -367,9 +453,39 @@ final class PullRequestDetailModel {
             return .success(PullRequestDetail(
                 loadID: loadID, pull: pull, timelineCount: comments.count + reviews.count { $0.state != "PENDING" },
                 timelineHTML: PRTimeline.html(pull: pull, comments: comments, reviews: reviews),
-                reviewers: reviewers(pull, reviews), commits: await commits, files: fileList, checks: await checks))
+                reviewers: reviewers(pull, reviews), commits: await commits, files: fileList, checks: await checks,
+                threads: threads(await reviewComments, await threadStates)))
         } catch {
             return .failure(error)
+        }
+    }
+
+    /// Joins the threads' comments (REST) and states (GraphQL): without the comments there are no threads, so their
+    /// failure is the part's; without the states the threads still show, only resolving is unavailable. States that
+    /// loaded but joined none of the threads make it unavailable too, with a reason, instead of Resolve going
+    /// missing without one.
+    private nonisolated static func threads(
+        _ comments: Loadable<[GitHubReviewComment]>, _ states: Loadable<[GitHubReviewThreadState]>
+    ) -> Loadable<PRThreads> {
+        switch comments {
+        case .loaded(let comments):
+            let grouped = GitHubReviewThread.group(comments, states: states.value ?? [])
+            var unavailable: String?
+            var failed = false
+            if case .failed(let message) = states {
+                unavailable = message
+                failed = true
+            } else if states.value != nil {
+                let all = grouped.threadsByReview.values.flatMap { $0 } + grouped.unattached
+                if !all.isEmpty, all.allSatisfy({ $0.state == nil }) {
+                    unavailable = "GitHub did not say which conversations these comments belong to."
+                }
+            }
+            return .loaded(PRThreads(
+                byReview: grouped.threadsByReview, replyOnlyReviewIDs: grouped.replyOnlyReviewIDs,
+                unattached: grouped.unattached, resolveUnavailable: unavailable, statesFailed: failed))
+        case .failed(let message): return .failed(message)
+        case .idle, .loading: return .idle
         }
     }
 
@@ -429,6 +545,10 @@ final class PullRequestDetailModel {
                 _ = try await client.review(number, in: repository, event: event, body: body.isEmpty ? nil : body)
             case .comment(let body): _ = try await client.comment(on: number, in: repository, body: body)
             case .setOpen(let open): try await client.setOpen(open, number: number, in: repository)
+            case .reply(let rootID, let body):
+                _ = try await client.replyToReviewComment(rootID: rootID, on: number, in: repository, body: body)
+            case .resolve(let threadID, let resolved):
+                _ = try await client.setReviewThread(threadID, resolved: resolved)
             }
             return nil
         } catch {
