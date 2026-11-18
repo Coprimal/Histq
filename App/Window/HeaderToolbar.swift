@@ -160,7 +160,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
                 form.submenu = makeMenu()
                 item.menuFormRepresentation = form
             }
-            groups[ID.panelsGroup] = row(ID.panelsGroup, title: "Panels", [sidebarItem, detailItem])
+            // Sidebar and Detail closer together than the other rows' buttons.
+            groups[ID.panelsGroup] = row(ID.panelsGroup, title: "Panels", [sidebarItem, detailItem], spacing: -4)
             groups[ID.historyGroup] = row(ID.historyGroup, title: "History", [undoItem, redoItem])
             // Pull, Push and Fetch as items of their own, each in its own capsule (`toolbarDefaultItemIdentifiers`):
             // a group of view items shares one.
@@ -222,9 +223,11 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// One bordered item, so one capsule, showing `subitems` as a row of `ToolbarHoverButton`s; in the overflow menu,
     /// `title` with a submenu of them.
-    private func row(_ id: NSToolbarItem.Identifier, title: String, _ subitems: [NSToolbarItem]) -> NSToolbarItem {
+    private func row(_ id: NSToolbarItem.Identifier, title: String, _ subitems: [NSToolbarItem],
+                     spacing: CGFloat = 0) -> NSToolbarItem
+    {
         let buttons = subitems.map { hoverButton($0) }
-        let stack = ToolbarHoverButton.capsule(buttons)
+        let stack = ToolbarHoverButton.capsule(buttons, spacing: spacing)
         let item = NSToolbarItem(itemIdentifier: id)
         item.view = stack
         item.isBordered = true
@@ -795,14 +798,17 @@ private final class ToolbarHoverButton: NSView {
     private static let highlightDiameter: CGFloat = 28
     /// The room `capsule` adds at both ends. AppKit pads an item view less on the sides than above and below: a lone
     /// button 36 wide makes its capsule round, and leaves the same room around the circle at a capsule's ends as
-    /// above and below it.
+    /// above and below it. A capsule of several buttons gets more, so its ends are roomier than its top and bottom.
     private static let endInset: CGFloat = 2
+    private static let groupEndInset: CGFloat = 4
 
-    /// One capsule's view: `buttons` side by side, with `endInset` at both ends.
-    static func capsule(_ buttons: [ToolbarHoverButton]) -> NSStackView {
+    /// One capsule's view: `buttons` side by side, `spacing` apart (negative brings them closer than their circles'
+    /// 4 pt), with `endInset` (or `groupEndInset`) at both ends.
+    static func capsule(_ buttons: [ToolbarHoverButton], spacing: CGFloat = 0) -> NSStackView {
         let stack = NSStackView(views: buttons)
-        stack.spacing = 0
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: endInset, bottom: 0, right: endInset)
+        stack.spacing = spacing
+        let inset = buttons.count > 1 ? groupEndInset : endInset
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
         return stack
     }
 
