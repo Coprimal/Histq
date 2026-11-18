@@ -51,6 +51,9 @@ enum Palette {
     static let stageAllFill = color(srgb(0x2E9E5B))
     /// The WIP panel's Unstage All button: a light red, under a white label. #E0706C
     static let unstageAllFill = color(srgb(0xE0706C))
+    /// The WIP panel's Conflicted card: its title and icon, and the tint of its fill and edge (`SectionCard.tone`). The
+    /// conflict editor's gold. #F2B630
+    static let conflictTone = color(srgb(0xF2B630))
     /// A primary button's label shadow: lifts the white text off the blue so it stands out more (user, 2026-11-13).
     static let onPrimaryShadow = Color.black.opacity(0.4)
     static let switchOffFill = color(.white.withAlphaComponent(0.22))

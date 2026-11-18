@@ -62,7 +62,8 @@ struct WIPPanel: View {
     /// The files git left with conflicts (a merge, rebase, cherry-pick, revert or stash pop): a click opens the conflict
     /// editor in panel2 (`FileTarget.isConflict`); the button stages the file as it is, marking it resolved.
     private func conflictedCard(_ files: [FileChange]) -> some View {
-        SectionCard("Conflicted", systemImage: "exclamationmark.triangle", count: files.count, contentPadding: 6) {
+        SectionCard("Conflicted", systemImage: "exclamationmark.triangle", count: files.count, contentPadding: 6,
+                    tone: Palette.conflictTone) {
             if files.isEmpty {
                 EmptyFilesText(text: "No conflicts left")
             } else {
@@ -400,7 +401,7 @@ struct WorktreeChangesPanel: View {
             WorktreeHeaderCard(path: path, branch: status.branch.name)
             if !conflicted.isEmpty {
                 filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder,
-                          card: .conflicted)
+                          card: .conflicted, tone: Palette.conflictTone)
             }
             filesCard("Unstaged", systemImage: "doc.badge.ellipsis", unstaged, empty: "No unstaged changes",
                       folder: folder, card: .unstaged)
@@ -413,10 +414,10 @@ struct WorktreeChangesPanel: View {
     }
 
     private func filesCard(_ title: String, systemImage: String, _ files: [FileChange], empty: String, folder: URL,
-                           card: FileListCard)
+                           card: FileListCard, tone: Color? = nil)
         -> some View
     {
-        SectionCard(title, systemImage: systemImage, count: files.count, contentPadding: 6) {
+        SectionCard(title, systemImage: systemImage, count: files.count, contentPadding: 6, tone: tone) {
             if files.isEmpty {
                 EmptyFilesText(text: empty)
             } else {
@@ -483,7 +484,8 @@ struct WIPPlaceholder: View {
         // cheap in the click's frame), the commit box at the bottom.
         VStack(spacing: SectionCardMetrics.spacing) {
             if hasConflicts {
-                SectionCard("Conflicted", systemImage: "exclamationmark.triangle", countIsLoading: true, contentPadding: 6) {
+                SectionCard("Conflicted", systemImage: "exclamationmark.triangle", countIsLoading: true, contentPadding: 6,
+                            tone: Palette.conflictTone) {
                     SkeletonFileRows(fractions: [0.45, 0.6])
                         .frame(maxHeight: .infinity, alignment: .top)
                 }

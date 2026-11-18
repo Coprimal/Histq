@@ -16,7 +16,8 @@ enum SectionCardMetrics {
 /// an optional icon, the title, an optional count (a skeleton bar while `countIsLoading`) and, when `isExpanded` is
 /// given, a chevron: a click on the header collapses or expands the body at once. `accessory` sits at the header's
 /// trailing edge (small buttons such as "Stage all"). A nil `title` gives a card without a header (the commit graph,
-/// whose column titles are its header); its body then fills the card to the top.
+/// whose column titles are its header); its body then fills the card to the top. A `tone` (the Conflicted card) colors
+/// the header's icon and title and tints the card's fill and edge with it (`NoticeTint`).
 struct SectionCard<Content: View, Accessory: View>: View {
     let title: String?
     let systemImage: String?
@@ -25,6 +26,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
     let isExpanded: Binding<Bool>?
     /// Around the body, below the header: smaller for rows that draw their own capsules.
     let contentPadding: CGFloat
+    let tone: Color?
     @ViewBuilder let content: () -> Content
     @ViewBuilder let accessory: () -> Accessory
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -33,7 +35,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
 
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
-        isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding,
+        isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding, tone: Color? = nil,
         @ViewBuilder content: @escaping () -> Content, @ViewBuilder accessory: @escaping () -> Accessory
     ) {
         self.title = title
@@ -42,11 +44,20 @@ struct SectionCard<Content: View, Accessory: View>: View {
         self.countIsLoading = countIsLoading
         self.isExpanded = isExpanded
         self.contentPadding = contentPadding
+        self.tone = tone
         self.content = content
         self.accessory = accessory
     }
 
     var body: some View {
+        if let tone {
+            card.modifier(NoticeTint(tone: tone))
+        } else {
+            card
+        }
+    }
+
+    @ViewBuilder private var card: some View {
         let bodyShown = isExpanded?.wrappedValue ?? true
         VStack(alignment: .leading, spacing: 0) {
             if let title {
@@ -98,10 +109,11 @@ struct SectionCard<Content: View, Accessory: View>: View {
             }
             if let systemImage {
                 IconImage(systemImage)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
             }
             Text(title)
                 .font(.body.weight(.semibold))
+                .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
                 .lineLimit(1)
             if countIsLoading {
                 SkeletonLine(width: 14, height: 11)
@@ -129,11 +141,11 @@ struct SectionCard<Content: View, Accessory: View>: View {
 extension SectionCard where Accessory == EmptyView {
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
-        isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding,
+        isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding, tone: Color? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.init(title, systemImage: systemImage, count: count, countIsLoading: countIsLoading, isExpanded: isExpanded,
-                  contentPadding: contentPadding, content: content, accessory: { EmptyView() })
+                  contentPadding: contentPadding, tone: tone, content: content, accessory: { EmptyView() })
     }
 }
 
