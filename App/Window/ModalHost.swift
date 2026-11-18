@@ -23,6 +23,8 @@ enum WindowModal: Identifiable {
     case tabAlias(tabID: UUID)
     /// A tab's menu › Set Emoji… for the tab `tabID`.
     case tabEmoji(tabID: UUID)
+    /// A tab group's name › Rename Group… for the group `key` (`TabGroupNames`).
+    case groupName(key: String)
 
     var id: String {
         switch self {
@@ -30,6 +32,7 @@ enum WindowModal: Identifiable {
         case .generateKey(let id): "generate key \(id)"
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
+        case .groupName(let key): "group name \(key)"
         }
     }
 }
@@ -40,6 +43,8 @@ struct ModalHost: View {
     let model: WindowModel
     /// The modal layer's height, once laid out.
     @State private var layerHeight: CGFloat?
+    /// The auto-stash confirmation's "Always do this", unticked for each new one.
+    @State private var alwaysDo = false
 
     /// One modal at a time; a window modal first, then the shown tab's (only one of those is set in practice).
     private enum Shown {
@@ -120,6 +125,7 @@ struct ModalHost: View {
         }
         // The toolbar stays live above the scrim: the modal acts on the tab and page it opened on, so a change of
         // either cancels it.
+        .onChange(of: shown?.id) { alwaysDo = false }
         .onChange(of: model.selectedTabID) { old, _ in
             if let old, let session = model.sessions[old], session.hasModal { session.closeModals() }
             if model.modal != nil { model.closeModal() }
@@ -147,13 +153,19 @@ struct ModalHost: View {
             TabAliasModal(model: model, tabID: tabID) { model.closeModal() }
         case .window(.tabEmoji(let tabID)):
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
+        case .window(.groupName(let key)):
+            GroupNameModal(key: key) { model.closeModal() }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
-                              isDestructive: confirmation.isDestructive) {
-                session.confirmation = nil
-                session.run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+                              isDestructive: confirmation.isDestructive, secondary: confirmation.secondary?.button,
+                              always: confirmation.asksAlways ? $alwaysDo : nil) {
+                accept(confirmation, session, write: confirmation.write, remember: "always")
             } onCancel: {
                 session.confirmation = nil
+            } onSecondary: {
+                if let secondary = confirmation.secondary {
+                    accept(confirmation, session, write: secondary.write, remember: "never")
+                }
             }
         case .hostKey(let session, let check):
             HostKeySheet(session: session, check: check) { session.hostKeyCheck = nil }
@@ -172,6 +184,17 @@ struct ModalHost: View {
         case .conflictLeave(let session, let name):
             ConflictLeaveModal(session: session, fileName: name)
         }
+    }
+
+    /// Runs a confirmation's `write`; with "Always do this" ticked, stores `remember` as `PrefKey.autoStash` first.
+    private func accept(_ confirmation: OperationConfirmation, _ session: RepoSession, write: RepoSession.Write,
+                        remember: String)
+    {
+        if confirmation.asksAlways, alwaysDo {
+            Preferences.defaults.set(remember, forKey: PrefKey.autoStash.rawValue)
+        }
+        session.confirmation = nil
+        session.run(write, title: confirmation.operation, key: confirmation.key)
     }
 
     private func cancel(_ shown: Shown) {
@@ -229,6 +252,49 @@ private struct TabAliasModal: View {
 
     private func save() {
         model.setAlias(alias, for: tabID)
+        onClose()
+    }
+}
+
+/// A tab group's name › Rename Group…: the group's name in one field, the main worktree's folder as its placeholder.
+/// Return saves; an empty field gives the group its folder's name back.
+private struct GroupNameModal: View {
+    let key: String
+    let onClose: () -> Void
+    @State private var name = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        let folder = RepoGroupKey.name(of: key)
+        ModalCard(title: "Rename the \(folder) group",
+                  subtitle: "The group's name shows this instead of the folder's, in every window. Leave it empty to "
+                      + "show the folder's name.",
+                  width: 420) {
+            ModalSection {
+                TextField("Name", text: $name, prompt: Text(folder))
+                    .textFieldStyle(.settings)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .onSubmit(save)
+            }
+        } actions: {
+            Button("Cancel", action: onClose)
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            Button("Save", action: save)
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .keyboardShortcut(.defaultAction)
+        }
+        .onAppear {
+            name = TabGroupNames.shared.custom(of: key) ?? ""
+            // The card is installed on this turn; the field takes the focus on the next one.
+            DispatchQueue.main.async { fieldFocused = true }
+        }
+    }
+
+    private func save() {
+        TabGroupNames.shared.set(name, for: key)
         onClose()
     }
 }

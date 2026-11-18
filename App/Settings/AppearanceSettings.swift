@@ -1,10 +1,11 @@
-// Settings › Appearance: where the tabs show and their default icon, the commit graph's avatars, date format, row height and text columns,
-// and the file lists' layout and file sizes.
+// Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the commit graph's
+// avatars, date format, row height and text columns, and the file lists' layout and file sizes.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
 struct AppearanceSettings: View {
     @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
+    @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var layoutPreset = "classic"
     @AppStorage(PrefKey.defaultTabEmoji.rawValue, store: Preferences.defaults) private var tabEmoji = ""
     @AppStorage(PrefKey.defaultTabIconColor.rawValue, store: Preferences.defaults) private var tabIconColor = -1
     @FocusState private var emojiFocused: Bool
@@ -71,6 +72,20 @@ struct AppearanceSettings: View {
                 } label: {
                     Text("Default icon color")
                     SettingsHint("The book's color on tabs without their own. Default: the tab's text color.")
+                }
+            }
+            SettingsGroup("Panels") {
+                LabeledContent {
+                    // Through `LayoutPreset.choose`, as the View menu: turning Focus on remembers the preset to go
+                    // back to.
+                    CapsuleTabs(selection: Binding(get: { LayoutPreset.resolved(layoutPreset) },
+                                                   set: { if $0 != LayoutPreset.current { LayoutPreset.choose($0) } }),
+                                tabs: [LayoutPreset.classic, .stacked, .focus],
+                                title: { Text($0.rawValue.capitalized) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Layout")
+                    SettingsHint("Stacked: a file opens under the graph. Focus (⌥⌘F): the sidebar and detail panel hide.")
                 }
             }
             SettingsGroup("Avatars") {

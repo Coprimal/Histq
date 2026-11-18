@@ -1,5 +1,6 @@
 // Tab groups (as Chrome's): the tabs of one repository's worktrees sit side by side, under the repo's name and one color.
 import Foundation
+import Observation
 
 /// The repository a folder belongs to: its git common dir, which all its worktrees share. Read from the folder's `.git`
 /// (the repo's own folder, or a worktree's `gitdir:` file and that dir's `commondir`): small files, read off the main
@@ -43,12 +44,43 @@ enum RepoGroupKey {
     }
 }
 
+/// The names the user gave tab groups (a group's menu › Rename Group…), by group key, kept in `Preferences.defaults`
+/// (`PrefKey.tabGroupNames`): one repo has the same name in every window and at every launch.
+@Observable
+@MainActor
+final class TabGroupNames {
+    static let shared = TabGroupNames()
+
+    /// The custom names, by group key.
+    private(set) var names: [String: String]
+
+    private static var key: String { PrefKey.tabGroupNames.rawValue }
+
+    private init() {
+        names = Preferences.defaults.dictionary(forKey: Self.key) as? [String: String] ?? [:]
+    }
+
+    /// The group's custom name, else its main worktree's folder (`RepoGroupKey.name`).
+    func name(of key: String) -> String { names[key] ?? RepoGroupKey.name(of: key) }
+
+    /// The group's custom name (nil when it has none).
+    func custom(of key: String) -> String? { names[key] }
+
+    /// Names the group; empty (or only spaces) gives it back its folder's name.
+    func set(_ name: String, for key: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        names[key] = trimmed.isEmpty ? nil : trimmed
+        Preferences.defaults.set(names, forKey: Self.key)
+    }
+}
+
 /// Two or more neighboring tabs of one repository (`WindowModel.tabGroups`). A repo with a single tab has no group.
 struct TabGroup: Equatable {
     let key: String
     /// The tabs' indices; the tabs of a repo are always neighbors (`WindowModel.gatherGroups`).
     let range: ClosedRange<Int>
-    var name: String { RepoGroupKey.name(of: key) }
+    /// The custom name (`TabGroupNames`), else the main worktree's folder.
+    let name: String
 }
 
 /// The tabs in order with each group's header (the top tabs' chip, the vertical tabs' name row) before its first tab,

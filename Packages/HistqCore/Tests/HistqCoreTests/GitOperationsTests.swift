@@ -244,4 +244,116 @@ struct GitOperationsTests {
             try await fx.ops.fastForward("feature", to: "+refs/heads/main")
         }
     }
+
+    @Test("ignore appends one line to the top level's .gitignore, keeping its bytes (CRLF, no final newline) and mode")
+    func ignoreKeepsBytes() async throws {
+        let fx = try await Repo("graph")
+        defer { fx.copy.remove() }
+        let file = fx.repo.appending(path: ".gitignore")
+        let before = Data("a\r\nb".utf8)
+        try before.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        // From a subfolder: the line still goes to the top level's .gitignore.
+        let sub = fx.repo.appending(path: "sub", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: false)
+        let ops = GitOperations(
+            runner: fx.copy.runner, cwd: sub, env: GitInvocation.environment(profile: nil, base: fx.copy.base))
+
+        try await ops.ignore(pattern: "/x", in: .gitignore)
+        #expect(try Data(contentsOf: file) == before + Data("\n/x\n".utf8))
+        try await ops.ignore(pattern: "/y", in: .gitignore)
+        #expect(try Data(contentsOf: file) == before + Data("\n/x\n/y\n".utf8))
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+        #expect(!FileManager.default.fileExists(atPath: sub.appending(path: ".gitignore").path))
+        // The exclude path git gives is relative to the subfolder.
+        try await ops.ignore(pattern: "/z", in: .infoExclude)
+        let exclude = try Data(contentsOf: fx.repo.appending(path: ".git/info/exclude"))
+        #expect(exclude.suffix(3) == Data("/z\n".utf8))
+
+        // A line break would add a second pattern: refused, nothing written.
+        await #expect(throws: GitOperationError.self) { try await ops.ignore(pattern: "a\n*", in: .gitignore) }
+        #expect(try Data(contentsOf: file) == before + Data("\n/x\n/y\n".utf8))
+    }
+
+    @Test("a file named \"#a*b \" is escaped so git ignores only it, none of its look-alikes")
+    func ignoreEscapesSpecialNames() async throws {
+        let fx = try await Repo("graph")
+        defer { fx.copy.remove() }
+        try FileManager.default.createDirectory(at: fx.repo.appending(path: "sub"), withIntermediateDirectories: false)
+        let names = ["#a*b ", "#axb ", "#a*b", "#a*b  ", "x#a*b ", "sub/#a*b "]
+        for name in names { try Data().write(to: fx.repo.appending(path: name)) }
+
+        let pattern = GitOperations.ignorePattern(file: "#a*b ")
+        #expect(pattern == "/\\#a\\*b\\ ")
+        try await fx.ops.ignore(pattern: pattern, in: .gitignore)
+        #expect(try await fx.git(["check-ignore", "--no-index", "--"] + names) == "#a*b ")
+    }
+
+    @Test("folder and extension patterns; .infoExclude writes the resolved exclude file, a linked worktree's too")
+    func ignoreFolderExtensionAndExclude() async throws {
+        #expect(GitOperations.ignorePattern(folder: "build/out") == "/build/out/")
+        #expect(GitOperations.ignorePattern(extension: "log") == "*.log")
+        #expect(GitOperations.ignorePattern(file: "!x?[1]\\") == "/\\!x\\?\\[1]\\\\")
+
+        let fx = try await Repo("graph")
+        defer { fx.copy.remove() }
+        let fm = FileManager.default
+        let info = fx.repo.appending(path: ".git/info", directoryHint: .isDirectory)
+        let exclude = info.appending(path: "exclude")
+        try? fm.removeItem(at: info)  // a missing info folder is made
+        let gitignore = try? Data(contentsOf: fx.repo.appending(path: ".gitignore"))
+
+        try await fx.ops.ignore(pattern: GitOperations.ignorePattern(extension: "tmp"), in: .infoExclude)
+        try await fx.ops.ignore(pattern: GitOperations.ignorePattern(folder: "out"), in: .infoExclude)
+        #expect(try Data(contentsOf: exclude) == Data("*.tmp\n/out/\n".utf8))
+        #expect((try? Data(contentsOf: fx.repo.appending(path: ".gitignore"))) == gitignore)
+        // A cwd URL without a trailing slash still resolves inside the repo, not its parent.
+        let noSlash = GitOperations(
+            runner: fx.copy.runner, cwd: URL(filePath: fx.repo.path, directoryHint: .notDirectory),
+            env: GitInvocation.environment(profile: nil, base: fx.copy.base))
+        try await noSlash.ignore(pattern: "/no-slash", in: .infoExclude)
+        #expect(try Data(contentsOf: exclude) == Data("*.tmp\n/out/\n/no-slash\n".utf8))
+        for folder in ["sub", "out", "sub/out"] {
+            try fm.createDirectory(at: fx.repo.appending(path: folder), withIntermediateDirectories: false)
+        }
+        let names = ["a.tmp", "sub/b.tmp", "out/c", "sub/out/d", "keep.tmpx"]
+        for name in names { try Data().write(to: fx.repo.appending(path: name)) }
+        #expect(try await fx.git(["check-ignore", "--no-index", "--"] + names) == "a.tmp\nsub/b.tmp\nout/c")
+
+        // The linked worktree graph-wt shares the main repo's info/exclude.
+        let wt = GitOperations(
+            runner: fx.copy.runner, cwd: fx.copy.repo("graph-wt"),
+            env: GitInvocation.environment(profile: nil, base: fx.copy.base))
+        try await wt.ignore(pattern: "/wt-only", in: .infoExclude)
+        #expect(try Data(contentsOf: exclude) == Data("*.tmp\n/out/\n/no-slash\n/wt-only\n".utf8))
+    }
+
+    @Test("a symlinked .gitignore (dangling too) or info folder is refused and left untouched")
+    func ignoreRefusesSymlinks() async throws {
+        let fx = try await Repo("graph")
+        defer { fx.copy.remove() }
+        let fm = FileManager.default
+        let outside = fx.copy.folder.appending(path: "outside.txt")
+        try Data("keep\n".utf8).write(to: outside)
+        let link = fx.repo.appending(path: ".gitignore")
+        try? fm.removeItem(at: link)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: outside.path)
+
+        await #expect(throws: UndoError.self) { try await fx.ops.ignore(pattern: "/x", in: .gitignore) }
+        #expect(try fm.destinationOfSymbolicLink(atPath: link.path) == outside.path)
+        #expect(try Data(contentsOf: outside) == Data("keep\n".utf8))
+        try fm.removeItem(at: outside)
+        await #expect(throws: UndoError.self) { try await fx.ops.ignore(pattern: "/x", in: .gitignore) }
+        #expect(!fm.fileExists(atPath: outside.path))
+        #expect(try fm.destinationOfSymbolicLink(atPath: link.path) == outside.path)
+
+        let info = fx.repo.appending(path: ".git/info")
+        try? fm.removeItem(at: info)
+        let elsewhere = fx.copy.folder.appending(path: "elsewhere", directoryHint: .isDirectory)
+        try fm.createDirectory(at: elsewhere, withIntermediateDirectories: false)
+        try fm.createSymbolicLink(atPath: info.path, withDestinationPath: elsewhere.path)
+        await #expect(throws: UndoError.self) { try await fx.ops.ignore(pattern: "/x", in: .infoExclude) }
+        #expect(try fm.contentsOfDirectory(atPath: elsewhere.path).isEmpty)
+    }
 }

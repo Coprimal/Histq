@@ -8,12 +8,15 @@ import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A file whose diff panel2 shows: a WIP file (its unstaged and staged changes) or a file of a commit or a stash.
+/// A file whose diff panel2 shows: a WIP file (its unstaged and staged changes), a file of a commit or a stash, or a
+/// file of a compare.
 struct FileTarget: Hashable, Sendable {
     enum Source: Hashable, Sendable {
         case wip
         /// A commit or a stash, by its hash.
         case commit(String)
+        /// A file of a compare, read-only: `base` against `head` (nil for the working tree).
+        case compare(base: String, head: String?)
     }
 
     let source: Source
@@ -158,15 +161,16 @@ struct DiffView: View {
     }
 }
 
-/// Back, the file's icon, name and folder, its status, the line counts, the mode switch and close; a commit's file adds
-/// "Checkout This Version". The counts are skeletons until the diff is in.
+/// Back, the file's icon, name and folder, its status, File History and Blame icons (a tracked file), the line counts,
+/// the mode switch and close; a commit's file adds "Checkout This Version". The actions fold into a "…" menu when the
+/// row is narrow. The counts are skeletons until the diff is in.
 private struct DiffHeaderCard: View {
     let session: RepoSession
     let target: FileTarget
+    @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var storedPreset = "classic"
 
     var body: some View {
         @Bindable var session = session
-        let file = target.file
         let detail = session.fileDiff.value
         SectionCard(nil, contentPadding: 8) {
             HStack(spacing: 8) {
@@ -180,37 +184,24 @@ private struct DiffHeaderCard: View {
                 }
                 .buttonStyle(RowIconButtonStyle())
                 .keyboardShortcut(.cancelAction)
-                .help("Back to the Graph (Esc)")
-                .accessibilityLabel("Back to the graph")
+                .help(closesPane ? "Close the diff (Esc)" : "Back to the \(backName) (Esc)")
+                .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
                 .padding(.leading, 4)
-                Image(systemName: file.systemImage)
-                    .foregroundStyle(file.tint)
-                    .accessibilityHidden(true)
-                HStack(spacing: 4) {
-                    Text(file.name)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
-                    if !file.folder.isEmpty {
-                        Text(file.folder)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
+                // The name first: the secondary actions fold into a "…" menu when the row is too narrow for them.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        title
+                        Spacer(minLength: 8)
+                        actions
+                    }
+                    HStack(spacing: 8) {
+                        title
+                        Spacer(minLength: 8)
+                        actionsMenu
                     }
                 }
-                .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
-                Text(file.kindName)
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if case .commit = target.source, file.kind != .deleted {
-                    Button("Checkout This Version") { session.checkoutVersion(of: target) }
-                        .buttonStyle(RowTextButtonStyle())
-                        .lineLimit(1)
-                        .fixedSize()
-                        .help("Replace the file in the working tree with this commit's version")
-                }
                 counts(detail)
+                    .fixedSize()
                 // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
                 if !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true {
                     CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
@@ -226,12 +217,130 @@ private struct DiffHeaderCard: View {
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(RowIconButtonStyle())
-                .help("Close (back to the Graph)")
+                .help(closesPane ? "Close the diff" : "Close (back to the \(backName))")
                 .accessibilityLabel("Close the diff")
                 .padding(.trailing, 4)
             }
             // As tall as the compact tabs' padded track (24 pt pills inset 4 pt), the sidebar's look.
             .frame(height: 32)
+        }
+    }
+
+    /// The file's icon, name and folder, and its status; the name keeps its width before the folder and the status.
+    private var title: some View {
+        let file = target.file
+        return HStack(spacing: 8) {
+            Image(systemName: file.systemImage)
+                .foregroundStyle(file.tint)
+                .accessibilityHidden(true)
+            HStack(spacing: 4) {
+                Text(file.name)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if !file.folder.isEmpty {
+                    Text(file.folder)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+            .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
+            .layoutPriority(1)
+            Text(file.kindName)
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    /// "Checkout This Version" (a commit's file), then File History and Blame (a tracked file; no Blame for an image).
+    @ViewBuilder private var actions: some View {
+        let file = target.file
+        if case .commit = target.source, file.kind != .deleted {
+            Button("Checkout This Version") { session.checkoutVersion(of: target) }
+                .buttonStyle(RowTextButtonStyle())
+                .lineLimit(1)
+                .fixedSize()
+                .help("Replace the file in the working tree with this commit's version")
+        }
+        if file.kind != .untracked {
+            toolButton("clock.arrow.circlepath", help: "File History") {
+                session.selectTool(.fileHistory(path: file.path, rev: rev, follow: false))
+            }
+            if file.kind != .deleted, !target.isImage {
+                toolButton("person.text.rectangle", help: "Blame") {
+                    session.selectTool(.blame(path: file.path, rev: rev))
+                }
+            }
+        }
+    }
+
+    /// The same actions in a "…" menu, for a narrow row.
+    @ViewBuilder private var actionsMenu: some View {
+        let file = target.file
+        let checkout: [MenuEntry] = if case .commit = target.source, file.kind != .deleted {
+            [.action("Checkout This Version") { [session, target] in session.checkoutVersion(of: target) }]
+        } else {
+            []
+        }
+        let tools = file.kind == .untracked ? []
+            : RepoMenus.fileTools(path: file.path, rev: rev, blame: file.kind != .deleted && !target.isImage,
+                                  session: session)
+        let entries = checkout + tools
+        if !entries.isEmpty {
+            Menu {
+                MenuEntriesView(entries: entries)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .menuStyle(.button)
+            .buttonStyle(RowIconButtonStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More Actions")
+            .accessibilityLabel("More file actions")
+        }
+    }
+
+    /// An icon button opening a tool (File History, Blame), the back button's look.
+    private func toolButton(_ icon: String, help: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            IconImage(icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    /// The commit of a commit's or stash's file, a compare's head; nil for a WIP file or a compare with the working
+    /// tree (HEAD's history, the working tree's blame).
+    private var rev: String? {
+        switch target.source {
+        case .wip: nil
+        case .commit(let hash): hash
+        case .compare(_, let head): head
+        }
+    }
+
+    /// Stacked, not opened from a tool: Back and close hide the bottom pane under the graph, which stays in view.
+    private var closesPane: Bool {
+        session.returnTool == nil && LayoutPreset.resolved(storedPreset) == .stacked
+    }
+
+    /// Where Back and close return: the tool the diff was opened from, else the graph.
+    private var backName: String {
+        switch session.returnTool {
+        case .fileHistory?: "History"
+        case .blame?: "Blame"
+        case .reflog?: "Reflog"
+        case nil: "Graph"
         }
     }
 

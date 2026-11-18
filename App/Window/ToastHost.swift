@@ -8,7 +8,8 @@ import SwiftUI
 
 /// One outcome on screen.
 struct OperationToast: Identifiable, Equatable {
-    enum Kind { case success, failure }
+    /// `warning`: it ran, but something needs a look (the local changes stayed in a stash).
+    enum Kind { case success, failure, warning }
 
     let id = UUID()
     let kind: Kind
@@ -89,7 +90,13 @@ struct OperationToast: Identifiable, Equatable {
         OperationToast(kind: .failure, title: "\(title) stopped", detail: "Continue or abort it above the graph.")
     }
 
-    /// How long it stays: long enough to read, an error a bit longer.
+    /// An auto-stash that did not simply come back: "Changes kept in stash 1a2b3c4.", "Changes come back after continue
+    /// or abort."
+    static func warning(_ title: String, detail: String) -> OperationToast {
+        OperationToast(kind: .warning, title: title, detail: detail)
+    }
+
+    /// How long it stays: long enough to read, an error or a warning a bit longer.
     var duration: Duration { kind == .success ? .seconds(3) : .seconds(6) }
 }
 
@@ -112,8 +119,9 @@ enum ToastLevel: String, CaseIterable {
     func shows(_ kind: OperationToast.Kind) -> Bool {
         switch self {
         case .all: true
-        case .errors: kind == .failure
-        case .off: false
+        case .errors: kind != .success
+        // A warning is the only notice that the local changes moved into a stash: no banner says it.
+        case .off: kind == .warning
         }
     }
 }
@@ -144,8 +152,9 @@ private struct ToastCard: View {
     let dismiss: () -> Void
 
     var body: some View {
-        // Green for a success, the error banner's tone for a failure.
-        let tone = Color(nsColor: Palette.graphLanes[toast.kind == .success ? 2 : 6])
+        // Green for a success, orange for a warning, the error banner's tone for a failure.
+        let lane = switch toast.kind { case .success: 2; case .warning: 1; case .failure: 6 }
+        let tone = Color(nsColor: Palette.graphLanes[lane])
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: toast.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(tone)

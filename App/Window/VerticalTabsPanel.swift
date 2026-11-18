@@ -137,6 +137,7 @@ private struct VerticalTabList: View {
                                            lineLength: layout.span(of: group.key)
                                                - VerticalTabsMetrics.groupHeaderHeight - 2 * SidebarItemStyle.spacing,
                                            onToggle: { withAnimation(animation) { model.toggleGroup(group.key) } })
+                        .contextMenu { MenuEntriesView(entries: TabMenu.groupEntries(for: group.key, model: model)) }
                         .offset(y: (target.headers[group.key] ?? 0) - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
                 case .tab(let index, let tab):
@@ -162,7 +163,7 @@ private struct VerticalTabList: View {
         return VerticalTabRow(title: tab.title, systemImage: TabIcon.symbol(of: tab), emoji: tab.emoji,
                               iconColor: tab.iconColor,
                               help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color, profileName: profile?.name,
-                              groupName: group.map(RepoGroupKey.name(of:)),
+                              groupName: group.map(TabGroupNames.shared.name(of:)),
                               selected: selected, dragged: dragged, namespace: namespace,
                               onSelect: { model.selectTab(id: tab.id) },
                               onClose: { close(tab.id) })
@@ -398,7 +399,7 @@ private struct VerticalPinnedGrid: View {
         return VerticalPinnedCell(title: tab.title, emoji: tab.emoji, symbol: TabIcon.symbol(of: tab),
                                   iconColor: tab.iconColor,
                                   profileColor: profile?.color, profileName: profile?.name,
-                                  groupName: group.map(RepoGroupKey.name(of:)),
+                                  groupName: group.map(TabGroupNames.shared.name(of:)),
                                   groupColor: group.map(TabGroupColors.line),
                                   selected: tab.id == model.selectedTabID,
                                   onSelect: { model.selectTab(id: tab.id) })

@@ -4,7 +4,8 @@
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
 // inserted as rows, a new load reloads. A click selects at once (`action`); a double-click calls the checkout hook
 // (`doubleAction`) without delaying the single click. A click on a branch badge's pull request chip opens that pull
-// request at mouse down instead of selecting the row.
+// request at mouse down instead of selecting the row. `GraphVisibilityChip` floats over its header while branches are
+// hidden or soloed.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -446,7 +447,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private var ghost: Ghost?
-    private var wipDetail: String?
+    private var wipChanges: WorktreeChanges?
     private var dateFormat: String?
     private let formatter = DateFormatter()
     private var metrics = GraphMetrics(density: "regular")
@@ -694,9 +695,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             reloadVisible = true
         }
         if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
-        let wip = view.status.map(Self.wipDetail)
-        if wip != wipDetail {
-            wipDetail = wip
+        let wip = view.status.map(WorktreeChanges.init)
+        if wip != wipChanges {
+            wipChanges = wip
             reloadVisible = true
         }
 
@@ -867,11 +868,6 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         scroll.reflectScrolledClipView(clip)
     }
 
-    /// "3 unstaged · 2 staged": the WIP row's counts (untracked and conflicted files count as unstaged).
-    private static func wipDetail(_ status: WorkingStatus) -> String {
-        WorktreeChanges(status).detail
-    }
-
     // MARK: Rows
 
     private func item(at row: Int) -> GraphItem? {
@@ -975,7 +971,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case .message:
             let cell = reuse(tableView, column) { GraphTextCellView() }
-            cell.detail = nil
+            cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             if let commit {
                 cell.text = commit.subject
@@ -987,12 +983,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.isItalic = true
             } else if let worktree = worktree(synthetic) {
                 cell.text = "// WIP"
-                cell.detail = worktree.changes.map(\.detail).flatMap { $0.isEmpty ? nil : $0 }
+                cell.changes = worktree.changes
                 cell.tone = .secondary
                 cell.isItalic = true
             } else {
                 cell.text = "// WIP"
-                cell.detail = wipDetail.flatMap { $0.isEmpty ? nil : $0 }
+                cell.changes = wipChanges
                 cell.tone = .primary
                 cell.isItalic = true
             }
@@ -1005,7 +1001,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             cell.avatarDiameter = (metrics.nodeDiameter * 0.8 / 2).rounded() * 2
             cell.avatar = commit.flatMap { avatar(for: $0, in: tableView) }
             cell.text = commit?.authorName ?? ""
-            cell.detail = nil
+            cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             cell.tone = .secondary
             cell.isItalic = false
@@ -1016,7 +1012,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // Formatted only for the rows on screen.
             let date = commit?.authorDate ?? (synthetic?.kind == .stash ? stash(synthetic?.id)?.date : nil)
             cell.text = date.map(formatter.string(from:)) ?? ""
-            cell.detail = nil
+            cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             cell.tone = .secondary
             cell.isItalic = false
@@ -1493,5 +1489,27 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             }
             .joined(separator: ",")
         Preferences.defaults.set(encoded, forKey: PrefKey.graphColumnWidths.rawValue)
+    }
+}
+
+/// Over the graph's header while branches are left out: "2 hidden · Show All", "Solo · Show All" or both; a click shows
+/// every branch (`RepoSession.showAll`).
+struct GraphVisibilityChip: View {
+    let session: RepoSession
+
+    var body: some View {
+        let hidden = session.hiddenCount
+        if hidden > 0 || session.isSoloActive {
+            let summary = [hidden > 0 ? "\(hidden) hidden" : nil, session.isSoloActive ? "Solo" : nil]
+                .compactMap(\.self).joined(separator: " · ")
+            Button { session.showAll() } label: {
+                Text("\(summary) · \(Text("Show All").foregroundStyle(Color.accentColor))")
+                    .font(.caption)
+            }
+            .buttonStyle(RaisedButtonStyle(height: 22, horizontalPadding: 10))
+            .help("Show every branch in the graph")
+            .padding(.top, 2)
+            .padding(.trailing, 8)
+        }
     }
 }

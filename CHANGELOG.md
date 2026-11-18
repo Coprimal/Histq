@@ -29,6 +29,29 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Toasts at the bottom right after a push, pull, fetch, commit or other operation, saying whether it worked or failed, and what a push, pull or fetch changed (or that there was nothing to do). They close after a few seconds or with their x; Settings › General › Notifications shows all, errors only or none.
 - Settings › AI › Commit messages: Summary only (Generate Message writes the summary line and keeps your description) and Custom instructions, added to the prompt and followed over its default style.
 - Image files (PNG, JPEG, GIF, HEIC, WebP…) show their versions before and after the change, side by side, instead of "Binary file", for commits, staged and unstaged changes and untracked files.
+- File History: every commit that changed a file, with Follow renames, from a file's context menu or the diff header's History button; a row opens the file's diff at that commit.
+- Blame: who last changed each line of a file, at a commit or in the working tree, from a file's context menu or the diff header's Blame button.
+- Compare two commits or branches, or a commit with the working tree, from a 2-row selection and from the branch and commit menus.
+- Hide and Show a branch or tag from its menu: a hidden one leaves the graph and the sidebar list; the eye button in the Local, Remote or Tags card header lists the hidden rows dimmed, and a row's own eye shows it again.
+- Solo one or more branches, so the graph shows only them and the current branch.
+- Pin to Left: a pinned branch keeps the graph's leftmost lane.
+- Hide Stale Branches (no commit for 90 days), from the Local and Remote cards' menus or the command palette.
+- An "N hidden · Show All" chip over the graph while branches or tags are hidden or branches are soloed.
+- Auto-stash: a checkout or pull with uncommitted changes asks Stash & Checkout, Carry Changes or Cancel (Stash & Pull or Cancel for a pull), with "Always do this"; Settings › General › Uncommitted changes sets Ask, Always stash or Never stash.
+- When stashed changes cannot all come back, they stay in the stash and a toast names it ("Changes kept in stash 1a2b3c4"); a pull stopped on conflicts brings them back on continue or abort.
+- Stash Changes in a file or folder from the WIP file menus; other staged files stay staged but are also saved in that stash.
+- Apply This File from a stash's file menu, which asks first when the file has local changes.
+- Undo of a Stash & Checkout whose stash held staged changes refuses, because bringing the stash back stages them again.
+- Undo and redo for staging and unstaging whole files (Stage, Unstage, Stage All, Unstage All; not single lines or hunks).
+- Undo and redo for stash save, drop, apply and pop: undoing a drop or a pop puts the stash back with its message.
+- Undo and redo for creating and deleting local tags.
+- Undo of resolving a conflicted file in the conflict editor while the merge, rebase, cherry-pick or revert is still stopped: the file's conflict comes back.
+- Stacked layout (View menu, command palette or Settings › Appearance): a file diff, the conflict editor, file history, blame or a pull request opens in a pane under the graph, so the graph stays visible.
+- Focus layout (Option-Cmd-F): the sidebar and detail panel hide and the graph or diff takes the whole width; Option-Cmd-F again returns to the layout used before.
+- View › Reset Layout restores the default panel widths, the Stacked split and the Classic layout.
+- Optimize Repository, from the toolbar's repository menu or the command palette: writes a commit-graph so history and the graph load faster in big repositories.
+- Show Reflog: where HEAD has been, with Checkout, Create Branch Here and Copy SHA on each entry, and the commit's details even when it is no longer in the graph.
+- Ignore an untracked file, all files with its extension or its folder from the WIP file and folder menus, in `.gitignore` or, with Exclude Locally, in `.git/info/exclude` (this clone only).
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.
@@ -40,6 +63,10 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - New branch and laptop icons, and a filled check on the checked-out branch.
 - A click on a branch checked out with uncommitted changes (in this worktree or another one), or on a worktree with changes in the Worktrees card, selects the row of those changes instead of the last commit; opening a worktree in a tab does the same.
 - A click on another worktree's changes row in the graph shows its unstaged and staged files instead of opening it in a tab; a double-click in the Worktrees card or Open in New Tab opens it.
+- The graph's WIP rows show how many files are edited, added and deleted, with GitKraken's icons, instead of "3 unstaged".
+- Another worktree's changes row sits right above that worktree's last commit, as in GitKraken, instead of at the top of the graph.
+- Cmd-Z right after staging a file now unstages it, instead of undoing the operation before it.
+- A stash apply or pop that stops on conflicts shows a warning toast ("Applied with conflicts: this apply cannot be undone") instead of a failure; the conflicted files are in the WIP panel.
 
 ## [0.1.0] - YYYY-MM-DD
 

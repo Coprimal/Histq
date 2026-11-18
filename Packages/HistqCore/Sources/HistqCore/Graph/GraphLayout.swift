@@ -121,8 +121,18 @@ public struct GraphLayout: Sendable {
     public private(set) var hung: [GraphHungRow] = []
     /// Commits laid out so far.
     private var placed = 0
+    /// Lanes `0..<reserved` are kept for the pinned branches' first-parent chains.
+    private let reserved: Int
+    /// Each pinned tip's lane, until the tip is laid out.
+    private var pins: [String: Int] = [:]
 
-    public init() {}
+    /// `pinned` are the tips of the pinned branches, in pin order: each tip and its first-parent chain take
+    /// the lane of its index, and every other line goes right of them. A tip that never comes leaves its
+    /// lane empty.
+    public init(pinned: [String] = []) {
+        reserved = pinned.count
+        for (lane, tip) in pinned.enumerated() where pins[tip] == nil { pins[tip] = lane }
+    }
 
     /// Lays out synthetic rows, each on a new lane that leads down to its base commit.
     public mutating func append(_ synthetic: [GraphSyntheticRow]) -> [GraphRow] {
@@ -178,13 +188,19 @@ public struct GraphLayout: Sendable {
                 best = lane.edge
             }
         }
+        // A pinned tip moves to its reserved lane, unless it continues a lane further left (another pin's).
+        let pin = reserved > 0 ? pins.removeValue(forKey: commit.hash) : nil
         let color: Int
         if node >= 0, lanes[node]!.color != Self.stashColor {
             color = lanes[node]!.color
         } else {
             // A tip, or a commit only stashes hang from: a color of its own.
-            if node < 0 { node = freeSlot() }
+            if node < 0 && pin == nil { node = freeSlot() }
             color = newColor()
+        }
+        if let pin, node < 0 || pin < node {
+            node = pin
+            if lanes.count <= pin { lanes += Array(repeating: nil, count: pin + 1 - lanes.count) }
         }
         for index in lanes.indices {
             guard let lane = lanes[index] else { continue }
@@ -248,9 +264,11 @@ public struct GraphLayout: Sendable {
         return GraphRow(node: node, lane: lane, color: color, top: top, bottom: bottom, width: highest + 1)
     }
 
-    /// The leftmost free slot, growing the lane list when none is free. The slot stays free until set.
+    /// The leftmost free slot right of the reserved lanes, growing the lane list when none is free. The slot
+    /// stays free until set.
     private mutating func freeSlot() -> Int {
-        if let index = lanes.firstIndex(where: { $0 == nil }) { return index }
+        if lanes.count < reserved { lanes += Array(repeating: nil, count: reserved - lanes.count) }
+        if let index = lanes[reserved...].firstIndex(where: { $0 == nil }) { return index }
         lanes.append(nil)
         return lanes.count - 1
     }

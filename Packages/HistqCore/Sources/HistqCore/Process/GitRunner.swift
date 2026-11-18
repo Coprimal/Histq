@@ -15,7 +15,7 @@ public struct GitResult: Sendable {
     public var text: String { String(decoding: stdout, as: UTF8.self) }
 }
 
-/// Why a git command failed. Every case but `.timeout` and `.launchFailed` carries the exit code
+/// Why a git command failed. Every case but `.timeout`, `.launchFailed` and `.autostashKept` carries the exit code
 /// (128 + the signal number when a signal killed git) and the last 8 KB of stderr.
 public enum GitError: Error, Equatable, Sendable {
     case auth(exit: Int32, stderrTail: String)
@@ -28,13 +28,15 @@ public enum GitError: Error, Equatable, Sendable {
     case other(exit: Int32, stderrTail: String)
     /// The executable could not be started.
     case launchFailed(String)
+    /// An auto-stash could not be put back cleanly: the changes are kept in the stash whose commit is the hash.
+    case autostashKept(String)
 
     public var exitCode: Int32? {
         switch self {
         case .auth(let exit, _), .hostKey(let exit, _), .nonFastForward(let exit, _), .conflict(let exit, _),
              .indexLock(let exit, _), .other(let exit, _):
             exit
-        case .timeout, .launchFailed: nil
+        case .timeout, .launchFailed, .autostashKept: nil
         }
     }
 
@@ -45,6 +47,7 @@ public enum GitError: Error, Equatable, Sendable {
             tail
         case .timeout: ""
         case .launchFailed(let message): message
+        case .autostashKept(let hash): "Changes kept in stash \(hash.prefix(7))."
         }
     }
 

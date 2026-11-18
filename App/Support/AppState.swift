@@ -100,6 +100,9 @@ enum PrefKey: String, CaseIterable {
     case avatarMode
     /// Pull button: a `GitOperations.PullMode` case name, "fastForward" (merge if needed), "fastForwardOnly" or "rebase".
     case pullMode
+    /// A checkout or pull with local changes: "ask" (the dialog), "always" (stash them first and put them back) or
+    /// "never" (a checkout carries them, a pull runs without `--autostash`).
+    case autoStash
     /// Auto-fetch interval in minutes; 0 = off.
     case autoFetchMinutes
     /// `fetch --prune` on every fetch.
@@ -116,10 +119,18 @@ enum PrefKey: String, CaseIterable {
     case defaultTabEmoji
     /// The book's color for a repo tab without its own: an index into `Palette.graphLanes`; -1 = the text's color.
     case defaultTabIconColor
+    /// The names the user gave tab groups (Rename Group…), by group key (`TabGroupNames`); a missing one = the folder's.
+    case tabGroupNames
     /// Native window tabs in the traffic-light row (Phase 8 attempt).
     case nativeTabsOnTop
     /// Repo layout panel widths, encoded by `RepoLayoutView`; empty = the layout's defaults.
     case panelWidths
+    /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked" or "focus". Global, like `panelWidths`.
+    case layoutPreset
+    /// Stacked's split: the graph's share of panel 2's height above the bottom pane, 0...1. Global.
+    case stackedSplit
+    /// The preset leaving Focus returns to: "classic" or "stacked" (never "focus"), set when Focus turns on. Global.
+    case presetBeforeFocus
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
     /// The graph's Commit message, Author and Commit date / time columns show (Branch / Tag and Graph always do).
@@ -166,7 +177,8 @@ enum PrefKey: String, CaseIterable {
     case aiCommitInstructions
     /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
     case toastLevel
-    /// The refs hidden from the sidebar and the graph (`RepoSession.hiddenRefs`): full ref names by repo folder path.
+    /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
+    /// its `RepoViewState` (`RepoSession.migrateHiddenRefs`).
     case hiddenRefs
 
     /// The value a key has until the user sets it.
@@ -176,6 +188,7 @@ enum PrefKey: String, CaseIterable {
         case .rowDensity: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"
+        case .autoStash: "ask"
         case .autoFetchMinutes: 3
         case .pruneOnFetch: false
         case .mergeTool: ""
@@ -184,8 +197,12 @@ enum PrefKey: String, CaseIterable {
         case .tabPosition: "top"
         case .defaultTabEmoji: ""
         case .defaultTabIconColor: -1
+        case .tabGroupNames: [String: String]()
         case .nativeTabsOnTop: false
         case .panelWidths: ""
+        case .layoutPreset: "classic"
+        case .stackedSplit: 0.45
+        case .presetBeforeFocus: "classic"
         case .graphColumnWidths: ""
         case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
         case .terminalFontName: ""
@@ -212,12 +229,55 @@ enum PrefKey: String, CaseIterable {
     }
 }
 
+/// How a repo tab lays out its panels (`PrefKey.layoutPreset`). Classic: sidebar | graph | detail, a file opens over
+/// the graph. Stacked: a file opens in a pane under the graph. Focus: sidebar and detail collapse, panel 2 goes full
+/// width.
+enum LayoutPreset: String {
+    case classic, stacked, focus
+
+    /// DEBUG `-HistqLayout classic|stacked|focus`, read once. It wins over the preference (as `-HistqTabPosition`
+    /// does) and is never written to it.
+    private static let launchOverride = AppState.launchFlag("-HistqLayout").flatMap(LayoutPreset.init(rawValue:))
+
+    /// The preset for a stored `PrefKey.layoutPreset` value; anything unknown reads as classic.
+    static func resolved(_ stored: String) -> LayoutPreset {
+        launchOverride ?? LayoutPreset(rawValue: stored) ?? .classic
+    }
+
+    /// The preset for the preference stored now.
+    static var current: LayoutPreset {
+        resolved(Preferences.defaults.string(forKey: PrefKey.layoutPreset.rawValue) ?? "")
+    }
+
+    /// Switches to `preset` (View menu, palette, Settings › Appearance); the windows follow it live. Focus while in
+    /// Focus (⌥⌘F again) returns to the preset used before it, which turning Focus on remembers.
+    static func choose(_ preset: LayoutPreset) {
+        let defaults = Preferences.defaults
+        let stored = LayoutPreset(rawValue: defaults.string(forKey: PrefKey.layoutPreset.rawValue) ?? "") ?? .classic
+        var next = preset
+        if preset == .focus, stored == .focus {
+            next = LayoutPreset(rawValue: defaults.string(forKey: PrefKey.presetBeforeFocus.rawValue) ?? "")
+                .flatMap { $0 == .focus ? nil : $0 } ?? .classic
+        } else if preset == .focus {
+            defaults.set(stored.rawValue, forKey: PrefKey.presetBeforeFocus.rawValue)
+        }
+        defaults.set(next.rawValue, forKey: PrefKey.layoutPreset.rawValue)
+    }
+
+    /// View › Reset Layout: the default panel widths and Stacked split, and Classic.
+    static func reset() {
+        for key in [PrefKey.panelWidths, .stackedSplit, .layoutPreset, .presetBeforeFocus] {
+            Preferences.defaults.removeObject(forKey: key.rawValue)
+        }
+    }
+}
+
 /// A DEBUG `-HistqSelect <kind>[:<value>]` request (`tab:1`, `wip`, `commit:<sha>`, `file:src/app.swift`,
 /// `settings:profiles`). The window routes it through the same `select` path a click takes.
 struct SelectRequest: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
-        case tab, wip, commit, branch, branchclick, worktree, openworktree, file, conflict, commitfile, settings,
-            sidebar, pr, issue, prbadge
+        case tab, wip, commit, commits, branch, branchclick, worktree, openworktree, file, conflict, commitfile,
+            settings, sidebar, pr, issue, prbadge
     }
 
     let kind: Kind

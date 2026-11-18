@@ -54,6 +54,57 @@ public enum LogReader {
         "--format=%H%x1f%P%x1f%at%x1f%ct%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%b",
     ]
 
+    /// `arguments` with refs hidden or branches soloed, and with the `alsoFrom` hashes (see `pages`); with no
+    /// hidden or soloed ref it is `arguments` followed by those hashes, as before. Hide puts an `--exclude`
+    /// per ref before `--all`. Solo drops `--all` and ends the command with `--end-of-options <refs> HEAD
+    /// <hashes> --`: HEAD keeps the WIP row's base, and the trailing `--` keeps a worktree file named `HEAD`
+    /// (or a hash) from being read as a path. A ref both hidden and soloed is shown: its `--exclude` is still
+    /// passed, but git applies it only to a following `--all`, which solo mode has not. Only full ref names
+    /// that git would accept are passed, the rest are dropped: hidden ones under `refs/heads/`, `refs/remotes/`
+    /// or `refs/tags/`, soloed ones under the first two; if no soloed ref is left, every ref is read.
+    public static func arguments(hidden: [String], solo: [String], alsoFrom hashes: [String] = []) -> [String] {
+        let revisions = hashes.filter { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
+        let excludes = hidden.filter(isHideableRef).map { "--exclude=\($0)" }
+        let solo = solo.filter(isBranchRef)
+        var command = arguments
+        let all = command.firstIndex(of: "--all")!
+        if solo.isEmpty {
+            command.insert(contentsOf: excludes, at: all)
+            return command + revisions
+        }
+        command.replaceSubrange(all...all, with: excludes)
+        return command + ["--end-of-options"] + solo + ["HEAD"] + revisions + ["--"]
+    }
+
+    /// A full branch or remote-tracking ref name git accepts (`git check-ref-format`), checked on its UTF-8
+    /// bytes so a combining character cannot hide a forbidden one. The name after the prefix cannot start
+    /// with `-`.
+    static func isBranchRef(_ name: String) -> Bool {
+        isRef(name, prefixes: ["refs/heads/", "refs/remotes/"])
+    }
+
+    /// A full branch, remote-tracking or tag ref name git accepts, as `isBranchRef` checks it.
+    static func isHideableRef(_ name: String) -> Bool {
+        isRef(name, prefixes: ["refs/heads/", "refs/remotes/", "refs/tags/"])
+    }
+
+    /// `name` starts with one of `prefixes` and git accepts it; a remote-tracking name needs a remote and a branch.
+    private static func isRef(_ name: String, prefixes: [String]) -> Bool {
+        let prefix = prefixes.first { name.hasPrefix($0) }
+        guard let prefix else { return false }
+        let rest = Array(name.utf8.dropFirst(prefix.utf8.count))
+        let forbidden = Set(" ~^:?*[\\".utf8)
+        guard rest.first != UInt8(ascii: "-"), rest.last != UInt8(ascii: "."),
+              rest.allSatisfy({ $0 >= 0x20 && $0 != 0x7F && !forbidden.contains($0) }),
+              !["..", "@{"].contains(where: { rest.contains(Array($0.utf8)) }),
+              prefix != "refs/remotes/" || rest.contains(UInt8(ascii: "/"))
+        else { return false }
+        let parts = rest.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+        return parts.allSatisfy {
+            !$0.isEmpty && $0.first != UInt8(ascii: ".") && !$0.suffix(5).elementsEqual(".lock".utf8)
+        }
+    }
+
     /// Streams the history of the repository at `cwd` in pages of up to `pageSize` commits (the last page
     /// may be shorter; an empty repository yields no page). `env` must be the read environment built by
     /// `GitInvocation.readEnvironment` for this `cwd`. The stream throws `GitError` when git fails. Ending
@@ -61,21 +112,13 @@ public enum LogReader {
     ///
     /// `alsoFrom`: commit hashes whose history is read too, e.g. the stashes' bases, so a stash made on a
     /// commit no branch holds any more still has its base in the log, as GitKraken shows it. Anything but a
-    /// hex hash is left out, so it can never be read as an option.
-    ///
-    /// `excluding`: full ref names (`refs/heads/x`) the walk does not start from, the refs the user hid; their
-    /// commits stay when another ref (or HEAD) reaches them. Anything not under `refs/`, or with a glob character,
-    /// is left out, so each excludes exactly one ref.
+    /// hex hash is left out, so it can never be read as an option. `hidden` and `solo`: full ref names, see
+    /// `arguments(hidden:solo:alsoFrom:)`.
     public static func pages(
         runner: GitRunner, cwd: URL, env: [String: String], pageSize: Int = defaultPageSize,
-        alsoFrom hashes: [String] = [], excluding refNames: [String] = []
+        alsoFrom hashes: [String] = [], hidden: [String] = [], solo: [String] = []
     ) -> AsyncThrowingStream<[Commit], Error> {
-        var command = arguments
-        let excludes = refNames
-            .filter { $0.hasPrefix("refs/") && !$0.contains(where: { "*?[\\".contains($0) }) }
-            .map { "--exclude=" + $0 }
-        command.insert(contentsOf: excludes, at: command.firstIndex(of: "--all") ?? command.endIndex)
-        command += hashes.filter { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
+        let command = arguments(hidden: hidden, solo: solo, alsoFrom: hashes)
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [Commit].self)
         let task = Task {
             do {

@@ -489,7 +489,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private static let recentMarker = "\u{1}recent"
 
     /// The window's repo tabs (the selected one checked; a pick selects that tab at once, as a click on it does), the
-    /// recent repos not open here (a pick opens it as `openTab`), then Open….
+    /// recent repos not open here (a pick opens it as `openTab`), then Open…, then the tab's repository actions
+    /// (`RepoMenus.repository`).
     private func repoEntries() -> [MenuEntry] {
         let repoTabs = model.tabs.filter { $0.repoURL != nil }
         let openPaths = Set(repoTabs.compactMap { $0.repoURL?.path })
@@ -504,6 +505,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         entries += [.separator, .action("Open…") {
             NSApp.sendAction(#selector(AppDelegate.openDocument(_:)), to: nil, from: nil)
         }]
+        if let session = model.actionSession { entries += [.separator] + RepoMenus.repository(session) }
         return entries
     }
 }

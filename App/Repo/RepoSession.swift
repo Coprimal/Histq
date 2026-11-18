@@ -61,15 +61,30 @@ enum GitToolchain {
     }
 }
 
+/// What the graph leaves out and pins, from a `RepoViewState` against the refs it was resolved with
+/// (`RepoSession.logFilter(view:refs:)`).
+struct LogFilter: Equatable, Sendable {
+    /// Full ref names left out of the graph (its log, its badges) and of the sidebar's lists: the hidden branches and
+    /// tags, the own upstreams of the hidden local branches and, with "hide stale branches" on, the stale branches.
+    /// Never the current branch, nor its upstream unless hidden itself.
+    var hidden: Set<String> = []
+    /// Full ref names: when any, the graph reads only them and HEAD.
+    var solo: [String] = []
+    /// The pinned branches' tip hashes, in pin order, one each: `GraphLayout(pinned:)`.
+    var pinned: [String] = []
+}
+
 /// The log of a repo with its graph rows, in `git log --all --topo-order` order. `rows[i]` is `commits[i]`'s row; the
-/// rows above the commits (WIP, worktrees) are in `syntheticRows`, the stash rows in `hung`, each right above its base.
+/// WIP row above the commits is in `syntheticRows`, the other worktrees' and the stash rows in `hung`, each right above
+/// its base (as GitKraken).
 struct LogSnapshot: Sendable {
     var commits: [Commit] = []
     var rows: [GraphRow] = []
-    /// Laid out before the commits, shown above them: the WIP row when the working tree has changes, then one row per
-    /// other worktree with changes; once the log is complete, the stashes whose base is not in it (without a line).
+    /// Laid out before the commits, shown above them: the WIP row when the working tree has changes; once the log is
+    /// complete, the other worktrees' and stash rows whose base is not in it (without a line).
     var syntheticRows: [GraphRow] = []
-    /// The stash rows, each laid out right above its base commit, newest first among one base; top first.
+    /// The other worktrees' rows, then the stash rows (newest first), each laid out right above its base commit; top
+    /// first.
     var hung: [GraphHungRow] = []
     /// What the synthetic rows were laid out from (`RepoSession.syntheticRows(status:stashes:worktrees:)`).
     var synthetic: [GraphSyntheticRow] = []
@@ -84,6 +99,8 @@ struct LogSnapshot: Sendable {
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
     /// inserts the rows a snapshot of the same load adds and reloads for a new one.
     var generation = 0
+    /// The hidden, soloed and pinned branches the log was read and laid out with.
+    var filter = LogFilter()
 
     /// What a table row of the graph shows.
     enum Entry {
@@ -255,21 +272,51 @@ struct WorktreeInfo: Hashable, Sendable {
     var isDirty: Bool { changes?.isEmpty == false }
 }
 
-/// A working tree's change counts: what the WIP row shows ("3 unstaged · 2 staged"; untracked and conflicted files
-/// count as unstaged).
+/// A working tree's change counts: "3 unstaged · 2 staged" (untracked and conflicted files count as unstaged), and the
+/// WIP row's edited, added and deleted files (GitKraken's icons; each file once, staged or not).
 struct WorktreeChanges: Hashable, Sendable {
     let unstaged: Int
     let staged: Int
+    /// Modified, renamed, copied, type-changed or conflicted files.
+    let edited: Int
+    /// New files: added (staged, or `git add -N`) or untracked.
+    let added: Int
+    let deleted: Int
 
     init(_ status: WorkingStatus) {
         var unstaged = 0
         var staged = 0
-        for entry in status.entries {
+        var edited = 0
+        var added = 0
+        var deleted = 0
+        for entry in status.entries where entry.kind != .ignored {
             if entry.isStaged { staged += 1 }
             if entry.isUnstaged || entry.kind == .untracked || entry.kind == .unmerged { unstaged += 1 }
+            // A conflict's letters are both sides' (`DU`, `AA`): it is edited.
+            if entry.kind == .unmerged {
+                edited += 1
+            } else if entry.index == .deleted || entry.worktree == .deleted {
+                deleted += 1
+            } else if entry.kind == .untracked || entry.index == .added || entry.worktree == .added {
+                added += 1
+            } else {
+                edited += 1
+            }
         }
         self.unstaged = unstaged
         self.staged = staged
+        self.edited = edited
+        self.added = added
+        self.deleted = deleted
+    }
+
+    /// "5 edited · 1 added": the WIP row's counts as text (its tooltip and accessibility label).
+    var kindSummary: String {
+        var parts: [String] = []
+        if edited > 0 { parts.append("\(edited) edited") }
+        if added > 0 { parts.append("\(added) added") }
+        if deleted > 0 { parts.append("\(deleted) deleted") }
+        return parts.joined(separator: " · ")
     }
 
     var isEmpty: Bool { unstaged == 0 && staged == 0 }
@@ -304,20 +351,35 @@ extension Refs {
 struct UndoStatus: Equatable, Sendable {
     var undo: String?
     var redo: String?
+    /// What Undo and Redo do while the merge, rebase, cherry-pick or revert in progress is stopped: its resolved files.
+    var resolveUndo: String?
+    var resolveRedo: String?
     var isUnreadable = false
 
     init() {}
 
-    /// Reads the journal file (off the main actor: file I/O).
-    nonisolated init(_ journal: UndoJournal) {
+    /// Reads the journal file without the stage and unstage entries the index moved on from, which Undo and Redo skip
+    /// (`UndoJournal.load(_:)`), so the titles name what they will do (off the main actor: file I/O and git).
+    nonisolated init(_ journal: UndoJournal, ops: GitOperations) async {
         do {
-            let state = try journal.load()
+            let state = try await journal.load(ops)
             undo = state.nextUndo?.title
             redo = state.nextRedo?.title
+            resolveUndo = state.nextResolveUndo?.title
+            resolveRedo = state.nextResolveRedo?.title
         } catch {
             isUnreadable = true
         }
     }
+}
+
+/// What a write did, for its toast.
+enum WriteOutcome: Equatable, Sendable {
+    case done
+    /// A pull stopped on conflicts; git holds the local changes until it is continued or aborted.
+    case autostashPending
+    /// A stash apply or pop: whether it applied cleanly and undo can take it back.
+    case stash(GitOperations.StashApplyOutcome, pop: Bool)
 }
 
 /// A user operation in flight: what the action bar shows while it runs.
@@ -337,6 +399,33 @@ struct OperationFailure: Identifiable {
     let write: RepoSession.Write
     let error: Error
     let message: String
+}
+
+/// A tool panel2 shows instead of the graph: a file's history (of `rev`, HEAD when nil; across renames with `follow`),
+/// its blame (at `rev`, the working tree when nil) or HEAD's reflog. `path` is root-relative.
+enum RepoTool: Equatable, Sendable {
+    case fileHistory(path: String, rev: String?, follow: Bool)
+    case blame(path: String, rev: String?)
+    case reflog
+
+    /// The timing log's detail: `history src/app.swift`, `blame src/app.swift`.
+    var timingDetail: String {
+        switch self {
+        case .fileHistory(let path, _, _): "history \(path)"
+        case .blame(let path, _): "blame \(path)"
+        case .reflog: "reflog"
+        }
+    }
+}
+
+/// What a tool read: the file's commits, newest first, its blame or the reflog; a blame refuses a binary file and one
+/// over `RepoSession.fileSizeLimit` (its size in bytes), as the diff does.
+enum ToolContent: Sendable {
+    case history([FileHistoryEntry])
+    case blame([BlameGroup])
+    case reflog([ReflogEntry])
+    case binary
+    case tooLarge(Int)
 }
 
 /// One tab's repository. `select(_:)` switches the detail at once (`detail` becomes `.loading` in the same call)
@@ -362,6 +451,8 @@ final class RepoSession: Identifiable {
         case ref(SidebarItem)
         /// Another worktree's changes (its graph row), by its path.
         case worktree(String)
+        /// `base` against `head` (commit hashes or ref names), or against the working tree when `head` is nil.
+        case compare(base: String, head: String?)
     }
 
     /// The loaded detail of a selection; the views read `status`, `refs` and `log` for its values.
@@ -375,6 +466,8 @@ final class RepoSession: Identifiable {
         case multiple(Int)
         /// Another worktree's changes, read-only: its path and its status.
         case worktree(String, WorkingStatus)
+        /// A compare's files (`base` against `head`, nil for the working tree; untracked files left out).
+        case compare(base: String, head: String?, files: [FileChange])
 
         /// False for a commit whose files are still loading.
         var isReady: Bool {
@@ -402,9 +495,9 @@ final class RepoSession: Identifiable {
         /// Selected lines of a diff (`PatchBuilder.patch`): staged, unstaged or discarded with `git apply`.
         case applyPatch(Data, PatchBuilder.Action)
 
-        case checkoutBranch(String)
+        case checkoutBranch(String, autostash: Bool = false)
         /// A local branch `localName` tracking the remote branch (`origin/x`), checked out.
-        case checkoutTracking(remoteBranch: String, as: String)
+        case checkoutTracking(remoteBranch: String, as: String, autostash: Bool = false)
         /// A detached HEAD.
         case checkoutCommit(String)
         case checkoutFiles([String], from: String)
@@ -413,7 +506,8 @@ final class RepoSession: Identifiable {
         case checkoutPullRequest(number: Int, remote: String)
 
         case fetchAll(prune: Bool)
-        case pull(GitOperations.PullMode)
+        /// `autostash`: `--autostash` (git stashes the local changes and puts them back after the pull).
+        case pull(GitOperations.PullMode, autostash: Bool = false)
         case push(branch: String, remote: String, remoteBranch: String?, setUpstream: Bool, forceWithLease: String?)
         case pushTag(String, remote: String)
         case pushMirror(remote: String)
@@ -435,6 +529,10 @@ final class RepoSession: Identifiable {
         /// A linked worktree by its listed path; `force` loses its changes (only after the user chose that).
         case removeWorktree(String, force: Bool)
         case pruneWorktrees
+        /// `git commit-graph write` (Optimize Repository): no timeout, no undo entry.
+        case optimizeRepository
+        /// One line (a `GitOperations.ignorePattern`) added to `.gitignore` or `.git/info/exclude`: no undo entry.
+        case ignore(pattern: String, in: GitOperations.IgnoreFile)
 
         /// Merges `revision` into the current branch; `checkoutFirst` switches to that branch first.
         case merge(String, checkoutFirst: String?)
@@ -447,11 +545,15 @@ final class RepoSession: Identifiable {
         case reset(to: String, mode: GitOperations.ResetMode)
 
         case stashPush(message: String?)
+        /// Only these paths (a WIP file or folder, untracked ones too); the whole index is recorded in the stash.
+        case stashPaths([String])
         /// By the stash's commit hash: its `stash@{n}` is looked up when it runs, so a stale index never hits
         /// another stash.
         case stashApply(hash: String)
         case stashPop(hash: String)
         case stashDrop(hash: String)
+        /// One file of a stash written to the working tree; `untracked`: from its untracked-files commit.
+        case stashRestoreFile(hash: String, path: String, untracked: Bool)
 
         /// Annotated when `message` is given.
         case createTag(String, at: String, message: String?)
@@ -558,11 +660,6 @@ final class RepoSession: Identifiable {
     var localShowsHidden = false
     var remoteShowsHidden = false
     var tagsShowHidden = false
-
-    /// The refs the user hid (full names, `refs/heads/x`), kept per repo folder in `PrefKey.hiddenRefs`:
-    /// they leave the sidebar's lists and the graph's badges, and the log no longer starts from them (their
-    /// commits stay where another ref or HEAD reaches them). The checked-out branch is never hidden.
-    private(set) var hiddenRefs: Set<String> = []
 
     /// The repo's worktrees (the main one first) with the other worktrees' change counts: read after the first log
     /// page, so they never delay the tab's first content, then with every refs read and when the tab is shown again.
@@ -673,6 +770,14 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var logGeneration = 0
     /// The stashes, read with the refs; nil until the first read. Compared with the log's to reload it when they change.
     @ObservationIgnored private var stashes: [Stash]?
+    /// The graph's hidden, soloed and pinned branches and its "hide stale branches" switch, saved per worktree; read
+    /// with the setup (`backend()`), before the first log load.
+    private(set) var view = RepoViewState()
+    /// What `view` leaves out and pins against the latest refs; recomputed with each refs read and each view change.
+    private(set) var visibility = LogFilter()
+    @ObservationIgnored private var viewLoaded = false
+    /// The last save of `view`: each save waits for the one before, so the file ends with the latest state.
+    @ObservationIgnored private var viewSave: Task<Void, Never>?
     @ObservationIgnored private var worktreeTask: Task<Void, Never>?
     @ObservationIgnored private let watcher = RepoWatcher()
     /// The auto-fetch timer while `PrefKey.autoFetchMinutes` is on; cancelled when the tab closes.
@@ -685,10 +790,23 @@ final class RepoSession: Identifiable {
     /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
     private(set) var openFile: FileTarget?
     /// The pull request or issue panel2 shows instead of the graph (a click in the PRs tab); nil shows the graph or
-    /// the open file. Only one of the two is ever set.
+    /// the open file. Only one of the two (and `openTool`) is ever set.
     private(set) var openHosted: HostedItem?
     /// Changes with every PR or issue select: its placeholder logs a line per select.
     private(set) var hostedToken = 0
+    /// The file history or blame panel2 shows instead of the graph; nil shows the graph, the open file or the open pull
+    /// request or issue. Never set with them: a diff opened from a tool keeps the tool in `returnTool`.
+    private(set) var openTool: RepoTool?
+    /// The tool the open diff was opened from (a history row): closing the diff (Back, Esc) shows it again, as it was.
+    private(set) var returnTool: RepoTool?
+    /// The last selected tool's read: `.loading` in the same call as the click, then its content. Kept while the tool
+    /// is closed, so a diff opened from it returns to it as it was; the next `selectTool` replaces it.
+    private(set) var toolState: Loadable<ToolContent> = .idle
+    /// Changes with every tool select: its placeholder logs a line per select.
+    private(set) var toolToken = 0
+    /// The tool `toolState` was read for.
+    @ObservationIgnored private var loadedTool: RepoTool?
+    @ObservationIgnored private var toolTask: Task<Void, Never>?
     /// The tab's terminal (task 13.1): made on the first open the user asks for (`openTerminal`; a drawer shown with a
     /// new tab has none until clicked), kept while the drawer is closed or another tab shows, ended with the tab
     /// (`close()`) or its window. Nil until then, and again after its shell exited on its own.
@@ -730,6 +848,8 @@ final class RepoSession: Identifiable {
         /// The worktree's undo journal and rebase folder under `StatePaths` (never in `.git`).
         let journal: UndoJournal
         let rebaseFolder: URL
+        /// The graph's view as saved when the tab opened.
+        let view: RepoViewState
 
         /// The read environment for this folder, built once per load: it lists the repo's filter and diff drivers
         /// first, so they can be disabled. Never with the tab's profile: a read needs no identity, signing or SSH key,
@@ -741,7 +861,6 @@ final class RepoSession: Identifiable {
 
     init(url: URL) {
         self.url = url
-        hiddenRefs = Set(Self.storedHiddenRefs[url.path] ?? [])
         graphSearch.session = self
         resolveProfile()
         scheduleAutoFetch()
@@ -852,6 +971,7 @@ final class RepoSession: Identifiable {
         detailTask?.cancel()
         prefetchTask?.cancel()
         fileTask?.cancel()
+        toolTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
         branchMapTask?.cancel()
@@ -867,6 +987,7 @@ final class RepoSession: Identifiable {
         detailTask?.cancel()
         prefetchTask?.cancel()
         fileTask?.cancel()
+        toolTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
         branchMapTask?.cancel()
@@ -1098,10 +1219,11 @@ final class RepoSession: Identifiable {
     /// (no load), a commit of the log shows its header with its files loading, anything else is `.loading` (the
     /// placeholder). The load runs in a task that a newer select cancels. Selecting the current selection again (a tab
     /// switch) reloads it, unless the cache has it. A commit on screen whole prefetches its neighbours
-    /// (`prefetchNeighbours`); a newer select cancels that too.
-    func select(_ selection: Selection) {
+    /// (`prefetchNeighbours`); a newer select cancels that too. `keepsPanel2`: another selection leaves panel2 as it is
+    /// (a blame gutter's click keeps the blame).
+    func select(_ selection: Selection, keepsPanel2: Bool = false) {
         // Another row (a parent jump, a vanished WIP) shows the graph again; a tab switch keeps the open file.
-        if selection != self.selection { closeFile() }
+        if selection != self.selection, !keepsPanel2 { closePanel2() }
         self.selection = selection
         selectToken &+= 1
         selectDetail = timingDetail(selection)
@@ -1127,12 +1249,16 @@ final class RepoSession: Identifiable {
     }
 
     /// Selects graph rows: the path a click in the graph takes (and `-HistqSelect wip|commit:<sha>`, a parent
-    /// jump). One row shows its detail, several a count; none keeps the detail as it is.
-    func selectGraph(_ items: [GraphItem]) {
-        if asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items) }) { return }
+    /// jump). One row shows its detail, several a count; none keeps the detail as it is. `keepsPanel2` (Stacked, where
+    /// the graph stays clickable above the bottom pane): the pane keeps what it shows until a file of the new row
+    /// swaps in it.
+    func selectGraph(_ items: [GraphItem], keepsPanel2: Bool = LayoutPreset.current == .stacked) {
+        if !keepsPanel2, asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items, keepsPanel2: false) }) {
+            return
+        }
         // Another worktree's row is a selection alone (its changes); several rows leave it out.
         let items = items.count > 1 ? items.filter { if case .worktree = $0 { false } else { true } } : items
-        closeFile()
+        if !keepsPanel2 { closePanel2() }
         graphSelection = items
         guard let first = items.first else { return }
         let selection: Selection
@@ -1147,7 +1273,24 @@ final class RepoSession: Identifiable {
             }
         }
         UITiming.select(timingDetail(selection))
+        select(selection, keepsPanel2: keepsPanel2)
+    }
+
+    /// Compares `base` with `head` (nil: the working tree) now, in the click's frame: the detail shows its placeholder
+    /// until the files are read. The graph keeps its selected rows.
+    func selectCompare(base: String, head: String?) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectCompare(base: base, head: head) }) { return }
+        let selection = Selection.compare(base: base, head: head)
+        UITiming.select(timingDetail(selection))
         select(selection)
+    }
+
+    /// A blame gutter's click: selects commit `hash` like a graph click (its row, panel3's detail), but panel2 keeps
+    /// the open tool.
+    func selectKeepingTool(_ hash: String) {
+        graphSelection = [.commit(hash)]
+        UITiming.select(timingDetail(.commit(hash)))
+        select(.commit(hash), keepsPanel2: true)
     }
 
     /// What a select can show at once: the cached detail, else (a commit, not a stash) the log's header with its files
@@ -1211,6 +1354,7 @@ final class RepoSession: Identifiable {
         case .multiple(let count): "commits \(count)"
         case .worktree(let path): "worktree-wip \(URL(filePath: path).lastPathComponent)"
         case .ref(let item): item.timingDetail
+        case .compare(let base, let head): "compare \(base) \(head ?? "worktree")"
         }
     }
 
@@ -1252,6 +1396,9 @@ final class RepoSession: Identifiable {
                 loaded = .multiple(count)
             case .worktree(let path):
                 loaded = .worktree(path, try await Self.readWorktreeStatus(backend, path: path))
+            case .compare(let base, let head):
+                loaded = .compare(base: base, head: head,
+                                  files: try await Self.readCompareFiles(backend, cwd: url, base: base, head: head))
             case .ref(let item):
                 if refs.value == nil, try await readStatusAndRefs(backend, scope: [.status, .refs]) {
                     loadLog(backend)
@@ -1326,7 +1473,7 @@ final class RepoSession: Identifiable {
     /// commit placeholder at once and jumps once they are in (`Selection.ref`).
     func selectRef(_ item: SidebarItem) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectRef(item) }) { return }
-        closeFile()
+        closePanel2()
         selectSidebarItem(item)
         guard let refs = refs.value else { return select(.ref(item)) }
         guard let (resolved, commit) = Self.resolve(item, in: refs) else { return }
@@ -1389,14 +1536,15 @@ final class RepoSession: Identifiable {
             // Its graph row goes once it is clean, removed or unreadable.
             guard worktrees.value != nil else { return }
             vanished = !dirtyWorktrees.contains { $0.path == path }
-        case .overview, .multiple, .ref:
+        case .overview, .multiple, .ref, .compare:
             return
         }
         guard vanished else { return }
+        // The pane closes in Stacked too: what it shows (a WIP file once the tree is clean) may be gone.
         if case .worktree = selection, hasChanges {
-            selectGraph([.wip])
+            selectGraph([.wip], keepsPanel2: false)
         } else if let head = status.value?.branch.commit {
-            selectGraph([.commit(head)])
+            selectGraph([.commit(head)], keepsPanel2: false)
         } else {
             // An unborn branch: the overview cards.
             graphSelection = []
@@ -1471,7 +1619,11 @@ final class RepoSession: Identifiable {
             moved = refs.value.map { $0 != newRefs } ?? false
             let changed = refs.value != newRefs
             refs = .loaded(newRefs)
-            if changed { updateBranchMap() }
+            pruneView(newRefs)
+            let filter = visibility
+            updateVisibility()
+            // After the filter: the branch map attributes commits to the shown refs only.
+            if changed || filter != visibility { updateBranchMap() }
         }
         dropVanishedSelection()
         return moved || syntheticRowsChanged
@@ -1488,9 +1640,9 @@ final class RepoSession: Identifiable {
         return Self.syntheticRows(status: status, stashes: stashes, worktrees: log.worktrees) != log.synthetic
     }
 
-    /// The synthetic rows: the WIP row when the working tree has changes (hanging from HEAD), then one per other
-    /// worktree with changes (hanging from its HEAD), both above the commits, then the stashes (each right above the
-    /// commit it was made on), newest first.
+    /// The synthetic rows: the WIP row when the working tree has changes (hanging from HEAD, above the commits), then
+    /// one per other worktree with changes (right above its HEAD), then the stashes (each right above the commit it was
+    /// made on), newest first.
     nonisolated static func syntheticRows(status: WorkingStatus, stashes: [Stash], worktrees: [WorktreeInfo])
         -> [GraphSyntheticRow]
     {
@@ -1520,10 +1672,13 @@ final class RepoSession: Identifiable {
         // rereads the refs).
         async let newRemotes = refs ? readRemotes(backend, cwd: cwd, env: env) : nil
         // Every journaled write moves a ref or comes with one (each write rereads the refs), so the journal is read
-        // with them.
-        let newUndo = refs ? UndoStatus(backend.journal) : nil
+        // with them; and with the status, since an index change made outside Histq (a terminal `git add`) makes the
+        // stage entries on top stale.
+        async let newUndo = status || refs
+            ? UndoStatus(backend.journal, ops: GitOperations(runner: backend.runner, cwd: cwd, env: env)) : nil
         return (
-            try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes, newUndo
+            try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes,
+            await newUndo
         )
     }
 
@@ -1541,37 +1696,10 @@ final class RepoSession: Identifiable {
         return remotes
     }
 
-    // MARK: Hidden refs
-
-    private static var storedHiddenRefs: [String: [String]] {
-        Preferences.defaults.dictionary(forKey: PrefKey.hiddenRefs.rawValue) as? [String: [String]] ?? [:]
-    }
-
-    /// Whether the sidebar row or graph badge `item` is hidden. Never the checked-out branch, even when it was hidden
-    /// before it was checked out, so the Local card lists, counts and never dims it, and its menu offers no Show.
-    func isHidden(_ item: SidebarItem) -> Bool {
-        item != .local(currentBranch ?? "") && hiddenRefs.contains(item.fullRefName)
-    }
-
-    /// Hides `item` (or shows it again), saves the repo's hidden refs and reloads the log without (or with) it. A hidden
-    /// row that was selected is no longer.
-    func setHidden(_ item: SidebarItem, _ hidden: Bool) {
-        guard hidden != isHidden(item) else { return }
-        if hidden {
-            hiddenRefs.insert(item.fullRefName)
-            if sidebarSelection == item { sidebarSelection = nil }
-        } else {
-            hiddenRefs.remove(item.fullRefName)
-        }
-        var stored = Self.storedHiddenRefs
-        stored[url.path] = hiddenRefs.isEmpty ? nil : hiddenRefs.sorted()
-        Preferences.defaults.set(stored, forKey: PrefKey.hiddenRefs.rawValue)
-        refresh(scope: .log)
-    }
-
-    /// `refs` without the hidden refs (the checked-out branch always stays): what the graph labels.
+    /// `refs` without the refs the graph leaves out (`visibility.hidden`; the checked-out branch always stays): what
+    /// the graph labels and attributes its commits to.
     var visibleRefs: Refs? {
-        refs.value.map { $0.hiding(hiddenRefs) }
+        refs.value.map { $0.hiding(visibility.hidden) }
     }
 
     // MARK: Log
@@ -1588,11 +1716,13 @@ final class RepoSession: Identifiable {
         let generation = logGeneration
         // The rows of the other worktrees as last read (none before the first read, which waits for this first page).
         let worktrees = dirtyWorktrees
-        let hidden = hiddenRefs.sorted()
+        // The first load starts beside the first refs read: with a saved view and no refs yet, `readLog` reads them.
+        let filter: LogFilter? = view == .empty || refs.value != nil ? visibility : nil
+        let view = view
         logTask = Task { [weak self] in
             do {
                 let snapshot = try await Self.readLog(
-                    backend, cwd: cwd, generation: generation, worktrees: worktrees, hidden: hidden
+                    backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view
                 ) { first in
                     guard isFirstLoad, !Task.isCancelled else { return }
                     await MainActor.run {
@@ -1611,8 +1741,13 @@ final class RepoSession: Identifiable {
                 if !isFirstLoad { dropVanishedSelection(previousLog: previous) }
                 // A log without a page (an unborn branch) never started the worktrees' first read.
                 if case .idle = self.worktrees { loadWorktrees(backend) }
-                // The status or the stashes changed while it loaded, or the worktrees were read meanwhile.
-                if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
+                // The status or the stashes changed while it loaded, or the worktrees were read meanwhile; or the
+                // refs it read itself differ from the session's.
+                if syntheticRowsChanged || (filter == nil && refs.value != nil && snapshot.filter != visibility) {
+                    loadLog(backend)
+                } else {
+                    updateWorktreeRows(backend)
+                }
             } catch {
                 guard !Self.isCancellation(error), let self else { return }
                 logTask = nil
@@ -1627,19 +1762,29 @@ final class RepoSession: Identifiable {
 
     /// Parses every page and lays it out, off the main actor, below the WIP and stash rows (the status and the stashes
     /// are read while git walks the history). `firstPage` gets the first page (laid out) as soon as it is ready.
+    /// `filter`: the graph's hidden, soloed and pinned branches; nil = resolve `view` against refs read here.
     /// Throws `CancellationError` when cancelled (the stream itself ends without an error then).
     @concurrent
     private nonisolated static func readLog(
-        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo], hidden: [String],
-        firstPage: @Sendable (LogSnapshot) async -> Void
+        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo], filter: LogFilter?,
+        view: RepoViewState, firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
         var snapshot = LogSnapshot(generation: generation)
-        // Read first: the log also reads the stashes' bases, which no branch may hold any more.
+        if let filter {
+            snapshot.filter = filter
+        } else {
+            snapshot.filter = logFilter(
+                view: view, refs: try await RefReader.read(runner: backend.runner, cwd: cwd, env: env))
+        }
+        let filter = snapshot.filter
+        // Read first: the log also reads the stashes' bases, which no branch may hold any more (not in solo mode).
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
         let pages = LogReader.pages(
-            runner: backend.runner, cwd: cwd, env: env, alsoFrom: snapshot.stashes.map(\.base), excluding: hidden)
+            runner: backend.runner, cwd: cwd, env: env,
+            alsoFrom: filter.solo.isEmpty ? snapshot.stashes.map(\.base) : [],
+            hidden: filter.hidden.sorted(), solo: filter.solo)
         snapshot.worktrees = worktrees
         snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
         var (layout, top) = beginLayout(&snapshot)
@@ -1662,15 +1807,229 @@ final class RepoSession: Identifiable {
         return snapshot
     }
 
-    /// Lays out `snapshot.synthetic`'s WIP and worktree rows at the top and hangs its stashes above their bases. Returns
-    /// the layout to feed the commits, and the top rows' layout: the stashes whose base never came are laid out with it
+    /// `row`'s base is not in the complete log `snapshot`.
+    nonisolated private static func isMissingBase(_ row: GraphSyntheticRow, in snapshot: LogSnapshot) -> Bool {
+        guard snapshot.isComplete, let base = row.base else { return false }
+        return snapshot.commitIndex[base] == nil
+    }
+
+    /// A top row of the complete `log` (the WIP row; the other worktrees' rows hang) was laid out with a line to a base
+    /// the log does not hold: its line runs to the end until it is laid out again (`beginLayout`).
+    private static func hasLineToMissingBase(_ log: LogSnapshot) -> Bool {
+        log.syntheticRows.contains { row in
+            guard case .synthetic(let synthetic) = row.node else { return false }
+            return isMissingBase(synthetic, in: log)
+        }
+    }
+
+    /// Lays out `snapshot.synthetic`'s WIP row at the top and hangs the other worktrees' rows and its stashes above
+    /// their bases (as GitKraken: another worktree's changes sit on its HEAD, not above every commit). Returns the
+    /// layout to feed the commits, and the top rows' layout: the hung rows whose base never came are laid out with it
     /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are).
+    /// The pinned branches take the leftmost lanes.
     nonisolated private static func beginLayout(_ snapshot: inout LogSnapshot) -> (layout: GraphLayout, top: GraphLayout) {
-        var layout = GraphLayout()
-        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind != .stash })
+        var layout = GraphLayout(pinned: snapshot.filter.pinned)
+        snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind == .wip }.map { row in
+            isMissingBase(row, in: snapshot) ? GraphSyntheticRow(kind: row.kind, id: row.id, base: nil) : row
+        })
         let top = layout
-        layout.hang(snapshot.synthetic.filter { $0.kind == .stash })
+        layout.hang(snapshot.synthetic.filter { $0.kind != .wip })
         return (layout, top)
+    }
+
+    // MARK: Branch visibility
+
+    /// Branches older than this (their tip's committer date) are stale.
+    private nonisolated static let staleAge: TimeInterval = 90 * 24 * 60 * 60
+
+    /// The graph and the sidebar's lists leave `ref` (a full ref name) out: hidden, the own upstream of a hidden local
+    /// branch, or stale.
+    func isHidden(_ ref: String) -> Bool { visibility.hidden.contains(ref) }
+    /// The user soloed `ref`.
+    func isSoloed(_ ref: String) -> Bool { view.solo.contains(ref) }
+    /// The user pinned `ref` to the left.
+    func isPinned(_ ref: String) -> Bool { view.pinned.contains(ref) }
+    /// The branches and tags the graph leaves out (the chip's count).
+    var hiddenCount: Int { visibility.hidden.count }
+    /// The graph shows only the soloed branches and HEAD.
+    var isSoloActive: Bool { !visibility.solo.isEmpty }
+
+    /// `ref`'s tip is older than 90 days (what "hide stale branches" hides).
+    func isStale(_ ref: String) -> Bool {
+        guard let refs = refs.value else { return false }
+        let date = refs.localBranches.first { $0.refName == ref }?.tipDate
+            ?? refs.remoteBranches.first { $0.refName == ref }?.tipDate
+        return date.map { $0 < Date.now.addingTimeInterval(-Self.staleAge) } ?? false
+    }
+
+    /// Hides `ref` (a branch or a tag) from the graph and the sidebar's lists; never the current branch. Its row, if
+    /// selected, no longer is.
+    func hide(_ ref: String) {
+        if case .branch(let name, _) = refs.value?.head, ref == "refs/heads/\(name)" { return }
+        guard !view.hidden.contains(ref) else { return }
+        view.hidden.append(ref)
+        if sidebarSelection?.fullRefName == ref { sidebarSelection = nil }
+        viewChanged()
+    }
+
+    /// Shows `ref` again, and the hidden local branches it is the own upstream of. A stale branch stays hidden while
+    /// "hide stale branches" is on.
+    func show(_ ref: String) {
+        let locals = refs.value?.localBranches.filter { local in
+            Self.tracksOwnName(local) && local.upstream.map { "refs/remotes/\($0)" } == ref
+        }.map(\.refName) ?? []
+        let hidden = view.hidden.filter { $0 != ref && !locals.contains($0) }
+        guard hidden != view.hidden else { return }
+        view.hidden = hidden
+        viewChanged()
+    }
+
+    func solo(_ ref: String) {
+        guard !view.solo.contains(ref) else { return }
+        view.solo.append(ref)
+        viewChanged()
+    }
+
+    func unsolo(_ ref: String) {
+        guard view.solo.contains(ref) else { return }
+        view.solo.removeAll { $0 == ref }
+        viewChanged()
+    }
+
+    func pin(_ ref: String) {
+        guard !view.pinned.contains(ref) else { return }
+        view.pinned.append(ref)
+        viewChanged()
+    }
+
+    func unpin(_ ref: String) {
+        guard view.pinned.contains(ref) else { return }
+        view.pinned.removeAll { $0 == ref }
+        viewChanged()
+    }
+
+    func setHideStale(_ on: Bool) {
+        guard view.hideStale != on else { return }
+        view.hideStale = on
+        viewChanged()
+    }
+
+    /// Shows every branch: no hidden or soloed one, stale ones too. Pins stay.
+    func showAll() {
+        guard !view.hidden.isEmpty || !view.solo.isEmpty || view.hideStale else { return }
+        view.hidden = []
+        view.solo = []
+        view.hideStale = false
+        viewChanged()
+    }
+
+    /// Folds the refs an earlier build hid for this folder (`PrefKey.hiddenRefs`) into `view` once, then drops them
+    /// from that key.
+    private func migrateHiddenRefs() {
+        let key = PrefKey.hiddenRefs.rawValue
+        guard var stored = Preferences.defaults.dictionary(forKey: key) as? [String: [String]],
+              let old = stored.removeValue(forKey: url.path)
+        else { return }
+        view.hidden += old.filter { !view.hidden.contains($0) }
+        Preferences.defaults.set(stored, forKey: key)
+        saveView()
+    }
+
+    /// After a change of `view`, in the click's frame: the graph's filter follows, the view is saved and the log read
+    /// again off the main actor (the old one stays on screen until then; a selected commit still in it stays selected).
+    private func viewChanged() {
+        updateVisibility()
+        saveView()
+        refresh(scope: .log)
+    }
+
+    private func updateVisibility() {
+        let new = view == .empty ? LogFilter() : refs.value.map { Self.logFilter(view: view, refs: $0) } ?? LogFilter()
+        if new != visibility { visibility = new }
+    }
+
+    /// Drops the branches (and hidden tags) `refs` no longer has from `view` (deleted, pruned, renamed outside Histq):
+    /// a soloed one would make `git log` fail.
+    private func pruneView(_ refs: Refs) {
+        guard view != .empty else { return }
+        let names = Set(refs.localBranches.map(\.refName) + refs.remoteBranches.map(\.refName))
+        let tags = Set(refs.tags.map(\.refName))
+        var pruned = view
+        pruned.hidden.removeAll { !names.contains($0) && !tags.contains($0) }
+        pruned.solo.removeAll { !names.contains($0) }
+        pruned.pinned.removeAll { !names.contains($0) }
+        guard pruned != view else { return }
+        view = pruned
+        saveView()
+    }
+
+    /// Saves `view` off the main actor, after the saves before it.
+    private func saveView() {
+        let (state, cwd, previous) = (view, url, viewSave)
+        viewSave = Task {
+            await previous?.value
+            do {
+                try await Self.save(state, cwd: cwd)
+            } catch {
+                Self.logger.error("view save failed: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    @concurrent
+    private nonisolated static func save(_ state: RepoViewState, cwd: URL) async throws {
+        try state.save(key: stateKey(cwd))
+    }
+
+    /// `view` against `refs`. Hidden: the hidden branches and tags that exist but the current branch, each hidden local one's
+    /// own upstream (see `tracksOwnName`) and, with "hide stale branches" on, every branch whose tip is older than
+    /// `staleAge`; the last two never hide the current branch's upstream, and stale never a pinned branch. Solo: the soloed branches that exist; none on an unborn branch (git cannot read its
+    /// HEAD). Pinned: the tips of the pinned branches that are shown (in solo mode only the soloed ones and the
+    /// current branch), each tip once.
+    nonisolated static func logFilter(view: RepoViewState, refs: Refs, now: Date = .now) -> LogFilter {
+        let remotes = Dictionary(refs.remoteBranches.map { ($0.name, $0.refName) }) { first, _ in first }
+        let upstream = { (local: LocalBranch) in local.upstream.flatMap { remotes[$0] } }
+        let head = refs.localBranches.first(where: \.isHead)
+        let kept = Set([head?.refName, head.flatMap(upstream)].compactMap(\.self))
+        let hiddenNames = Set(view.hidden)
+        let pinnedNames = Set(view.pinned)
+        let cutoff = now.addingTimeInterval(-staleAge)
+        let isStale = { (ref: String, date: Date?) in
+            view.hideStale && !kept.contains(ref) && !pinnedNames.contains(ref) && date.map { $0 < cutoff } ?? false
+        }
+        var hidden: Set<String> = []
+        for local in refs.localBranches {
+            if hiddenNames.contains(local.refName) {
+                hidden.insert(local.refName)
+                if tracksOwnName(local), let ref = upstream(local), !kept.contains(ref) { hidden.insert(ref) }
+            } else if isStale(local.refName, local.tipDate) {
+                hidden.insert(local.refName)
+            }
+        }
+        for remote in refs.remoteBranches
+        where hiddenNames.contains(remote.refName) || isStale(remote.refName, remote.tipDate) {
+            hidden.insert(remote.refName)
+        }
+        // A tag is only ever hidden by hand: never stale, soloed or pinned.
+        for tag in refs.tags where hiddenNames.contains(tag.refName) { hidden.insert(tag.refName) }
+        // The current branch shows even when hidden before it was checked out.
+        if let head { hidden.remove(head.refName) }
+
+        let tips = Dictionary(
+            refs.localBranches.map { ($0.refName, $0.commit) } + refs.remoteBranches.map { ($0.refName, $0.commit) }
+        ) { first, _ in first }
+        let solo = refs.head.commit == nil ? [] : view.solo.filter { tips[$0] != nil }
+        var pinned: [String] = []
+        for ref in view.pinned where !hidden.contains(ref) && (solo.isEmpty || solo.contains(ref) || ref == head?.refName) {
+            if let tip = tips[ref], !pinned.contains(tip) { pinned.append(tip) }
+        }
+        return LogFilter(hidden: hidden, solo: solo, pinned: pinned)
+    }
+
+    /// `local`'s upstream is its own remote counterpart (`feature` → `origin/feature`), which hiding `local` hides too;
+    /// not a branch others may track as well (`feature` made from `origin/main`).
+    private nonisolated static func tracksOwnName(_ local: LocalBranch) -> Bool {
+        local.upstream.map { $0.drop { $0 != "/" }.dropFirst() == local.name } ?? false
     }
 
     // MARK: Worktrees
@@ -1783,7 +2142,7 @@ final class RepoSession: Identifiable {
     private func updateWorktreeRows(_ backend: Backend) {
         guard logTask == nil, let current = log.value, current.isComplete else { return }
         let worktrees = dirtyWorktrees
-        guard worktrees != current.worktrees else { return }
+        guard worktrees != current.worktrees || Self.hasLineToMissingBase(current) else { return }
         logGeneration &+= 1
         let generation = logGeneration
         logTask = Task { [weak self] in
@@ -1909,12 +2268,13 @@ final class RepoSession: Identifiable {
     /// A click on a worktree's sidebar row: its changes when it has any (this tab's own: the WIP row; another's: its
     /// row), else its HEAD commit.
     func selectWorktree(_ info: WorktreeInfo) {
-        if info.isCurrent, hasChanges { return selectGraph([.wip]) }
+        // A sidebar click shows the graph, in Stacked too (as `selectRef`).
+        if info.isCurrent, hasChanges { return selectGraph([.wip], keepsPanel2: false) }
         if !info.isCurrent, dirtyWorktrees.contains(where: { $0.path == info.path }) {
-            return selectGraph([.worktree(info.path)])
+            return selectGraph([.worktree(info.path)], keepsPanel2: false)
         }
         guard let head = info.worktree.head else { return }
-        selectGraph([.commit(head)])
+        selectGraph([.commit(head)], keepsPanel2: false)
     }
 
     /// This tab opened as a worktree from another tab (a double-click in the sidebar, "Open in New Tab"): its changes
@@ -1950,12 +2310,13 @@ final class RepoSession: Identifiable {
 
     /// Shows `target`'s diff in panel2 instead of the graph now: `fileDiff` is `.loading` when this returns, so the
     /// placeholder shows in the click's frame. The diff loads in a task that a newer select cancels.
-    /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`).
-    func selectFile(_ target: FileTarget) {
+    /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`). A diff opened from a
+    /// tool (a history row) passes it as `returnTool`: closing the diff shows the tool again instead of the graph.
+    func selectFile(_ target: FileTarget, returnTool: RepoTool? = nil) {
         if isConflictDirty {
             // The open conflict's row again keeps its ticks (a reload would drop them).
             if target == openFile { return }
-            if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target) }) { return }
+            if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target, returnTool: returnTool) }) { return }
         }
         UITiming.select(fileDetail(target))
         if openHosted != nil {
@@ -1963,6 +2324,8 @@ final class RepoSession: Identifiable {
             pullDetail.close()
             issueDetail.close()
         }
+        openTool = nil
+        self.returnTool = returnTool
         openFile = target
         fileIgnoresSizeLimit = false
         startFileLoad()
@@ -1982,13 +2345,17 @@ final class RepoSession: Identifiable {
     }
 
     /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
-    /// The conflict editor's unsaved ticks and edits go with it. An open pull request or issue closes too.
+    /// The conflict editor's unsaved ticks and edits go with it. An open pull request, issue or tool closes too. A diff
+    /// opened from a tool (`returnTool`) shows that tool again instead, with its read (read again only if replaced).
     func closeFile() {
         if openHosted != nil {
             openHosted = nil
             pullDetail.close()
             issueDetail.close()
         }
+        openTool = nil
+        let back = openFile != nil ? returnTool : nil
+        returnTool = nil
         guard openFile != nil else { return }
         fileTask?.cancel()
         fileTask = nil
@@ -1999,6 +2366,17 @@ final class RepoSession: Identifiable {
         conflictError = nil
         cancelConflictSave()
         conflictLeave = nil
+        if let back {
+            openTool = back
+            if back != loadedTool { loadTool(back) }
+        }
+    }
+
+    /// Shows the graph whatever panel2 shows (another graph row, ref, pull request or tool): a diff opened from a tool
+    /// closes with it instead of going back to it.
+    private func closePanel2() {
+        returnTool = nil
+        closeFile()
     }
 
     /// The conflict editor's close button: shows the graph again, asking first when there are unsaved resolutions.
@@ -2058,12 +2436,76 @@ final class RepoSession: Identifiable {
     func selectHosted(_ item: HostedItem) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectHosted(item) }) { return }
         UITiming.select(item.timingDetail)
-        closeFile()
+        closePanel2()
         openHosted = item
         hostedToken &+= 1
         switch item {
         case .pullRequest(let number): pullDetail.load(number, github: github)
         case .issue(let number): issueDetail.load(number, github: github)
+        }
+    }
+
+    /// The timing log's detail of the open tool (`history src/app.swift`).
+    var toolDetail: String { openTool?.timingDetail ?? "" }
+
+    /// Shows a file's history or blame, or the reflog, in panel2 now: the open file, pull request or issue closes and
+    /// `toolState` is `.loading` when this returns, so the placeholder shows in the click's frame. Selecting a tool again
+    /// (another `follow`) reads it again.
+    func selectTool(_ tool: RepoTool) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectTool(tool) }) { return }
+        UITiming.select(tool.timingDetail)
+        closePanel2()
+        openTool = tool
+        loadTool(tool)
+    }
+
+    /// Reads `tool` off the main actor into `toolState`; a newer tool select cancels it.
+    private func loadTool(_ tool: RepoTool) {
+        toolTask?.cancel()
+        toolToken &+= 1
+        let token = toolToken
+        loadedTool = tool
+        toolState = .loading
+        toolTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let backend = try await backend()
+                let content = try await Self.readTool(backend, cwd: url, tool: tool)
+                try Task.checkCancellation()
+                guard token == toolToken else { return }
+                toolState = .loaded(content)
+            } catch {
+                guard token == toolToken, !Self.isCancellation(error) else { return }
+                toolState = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// A file's history or blame, or the reflog, with the read environment (no textconv, no external diff, the repo's
+    /// filters blanked: a working tree blame of a filtered file fails instead of running the filter), off the main actor.
+    @concurrent
+    private nonisolated static func readTool(_ backend: Backend, cwd: URL, tool: RepoTool) async throws -> ToolContent {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        switch tool {
+        case .fileHistory(let path, let rev, let follow):
+            return .history(try await FileHistoryReader.read(
+                path, revision: rev, follow: follow, runner: backend.runner, cwd: cwd, env: env))
+        case .blame(let path, let rev):
+            // The diff's gates: the size first (so a huge blob is never read), then git's NUL test. A read that
+            // fails leaves the error to blame.
+            let target = FileTarget(source: rev.map { .commit($0) } ?? .wip,
+                                    file: FileChange(kind: .unchanged, path: path))
+            let size = await largestSize(of: target, runner: backend.runner, cwd: cwd, env: env)
+            if size > fileSizeLimit { return .tooLarge(size) }
+            let data = if let rev {
+                try? await DiffReader.file(at: rev, path: path, runner: backend.runner, cwd: cwd, env: env)
+            } else {
+                (try? worktreeData(path, cwd: cwd)) ?? nil
+            }
+            if data?.prefix(8000).contains(0) == true { return .binary }
+            return .blame(try await BlameReader.read(path, revision: rev, runner: backend.runner, cwd: cwd, env: env))
+        case .reflog:
+            return .reflog(try await ReflogReader.read(runner: backend.runner, cwd: cwd, env: env))
         }
     }
 
@@ -2237,6 +2679,14 @@ final class RepoSession: Identifiable {
             let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
                                       language: language)
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
+        case .compare(let base, let head):
+            // Read-only like a commit's changes (no hunk buttons).
+            async let diff = DiffReader.compare(base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths)
+            async let diffFull = DiffReader.compare(
+                base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+            let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
+                                      language: language)
+            return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         }
     }
 
@@ -2266,6 +2716,15 @@ final class RepoSession: Identifiable {
             case .untracked: ["\(hash)^3:\(file.path)"]
             case .unchanged: ["\(hash):\(file.path)"]
             default: ["\(hash):\(file.path)", "\(hash)^:\(oldPath)"]
+            }
+        case .compare(let base, let head):
+            if let head {
+                objects = ["\(head):\(file.path)", "\(base):\(oldPath)"]
+            } else {
+                let attributes = try? FileManager.default.attributesOfItem(
+                    atPath: cwd.appending(path: file.path, directoryHint: .notDirectory).path)
+                size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+                objects = ["\(base):\(oldPath)"]
             }
         }
         for object in objects {
@@ -2311,6 +2770,12 @@ final class RepoSession: Identifiable {
         case .commit(let hash):
             let before = file.kind == .added ? nil : await blob("\(hash)^", oldPath)
             let after = file.kind == .deleted ? nil : await blob(hash, file.path)
+            versions = [(.commit, before, after)]
+        case .compare(let base, let head):
+            let before = file.kind == .added ? nil : await blob(base, oldPath)
+            let after: Data? = if file.kind == .deleted { nil } else if let head { await blob(head, file.path) } else {
+                worktree()
+            }
             versions = [(.commit, before, after)]
         }
         let sides = versions
@@ -2684,56 +3149,6 @@ final class RepoSession: Identifiable {
         return nil
     }
 
-    /// Writes a resolution into the working tree: atomically (a temporary file renamed over the old one, so a crash
-    /// never leaves half a file and a symlink is replaced, not followed), keeping the old file's permissions. nil
-    /// deletes the file. `path` must stay inside `cwd`: no absolute path, no `..`, no folder that is a symlink out.
-    private nonisolated static func writeResolution(_ content: Data?, to path: String, cwd: URL) throws {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !path.isEmpty, !path.hasPrefix("/"), parts.first != ".git",
-            !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty })
-        else {
-            throw ConflictWriteError.outsideRepository(path)
-        }
-        let file = cwd.appending(path: path, directoryHint: .notDirectory)
-        // Each parent folder is checked with lstat, from the repo root down, and created when missing: a folder that
-        // is a symlink (planted by an untrusted repo, or not created yet when a resolved path is checked) could
-        // otherwise send the write outside the repository.
-        var folder = cwd
-        for part in parts.dropLast() {
-            folder = folder.appending(path: String(part), directoryHint: .isDirectory)
-            var info = stat()
-            if lstat(folder.path, &info) != 0 {
-                guard errno == ENOENT, mkdir(folder.path, 0o755) == 0 else {
-                    throw ConflictWriteError.outsideRepository(path)
-                }
-            } else if info.st_mode & S_IFMT != S_IFDIR {
-                throw ConflictWriteError.outsideRepository(path)
-            }
-        }
-        let fm = FileManager.default
-        // attributesOfItem does not follow a symlink at the file itself; the atomic write and the removal replace or
-        // remove that link, never its target.
-        let attributes = try? fm.attributesOfItem(atPath: file.path)
-        guard let content else {
-            if attributes != nil { try fm.removeItem(at: file) }
-            return
-        }
-        try content.write(to: file, options: .atomic)
-        if attributes?[.type] as? FileAttributeType == .typeRegular, let mode = attributes?[.posixPermissions] {
-            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
-        }
-    }
-
-    private enum ConflictWriteError: LocalizedError {
-        case outsideRepository(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .outsideRepository(let path): "\(path) is not a file inside this repository."
-            }
-        }
-    }
-
     #if DEBUG
     /// Whether `-HistqResolve` already ran in this launch.
     private static var launchResolveDone = false
@@ -2944,7 +3359,13 @@ final class RepoSession: Identifiable {
         if isRunning(.undo) || isRunning(.redo) { return (false, "\(verb): running…") }
         // The toolbar stays live above a modal: an undo there would change the state a confirmation or form describes.
         if hasModal { return (false, "\(verb): close the open dialog first") }
-        if repoState?.isOperationInProgress == true { return (false, UndoError.operationInProgress.message) }
+        if repoState?.isOperationInProgress == true {
+            // Only a file resolved during this operation can be taken back (`UndoJournal.step` checks it is the same).
+            guard let title = redo ? undoStatus.resolveRedo : undoStatus.resolveUndo else {
+                return (false, UndoError.operationInProgress.message)
+            }
+            return (true, "\(verb) \(title)")
+        }
         if undoStatus.isUnreadable { return (false, UndoError.unreadableJournal.message) }
         if let title = redo ? undoStatus.redo : undoStatus.undo { return (true, "\(verb) \(title)") }
         if !redo, let lastNotUndoable { return (false, lastNotUndoable.reason) }
@@ -3219,6 +3640,17 @@ final class RepoSession: Identifiable {
         return files
     }
 
+    /// The files of a compare (`base` against `head`, nil for the working tree), off the main actor. Untracked files are
+    /// not part of it.
+    @concurrent
+    private nonisolated static func readCompareFiles(_ backend: Backend, cwd: URL, base: String, head: String?)
+        async throws -> [FileChange]
+    {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        return parseNameStatus(
+            try await DiffReader.compareFiles(base: base, head: head, runner: backend.runner, cwd: cwd, env: env))
+    }
+
     /// Every file of commit `commit`'s tree (its Files card's "View all files"), path order: the changed ones as
     /// `commit.files` has them (a deleted file, gone from the tree, too), the others `.unchanged`. Submodules are left
     /// out unless changed (no blob to show). Read environment, off the main actor; nothing is cached.
@@ -3288,8 +3720,10 @@ final class RepoSession: Identifiable {
 
     /// Runs a user-initiated write of the WIP panel with the write environment (the login shell's PATH, for hooks
     /// and signing tools), off the main actor, then rereads the status and the refs (also when it failed: it may have
-    /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel.
-    func perform(_ write: Write) async throws {
+    /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel. Returns a pull's
+    /// outcome (`.autostashPending`: it stopped on conflicts with git holding the local changes) or a stash apply's.
+    @discardableResult
+    func perform(_ write: Write) async throws -> WriteOutcome {
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
@@ -3307,14 +3741,28 @@ final class RepoSession: Identifiable {
                 removeRebaseFilesIfDone()
             }
         }
+        let outcome: WriteOutcome
         do {
-            try await Self.run(write, profile: profile, backend: backend, cwd: url)
+            outcome = try await Self.run(write, profile: profile, backend: backend, cwd: url)
+        } catch GitError.autostashKept(let hash) where { if case .commit = write { true } else { false } }() {
+            // A commit that concluded a stopped pull is made (the WIP panel calls `perform`, not `run`).
+            postToast(.warning("Commit", detail: "Changes kept in stash \(hash.prefix(7))."))
+            outcome = .done
         } catch {
+            // A pull whose local changes stayed in a stash still pulled.
+            if case GitError.autostashKept = error, case .pull = write, lastNotUndoable != write.notUndoable {
+                lastNotUndoable = write.notUndoable
+            }
             await refreshAfterWrite()
             throw error
         }
-        if lastNotUndoable != write.notUndoable { lastNotUndoable = write.notUndoable }
+        if case .optimizeRepository = write {
+            // Outside the write lane, it may end after later writes; it changes nothing undo covers.
+        } else if lastNotUndoable != write.notUndoable {
+            lastNotUndoable = write.notUndoable
+        }
         await refreshAfterWrite()
+        return outcome
     }
 
     /// Waits for the reread to publish: the watcher may see the write's own changes and start a refresh that cancels
@@ -3327,8 +3775,12 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// Returns the pull's or the stash apply's outcome (`.done` for every other write).
     @concurrent
-    private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws {
+    private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws
+        -> WriteOutcome
+    {
+        var outcome = WriteOutcome.done
         let base = await GitToolchain.writeBase()
         // The profile's GitHub token, from the Keychain off the main actor (cached), for network writes alone: their
         // operations hand it to git only when the gate lets them (`GitInvocation.networkToken`).
@@ -3352,9 +3804,9 @@ final class RepoSession: Identifiable {
             // `apply` takes the runner's write lane itself, like the operations.
             try await PatchBuilder.apply(patch, action: action, runner: backend.runner, cwd: cwd, env: environment)
 
-        case .checkoutBranch(let name): try await ops.checkout(branch: name)
-        case .checkoutTracking(let remoteBranch, let localName):
-            try await ops.checkoutTracking(remoteBranch: remoteBranch, as: localName)
+        case .checkoutBranch(let name, let autostash): try await ops.checkout(branch: name, autostash: autostash)
+        case .checkoutTracking(let remoteBranch, let localName, let autostash):
+            try await ops.checkoutTracking(remoteBranch: remoteBranch, as: localName, autostash: autostash)
         case .checkoutCommit(let revision): try await ops.checkout(commit: revision)
         case .checkoutFiles(let paths, let revision): try await ops.checkoutFiles(paths, from: revision)
         case .checkoutPullRequest(let number, let remote):
@@ -3362,7 +3814,8 @@ final class RepoSession: Identifiable {
             try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
-        case .pull(let mode): try await ops.pull(mode)
+        case .pull(let mode, let autostash):
+            if try await ops.pull(mode, autostash: autostash) == .autostashPending { outcome = .autostashPending }
         case .push(let branch, let remote, let remoteBranch, let setUpstream, let lease):
             try await ops.push(
                 branch: branch, to: remote, as: remoteBranch, setUpstream: setUpstream, forceWithLease: lease)
@@ -3386,6 +3839,8 @@ final class RepoSession: Identifiable {
             try await ops.addWorktree(at: path, from: source, newBranch: newBranch)
         case .removeWorktree(let path, let force): try await ops.removeWorktree(path, force: force)
         case .pruneWorktrees: try await ops.pruneWorktrees()
+        case .optimizeRepository: try await ops.optimizeRepository()
+        case .ignore(let pattern, let file): try await ops.ignore(pattern: pattern, in: file)
 
         case .merge(let revision, let checkoutFirst):
             if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
@@ -3399,19 +3854,20 @@ final class RepoSession: Identifiable {
         case .reset(let revision, let mode): try await ops.reset(to: revision, mode: mode)
 
         case .stashPush(let message): try await ops.stashPush(message: message, includeUntracked: true)
-        case .stashApply(let hash): try await ops.stashApply(try await stashIndex(hash, backend: backend, cwd: cwd))
-        case .stashPop(let hash): try await ops.stashPop(try await stashIndex(hash, backend: backend, cwd: cwd))
-        case .stashDrop(let hash): try await ops.stashDrop(try await stashIndex(hash, backend: backend, cwd: cwd))
+        case .stashApply(let hash): outcome = .stash(try await ops.stashApply(hash), pop: false)
+        case .stashPop(let hash): outcome = .stash(try await ops.stashPop(hash), pop: true)
+        case .stashDrop(let hash): try await ops.stashDrop(hash)
+        case .stashPaths(let paths): try await ops.stashPush(message: nil, includeUntracked: true, paths: paths)
+        case .stashRestoreFile(let hash, let path, let untracked):
+            try await ops.stashRestoreFile(hash, path: path, untracked: untracked)
 
         case .createTag(let name, let revision, let message):
             try await ops.createTag(name, at: revision, message: message)
         case .deleteTag(let name): try await ops.deleteTag(name)
 
-        case .resolveConflict(let path, let content):
-            try writeResolution(content, to: path, cwd: cwd)
-            try await ops.stage([path])
+        case .resolveConflict(let path, let content): try await ops.resolve(path: path, content: content)
         case .writeConflictChunks(let path, let content):
-            try writeResolution(content, to: path, cwd: cwd)
+            try GitOperations.writeResolution(content, to: path, cwd: cwd)
         case .mergeTool(let path, let tool):
             let runner = backend.runner
             let args = ["--literal-pathspecs", "mergetool", "--no-prompt"] + (tool.map { ["--tool=\($0)"] } ?? [])
@@ -3435,14 +3891,7 @@ final class RepoSession: Identifiable {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try await ops.interactiveRebase(todo, files: folder)
         }
-    }
-
-    /// The current `stash@{n}` of the stash whose commit is `hash` (read environment); fails when it is gone.
-    private nonisolated static func stashIndex(_ hash: String, backend: Backend, cwd: URL) async throws -> Int {
-        let env = try await backend.readEnvironment(cwd: cwd)
-        let stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
-        guard let stash = stashes.first(where: { $0.hash == hash }) else { throw OperationError.stashGone }
-        return stash.index
+        return outcome
     }
 
     // MARK: Operations
@@ -3461,22 +3910,44 @@ final class RepoSession: Identifiable {
             // What a push, pull or fetch changed is read from the refs before it and after it.
             let refsBefore = refs.value
             do {
-                try await perform(write)
+                let outcome = try await perform(write)
                 // Started one (a rebase at an `edit` step), or Continue / Skip went on to the next stop.
                 let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }
                 let stopped = repoState?.isOperationInProgress == true && (!wasInProgress || resumes)
-                if stopped {
+                if outcome == .autostashPending {
+                    postToast(.warning("\(title) stopped on conflicts",
+                                       detail: "Changes come back after continue or abort."))
+                } else if case .stash(let stash, let pop) = outcome, !stash.undoable {
+                    // Undo would skip it and take back the operation before it.
+                    postToast(.warning(title, detail: stash.applied
+                        ? "Applied, but this apply cannot be undone."
+                        : "Applied with conflicts: this apply cannot be undone." + (pop ? " The stash is kept." : "")))
+                } else if case .optimizeRepository = write {
+                    // Before `stopped`: a merge or rebase may stop on conflicts while it runs (it is outside the lane).
+                    postToast(.success(title, detail: "Repository optimized: history and the graph load faster."))
+                } else if stopped {
                     postToast(.stopped(title))
                 } else if case .applyPatch = write {
                     // Lines staged, unstaged or discarded from a diff: no success toast, as the WIP panel's files.
+                } else if case .ignore(let pattern, let file) = write {
+                    let name = switch file { case .gitignore: ".gitignore"; case .infoExclude: ".git/info/exclude" }
+                    postToast(.success(title, detail: "Added \(pattern) to \(name)."))
                 } else {
                     postToast(.success(title, detail: OperationToast.outcome(of: write, before: refsBefore,
                                                                              after: refs.value)))
                 }
+            } catch GitError.autostashKept(let hash) {
+                // Not the error banner, and before any cancellation check: the changes may be only in that stash.
+                postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))
             } catch {
                 if !(error is CancellationError) {
-                    let failure = OperationFailure(title: title, write: write, error: error,
-                                                   message: Self.message(for: error))
+                    // `ignore` refuses to write through a symlink or into something that is not a plain file.
+                    let message = if case .ignore = write, case UndoError.unsafePath = error {
+                        "The ignore file or its folder is a symlink or not a plain file; Histq won't write through it."
+                    } else {
+                        Self.message(for: error)
+                    }
+                    let failure = OperationFailure(title: title, write: write, error: error, message: message)
                     self.failure = failure
                     postToast(.failure(title, error: error, message: failure.message,
                                        hint: ActionErrorBanner.hint(for: failure).text))
@@ -3492,13 +3963,15 @@ final class RepoSession: Identifiable {
     }
 
     /// Asks for a confirmation before `write` (a destructive operation); `OperationDialogs` shows it, naming the
-    /// target, and runs the write on confirm.
+    /// target, and runs the write on confirm. `secondary`: a second button and its write; `asksAlways`: the auto-stash
+    /// dialog's "Always do this" (`OperationConfirmation.asksAlways`).
     func confirm(_ title: String, message: String, button: String, write: Write, operation: String,
-                 key: ActionBarAction? = nil, isDestructive: Bool = true)
+                 key: ActionBarAction? = nil, isDestructive: Bool = true,
+                 secondary: (button: String, write: Write)? = nil, asksAlways: Bool = false)
     {
         confirmation = OperationConfirmation(
             title: title, message: message, button: button, write: write, operation: operation, key: key,
-            isDestructive: isDestructive)
+            isDestructive: isDestructive, secondary: secondary, asksAlways: asksAlways)
     }
 
     /// The checked-out branch; nil on a detached HEAD or before the refs are read.
@@ -3608,16 +4081,6 @@ final class RepoSession: Identifiable {
         try HostKeyTrust(environment: await GitToolchain.writeBase()).trust(scan)
     }
 
-    private enum OperationError: LocalizedError {
-        case stashGone
-
-        var errorDescription: String? {
-            switch self {
-            case .stashGone: "That stash no longer exists."
-            }
-        }
-    }
-
     /// A short message for a failed write, shown in the card that started it.
     static func writeMessage(for error: Error) -> String {
         message(for: error)
@@ -3645,13 +4108,21 @@ final class RepoSession: Identifiable {
                     runner: runner, base: toolchain.readBase, directories: directories,
                     journal: UndoJournal(file: StatePaths.directory("undo").appending(
                         path: "\(key).json", directoryHint: .notDirectory)),
-                    rebaseFolder: StatePaths.root.appending(path: "rebase/\(key)", directoryHint: .isDirectory))
+                    rebaseFolder: StatePaths.root.appending(path: "rebase/\(key)", directoryHint: .isDirectory),
+                    view: RepoViewState.load(key: key))
             }
         }
         guard let setUpTask else { throw CancellationError() }
         // Not cancelled with the caller: another select still needs it.
         do {
-            return try await setUpTask.value
+            let backend = try await setUpTask.value
+            if !viewLoaded {
+                viewLoaded = true
+                view = backend.view
+                migrateHiddenRefs()
+                updateVisibility()
+            }
+            return backend
         } catch {
             // A failed setup (no git, not a repo) is retried by the next load.
             if !Self.isCancellation(error), self.setUpTask == setUpTask { self.setUpTask = nil }
@@ -3661,7 +4132,7 @@ final class RepoSession: Identifiable {
 
     /// A file name for the worktree's state: the SHA-256 of its real path (`ProfileStore.repoKey`), so each worktree
     /// of a repo has its own journal and no path character reaches a file name.
-    private nonisolated static func stateKey(_ cwd: URL) -> String {
+    nonisolated static func stateKey(_ cwd: URL) -> String {
         SHA256.hash(data: Data(ProfileStore.repoKey(cwd).utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -3695,7 +4166,7 @@ final class RepoSession: Identifiable {
             case .invalidObjectID(let text): "\(text) is not a commit id."
             case .noPaths: "No files were given."
             case .invalidRefspec(let refspec): "\"\(refspec)\" is not a ref and a new branch name."
-            case .invalidStashIndex: "That stash no longer exists."
+            case .stashNotFound: "That stash no longer exists."
             case .invalidMainline(let parent): "A merge has no parent \(parent)."
             case .noOperationInProgress: "No merge, rebase, cherry-pick or revert is in progress."
             case .unsupported(let what): "Not supported: \(what)."

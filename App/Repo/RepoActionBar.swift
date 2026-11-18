@@ -83,8 +83,19 @@ extension RepoSession {
         }
     }
 
+    /// Every pull (the toolbar, the action bar, the Pull menus). With local changes and `PrefKey.autoStash` "ask", asks
+    /// first: Stash & Pull (`--autostash`) or Cancel. Untracked files alone count as clean: `--autostash` leaves them
+    /// out (`stash create`) and a plain pull already works with them.
     func pull(_ mode: GitOperations.PullMode) {
-        run(.pull(mode), title: "Pull", key: .pull)
+        let preference = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue)
+        let dirty = status.value.map { !$0.staged.isEmpty || !$0.unstaged.isEmpty || !$0.conflicted.isEmpty } == true
+        guard dirty, preference != "never" else { return run(.pull(mode), title: "Pull", key: .pull) }
+        if preference == "always" { return run(.pull(mode, autostash: true), title: "Pull", key: .pull) }
+        confirm("Pull with uncommitted changes?",
+                message: "Stash & Pull puts your changes in a stash, pulls, then brings them back. If they conflict "
+                    + "with what was pulled, they are kept safe in the stash.",
+                button: "Stash & Pull", write: .pull(mode, autostash: true), operation: "Pull", key: .pull,
+                isDestructive: false, asksAlways: true)
     }
 
     func fetchAll() {
@@ -269,6 +280,9 @@ struct ActionErrorBanner: View {
             return Hint(text: "It stopped on conflicts. Resolve the conflicted files in the WIP panel, then commit.")
         case .timeout:
             return Hint(text: "Git took too long and was stopped.")
+        case .autostashKept:
+            return Hint(text: "Your changes could not all be put back, so they stay in that stash. Sort out the "
+                + "working tree, then apply or drop the stash from the graph.")
         case .other, .launchFailed:
             return Hint()
         }

@@ -1,10 +1,12 @@
 // The repo's context menus, built once as `MenuEntry` lists and shown both by the graph (an `NSMenu`) and by the sidebar
 // and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset,
 // interactive rebase from here, squash the selected commits, copy),
-// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…), a graph badge's menu (its
-// ref's menu, then its commit's), the Remote card's menus,
+// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…; hide, solo and pin in the
+// graph, a tag's hide), a graph badge's menu (its ref's menu, then its commit's), the Local and Remote cards' Hide Stale
+// Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
-// (open in a tab, add, remove, prune), checkout file from a commit, and what a double-click checks out.
+// (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, stash one WIP file or
+// folder, ignore or exclude an untracked one, apply one file of a stash, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -160,7 +162,9 @@ enum RepoMenus {
     }
 
     static func wip(_ session: RepoSession) -> [MenuEntry] {
-        [
+        // A leading separator is dropped when there is no Compare (`MenuEntry.tidy`).
+        compareSelection(.wip, session) + [
+            .separator,
             .action("Stash All Changes") { session.run(.stashPush(message: nil), title: "Stash", key: .stash) },
             .separator,
             .action("Discard All Changes…", destructive: true) {
@@ -170,6 +174,44 @@ enum RepoMenus {
                                 operation: "Discard all changes")
             },
         ]
+    }
+
+    /// The WIP file and folder menus' entries `WIPPanel` does not build itself, after a separator: "Stash Changes in
+    /// <name>" (`isFolder`: a folder row, `file.path` is its path). `untracked`: the row's files are all untracked,
+    /// which adds the Ignore entries (`ignore`).
+    static func wipExtras(_ file: FileChange, untracked: Bool, isFolder: Bool = false, session: RepoSession)
+        -> [MenuEntry]
+    {
+        // git cannot stash a path the index deletes (a staged deletion, a staged rename's old path): it saves the
+        // stash, then fails. So a rename is stashed by its new path and its old path's deletion stays staged.
+        let deletedInIndex = session.status.value?.entries.contains { $0.path == file.path && $0.index == .deleted }
+        guard deletedInIndex != true else { return [] }
+        return [
+            .separator,
+            .action("Stash Changes in \(file.name)") {
+                session.run(.stashPaths([file.path]), title: "Stash \(file.name)", key: .stash)
+            },
+        ] + (untracked ? ignore(file, isFolder: isFolder, session) : [])
+    }
+
+    /// An untracked file's "Ignore <name>", "Ignore All *.<ext>" (when it has one) and "Ignore Folder <dir>" (its
+    /// folder, when not at the top level), a folder row's "Ignore Folder <dir>", each adding a line to `.gitignore`;
+    /// then the same in an "Exclude Locally" submenu, for `.git/info/exclude` (this clone only).
+    private static func ignore(_ file: FileChange, isFolder: Bool, _ session: RepoSession) -> [MenuEntry] {
+        let folder = isFolder ? file.path : file.folder
+        let ext = isFolder ? "" : (file.name as NSString).pathExtension
+        let lines = (isFolder ? [] : [(file.name, GitOperations.ignorePattern(file: file.path))])
+            + (ext.isEmpty ? [] : [("All *.\(ext)", GitOperations.ignorePattern(extension: ext))])
+            + (folder.isEmpty ? [] : [("Folder \(folder)", GitOperations.ignorePattern(folder: folder))])
+        func entries(_ target: GitOperations.IgnoreFile, verb: String) -> [MenuEntry] {
+            lines.map { name, pattern in
+                .action("Ignore \(name)") {
+                    session.run(.ignore(pattern: pattern, in: target), title: "\(verb) \(name)")
+                }
+            }
+        }
+        return [.separator] + entries(.gitignore, verb: "Ignore")
+            + [.submenu("Exclude Locally", entries(.infoExclude, verb: "Exclude"))]
     }
 
     static func stash(_ hash: String, _ session: RepoSession) -> [MenuEntry] {
@@ -204,7 +246,10 @@ enum RepoMenus {
         entries.append(.action("Checkout This Commit (Detached)…", enabled: !(isHead && current == nil)) {
             confirmDetached(hash, label: short, session)
         })
+        entries.append(.separator)
+        entries += compareSelection(.commit(hash), session)
         entries += [
+            .action("Compare with Working Tree") { session.selectCompare(base: hash, head: nil) },
             .separator,
             .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
             .action("Create Tag Here…") { session.dialog = .createTag(at: hash, label: short) },
@@ -251,6 +296,31 @@ enum RepoMenus {
         return entries
     }
 
+    /// "Compare" for the clicked row of a 2-row selection that `comparePair` accepts; else nothing.
+    private static func compareSelection(_ item: GraphItem, _ session: RepoSession) -> [MenuEntry] {
+        guard session.graphSelection.contains(item), let pair = comparePair(session) else { return [] }
+        return [.action("Compare") { session.selectCompare(base: pair.base, head: pair.head) }]
+    }
+
+    /// What a 2-row selection compares (the rule of `MultipleSelectionCard`'s Compare button): the older of two
+    /// commits (lower in the log) with the newer, or a commit with the working tree (the WIP row); nil for any other
+    /// selection (a stash, a commit not in the log).
+    static func comparePair(_ session: RepoSession) -> (base: String, head: String?)? {
+        let items = session.graphSelection
+        guard items.count == 2 else { return nil }
+        switch (items[0], items[1]) {
+        case (.wip, .commit(let hash)), (.commit(let hash), .wip):
+            return (hash, nil)
+        case (.commit(let first), .commit(let second)):
+            guard let index = session.log.value?.commitIndex, let a = index[first], let b = index[second] else {
+                return nil
+            }
+            return a > b ? (first, second) : (second, first)
+        default:
+            return nil
+        }
+    }
+
     /// The local branches, remote branches and tags at `hash`, in the badge column's order.
     private static func refItems(at hash: String, refs: Refs?) -> [SidebarItem] {
         guard let refs else { return [] }
@@ -280,26 +350,10 @@ enum RepoMenus {
     }
 
     static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
-        let entries: [MenuEntry] = switch item {
+        switch item {
         case .local(let name): local(name, session)
         case .remote(let name): remote(name, session)
         case .tag(let name): tag(name, session)
-        }
-        return entries + [.separator, hide(item, session)]
-    }
-
-    /// Hide (or Show) a ref in the sidebar and the graph; never the checked-out branch.
-    private static func hide(_ item: SidebarItem, _ session: RepoSession) -> MenuEntry {
-        let name = switch item {
-        case .local(let name), .remote(let name), .tag(let name): name
-        }
-        if session.isHidden(item) {
-            return .action("Show \(name)") { session.setHidden(item, false) }
-        }
-        let isCurrent = item == .local(session.currentBranch ?? "")
-        return .action("Hide \(name)", enabled: !isCurrent,
-                       toolTip: isCurrent ? "The checked-out branch cannot be hidden." : nil) {
-            session.setHidden(item, true)
         }
     }
 
@@ -321,6 +375,9 @@ enum RepoMenus {
                 },
                 .action("Rebase \(current) onto \(name)") {
                     session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
+                },
+                .action("Compare with Current Branch") {
+                    session.selectCompare(base: "refs/heads/\(current)", head: ref)
                 },
             ]
         }
@@ -352,6 +409,7 @@ enum RepoMenus {
         if let upstream {
             entries.append(deleteRemote(upstream, session))
         }
+        entries += visibility(ref, canHide: !isCurrent, session)
         entries += [.separator, .action("Copy Branch Name") { copy(name) }]
         return entries
     }
@@ -371,6 +429,9 @@ enum RepoMenus {
                 .action("Rebase \(current) onto \(name)") {
                     session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
                 },
+                .action("Compare with Current Branch") {
+                    session.selectCompare(base: "refs/heads/\(current)", head: ref)
+                },
             ]
         }
         // Only a branch of the GitHub remote can be a pull request's head.
@@ -383,7 +444,32 @@ enum RepoMenus {
         if let branch {
             entries += [.separator, deleteRemote(branch, session)]
         }
+        entries += visibility(ref, canHide: true, session)
         entries += [.separator, .action("Copy Branch Name") { copy(name) }]
+        return entries
+    }
+
+    /// The graph's view of a branch or tag (`ref`, a full ref name): Hide / Show, then for a branch Solo / Unsolo, Pin
+    /// to Left / Unpin. A branch hidden as stale shows only once "Hide Stale Branches" is off.
+    private static func visibility(
+        _ ref: String, canHide: Bool, soloAndPin: Bool = true, _ session: RepoSession
+    ) -> [MenuEntry] {
+        var entries: [MenuEntry] = [.separator]
+        if session.isHidden(ref) {
+            let stale = session.view.hideStale && session.isStale(ref) && !session.isPinned(ref)
+            entries.append(.action("Show", enabled: !stale,
+                                   toolTip: stale ? "Hidden as a stale branch: turn off Hide Stale Branches" : nil) {
+                session.show(ref)
+            })
+        } else if canHide {
+            entries.append(.action("Hide") { session.hide(ref) })
+        }
+        guard soloAndPin else { return entries }
+        entries += [
+            session.isSoloed(ref) ? .action("Unsolo") { session.unsolo(ref) } : .action("Solo") { session.solo(ref) },
+            session.isPinned(ref)
+                ? .action("Unpin") { session.unpin(ref) } : .action("Pin to Left") { session.pin(ref) },
+        ]
         return entries
     }
 
@@ -421,8 +507,18 @@ enum RepoMenus {
                                 write: .deleteRemoteTag(name, remote: remote), operation: "Delete \(name) from \(remote)")
             }
         }
+        entries += visibility("refs/tags/\(name)", canHide: true, soloAndPin: false, session)
         entries += [.separator, .action("Copy Tag Name") { copy(name) }]
         return entries
+    }
+
+    /// The Local and Remote cards' menus: Hide Stale Branches (checked while on), then Show All Branches.
+    static func branchView(_ session: RepoSession) -> [MenuEntry] {
+        let hideStale = session.view.hideStale
+        return [
+            .action("Hide Stale Branches", checked: hideStale) { session.setHideStale(!hideStale) },
+            .action("Show All Branches", enabled: session.hiddenCount > 0 || session.isSoloActive) { session.showAll() },
+        ]
     }
 
     // MARK: Remotes
@@ -508,6 +604,41 @@ enum RepoMenus {
                     toolTip: prunable ? nil : "No worktree's folder is missing: nothing to prune.") {
                 session.run(.pruneWorktrees, title: "Prune worktrees")
             },
+        ]
+    }
+
+    // MARK: Repository
+
+    /// The repository's own actions (the toolbar's repo menu, the palette): Show Reflog, Optimize Repository
+    /// (confirmed; disabled while one runs: it is outside the write lane, so a second one would redo the work or fail on
+    /// git's lock).
+    static func repository(_ session: RepoSession) -> [MenuEntry] {
+        let operation = "Optimize repository"
+        return [
+            .action("Show Reflog") { session.selectTool(.reflog) },
+            .action("Optimize Repository…", enabled: !session.running.contains { $0.title == operation }) {
+                session.confirm("Optimize the repository?",
+                                message: "Writes a commit-graph file so history and the graph load faster in big "
+                                    + "repositories. It is safe: no branch, file or change is touched. It can take a "
+                                    + "while on a large repository.",
+                                button: "Optimize", write: .optimizeRepository, operation: operation,
+                                isDestructive: false)
+            },
+        ]
+    }
+
+    /// A reflog entry's menu: its commit, which may be in no branch any more, checked out (detached, confirmed), a branch
+    /// from it, its SHA.
+    static func reflog(_ hash: String, _ session: RepoSession) -> [MenuEntry] {
+        let short = String(hash.prefix(7))
+        let isHead = session.refs.value?.head.commit == hash
+        return [
+            .action("Checkout This Commit (Detached)…", enabled: !(isHead && session.currentBranch == nil)) {
+                confirmDetached(hash, label: short, session)
+            },
+            .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
+            .separator,
+            .action("Copy SHA") { copy(hash) },
         ]
     }
 
@@ -641,7 +772,7 @@ enum RepoMenus {
         switch item {
         case .local(let name):
             guard name != session.currentBranch else { return }
-            checkoutAskingIfDirty(.checkoutBranch(name), name: name, session)
+            checkoutAskingIfDirty(name: name, session) { .checkoutBranch(name, autostash: $0) }
         case .remote(let name):
             guard let branch = refs?.remoteBranches.first(where: { $0.name == name }) else { return }
             let localName = localName(of: branch)
@@ -650,7 +781,9 @@ enum RepoMenus {
             {
                 checkout(.local(local.name), session)
             } else {
-                checkoutAskingIfDirty(.checkoutTracking(remoteBranch: name, as: localName), name: localName, session)
+                checkoutAskingIfDirty(name: localName, session) {
+                    .checkoutTracking(remoteBranch: name, as: localName, autostash: $0)
+                }
             }
         case .tag(let name):
             guard let tag = refs?.tags.first(where: { $0.name == name }) else { return }
@@ -658,18 +791,25 @@ enum RepoMenus {
         }
     }
 
-    /// A checkout carries uncommitted changes to the other branch, or stops when they conflict with it, so a dirty
-    /// working tree asks first; a clean one checks out at once.
-    private static func checkoutAskingIfDirty(_ write: RepoSession.Write, name: String, _ session: RepoSession) {
+    /// A clean working tree checks out at once. With changes, `PrefKey.autoStash` picks: "always" stashes them first
+    /// and puts them back on the branch (`write(true)`), "never" carries them (`write(false)`: git stops when they
+    /// conflict and nothing changes), "ask" asks: Stash & Checkout, Carry Changes or Cancel, with "Always do this".
+    private static func checkoutAskingIfDirty(
+        name: String, _ session: RepoSession, _ write: (_ autostash: Bool) -> RepoSession.Write
+    ) {
         let title = "Checkout \(name)"
-        guard session.status.value?.entries.isEmpty == false else {
-            session.run(write, title: title, key: .checkout)
+        let preference = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue)
+        guard session.status.value?.entries.isEmpty == false, preference != "never" else {
+            session.run(write(false), title: title, key: .checkout)
             return
         }
+        if preference == "always" { return session.run(write(true), title: title, key: .checkout) }
         session.confirm("Checkout \(name) with uncommitted changes?",
-                        message: "Your changes are carried to \(name). If they conflict with it, the checkout stops "
-                            + "and nothing changes.",
-                        button: "Checkout", write: write, operation: title, key: .checkout, isDestructive: false)
+                        message: "Stash & Checkout puts your changes in a stash and brings them back on \(name). "
+                            + "Carry Changes takes them along as they are; if they conflict with \(name), the "
+                            + "checkout stops and nothing changes.",
+                        button: "Stash & Checkout", write: write(true), operation: title, key: .checkout,
+                        isDestructive: false, secondary: ("Carry Changes", write(false)), asksAlways: true)
     }
 
     /// The toolbar's branch menu: the local branches (the current one checked), then a Remote Branches submenu, each
@@ -718,9 +858,11 @@ enum RepoMenus {
                         key: .checkout, isDestructive: false)
     }
 
-    /// "Checkout File from This Commit" in a commit's file list: confirmed when the file has local changes.
+    /// "Checkout File from This Commit" in a commit's file list (confirmed when the file has local changes), then its
+    /// File History and Blame at the commit. A deleted file has only its history.
     static func checkoutFile(_ file: FileChange, commit: String, session: RepoSession) -> [MenuEntry] {
-        guard file.kind != .deleted else { return [] }
+        let tools = fileTools(path: file.path, rev: commit, blame: file.kind != .deleted, session: session)
+        guard file.kind != .deleted else { return tools }
         let short = String(commit.prefix(7))
         let write = RepoSession.Write.checkoutFiles([file.path], from: commit)
         return [
@@ -734,6 +876,47 @@ enum RepoMenus {
                     session.run(write, title: "Checkout \(file.name) from \(short)")
                 }
             },
+            .separator,
+        ] + tools
+    }
+
+    /// A stash's file: "Apply This File" (confirmed when the file has local changes), then its File History and Blame
+    /// at the stash. Its untracked files come from the stash's untracked-files commit and have no history or blame.
+    static func stashFile(_ file: FileChange, stash hash: String, session: RepoSession) -> [MenuEntry] {
+        // "View all files" lists the files the stash did not change: nothing of the stash to apply.
+        guard file.kind != .unchanged else {
+            return fileTools(path: file.path, rev: hash, blame: true, session: session)
+        }
+        let untracked = file.kind == .untracked
+        let write = RepoSession.Write.stashRestoreFile(hash: hash, path: file.path, untracked: untracked)
+        let operation = "Apply \(file.name) from stash"
+        let apply = MenuEntry.action("Apply This File") {
+            let isChanged = session.status.value?.entries.contains { $0.path == file.path } ?? false
+            if isChanged {
+                session.confirm("Replace \(file.name) with its version from the stash?",
+                                message: "Its unstaged changes are lost.", button: "Apply File",
+                                write: write, operation: operation)
+            } else {
+                session.run(write, title: operation)
+            }
+        }
+        guard !untracked else { return [apply] }
+        return [apply, .separator]
+            + fileTools(path: file.path, rev: hash, blame: file.kind != .deleted, session: session)
+    }
+
+    /// "File History" and "Blame" of a tracked file at `rev` (nil: HEAD's history, the working tree's blame), shown in
+    /// panel2. `blame` false leaves Blame out (a deleted file has no lines to blame).
+    static func fileTools(path: String, rev: String?, blame: Bool = true, session: RepoSession) -> [MenuEntry] {
+        let history = MenuEntry.action(
+            "File History", image: NSImage.icon("clock.arrow.circlepath", accessibilityDescription: nil)
+        ) { session.selectTool(.fileHistory(path: path, rev: rev, follow: false)) }
+        guard blame else { return [history] }
+        return [
+            history,
+            .action("Blame", image: NSImage.icon("person.text.rectangle", accessibilityDescription: nil)) {
+                session.selectTool(.blame(path: path, rev: rev))
+            },
         ]
     }
 
@@ -743,9 +926,11 @@ enum RepoMenus {
     /// DEBUG `-HistqRun "<menu>|<title>[|<title>…][;;<next>…]"`: picks menu items by title and runs them, one step after
     /// the other, as a click would (a confirmation is accepted; forms are not supported). `<menu>` is `wip`,
     /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `badge:<local|remote|tag>:<name>`
-    /// (a graph badge), `remotes`, `file:<sha>:<path>`,
-    /// `drop:<local|remote>:<name>><local|remote>:<name>` or `branches` (the toolbar's branch menu). Each step's
-    /// outcome goes to `operations.txt` in the state folder. For QA on fixture copies only.
+    /// (a graph badge), `remotes`, `file:<sha>:<path>`, `wipfile:<path>` (a WIP file's `wipExtras`),
+    /// `stashfile:<sha>:<path>` (a tracked file of a stash), `drop:<local|remote>:<name>><local|remote>:<name>`,
+    /// `branches` (the toolbar's branch menu), `repo` (`repository`, the toolbar's repo menu) or `reflog:<sha>` (a
+    /// reflog entry's menu). Each step's outcome goes to `operations.txt` in the state folder. For QA on fixture copies
+    /// only.
     static func debugRun(_ spec: String, session: RepoSession) async {
         for step in spec.components(separatedBy: ";;") {
             guard let perform = debugAction(step, session) else {
@@ -813,6 +998,8 @@ enum RepoMenus {
         case "push": return push(session)
         case "branches": return branchPicker(session)
         case "worktrees": return worktrees(session)
+        case "repo": return repository(session)
+        case "reflog": return reflog(value, session)
         case "worktree":
             // By folder name or path.
             let info = session.worktrees.value?.first { $0.name == value || $0.path == value }
@@ -821,6 +1008,15 @@ enum RepoMenus {
             let file = value.split(separator: ":", maxSplits: 1).map(String.init)
             guard file.count == 2 else { return [] }
             return checkoutFile(FileChange(kind: .modified, path: file[1]), commit: file[0], session: session)
+        case "wipfile":
+            let entry = session.status.value?.entries.first { $0.path == value }
+            let untracked = entry?.kind == .untracked
+            let file = FileChange(kind: untracked ? .untracked : .modified, path: value, originalPath: entry?.originalPath)
+            return wipExtras(file, untracked: untracked, session: session)
+        case "stashfile":
+            let file = value.split(separator: ":", maxSplits: 1).map(String.init)
+            guard file.count == 2 else { return [] }
+            return stashFile(FileChange(kind: .modified, path: file[1]), stash: file[0], session: session)
         case "drop":
             let ends = value.components(separatedBy: ">").map(debugItem)
             guard ends.count == 2, let source = ends[0], let target = ends[1] else { return [] }

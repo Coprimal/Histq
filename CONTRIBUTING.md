@@ -104,11 +104,11 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | --- | --- |
 | `-HistqStateDir <dir>` | Keeps files, logs and session state in `<dir>`; uses the QA preferences suite and Keychain service. |
 | `-HistqBackground YES` | Never activates the app; windows stay behind others and are never key. |
-| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
+| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `commits:<sha>,<sha\|wip>` (full shas), `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
 | `-HistqSelectWalk <n>[,<ms>]` | Selects the first n commits `ms` apart (default 250), walks back up, then logs `walk done`. |
 | `-HistqSelectAfter <path>` | Then selects that WIP file (with or without `-HistqResolve`), to drive the conflict editor's leave prompt. |
 | `-HistqWindowSize <w>x<h>` / `-HistqTabbedWindows <n>` | Size of new windows; spreads the repositories over n native-tab windows. |
-| `-HistqTabPosition left\|top` / `-HistqAvatarMode real\|generated\|initials` | Overrides the preference. |
+| `-HistqTabPosition left\|top` / `-HistqAvatarMode real\|generated\|initials` / `-HistqLayout classic\|stacked\|focus` | Overrides the preference. |
 | `-HistqGraphWidth <pt>` / `-HistqRefColumnWidth <pt>` | Graph column width as a border drag would set it (logs `graph-col`); Branch / Tag column width. |
 | `-HistqDensityAfter <density>` | Switches the row density about 2 s after launch, as the Settings picker does (logs `graph-cells`). |
 | `-HistqColumnDrag <column>:<dx>` | Drags the border right of `message` or `author` by dx points; logs `columns`. |
@@ -117,10 +117,11 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqToolbarFrames YES` | Logs the repo and branch dropdowns' frames (`toolbar`). |
 | `-HistqOpenPalette "<query>"` / `-HistqPaletteRun` | Opens the command palette with that query; runs its first row. |
 | `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell. |
+| `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows (dimmed), as their header's eye button does. |
 | `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
 | `-HistqHTMLProbe YES` | Snapshots every GitHub HTML view (`html-<n>.png`) and logs its size. |
 | `-HistqKeychain memory` / `-HistqKeychainSelfTest memory\|login` | In-memory Keychain; a Keychain round trip to `keychain-selftest.txt`. |
-| `-HistqRun "<menu>\|<item>[;;<next>...]"` | Runs context-menu items by title, accepting confirmations. Fixture copies only. |
+| `-HistqRun "<menu>\|<item>[;;<next>...]"` | Runs context-menu items by title, accepting confirmations. Menus include `local:<name>`, `remote:<name>`, `tag:<name>` (`tag:v1.0\|Hide`), `badge:<local\|remote\|tag>:<name>` (a graph badge's menu), `wipfile:<path>` (a WIP file's Stash Changes and, when untracked, its Ignore entries: `wipfile:<path>\|Ignore <name>`, `wipfile:<path>\|Exclude Locally\|Ignore <name>`), `stashfile:<sha>:<path>` (a tracked file of a stash, full sha), `repo` (the toolbar repo menu's repository actions: `repo\|Optimize Repository…`, `repo\|Show Reflog`) and `reflog:<sha>` (a reflog entry's menu, full sha). Fixture copies only. |
 | `-HistqShow "<menu>\|<item>"` / `-HistqFormName "<name>"` | Opens one item's confirmation or form; fills and submits the form. |
 | `-HistqWorktreeFolder "<parent>"` | With `-HistqFormName`, fills and submits the Add Worktree form. |
 | `-HistqCommit "<message>"` | Commits the staged changes through the WIP panel. |

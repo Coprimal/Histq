@@ -1,8 +1,9 @@
 // A repo tab's sidebar (panel 1): tabs Branches (Local, Remote and Worktrees cards, ahead/behind counts), Tags, and
 // Pull requests & Issues (`PullRequestSections`: the GitHub lists, or the Connect card). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
-// for it); a right-click opens the same menu as its badge in the graph. The Remote card's header menu adds a remote and
-// renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
+// for it); a right-click opens the same menu as its badge in the graph. A branch the graph hides is dimmed, with an eye
+// that shows it again; a pinned or soloed one has a pin or a scope. The Local and Remote cards' header menus hide stale
+// branches or show all. The Remote card's header menu also adds a remote and renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
 // when one has uncommitted changes); a double-click opens another one in a tab, its header menu adds or prunes.
 import HistqCore
 import SwiftUI
@@ -153,7 +154,7 @@ struct SidebarView: View {
             BranchSections(session: session, refs: refs)
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.tags, .loaded(let refs)):
-            let hidden = refs.tags.count { session.isHidden(.tag($0.name)) }
+            let hidden = refs.tags.count { session.isHidden($0.refName) }
             SidebarSection(title: "Tags", systemImage: "tag",
                            count: refs.tags.count - (session.tagsShowHidden ? 0 : hidden),
                            isExpanded: $session.tagsExpanded) { query in
@@ -197,12 +198,12 @@ private struct BranchSections: View {
 
     var body: some View {
         // The headers count the listed rows: the hidden ones only while their card lists them.
-        let hiddenLocal = refs.localBranches.count { session.isHidden(.local($0.name)) }
-        let hiddenRemote = refs.remoteBranches.count { session.isHidden(.remote($0.name)) }
+        let hiddenLocal = refs.localBranches.count { session.isHidden($0.refName) }
+        let hiddenRemote = refs.remoteBranches.count { session.isHidden($0.refName) }
         SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage,
                        count: refs.localBranches.count - (session.localShowsHidden ? 0 : hiddenLocal),
                        isExpanded: $session.localExpanded) { query in
-            let listed = refs.localBranches.filter { session.localShowsHidden || !session.isHidden(.local($0.name)) }
+            let listed = refs.localBranches.filter { session.localShowsHidden || !session.isHidden($0.refName) }
             let branches = listed.filter { FileSearch.matches($0.name, query: query) }
             if refs.localBranches.isEmpty {
                 EmptyRow(text: "No local branches")
@@ -220,6 +221,20 @@ private struct BranchSections: View {
             }
         } accessory: {
             HiddenRowsToggle(title: "Local", count: hiddenLocal, isShowing: $session.localShowsHidden)
+            Menu {
+                MenuEntriesView(entries: RepoMenus.branchView(session))
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(.secondary)
+                    // Square, so the hover circle (sized on the label's shorter side) clears the wide glyph.
+                    .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
+            }
+            .menuStyle(.button)
+            .buttonStyle(RowIconButtonStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Local branches")
+            .accessibilityLabel("Local branch actions")
         }
         SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage,
                        count: refs.remoteBranches.count - (session.remoteShowsHidden ? 0 : hiddenRemote),
@@ -244,7 +259,7 @@ private struct BranchSections: View {
         } accessory: {
             HiddenRowsToggle(title: "Remote", count: hiddenRemote, isShowing: $session.remoteShowsHidden)
             Menu {
-                MenuEntriesView(entries: RepoMenus.remotes(session))
+                MenuEntriesView(entries: RepoMenus.remotes(session) + [.separator] + RepoMenus.branchView(session))
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
@@ -268,7 +283,7 @@ private struct BranchSections: View {
         var groups: [String: [RemoteBranch]] = Dictionary(order.map { ($0, []) }, uniquingKeysWith: { a, _ in a })
         for branch in refs.remoteBranches {
             if groups[branch.remote] == nil { order.append(branch.remote) }
-            guard session.remoteShowsHidden || !session.isHidden(.remote(branch.name)) else { continue }
+            guard session.remoteShowsHidden || !session.isHidden(branch.refName) else { continue }
             groups[branch.remote, default: []].append(branch)
         }
         return order.map { ($0, groups[$0] ?? []) }
@@ -408,7 +423,7 @@ private struct TagRows: View {
     let query: String
 
     var body: some View {
-        let listed = tags.filter { session.tagsShowHidden || !session.isHidden(.tag($0.name)) }
+        let listed = tags.filter { session.tagsShowHidden || !session.isHidden($0.refName) }
         let shown = listed.filter { FileSearch.matches($0.name, query: query) }
         if tags.isEmpty {
             EmptyRow(text: "No tags")
@@ -501,8 +516,8 @@ struct CardSearchButton: View {
     }
 }
 
-/// A card header's eye button while some of its rows are hidden (`RepoSession.hiddenRefs`): lists them, dimmed, so
-/// their menu can show them again, or leaves them out again. The graph keeps them hidden either way.
+/// A card header's eye button while some of its rows are hidden (`RepoSession.isHidden`): lists them, dimmed, so their
+/// eye or menu can show them again, or leaves them out again. The graph keeps them hidden either way.
 private struct HiddenRowsToggle: View {
     let title: String
     let count: Int
@@ -634,28 +649,29 @@ private struct BranchRow<Trailing: View>: View {
 
     var body: some View {
         let selected = session.sidebarSelection == item
-        // Listed only while its card shows the hidden rows: dimmed, with a slashed eye at the end.
-        let hidden = session.isHidden(item)
+        let ref = item.fullRefName
+        // A ref the graph leaves out, listed only while its card shows the hidden rows: its icon and name dimmed, with
+        // a slashed eye at the end that shows it again.
+        let dimmed = session.isHidden(ref) ? 0.5 : 1.0
         HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             IconImage(systemImage)
                 // The checked-out branch's check reads at a glance (a step bigger than the branch glyphs).
                 .imageScale(systemImage == SidebarMetrics.currentImage ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+                .opacity(dimmed)
             HStack(spacing: 4) {
                 Text(name)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .opacity(dimmed)
                 Spacer(minLength: 4)
+                if session.isPinned(ref) { Image(systemName: "pin.fill").imageScale(.small) }
+                if session.isSoloed(ref) { Image(systemName: "scope").imageScale(.small) }
                 trailing()
-                if hidden {
-                    Image(systemName: "eye.slash")
-                        .font(.settingsCaption)
-                        .accessibilityLabel("hidden")
-                }
+                if session.isHidden(ref) { showButton(ref) }
             }
         }
-        .opacity(hidden ? 0.5 : 1)
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
         .padding(.leading, SidebarMetrics.capsuleLeading)
@@ -676,6 +692,16 @@ private struct BranchRow<Trailing: View>: View {
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { session.selectRef(item) }
         .accessibilityAction(named: "Checkout") { RepoMenus.checkout(item, session) }
+    }
+
+    /// A hidden branch's or tag's eye: a click shows it again (not a branch hidden as stale while that is on).
+    private func showButton(_ ref: String) -> some View {
+        let stale = session.view.hideStale && session.isStale(ref) && !session.isPinned(ref)
+        return Button { session.show(ref) } label: { Image(systemName: "eye.slash") }
+            .buttonStyle(RowIconButtonStyle())
+            .disabled(stale)
+            .help(stale ? "Hidden as a stale branch: turn off Hide Stale Branches" : "Show Again")
+            .accessibilityLabel("Show \(name)")
     }
 }
 

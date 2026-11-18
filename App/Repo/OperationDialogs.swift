@@ -46,6 +46,11 @@ struct OperationConfirmation: Identifiable {
     let key: ActionBarAction?
     /// False for a confirmation that loses nothing (a detached checkout): its button is not red.
     let isDestructive: Bool
+    /// A second action between Cancel and the button (the auto-stash dialog's Carry Changes): its title and write.
+    var secondary: (button: String, write: RepoSession.Write)?
+    /// The auto-stash dialog's "Always do this" checkbox: ticked, the button stores `PrefKey.autoStash` "always" and
+    /// `secondary` "never" (Cancel stores nothing).
+    var asksAlways = false
 }
 
 /// A confirmation that is not a repo write (a profile's deletion, a WIP file's discard): `WindowModel.modal` shows it
@@ -58,25 +63,37 @@ struct ModalConfirmation {
     let perform: @MainActor () -> Void
 }
 
-/// A confirmation card: the title and what it does in the header, then Cancel (Escape) and the button. Return presses
-/// the button only when it loses nothing; a destructive button is never one Return away.
+/// A confirmation card: the title and what it does in the header, then Cancel (Escape), an optional second button and
+/// the button. Return presses the button only when it loses nothing; a destructive button is never one Return away.
+/// `always`: an "Always do this" checkbox above the buttons.
 struct ConfirmationModal: View {
     let title: String
     let message: String
     let button: String
     let isDestructive: Bool
+    var secondary: String?
+    var always: Binding<Bool>?
     let onConfirm: () -> Void
     let onCancel: () -> Void
+    var onSecondary: () -> Void = {}
 
     var body: some View {
         ModalCard(title: title, subtitle: message,
                   systemImage: isDestructive ? "exclamationmark.triangle" : "questionmark.circle", width: 420,
                   takesFocus: true) {
-            EmptyView()
+            if let always {
+                Toggle("Always do this", isOn: always)
+                    .toggleStyle(.checkbox)
+                    .padding(.horizontal, SettingsMetrics.cardPadding)
+            }
         } actions: {
             Button("Cancel", action: onCancel)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
                 .keyboardShortcut(.cancelAction)
+            if let secondary {
+                Button(secondary, action: onSecondary)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+            }
             Button(button, action: onConfirm)
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true, destructive: isDestructive))
                 .keyboardShortcut(isDestructive ? nil : KeyboardShortcut.defaultAction)
