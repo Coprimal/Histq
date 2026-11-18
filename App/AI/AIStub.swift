@@ -13,9 +13,11 @@
 // are enabled.
 //
 // `-HistqAI <hook>[,apply][,cancel][,regenerate][,undo]` (stub runs only) clicks one AI button once it can run:
-// `generate` (commit box), `explain-wip` (commit box), `explain` (commit details), `resolve` (conflict editor), `test`
-// (Settings › AI, Test Connection), `load-models` (Settings › AI, Load models), `resolve-all` (conflict editor, Suggest
-// All: logs `batch finished ok=<n> failed=<m>` once every region ended; with `apply` it clicks Apply N and logs
+// `generate` (commit box), `explain-wip` (commit box), `explain` (commit details), `improve-message` (a reword row
+// of the rebase sheet, with `-HistqRewordRow <n>`; its prompt is a commit message's, so it gets the same answer),
+// `resolve` (conflict editor), `test` (Settings › AI, Test Connection), `load-models` (Settings › AI, Load models),
+// `resolve-all` (conflict editor, Suggest All: logs `batch finished ok=<n> failed=<m>` once every region ended; with
+// `apply` it clicks Apply N and logs
 // `apply-batch regions [...]`, and with `undo` it then does Undo AI and logs `unresolved <a>-><b>`); `apply` applies
 // the finished answer, `regenerate` clicks Regenerate once on the first finish (once per launch), `cancel` cancels as
 // soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still

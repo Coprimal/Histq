@@ -18,6 +18,9 @@ enum AIJob: Equatable, Sendable {
     /// `message`: the commit's subject and body.
     case explainCommit(hash: String, message: String)
     case explainWorkingChanges
+    /// A reword row's Improve (interactive rebase): `message` is the row's message at the click; Apply (the row's
+    /// `onApply`) replaces it with the whole answer.
+    case improveMessage(hash: String, message: String)
     case resolution(AIResolutionTarget)
 
     var title: String {
@@ -25,6 +28,7 @@ enum AIJob: Equatable, Sendable {
         case .commitMessage: "Commit message"
         case .explainCommit(let hash, _): "Explain commit \(hash.prefix(7))"
         case .explainWorkingChanges: "Explain the uncommitted changes"
+        case .improveMessage: "Improve message"
         case .resolution(let target): "Resolve conflict \(target.conflict + 1) of \(target.path)"
         }
     }
@@ -35,6 +39,7 @@ enum AIJob: Equatable, Sendable {
         case .commitMessage: "commit-message"
         case .explainCommit: "explain-commit"
         case .explainWorkingChanges: "explain-wip"
+        case .improveMessage: "improve-message"
         case .resolution: "resolution"
         }
     }
@@ -42,7 +47,7 @@ enum AIJob: Equatable, Sendable {
     /// Whether the answer can be applied (an explanation is only shown and copied).
     var canApply: Bool {
         switch self {
-        case .commitMessage, .resolution: true
+        case .commitMessage, .resolution, .improveMessage: true
         case .explainCommit, .explainWorkingChanges: false
         }
     }
@@ -109,6 +114,8 @@ final class AIRun: Identifiable {
     let job: AIJob
     let provider: AIProvider
     let model: String
+    /// A form's AI button: Apply hands it the answer (then closes the card) instead of the job's own apply.
+    let onApply: (@MainActor (String) -> Void)?
     private(set) var phase = Phase.preparing
     /// What the card shows of the reply so far (the answer block only).
     private(set) var preview = ""
@@ -119,10 +126,11 @@ final class AIRun: Identifiable {
     /// Not observed, so `deinit` (nonisolated) can cancel it.
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    init(job: AIJob, provider: AIProvider, model: String) {
+    init(job: AIJob, provider: AIProvider, model: String, onApply: (@MainActor (String) -> Void)? = nil) {
         self.job = job
         self.provider = provider
         self.model = model
+        self.onApply = onApply
     }
 
     deinit {
@@ -263,6 +271,7 @@ struct AIResultSheet: View {
         case .commitMessage(let summaryOnly, _, _):
             summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
+        case .improveMessage: "Replace the row's new message"
         default: ""
         }
     }
@@ -329,7 +338,7 @@ struct AIResultSheet: View {
         case .explainCommit, .explainWorkingChanges:
             Text(Self.markdown(text))
                 .textSelection(.enabled)
-        case .commitMessage:
+        case .commitMessage, .improveMessage:
             Text(verbatim: text)
                 .textSelection(.enabled)
         }
@@ -364,11 +373,16 @@ struct AIResultSheet: View {
 
     /// The same job again in a new `AIRun`, so the card starts fresh.
     private func regenerate() {
-        session.startAI(run.job)
+        session.startAI(run.job, onApply: run.onApply)
     }
 
     private func apply() {
         guard let answer = run.answer else { return }
+        if let onApply = run.onApply {
+            onApply(answer)
+            onClose()
+            return
+        }
         switch run.job {
         case .commitMessage(let summaryOnly, _, _):
             session.applyAICommitMessage(answer, summaryOnly: summaryOnly)
@@ -379,7 +393,7 @@ struct AIResultSheet: View {
             } else {
                 onClose()
             }
-        case .explainCommit, .explainWorkingChanges:
+        case .explainCommit, .explainWorkingChanges, .improveMessage:
             break
         }
     }
@@ -400,6 +414,7 @@ struct AIResultSheet: View {
             let before = session.conflict.value?.merge
             apply()
             AIStub.log("apply \(run.job.logName) error \(applyError ?? "none") card-open \(session.aiRun != nil)")
+            AIStub.log("form-open \(run.job.logName) \(session.rebaseRequest != nil || session.pullRequestForm != nil)")
             switch run.job {
             case .commitMessage:
                 let draft = session.commitDraft
@@ -416,7 +431,7 @@ struct AIResultSheet: View {
                 AIStub.log("resolution conflict \(target.conflict) region \(target.region) manual-regions \(manual) "
                     + "changed-regions \(changed) unresolved \(before.unresolvedCount)->\(after.unresolvedCount) "
                     + "line-break \(AIStub.quoted(target.lineBreak)) output \(AIStub.quoted(after.outputLines[region.output].joined()))")
-            case .explainCommit, .explainWorkingChanges:
+            case .explainCommit, .explainWorkingChanges, .improveMessage:
                 break
             }
         case .failed(let message):

@@ -87,7 +87,7 @@ struct InteractiveRebaseView: View {
         SectionCard("Commits", systemImage: "list.bullet", count: items.count, contentPadding: 6) {
             List {
                 ForEach($items) { $item in
-                    RebaseRow(item: $item)
+                    RebaseRow(item: $item) { improve(item) }
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                 }
@@ -162,9 +162,28 @@ struct InteractiveRebaseView: View {
             let loaded = try await session.loadRebaseTodo(request.kind)
             items = loaded.items
             message = loaded.items.first?.newMessage ?? ""
+            #if DEBUG
+            // `-HistqRewordRow <n>` (1-based): that row becomes reword as its action menu would, for the Improve hook.
+            if !isSquash, let row = AppState.launchFlag("-HistqRewordRow").flatMap(Int.init),
+               items.indices.contains(row - 1) {
+                items[row - 1].setAction(.reword)
+            }
+            #endif
             todo = .loaded(loaded)
         } catch {
             if !(error is CancellationError) { todo = .failed(RepoSession.writeMessage(for: error)) }
+        }
+    }
+
+    /// A reword row's Improve: the AI card opens over the sheet; Apply replaces the row's new message (nothing when
+    /// the row is gone or no longer reword). Sends the edited message, or the original when the editor is blank.
+    private func improve(_ item: RebaseTodo.Item) {
+        let edited = item.newMessage ?? ""
+        let message = edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? item.message : edited
+        let id = item.id
+        session.startAI(.improveMessage(hash: item.commit, message: message)) { answer in
+            guard let index = items.firstIndex(where: { $0.id == id }), items[index].action == .reword else { return }
+            items[index].newMessage = answer
         }
     }
 
@@ -183,6 +202,7 @@ struct InteractiveRebaseView: View {
 /// row shows its message editor under it.
 private struct RebaseRow: View {
     @Binding var item: RebaseTodo.Item
+    let onImprove: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -207,28 +227,22 @@ private struct RebaseRow: View {
                 Spacer(minLength: 0)
             }
             if item.action == .reword {
-                TextEditor(text: newMessage)
-                    .font(.body)
-                    .frame(height: 64)
-                    .settingsTextEditor()
+                HStack(alignment: .top, spacing: 6) {
+                    TextEditor(text: newMessage)
+                        .font(.body)
+                        .frame(height: 64)
+                        .settingsTextEditor()
+                    AIHookButton(title: "Improve", systemImage: "sparkles",
+                                 help: "Improve this commit message with AI", seam: "improve-message", small: true,
+                                 action: onImprove)
+                }
             }
         }
         .padding(.vertical, 2)
     }
 
-    /// A row that becomes reword starts from its message; a row that leaves it drops the new message, which the todo
-    /// would otherwise still apply to a pick.
     private var action: Binding<RebaseTodo.Action> {
-        Binding {
-            item.action
-        } set: { action in
-            item.action = action
-            if action == .reword {
-                if item.newMessage == nil { item.newMessage = item.message.trimmingCharacters(in: .newlines) }
-            } else {
-                item.newMessage = nil
-            }
-        }
+        Binding { item.action } set: { item.setAction($0) }
     }
 
     private var newMessage: Binding<String> {
@@ -254,6 +268,19 @@ private struct RebaseSkeleton: View {
         .overlay { DelayedSpinner(detail: "rebase") }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Loading")
+    }
+}
+
+extension RebaseTodo.Item {
+    /// The action menu's change: a row that becomes reword starts from its message; a row that leaves it drops the
+    /// new message, which the todo would otherwise still apply to a pick.
+    fileprivate mutating func setAction(_ action: RebaseTodo.Action) {
+        self.action = action
+        if action == .reword {
+            if newMessage == nil { newMessage = message.trimmingCharacters(in: .newlines) }
+        } else {
+            newMessage = nil
+        }
     }
 }
 

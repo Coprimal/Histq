@@ -2625,10 +2625,11 @@ final class RepoSession: Identifiable {
 
     /// An AI button's click: the result card opens in this call (its skeleton shows in the click's frame); the job's
     /// content is read and its prompt built off the main actor, then the answer streams in. Only a click gets here.
-    func startAI(_ job: AIJob) {
+    /// `onApply`: a form's AI button (the card shows over the form) gets the answer at Apply instead of the job's own.
+    func startAI(_ job: AIJob, onApply: (@MainActor (String) -> Void)? = nil) {
         aiRun?.cancel()
         let setup = AISetup.shared
-        let run = AIRun(job: job, provider: setup.provider, model: setup.model(for: setup.provider))
+        let run = AIRun(job: job, provider: setup.provider, model: setup.model(for: setup.provider), onApply: onApply)
         UITiming.select("ai \(job.logName)")
         aiRun = run
         run.start(prompt: aiPrompt(for: job))
@@ -2640,7 +2641,7 @@ final class RepoSession: Identifiable {
         let url = url
         let languages = Self.aiLanguages()
         let instructionsKey: PrefKey = switch job {
-        case .commitMessage: .aiCommitInstructions
+        case .commitMessage, .improveMessage: .aiCommitInstructions
         case .explainCommit, .explainWorkingChanges: .aiExplainInstructions
         case .resolution: .aiConflictInstructions
         }
@@ -2719,6 +2720,14 @@ final class RepoSession: Identifiable {
             return AIPrompts.explainCommit(
                 message: message, diff: try aiFiltered(diff, worktree: worktree),
                 language: languages.response, instructions: instructions)
+        case .improveMessage(let hash, let message):
+            // Never summary only: Apply replaces the whole message, so the body must stay.
+            guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
+            let env = try await backend.readEnvironment(cwd: cwd)
+            let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
+            return AIPrompts.commitMessage(
+                stagedDiff: try aiFiltered(diff, worktree: worktree), language: languages.commit, summaryOnly: false,
+                instructions: instructions, currentMessage: message)
         case .explainWorkingChanges:
             // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
             let env = try await backend.readEnvironment(cwd: cwd)

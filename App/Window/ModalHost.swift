@@ -5,6 +5,8 @@
 // that had it once it closes. The AppKit toolbar stays live above the scrim: a tab or page change cancels the modal.
 // Settings (task 9.7) is the bottom layer: the modals it opens (Generate Key, a profile's deletion) and a form a
 // toolbar action opens meanwhile stack above it, with their own scrim, while its card is blurred and disabled.
+// An AI card opened from the rebase or pull request form stacks above the form the same way, so the form keeps its
+// input; Escape then closes only the AI card.
 import AppKit
 import SwiftUI
 
@@ -106,19 +108,38 @@ struct ModalHost: View {
                 SettingsLayer(model: model, isCovered: shown != nil)
             }
             if let shown {
+                let cover = aiCover(shown)
+                let covered = cover != nil
                 ZStack {
                     ModalScrim { if shown.closesOnScrimTap { cancel(shown) } }
                     card(shown)
                         .environment(\.modalAvailableHeight,
                                      layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
                         .padding(ModalMetrics.margin)
+                        // Always there, never in an `if`: the form keeps its identity and input under the AI card.
+                        // Disabled at once (the backdrop disables late), so Return can't reach the form's button.
+                        .modifier(ModalBackdrop(isActive: covered))
+                        .disabled(covered)
+                    if let cover {
+                        ZStack {
+                            ModalScrim()
+                            AIResultSheet(session: cover.session, run: cover.run) { cover.session.closeAI() }
+                                .environment(\.modalAvailableHeight,
+                                             layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
+                                .padding(ModalMetrics.margin)
+                        }
+                        .id("ai \(cover.run.id)")
+                        .modifier(RestoresFocus())
+                    }
                 }
                 // The scrim fills the window under the toolbar: a tall form fits its card in that (`CreatePRView`).
                 .onGeometryChange(for: CGFloat.self, of: \.size.height) { layerHeight = $0 }
                 // A new view per modal: the focus to restore starts over.
                 .id(shown.id)
                 .modifier(RestoresFocus())
-                .onExitCommand { cancel(shown) }
+                .onExitCommand {
+                    if let cover { cover.session.closeAI() } else { cancel(shown) }
+                }
             }
         }
         // The toolbar stays live above the scrim: the modal acts on the tab and page it opened on, so a change of
@@ -176,6 +197,14 @@ struct ModalHost: View {
             ConflictSaveModal(session: session)
         case .conflictLeave(let session, let name):
             ConflictLeaveModal(session: session, fileName: name)
+        }
+    }
+
+    /// The AI card over the rebase or pull request form (`shown` keeps the form, so its card is not re-created).
+    private func aiCover(_ shown: Shown) -> (session: RepoSession, run: AIRun)? {
+        switch shown {
+        case .rebase(let session, _), .pullRequest(let session, _): session.aiRun.map { (session, $0) }
+        default: nil
         }
     }
 

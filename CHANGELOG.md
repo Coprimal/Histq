@@ -40,6 +40,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Conflict editor: Suggest All suggests every unresolved conflict of a file, one request per conflict, each kept or skipped with its Use switch before Apply.
 - Conflict editor: Undo AI puts the conflict editor back as it was before Apply from Suggest Resolution or Suggest All, in one step.
 - Suggest Resolution and Suggest All are unavailable, with the reason, for a file matched by `.aiignore` or when `.aiignore` can't be read.
+- Interactive rebase: Improve next to a reworded commit's message asks AI for a better message from the commit's diff and its current message; Apply puts it in the row.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.
