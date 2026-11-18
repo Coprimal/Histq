@@ -121,11 +121,36 @@ final class AvatarStore {
     /// `ownerIdentity(_:)`.
     func ownerAvatar(of repository: HostedRepository, pixels: Int) -> NSImage? {
         guard AvatarLoader.ownerHosts.contains(repository.host) else { return nil }
+        if repository.host == "github.com", repository.owner.lowercased() == "github" { return gitHubOwnerLogo() }
         let identity = Self.ownerIdentity(repository)
         let key = "\(identity)|\(pixels)"
         if let image = images.object(forKey: key as NSString) { return image }
         if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
         return nil
+    }
+
+    /// The `github` organization's logo: GitHub's own avatar (a white mark on light gray) is hard to read at 16 pt, so
+    /// the bundled mark is drawn black on that gray instead. #CBCBCB
+    private func gitHubOwnerLogo() -> NSImage? {
+        let cacheKey = "o|github" as NSString
+        if let image = drawn.object(forKey: cacheKey) { return image }
+        guard let logo = NSImage(named: Provider.github.asset) else { return nil }
+        let background = NSColor(srgbRed: 0xCB / 255, green: 0xCB / 255, blue: 0xCB / 255, alpha: 1)
+        let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
+            background.setFill()
+            rect.fill()
+            let mark = rect.insetBy(dx: rect.width * 0.12, dy: rect.height * 0.12)
+            let tinted = NSImage(size: mark.size, flipped: false) { markRect in
+                logo.draw(in: markRect)
+                NSColor.black.setFill()
+                markRect.fill(using: .sourceAtop)
+                return true
+            }
+            tinted.draw(in: mark)
+            return true
+        }
+        drawn.setObject(image, forKey: cacheKey)
+        return image
     }
 
     /// The identity `didChange` names when the owner logo of `repository` arrives.
