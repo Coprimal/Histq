@@ -1,4 +1,4 @@
-// The commit graph: an NSTableView with gk's columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, COMMIT DATE / TIME).
+// The commit graph: an NSTableView with gk's columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, TIME).
 // Rows: the WIP row (when the working tree has changes), a WIP row per other worktree with changes (labeled with its
 // folder's name; a click shows its changes), the stash rows, then the commits, laid out by `GraphLayout`.
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
@@ -39,7 +39,6 @@ enum GraphColumn: String, CaseIterable {
     var compactSymbol: String? {
         switch self {
         case .author: "person"
-        case .date: "clock"
         default: nil
         }
     }
