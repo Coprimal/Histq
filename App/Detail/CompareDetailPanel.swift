@@ -84,9 +84,9 @@ struct CompareDetailPanel: View {
         .compare(base: base, head: head)
     }
 
-    /// This compare's file whose diff panel2 shows, drawn as selected.
+    /// This compare's file whose diff or blame panel2 shows, drawn as selected.
     private var openPath: String? {
-        session.openFile?.source == source ? session.openFile?.path : nil
+        session.openFile?.source == source ? session.openFile?.path : session.blamePath(in: source)
     }
 
     /// A full object id as its short sha, a branch's full ref as its name, any other ref name as it is.

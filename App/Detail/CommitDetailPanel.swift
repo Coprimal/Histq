@@ -102,9 +102,10 @@ struct CommitDetailPanel: View {
         }
     }
 
-    /// This commit's file whose diff panel2 shows, drawn as selected.
+    /// This commit's file whose diff or blame panel2 shows, drawn as selected.
     private var openPath: String? {
-        session.openFile?.source == .commit(commit.hash) ? session.openFile?.path : nil
+        session.openFile?.source == .commit(commit.hash) ? session.openFile?.path
+            : session.blamePath(in: .commit(commit.hash))
     }
 }
 
