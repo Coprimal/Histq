@@ -265,6 +265,52 @@ struct CommitDetailCache {
     }
 }
 
+/// The diffs of commits' files read lately (a commit's diff never changes), so a file history row clicked again, or
+/// prefetched, shows its diff in the click's frame. Bounded by the rows kept, not by the diffs: one big file weighs
+/// as much as many small ones.
+struct FileDiffCache {
+    struct Key: Hashable {
+        let target: FileTarget
+        let ignoresWhitespace: Bool
+    }
+
+    static let rowCapacity = 100_000
+    private var entries: [Key: (detail: FileDiffDetail, rows: Int)] = [:]
+    /// Least recently used first.
+    private var order: [Key] = []
+    private var rows = 0
+
+    /// The diff of `key`, now the most recently used.
+    mutating func value(_ key: Key) -> FileDiffDetail? {
+        guard let entry = entries[key] else { return nil }
+        if let index = order.lastIndex(of: key) { order.remove(at: index) }
+        order.append(key)
+        return entry.detail
+    }
+
+    func contains(_ key: Key) -> Bool {
+        entries[key] != nil
+    }
+
+    /// Keeps `detail`, dropping the least recently used diffs over `rowCapacity`. Only a commit's file is kept, and
+    /// never an image's versions (decoded bitmaps, far heavier than their row count).
+    mutating func insert(_ detail: FileDiffDetail, for key: Key) {
+        guard case .commit = key.target.source, entries[key] == nil else { return }
+        let weight = switch detail.content {
+        case .sections(let sections): sections.reduce(1) { $0 + $1.rows.count + $1.fullRows.count + $1.splitRows.count }
+        case .images: Self.rowCapacity + 1
+        default: 1
+        }
+        guard weight <= Self.rowCapacity else { return }
+        entries[key] = (detail, weight)
+        order.append(key)
+        rows += weight
+        while rows > Self.rowCapacity, !order.isEmpty {
+            rows -= entries.removeValue(forKey: order.removeFirst())?.rows ?? 0
+        }
+    }
+}
+
 /// A worktree of the repo as the sidebar card and the graph show it.
 struct WorktreeInfo: Hashable, Sendable {
     let worktree: Worktree
@@ -874,6 +920,9 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var fileIgnoresSizeLimit = false
     /// Numbers the file loads, so the diff tables tell a reloaded diff (after a stage) from a redraw.
     @ObservationIgnored private var fileLoadCount = 0
+    /// The commits' file diffs read lately (`FileDiffCache`), and the read of a file history's neighbouring rows into it.
+    @ObservationIgnored private var fileDiffCache = FileDiffCache()
+    @ObservationIgnored private var fileDiffPrefetch: Task<Void, Never>?
     /// The open conflicted file's stages and its resolution so far (`openFile` is a WIP file of kind `.conflicted`):
     /// `.loading` in the same call as the click. Ticks and edits live here, so a tab switch keeps them.
     private(set) var conflict: Loadable<ConflictDocument> = .idle
@@ -995,6 +1044,10 @@ final class RepoSession: Identifiable {
         // `-HistqSelectWalk <n>[,<ms>]`: times switches between commits (`runSelectWalk`).
         if let spec = AppState.launchFlag("-HistqSelectWalk") {
             Task { [weak self] in await self?.runSelectWalk(spec) }
+        }
+        // `-HistqHistoryWalk <n>[,<ms>]` (with `-HistqSelect history:<path>`): times switches between history rows.
+        if let spec = AppState.launchFlag("-HistqHistoryWalk") {
+            Task { [weak self] in await self?.runHistoryWalk(spec) }
         }
         // `-HistqOperation`: the operation banner's buttons on a fixture copy, once the state is read.
         if let step = AppState.launchFlag("-HistqOperation") {
@@ -2544,10 +2597,51 @@ final class RepoSession: Identifiable {
     /// A file history's row (or its newest, when the history loads): selects the commit as a graph click does (panel 3
     /// switches at once) and opens the file's diff at that commit in panel 2; panel 1 keeps the history.
     func openHistoryEntry(_ entry: FileHistoryEntry, of tool: RepoTool) {
-        let hash = entry.commit.hash
-        selectGraph([.commit(hash)])
+        selectGraph([.commit(entry.commit.hash)])
+        selectFile(Self.historyTarget(entry), returnTool: tool)
+    }
+
+    /// The file of a history row at its commit.
+    private static func historyTarget(_ entry: FileHistoryEntry) -> FileTarget {
         let file = FileChange(letter: entry.status ?? "M", path: entry.path, originalPath: entry.oldPath)
-        selectFile(FileTarget(source: .commit(hash), file: file), returnTool: tool)
+        return FileTarget(source: .commit(entry.commit.hash), file: file)
+    }
+
+    /// Once the diff of a file history's row is on screen: reads the diffs of the rows just above and below it into
+    /// `fileDiffCache`, both at once, so the next click up or down shows whole. Skips cached diffs; never touches
+    /// `fileDiff`, drops its errors; the next file select cancels it and its git processes.
+    private func prefetchHistoryNeighbours(of target: FileTarget) {
+        fileDiffPrefetch?.cancel()
+        fileDiffPrefetch = nil
+        guard case .commit(let hash) = target.source, case .fileHistory? = returnTool, loadedTool == returnTool,
+              case .loaded(.history(let entries)) = toolState,
+              let index = entries.firstIndex(where: { $0.commit.hash == hash })
+        else { return }
+        let ignoresWhitespace = ignoresWhitespace
+        // An image's versions are not cached (`FileDiffCache.insert`): reading them ahead would be wasted.
+        let targets = [index - 1, index + 1]
+            .filter { entries.indices.contains($0) }
+            .map { Self.historyTarget(entries[$0]) }
+            .filter { !$0.isImage && !fileDiffCache.contains(.init(target: $0, ignoresWhitespace: ignoresWhitespace)) }
+        guard !targets.isEmpty else { return }
+        let url = url
+        fileDiffPrefetch = Task { [weak self] in
+            guard let backend = try? await self?.backend() else { return }
+            await withTaskGroup(of: (FileTarget, FileDiffDetail?).self) { group in
+                for target in targets {
+                    group.addTask {
+                        let detail = try? await Self.readFileDiff(
+                            backend, cwd: url, target: target, ignoresSizeLimit: false,
+                            ignoresWhitespace: ignoresWhitespace, loadID: 0)
+                        return (target, detail)
+                    }
+                }
+                for await (target, detail) in group {
+                    guard let detail, !Task.isCancelled else { continue }
+                    self?.fileDiffCache.insert(detail, for: .init(target: target, ignoresWhitespace: ignoresWhitespace))
+                }
+            }
+        }
     }
 
     /// Opens a WIP file by its path (DEBUG `-HistqSelect file:<path>`) as its row in the WIP panel would: an
@@ -2581,6 +2675,8 @@ final class RepoSession: Identifiable {
         guard openFile != nil else { return }
         fileTask?.cancel()
         fileTask = nil
+        fileDiffPrefetch?.cancel()
+        fileDiffPrefetch = nil
         openFile = nil
         fileDiff = .idle
         conflict = .idle
@@ -2685,6 +2781,19 @@ final class RepoSession: Identifiable {
         case .commit(let hash): hash
         case .compare(_, let head): head
         }
+    }
+
+    /// The worktree's tracked files (`git ls-files`), relative to its folder: the palette's File History… searches them.
+    func trackedFiles() async throws -> [String] {
+        let backend = try await backend()
+        return try await Self.readTrackedFiles(backend, cwd: url)
+    }
+
+    @concurrent
+    private nonisolated static func readTrackedFiles(_ backend: Backend, cwd: URL) async throws -> [String] {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let output = try await backend.runner.run(["ls-files", "-z"], cwd: cwd, env: env).stdout
+        return output.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
     }
 
     /// Shows a file's history or blame, or the reflog, in panel2 now: the open file, pull request or issue closes and
@@ -2838,6 +2947,19 @@ final class RepoSession: Identifiable {
             conflictError = nil
             return loadConflict()
         }
+        // A commit's file read lately (or prefetched) shows whole in the click's frame.
+        if let target = openFile, !fileIgnoresSizeLimit,
+           var cached = fileDiffCache.value(.init(target: target, ignoresWhitespace: ignoresWhitespace))
+        {
+            fileTask?.cancel()
+            fileTask = nil
+            fileLoadCount &+= 1
+            cached.loadID = fileLoadCount
+            fileDiff = .loaded(cached)
+            return prefetchHistoryNeighbours(of: target)
+        }
+        fileDiffPrefetch?.cancel()
+        fileDiffPrefetch = nil
         fileDiff = .loading
         loadFile(quietly: false)
     }
@@ -2866,6 +2988,10 @@ final class RepoSession: Identifiable {
                 // Ignoring whitespace, no diff can mean a whitespace-only change: the file stays open.
                 if quietly, !ignoresWhitespace, case .unchanged = loaded.content { return closeFile() }
                 fileDiff = .loaded(loaded)
+                if !ignoresSizeLimit {
+                    fileDiffCache.insert(loaded, for: .init(target: target, ignoresWhitespace: ignoresWhitespace))
+                }
+                if !quietly { prefetchHistoryNeighbours(of: target) }
             } catch {
                 guard token == fileToken, openFile == target, !Self.isCancellation(error) else { return }
                 // A failed quiet reload keeps the diff on screen; the next status change tries again.
@@ -2906,7 +3032,9 @@ final class RepoSession: Identifiable {
         if case .commit(let hash) = target.source, !GitOperations.isObjectID(hash) {
             throw CommitReadError.notACommit(hash)
         }
+        var steps = UITiming.Steps()
         let env = try await backend.readEnvironment(cwd: cwd)
+        steps.lap("env")
         let runner = backend.runner
         let file = target.file
         let language = LanguageTable.language(forPath: file.path)
@@ -2914,6 +3042,7 @@ final class RepoSession: Identifiable {
             let size = await largestSize(of: target, runner: runner, cwd: cwd, env: env)
             if size > fileSizeLimit { return FileDiffDetail(loadID: loadID, content: .tooLarge(size)) }
         }
+        steps.lap("size")
         let paths = [file.originalPath, file.path].compactMap { $0 }
         let full = fullFileContext
         switch target.source {
@@ -2949,8 +3078,11 @@ final class RepoSession: Identifiable {
             async let diffFull = DiffReader.commit(
                 revision, runner: runner, cwd: cwd, env: env, paths: paths, context: full,
                 ignoringWhitespace: ignoresWhitespace)
-            let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
-                                      language: language)
+            let picked = (pick(try await diff, file), pick(try await diffFull, file))
+            steps.lap("diff")
+            let section = DiffSection(side: .commit, diff: picked.0, full: picked.1, language: language)
+            steps.lap("rows")
+            UITiming.fileLoad("\(file.path) \(steps.description)")
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         case .compare(let base, let head):
             // Read-only like a commit's changes (no hunk buttons).
@@ -4025,6 +4157,33 @@ final class RepoSession: Identifiable {
         UITiming.walk("start \(hashes.count) every \(interval) ms")
         for hash in hashes + hashes.dropLast().reversed() {
             selectGraph([.commit(hash)])
+            try? await Task.sleep(for: .milliseconds(interval))
+        }
+        UITiming.walk("done")
+    }
+
+    /// DEBUG `-HistqHistoryWalk <n>[,<ms>]`: once a file history is read, clicks its first `n` rows down and back up,
+    /// one every `ms` (default 250), as a click on a row does.
+    private func runHistoryWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let count = parts.first ?? nil, count > 0 else {
+            return Self.logger.error("-HistqHistoryWalk: expected <n>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 1 ? parts[1] : nil) ?? 250
+        var history: (RepoTool, [FileHistoryEntry])?
+        for _ in 0..<600 {
+            if let tool = historyTool, case .loaded(.history(let entries)) = toolState, fileDiff.value != nil {
+                history = (tool, entries)
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard let (tool, entries) = history else { return Self.logger.error("-HistqHistoryWalk: no file history") }
+        try? await Task.sleep(for: .milliseconds(500))
+        let rows = Array(entries.prefix(count))
+        UITiming.walk("start history \(rows.count) every \(interval) ms")
+        for entry in rows.dropFirst() + rows.dropLast().reversed() {
+            openHistoryEntry(entry, of: tool)
             try? await Task.sleep(for: .milliseconds(interval))
         }
         UITiming.walk("done")

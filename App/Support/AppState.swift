@@ -389,6 +389,8 @@ enum UITiming {
     static func probe(_ event: String, _ detail: String) { record(event, detail) }
     /// DEBUG `-HistqSelectWalk`: `walk start <n> every <ms> ms`, then `walk done`.
     static func walk(_ detail: String) { record("walk", detail) }
+    /// A commit's file diff was read: `file-load <path> env=<ms> size=<ms> diff=<ms> rows=<ms>`.
+    static func fileLoad(_ detail: String) { record("file-load", detail) }
     /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
     static func toolbar(_ detail: String) { record("toolbar", detail) }
     /// The graph search (⌘F) landed on a result or moved to a match: `find <query> matches=<m> current=<n>

@@ -110,7 +110,7 @@ struct FileDiffDetail: Sendable {
         case unchanged
     }
 
-    let loadID: Int
+    var loadID: Int
     let content: Content
     /// Read with `git diff -w`: the hunks are read-only, and no diff means only whitespace changed.
     var ignoresWhitespace = false
@@ -165,6 +165,8 @@ struct DiffView: View {
             case .loaded(let detail):
                 DiffContent(session: session, target: target, detail: detail)
                     .onAppear { UITiming.content(session.fileDetail) }
+                    // A cached diff replaces the one on screen without a placeholder in between.
+                    .onChange(of: session.fileToken) { UITiming.content(session.fileDetail) }
             case .failed(let message):
                 DiffCard(header: DiffFileHeader(session: session, target: target, counts: .none),
                          contentPadding: SettingsMetrics.cardPadding) {
