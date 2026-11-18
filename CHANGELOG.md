@@ -76,12 +76,12 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - The graph's selection highlight starts at the avatar, and avatars are as tall as the row.
 - Remotes in the sidebar and the graph's remote badges show their owner's real logo whatever the Commit avatars setting is (Generated or Initials too).
 - The graph column can be widened only as far as its lanes need.
-- The conflict editor highlights the lines of each side and of the Output like GitKraken.
+- The conflict editor highlights the lines of each side and of the Output in their side's color.
 - New branch and laptop icons, and a filled check on the checked-out branch.
 - A click on a branch checked out with uncommitted changes (in this worktree or another one), or on a worktree with changes in the Worktrees card, selects the row of those changes instead of the last commit; opening a worktree in a tab does the same.
 - A click on another worktree's changes row in the graph shows its unstaged and staged files instead of opening it in a tab; a double-click in the Worktrees card or Open in New Tab opens it.
-- The graph's WIP rows show how many files are edited, added and deleted, with GitKraken's icons, instead of "3 unstaged".
-- Another worktree's changes row sits right above that worktree's last commit, as in GitKraken, instead of at the top of the graph.
+- The graph's WIP rows show how many files are edited, added and deleted, each with its own icon, instead of "3 unstaged".
+- Another worktree's changes row sits right above that worktree's last commit instead of at the top of the graph.
 - Cmd-Z right after staging a file now unstages it, instead of undoing the operation before it.
 - A stash apply or pop that stops on conflicts shows a warning toast ("Applied with conflicts: this apply cannot be undone") instead of a failure; the conflicted files are in the WIP panel.
 - A failed operation shows only in its toast, no longer also in a card above the panels: the toast keeps the hint and its button (Delete Anyway…, Pull, …), has a button that copies the whole error, and stays while the pointer is over it; a toast with a button stays until it is used or closed. The toasts setting has no Off any more; it shows errors only.
