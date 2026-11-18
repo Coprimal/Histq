@@ -1,9 +1,9 @@
 // The repo actions the toolbar's buttons run (`HeaderToolbar`): Pull (its menu: fetch all, pull fast-forward if
 // possible, fast-forward only, rebase), Push (its menu: force with lease, confirmed), Fetch, Branch, Stash and Pop. A
 // button shows its operation's progress on itself from the click's frame (`ActionBarAction`); the menus' operations
-// show in `RunningStatus`. A failure shows in the error banner at the top of the repo layout, with a hint mapped from
-// `GitError` (sign-in, unknown or changed host key, "Pull first", index.lock, conflicts); an unknown host key opens the
-// host-key sheet, which scans the host and appends its keys to known_hosts only on "Trust Host".
+// show in `RunningStatus`. A failure shows in its toast, with a hint mapped from `GitError` (sign-in, unknown or
+// changed host key, "Pull first", index.lock, conflicts) and the hint's action (`FailureHints`); an unknown host key
+// opens the host-key sheet, which scans the host and appends its keys to known_hosts only on "Trust Host".
 import HistqCore
 import SwiftUI
 
@@ -61,10 +61,9 @@ extension RepoSession {
     /// pushes with `--force-with-lease` against the remote-tracking commit.
     func push(branch: String, force: Bool = false, key: ActionBarAction? = nil) {
         guard let target = pushTarget(of: branch) else {
-            failure = OperationFailure(title: "Push \(branch)", write: .push(branch: branch, remote: "", remoteBranch: nil,
-                                       setUpstream: false, forceWithLease: nil),
-                                       error: CocoaError(.featureUnsupported), message: "This repository has no remote. Add one first.")
-            if let failure { postToast(.failure(failure.title, error: failure.error, message: failure.message)) }
+            report(OperationFailure(title: "Push \(branch)", write: .push(branch: branch, remote: "", remoteBranch: nil,
+                                    setUpstream: false, forceWithLease: nil),
+                                    error: CocoaError(.featureUnsupported), message: "This repository has no remote. Add one first."))
             return
         }
         let destination = "\(target.remote)/\(target.remoteBranch ?? branch)"
@@ -163,55 +162,10 @@ struct RunningStatus: View {
     }
 }
 
-// MARK: - Error banner
+// MARK: - Failure hints
 
-/// The last failure in its own card: what failed, git's message, a hint for the known cases and the hint's action.
-struct ActionErrorBanner: View {
-    let session: RepoSession
-    let failure: OperationFailure
-
-    var body: some View {
-        let hint = Self.hint(for: failure)
-        SectionCard(nil, contentPadding: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: hint.isWarning ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(Color(nsColor: Palette.graphLanes[6]))
-                    .font(.system(size: 16))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(failure.title) failed")
-                        .font(.body.weight(.semibold))
-                    if let text = hint.text {
-                        Text(text)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Text(failure.message)
-                        .font(.settingsCaption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(6)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let action = hint.action {
-                        Button(action.title) { perform(action) }
-                            .buttonStyle(RowTextButtonStyle())
-                            .padding(.top, 2)
-                    }
-                }
-                Spacer(minLength: 0)
-                Button {
-                    session.failure = nil
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(RowIconButtonStyle())
-                .help("Dismiss")
-                .accessibilityLabel("Dismiss")
-            }
-        }
-        .modifier(NoticeTint(tone: Color(nsColor: Palette.graphLanes[6])))
-    }
-
+/// A failure's hint for the known cases and the hint's action, shown in the failure's toast.
+enum FailureHints {
     /// What the hint's button does.
     enum Action {
         case checkHostKey, pull, forceDelete(String)
@@ -231,8 +185,6 @@ struct ActionErrorBanner: View {
     struct Hint {
         var text: String?
         var action: Action?
-        /// A changed host key: a stronger icon.
-        var isWarning = false
     }
 
     static func hint(for failure: OperationFailure) -> Hint {
@@ -263,7 +215,7 @@ struct ActionErrorBanner: View {
             if HostKeyTrust.isKeyChanged(error) {
                 return Hint(text: "The host's SSH key has changed since the last connection. Someone may be intercepting "
                     + "it. Histq will not trust the new key: check it with the host, then fix ~/.ssh/known_hosts yourself.",
-                    action: .checkHostKey, isWarning: true)
+                    action: .checkHostKey)
             }
             return Hint(text: "This host's SSH key is not trusted yet. Compare its fingerprints before trusting it.",
                         action: .checkHostKey)
@@ -288,7 +240,8 @@ struct ActionErrorBanner: View {
         }
     }
 
-    private func perform(_ action: Action) {
+    @MainActor
+    static func perform(_ action: Action, for failure: OperationFailure, in session: RepoSession) {
         switch action {
         case .checkHostKey:
             session.checkHostKey(for: failure)

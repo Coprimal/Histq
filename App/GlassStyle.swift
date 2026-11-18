@@ -924,7 +924,7 @@ struct GlassCard: ViewModifier {
     }
 }
 
-/// A notice on a `SectionCard` (the operation banner, an error banner): the card's fill tinted with its tone and a
+/// A notice on a `SectionCard` (the operation banner, a toast): the card's fill tinted with its tone and a
 /// faint edge in it, so it stands out from the cards around it and keeps their shape.
 struct NoticeTint: ViewModifier {
     let tone: Color

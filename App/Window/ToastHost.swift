@@ -1,13 +1,20 @@
 // The window's operation toasts, at its bottom right: a user operation's outcome (a push, a pull, a fetch, a commit,
 // a menu's or a dialog's write) as a short card that closes by itself after a few seconds, or at once with its x.
-// Settings › General › Notifications picks which outcomes show (`ToastLevel`). A failure still shows in the repo
-// tab's error banner too, with its hint and actions: the toast only says that it failed. The automatic fetch never
-// shows one.
+// The pointer over the cards holds their timers until it leaves. Settings › General › Notifications picks whether the
+// successes show (`ToastLevel`); a failure always shows, as the only place it is reported: its hint, the hint's
+// action (`FailureHints`) and a button that copies git's whole message. The automatic fetch never shows one.
+import AppKit
 import HistqCore
 import SwiftUI
 
 /// One outcome on screen.
 struct OperationToast: Identifiable, Equatable {
+    /// A button on the card ("Delete Anyway…"); the toast closes when it is clicked.
+    struct Action {
+        let title: String
+        let perform: @MainActor () -> Void
+    }
+
     /// `warning`: it ran, but something needs a look (the local changes stayed in a stash).
     enum Kind { case success, failure, warning }
 
@@ -17,6 +24,11 @@ struct OperationToast: Identifiable, Equatable {
     var detail: String?
     /// The tab's name, when the operation ran in a tab that is not the one on screen.
     var repo: String?
+    /// A failure's whole message (git's output), which the copy button copies with the title and the detail.
+    var message: String?
+    var action: Action?
+
+    static func == (lhs: OperationToast, rhs: OperationToast) -> Bool { lhs.id == rhs.id }
 
     /// "Push main to origin/main", with what changed (`outcome`) or "Done".
     static func success(_ title: String, detail: String? = nil) -> OperationToast {
@@ -72,16 +84,21 @@ struct OperationToast: Identifiable, Equatable {
         "\(n) \(n == 1 ? one : many ?? one + "s")"
     }
 
-    /// "Push main failed" with the error banner's hint when it has one, else git's `error:` or `fatal:` line (a
-    /// rejected push starts with "To <remote>"), else its first line; "Pull stopped on conflicts".
-    static func failure(_ title: String, error: Error, message: String, hint: String? = nil) -> OperationToast {
+    /// "Push main failed" with its hint (`FailureHints`) when it has one, and git's message under it (its first lines
+    /// on the card, whole for the copy button); "Pull stopped on conflicts".
+    static func failure(_ title: String, error: Error, message: String, hint: String? = nil,
+                        action: Action? = nil) -> OperationToast
+    {
         if case .conflict = error as? GitError {
             return OperationToast(kind: .failure, title: "\(title) stopped on conflicts",
-                                  detail: "Resolve the conflicted files to continue.")
+                                  detail: "Resolve the conflicted files to continue.", message: message)
         }
-        let lines = message.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        let line = lines.first { $0.hasPrefix("error:") || $0.hasPrefix("fatal:") } ?? lines.first
-        return OperationToast(kind: .failure, title: "\(title) failed", detail: hint ?? line)
+        return OperationToast(kind: .failure, title: "\(title) failed", detail: hint, message: message, action: action)
+    }
+
+    /// What the copy button copies: the title, the hint and git's whole message.
+    var copyText: String {
+        ([title] + [detail, message].compactMap { $0 }).joined(separator: "\n\n")
     }
 
     /// A merge, rebase, cherry-pick or revert that stopped without an error (a rebase at an `edit` step): the
@@ -100,15 +117,15 @@ struct OperationToast: Identifiable, Equatable {
     var duration: Duration { kind == .success ? .seconds(3) : .seconds(6) }
 }
 
-/// Settings › General › Notifications (`PrefKey.toastLevel`).
+/// Settings › General › Notifications (`PrefKey.toastLevel`). There is no "off": a failure shows only in its toast.
+/// A stored "off" (from before) is read as `errors` (`AppState.registerDefaults`).
 enum ToastLevel: String, CaseIterable {
-    case all, errors, off
+    case all, errors
 
     var title: String {
         switch self {
         case .all: "All"
         case .errors: "Errors only"
-        case .off: "Off"
         }
     }
 
@@ -120,13 +137,12 @@ enum ToastLevel: String, CaseIterable {
         switch self {
         case .all: true
         case .errors: kind != .success
-        // A warning is the only notice that the local changes moved into a stash: no banner says it.
-        case .off: kind == .warning
         }
     }
 }
 
-/// The toasts, newest at the bottom. Only the cards take clicks: the space around them reaches the panels below.
+/// The toasts, newest at the bottom. Only the cards take clicks: the space around them reaches the panels below. The
+/// pointer over them holds every toast's timer (`WindowModel.holdToasts`) until it leaves.
 struct ToastHost: View {
     /// The most on screen at once; a new one pushes the oldest out.
     static let limit = 3
@@ -141,18 +157,21 @@ struct ToastHost: View {
                     .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .onHover { model.holdToasts($0) }
         .padding(16)
         .animation(reduceMotion ? Motion.exit : Motion.standard, value: model.toasts.map(\.id))
     }
 }
 
-/// A toast: its icon, what ran, the outcome and the x.
+/// A toast: its icon, what ran, the outcome, a failure's action and copy button, and the x.
 private struct ToastCard: View {
     let toast: OperationToast
     let dismiss: () -> Void
+    /// The copy button shows a checkmark for a moment after a click.
+    @State private var copied = false
 
     var body: some View {
-        // Green for a success, orange for a warning, the error banner's tone for a failure.
+        // Green for a success, orange for a warning, red for a failure.
         let lane = switch toast.kind { case .success: 2; case .warning: 1; case .failure: 6 }
         let tone = Color(nsColor: Palette.graphLanes[lane])
         HStack(alignment: .top, spacing: 10) {
@@ -170,15 +189,45 @@ private struct ToastCard: View {
                 Text(toast.title)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
-                if let detail = toast.detail {
-                    Text(detail)
-                        .font(.settingsCaption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                VStack(alignment: .leading, spacing: 2) {
+                    if let detail = toast.detail {
+                        Text(detail)
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    // A failure's message: its first lines (the copy button copies it whole).
+                    if let message = toast.message, toast.kind == .failure {
+                        Text(message)
+                            .font(.settingsCaption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(6)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                if let action = toast.action {
+                    Button(action.title) {
+                        dismiss()
+                        action.perform()
+                    }
+                    .buttonStyle(RowTextButtonStyle())
+                    .padding(.top, 4)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
+            if toast.message != nil {
+                Button(action: copy) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(RowIconButtonStyle())
+                .help("Copy Error")
+                .accessibilityLabel("Copy Error")
+            }
             Button(action: dismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
@@ -193,5 +242,15 @@ private struct ToastCard: View {
         .frame(width: 320)
         .modifier(GlassCard(raised: true))
         .modifier(NoticeTint(tone: tone))
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(toast.copyText, forType: .string)
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = false
+        }
     }
 }

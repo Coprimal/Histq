@@ -104,7 +104,7 @@ struct ConfirmationModal: View {
 // MARK: - Forms
 
 /// One form: its title, fields, an inline error and Cancel / the action (⏎). The action checks new names first, then
-/// runs the write and closes the form; the write's own failure goes to the error banner.
+/// runs the write and closes the form; the write's own failure shows in its toast.
 struct OperationDialogView: View {
     let session: RepoSession
     let dialog: OperationDialog

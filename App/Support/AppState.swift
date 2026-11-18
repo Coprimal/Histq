@@ -134,7 +134,7 @@ enum PrefKey: String, CaseIterable {
     case presetBeforeFocus
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
-    /// The graph's Commit message, Author and Commit date / time columns show (Branch / Tag and Graph always do).
+    /// The graph's Commit message, Author and Time columns show (Branch / Tag and Graph always do).
     case graphShowMessage
     case graphShowAuthor
     case graphShowDate

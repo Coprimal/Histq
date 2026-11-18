@@ -82,6 +82,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Cmd-Z right after staging a file now unstages it, instead of undoing the operation before it.
 - A stash apply or pop that stops on conflicts shows a warning toast ("Applied with conflicts: this apply cannot be undone") instead of a failure; the conflicted files are in the WIP panel.
 - Faster refresh and less memory on very large repositories: after a commit, a 1M-commit history reloads in about 0.7 s instead of 0.85 s (and no longer slows down while Histq is in the background), with about 29% lower peak memory; refs under `refs/prefetch/` no longer show in the graph.
+- A failed operation shows only in its toast, no longer also in a card above the panels: the toast keeps the hint and its button (Delete Anyway…, Pull, …), has a button that copies the whole error, and stays while the pointer is over it. The toasts setting has no Off any more; it shows errors only.
 
 ## [0.1.0] - YYYY-MM-DD
 

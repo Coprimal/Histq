@@ -682,9 +682,9 @@ private struct CommitBox: View {
                 session.commitDraft = CommitDraft()
                 session.postToast(.success(title))
             } catch {
-                let message = RepoSession.writeMessage(for: error)
-                self.error = message
-                session.postToast(.failure(title, error: error, message: message))
+                // Only in its toast, not in the card too.
+                session.report(OperationFailure(title: title, write: write, error: error,
+                                                message: RepoSession.writeMessage(for: error)))
             }
             busy.remove(.commit)
         }

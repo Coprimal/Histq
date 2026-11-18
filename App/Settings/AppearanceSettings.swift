@@ -136,7 +136,7 @@ struct AppearanceSettings: View {
                 SettingsDivider()
                 SettingsSwitchRow(title: "Author", isOn: $showAuthor)
                 SettingsDivider()
-                SettingsSwitchRow(title: "Commit date", isOn: $showDate)
+                SettingsSwitchRow(title: "Time", isOn: $showDate)
             }
             SettingsGroup("File lists") {
                 LabeledContent {

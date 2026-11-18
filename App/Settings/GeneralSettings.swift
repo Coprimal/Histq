@@ -73,7 +73,7 @@ struct GeneralSettings: View {
                 } label: {
                     Text("Operation toasts")
                     SettingsHint("A short card at the bottom right after a push, pull, fetch, commit or other "
-                        + "operation. Errors only hides the successes.")
+                        + "operation, where an error shows with its details. Errors only hides the successes.")
                 }
             }
             SettingsGroup("Merge tool") {

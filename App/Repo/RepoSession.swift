@@ -404,7 +404,7 @@ struct RunningOperation: Identifiable, Hashable {
     let key: ActionBarAction?
 }
 
-/// A user operation that failed: the action bar's error banner, with the write (to retry it or force it) and the error
+/// A user operation that failed, shown in its toast, with the write (to retry it or force it) and the error
 /// (`GitError` cases get a hint).
 struct OperationFailure: Identifiable {
     let id = UUID()
@@ -692,7 +692,7 @@ final class RepoSession: Identifiable {
     private(set) var remotes: [RemoteInfo] = []
     /// The operations started from the action bar, the menus and the dialogs that are still running, oldest first.
     private(set) var running: [RunningOperation] = []
-    /// The last operation that failed: the action bar's error banner. A new operation clears it.
+    /// The last operation that failed (its toast shows it, `report`). A new operation clears it.
     var failure: OperationFailure?
     /// The form a menu or a button asked for (create branch, tag, reset, remotes); `OperationDialogs` presents it.
     var dialog: OperationDialog?
@@ -1201,7 +1201,7 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// One automatic fetch: skipped while a user operation runs; a failure is only logged (the error banner is for
+    /// One automatic fetch: skipped while a user operation runs; a failure is only logged (failure toasts are for
     /// the user's own operations). It shows as running (the action bar's spinner and title), so a user write that
     /// waits behind it in the write lane does not wait silently.
     private func autoFetch() async {
@@ -3222,7 +3222,7 @@ final class RepoSession: Identifiable {
     }
 
     /// "Open in external merge tool": `git mergetool --no-prompt [--tool=<PrefKey.mergeTool>] -- <path>` with the write
-    /// environment, as an operation (the action bar shows it running, its failure goes to the error banner). A tool
+    /// environment, as an operation (the action bar shows it running, its failure shows in a toast). A tool
     /// name that is not a plain name is refused rather than passed to git.
     func openMergeTool() {
         guard let target = openFile, target.isConflict else { return }
@@ -3727,7 +3727,7 @@ final class RepoSession: Identifiable {
     }
 
     /// Takes back the journal's next entry (⌘Z in the graph, the toolbar, the palette). A refusal (the repository
-    /// moved on, objects pruned) shows in the error banner with `UndoError.message`; nothing changed then. No
+    /// moved on, objects pruned) shows in a toast with `UndoError.message`; nothing changed then. No
     /// confirmation: an undo or a redo only moves between recorded states and can itself be taken back.
     func undo() {
         let availability = historyAvailability(redo: false)
@@ -4251,8 +4251,8 @@ final class RepoSession: Identifiable {
     // MARK: Operations
 
     /// Runs a user operation (the action bar, a menu, a dialog) through `perform` without blocking: it is in `running`
-    /// when this returns (with `key`, the action bar button that shows it), and a failure goes to `failure`, the
-    /// error banner. A new operation clears the banner. Its outcome also shows as a toast (`postToast`).
+    /// when this returns (with `key`, the action bar button that shows it). Its outcome shows as a toast
+    /// (`postToast`); a failure also goes to `failure` (`report`), which a new operation clears.
     func run(_ write: Write, title: String, key: ActionBarAction? = nil) {
         nextOperationID &+= 1
         let operation = RunningOperation(id: nextOperationID, title: title, key: key)
@@ -4292,7 +4292,7 @@ final class RepoSession: Identifiable {
                                                                              after: refs.value)))
                 }
             } catch GitError.autostashKept(let hash) {
-                // Not the error banner, and before any cancellation check: the changes may be only in that stash.
+                // A warning, not a failure, and before any cancellation check: the changes may be only in that stash.
                 postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))
             } catch {
                 if !(error is CancellationError) {
@@ -4302,14 +4302,26 @@ final class RepoSession: Identifiable {
                     } else {
                         Self.message(for: error)
                     }
-                    let failure = OperationFailure(title: title, write: write, error: error, message: message)
-                    self.failure = failure
-                    postToast(.failure(title, error: error, message: failure.message,
-                                       hint: ActionErrorBanner.hint(for: failure).text))
+                    report(OperationFailure(title: title, write: write, error: error, message: message))
                 }
             }
             running.removeAll { $0.id == operation.id }
         }
+    }
+
+    /// Keeps `failure` as the last failure and shows it in its toast, the only place it is reported: its hint, the
+    /// hint's action and git's whole message (the toast's copy button).
+    func report(_ failure: OperationFailure) {
+        self.failure = failure
+        let hint = FailureHints.hint(for: failure)
+        let action = hint.action.map { action in
+            OperationToast.Action(title: action.title) { [weak self] in
+                guard let self else { return }
+                FailureHints.perform(action, for: failure, in: self)
+            }
+        }
+        postToast(.failure(failure.title, error: failure.error, message: failure.message, hint: hint.text,
+                           action: action))
     }
 
     /// Whether the action bar's `key` operation is running.

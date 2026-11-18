@@ -81,7 +81,7 @@ private extension CGFloat {
     func clamped(to range: ClosedRange<CGFloat>) -> CGFloat { Swift.min(Swift.max(self, range.lowerBound), range.upperBound) }
 }
 
-/// A repo tab: the error banner of a failed operation (when there is one), then sidebar | commit list | detail. Each
+/// A repo tab: sidebar | commit list | detail (a failed operation shows in its toast). Each
 /// panel waits for its own data (the refs, the log, the selected detail) and shows its placeholder until then; a tab
 /// switch shows the detail's placeholder in the same frame.
 struct RepoLayoutView: View {
@@ -121,9 +121,6 @@ struct RepoLayoutView: View {
             let available = proxy.size.width - RepoLayoutMetrics.chrome
             let widths = (dragWidths ?? PanelWidths(encoded: storedWidths)).fitted(in: available)
             VStack(spacing: SectionCardMetrics.spacing) {
-                if let failure = session.failure {
-                    ActionErrorBanner(session: session, failure: failure)
-                }
                 panels(widths: widths, available: available, height: proxy.size.height)
             }
             .padding(RepoLayoutMetrics.inset)

@@ -84,8 +84,13 @@ final class WindowModel {
     var terminalHeight: CGFloat = TerminalDrawerMetrics.defaultHeight
     /// The operation toasts at the window's bottom right (`ToastHost`), oldest first. Read only by `ToastHost`.
     private(set) var toasts: [OperationToast] = []
-    /// Each toast's timer, which closes it once its time is up.
+    /// Each toast's timer, which closes it once its time is up. None while the pointer holds the toasts.
     @ObservationIgnored private var toastTimers: [OperationToast.ID: Task<Void, Never>] = [:]
+    /// Each toast's time left, as of `toastStarts` (when its running timer started).
+    @ObservationIgnored private var toastRemaining: [OperationToast.ID: Duration] = [:]
+    @ObservationIgnored private var toastStarts: [OperationToast.ID: ContinuousClock.Instant] = [:]
+    /// The pointer is over the toasts: their timers wait (`holdToasts`).
+    @ObservationIgnored private var toastsHeld = false
 
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "window")
 
@@ -98,28 +103,66 @@ final class WindowModel {
     // MARK: Toasts
 
     /// Shows an operation's outcome from the tab `tabID` when Settings' level shows its kind, naming the tab when it is
-    /// not the one on screen. Past `ToastHost.limit` the oldest closes.
+    /// not the one on screen. Its action first selects that tab, where it shows its dialog. Past `ToastHost.limit` the
+    /// oldest closes.
     func showToast(_ toast: OperationToast, from tabID: Tab.ID) {
         guard ToastLevel.current.shows(toast.kind) else { return }
         var toast = toast
         if tabID != selectedTabID { toast.repo = tabs.first { $0.id == tabID }?.title }
+        if let action = toast.action {
+            toast.action = OperationToast.Action(title: action.title) { [weak self] in
+                self?.selectTab(id: tabID)
+                action.perform()
+            }
+        }
         #if DEBUG
         RepoMenus.debugLog("toast \(toast.title): \(toast.detail ?? "")")
         #endif
         toasts.append(toast)
         while toasts.count > ToastHost.limit { dismissToast(toasts[0].id) }
-        let id = toast.id, duration = toast.duration
-        toastTimers[id] = Task { [weak self] in
-            try? await Task.sleep(for: duration)
-            guard !Task.isCancelled else { return }
-            self?.dismissToast(id)
+        toastRemaining[toast.id] = toast.duration
+        if !toastsHeld { startToastTimer(toast.id) }
+    }
+
+    /// Closes a toast (its x, its action, or its time is up).
+    func dismissToast(_ id: OperationToast.ID) {
+        toastTimers.removeValue(forKey: id)?.cancel()
+        toastRemaining.removeValue(forKey: id)
+        toastStarts.removeValue(forKey: id)
+        toasts.removeAll { $0.id == id }
+        // The last card went from under the pointer, which may never report leaving it.
+        if toasts.isEmpty { toastsHeld = false }
+    }
+
+    /// The pointer entered (`true`) or left the toasts: their timers stop, keeping each one's time left, then start
+    /// again from it, with at least a moment to see the toast once the pointer leaves.
+    func holdToasts(_ held: Bool) {
+        guard held != toastsHeld else { return }
+        toastsHeld = held
+        if held {
+            let now = ContinuousClock.now
+            for (id, timer) in toastTimers {
+                timer.cancel()
+                if let start = toastStarts[id], let remaining = toastRemaining[id] {
+                    toastRemaining[id] = max(remaining - start.duration(to: now), .seconds(1.5))
+                }
+            }
+            toastTimers.removeAll()
+        } else {
+            for toast in toasts { startToastTimer(toast.id) }
         }
     }
 
-    /// Closes a toast (its x, or its time is up).
-    func dismissToast(_ id: OperationToast.ID) {
-        toastTimers.removeValue(forKey: id)?.cancel()
-        toasts.removeAll { $0.id == id }
+    /// Closes the toast `id` once its time left is up.
+    private func startToastTimer(_ id: OperationToast.ID) {
+        guard let remaining = toastRemaining[id] else { return }
+        toastTimers[id]?.cancel()
+        toastStarts[id] = .now
+        toastTimers[id] = Task { [weak self] in
+            try? await Task.sleep(for: remaining)
+            guard !Task.isCancelled else { return }
+            self?.dismissToast(id)
+        }
     }
 
     /// The selected tab's session; nil for a Welcome tab.
