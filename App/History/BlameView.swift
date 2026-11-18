@@ -194,8 +194,8 @@ private struct BlamePlaceholder: View {
             ForEach(Self.widths.indices, id: \.self) { index in
                 HStack(spacing: 10) {
                     SkeletonLine(width: 44, height: 9)
-                    SkeletonLine(width: 180, height: 9)
-                    SkeletonLine(width: 90, height: 9)
+                    SkeletonLine(width: 140, height: 9)
+                    SkeletonLine(width: 60, height: 9)
                     SkeletonLine(width: 84, height: 9)
                     SkeletonLine(width: 20, height: 9)
                     SkeletonLine(fraction: Self.widths[index], height: 10)
@@ -321,8 +321,8 @@ private struct BlameLayout {
     @MainActor static let shaFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
     @MainActor static let authorFont = NSFont.systemFont(ofSize: 11)
     static let padding: CGFloat = 8
-    static let messageWidth: CGFloat = 220
-    static let authorWidth: CGFloat = 110
+    static let messageWidth: CGFloat = 170
+    static let authorWidth: CGFloat = 72
     /// Right of a wrapped line's text.
     static let trailingPadding: CGFloat = 12
 
