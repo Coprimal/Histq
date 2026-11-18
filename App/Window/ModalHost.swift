@@ -27,6 +27,8 @@ enum WindowModal: Identifiable {
     case tabEmoji(tabID: UUID)
     /// A tab group's name › Rename Group… for the group `key` (`TabGroupNames`).
     case groupName(key: String)
+    /// The palette's File History…: a search of the tab `tabID`'s tracked files.
+    case fileHistory(tabID: UUID)
 
     var id: String {
         switch self {
@@ -35,6 +37,7 @@ enum WindowModal: Identifiable {
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
         case .groupName(let key): "group name \(key)"
+        case .fileHistory(let id): "file history \(id)"
         }
     }
 }
@@ -81,7 +84,7 @@ struct ModalHost: View {
         /// A click on the scrim cancels a confirmation, which has nothing to lose; a form keeps its input.
         var closesOnScrimTap: Bool {
             switch self {
-            case .window(.confirmation), .confirmation, .conflictSave, .conflictLeave: true
+            case .window(.confirmation), .window(.fileHistory), .confirmation, .conflictSave, .conflictLeave: true
             default: false
             }
         }
@@ -179,6 +182,10 @@ struct ModalHost: View {
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
         case .window(.groupName(let key)):
             GroupNameModal(key: key) { model.closeModal() }
+        case .window(.fileHistory(let tabID)):
+            if let session = model.sessions[tabID] {
+                FileHistorySearchModal(session: session) { model.closeModal() }
+            }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
                               isDestructive: confirmation.isDestructive, secondary: confirmation.secondary?.button,
