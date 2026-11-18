@@ -4,6 +4,12 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-18
+
+### Added
+- A footer under the window with toggles for the side panels, the app version and the running status of operations.
+- Settings › AI checks an API key with its provider before saving it, and shows a toast saying whether the key was accepted.
+
 ## [0.1.0] - 2026-11-18
 
 ### Added
