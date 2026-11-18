@@ -4,6 +4,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+### Changed
+- Squash and interactive rebase work with uncommitted changes: they are stashed first and put back afterwards (a squash keeps staged changes staged).
+
 ## [0.1.1] - 2026-11-18
 
 ### Added

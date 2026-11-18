@@ -435,7 +435,8 @@ struct UndoStatus: Equatable, Sendable {
 /// What a write did, for its toast.
 enum WriteOutcome: Equatable, Sendable {
     case done
-    /// A pull stopped on conflicts; git holds the local changes until it is continued or aborted.
+    /// A pull or an interactive rebase stopped (on conflicts, at an `edit`); git holds the local changes until it is
+    /// continued or aborted.
     case autostashPending
     /// A stash apply or pop: whether it applied cleanly and undo can take it back.
     case stash(GitOperations.StashApplyOutcome, pop: Bool)
@@ -4382,7 +4383,8 @@ final class RepoSession: Identifiable {
     /// Runs a user-initiated write of the WIP panel with the write environment (the login shell's PATH, for hooks
     /// and signing tools), off the main actor, then rereads the status and the refs (also when it failed: it may have
     /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel. Returns a pull's
-    /// outcome (`.autostashPending`: it stopped on conflicts with git holding the local changes) or a stash apply's.
+    /// or an interactive rebase's outcome (`.autostashPending`: it stopped, on conflicts or at an `edit`, with git
+    /// holding the local changes) or a stash apply's.
     @discardableResult
     func perform(_ write: Write) async throws -> WriteOutcome {
         let backend = try await backend()
@@ -4410,8 +4412,9 @@ final class RepoSession: Identifiable {
             postToast(.warning("Commit", detail: "Changes kept in stash \(hash.prefix(7))."))
             outcome = .done
         } catch {
-            // A pull whose local changes stayed in a stash still pulled.
-            if case GitError.autostashKept = error, case .pull = write, lastNotUndoable != write.notUndoable {
+            // A pull or an interactive rebase whose local changes stayed in a stash still ran.
+            let ran = switch write { case .pull, .interactiveRebase: true; default: false }
+            if case GitError.autostashKept = error, ran, lastNotUndoable != write.notUndoable {
                 lastNotUndoable = write.notUndoable
             }
             await refreshAfterWrite()
@@ -4436,7 +4439,7 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// Returns the pull's or the stash apply's outcome (`.done` for every other write).
+    /// Returns the pull's, the interactive rebase's or the stash apply's outcome (`.done` for every other write).
     @concurrent
     private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws
         -> WriteOutcome
@@ -4553,7 +4556,7 @@ final class RepoSession: Identifiable {
             let folder = backend.rebaseFolder
             if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try await ops.interactiveRebase(todo, files: folder)
+            if try await ops.interactiveRebase(todo, files: folder) { outcome = .autostashPending }
         }
         return outcome
     }
@@ -4580,7 +4583,8 @@ final class RepoSession: Identifiable {
                 let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }
                 let stopped = repoState?.isOperationInProgress == true && (!wasInProgress || resumes)
                 if outcome == .autostashPending {
-                    postToast(.warning("\(title) stopped on conflicts",
+                    let conflicts = repoState?.conflictedPaths.isEmpty == false
+                    postToast(.warning(conflicts ? "\(title) stopped on conflicts" : "\(title) stopped",
                                        detail: "Changes come back after continue or abort."))
                 } else if case .stash(let stash, let pop) = outcome, !stash.undoable {
                     // Undo would skip it and take back the operation before it.

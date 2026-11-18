@@ -87,11 +87,11 @@ public struct RebaseTodo: Sendable, Equatable {
     let range: [String]
 
     /// The rebase command (run with `GIT_SEQUENCE_EDITOR` set): the upstream is an object id after
-    /// `--end-of-options`, or `--root`.
+    /// `--end-of-options`, or `--root`. `--autostash`: local changes are stashed first and put back at the end.
     public var arguments: [String] {
         switch base {
-        case .parent(let oid): ["-c", "core.editor=true", "rebase", "-i", "--end-of-options", oid]
-        case .root: ["-c", "core.editor=true", "rebase", "-i", "--root"]
+        case .parent(let oid): ["-c", "core.editor=true", "rebase", "-i", "--autostash", "--end-of-options", oid]
+        case .root: ["-c", "core.editor=true", "rebase", "-i", "--autostash", "--root"]
         }
     }
 
@@ -252,11 +252,42 @@ extension GitOperations {
     /// existing folder the caller owns for the todo and message files: keep it until no rebase is in progress,
     /// because the `exec` lines of a rebase that stopped (conflict, `edit`) read their message files only after
     /// `continueOperation`. A conflict throws `GitError.conflict` and leaves the rebase in progress (`RepoState`).
-    public func interactiveRebase(_ todo: RebaseTodo, files folder: URL) async throws {
+    /// Local changes ride along (`--autostash`): when putting them back conflicts git keeps them in `refs/stash`,
+    /// which throws `GitError.autostashKept`. A rebase that stops (`edit`, a conflict) holds them until it is
+    /// continued or aborted: that returns true, and the conflict is not thrown.
+    @discardableResult
+    public func interactiveRebase(_ todo: RebaseTodo, files folder: URL) async throws -> Bool {
         let file = try todo.write(to: folder, git: runner.executable)
         let editor = "cp " + (try RebaseTodo.shellQuoted(file.path))
-        try await journaled(.rebase, todo.title, mode: .carry) { ops in
+        do {
+            try await rebase(todo, editor: editor)
+        } catch {
+            guard case GitError.conflict = error, try await lane({ await $0.autostashPending() }) else { throw error }
+            return true
+        }
+        return try await lane { await $0.autostashPending() }
+    }
+
+    private func rebase(_ todo: RebaseTodo, editor: String) async throws {
+        try await journaled(
+            .rebase, todo.title, mode: .carry, before: { try await $0.stashTop() },
+            after: { ops, top, _ in
+                guard let now = try await ops.stashTop(), now != top else { return }
+                throw GitError.autostashKept(now)
+            }
+        ) { ops in
+            let top = try await ops.stashTop()
+            let tree = try? await ops.exec(["rev-parse", "HEAD^{tree}"]).text
+            let index = try? await ops.exec(["write-tree"]).text
             try await ops.exec(todo.arguments, extraEnv: ["GIT_SEQUENCE_EDITOR": editor])
+            // git puts the changes back with a plain `stash apply`, so staged ones come back unstaged. A rebase that
+            // ended on the same tree (a squash, a reorder, a reword) takes the index back as it was, before the
+            // journal records the state after it.
+            guard let index, index != tree, try await ops.stashTop() == top, await !ops.autostashPending(),
+                  (try? await ops.exec(["rev-parse", "HEAD^{tree}"]).text) == tree
+            else { return }
+            // Not `-m`: it refuses the files that differ from the index, which here are the local changes.
+            try await ops.exec(["read-tree", "--end-of-options", index.trimmingCharacters(in: .newlines)])
         }
     }
 }

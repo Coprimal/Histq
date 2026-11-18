@@ -968,7 +968,7 @@ public struct GitOperations: Sendable {
     }
 
     /// The commit `refs/stash` points to; nil without stashes. Inside `lane`.
-    private func stashTop() async throws -> String? {
+    func stashTop() async throws -> String? {
         let result = try await exec(["rev-parse", "-q", "--verify", "refs/stash"], allowedExitCodes: [0, 1])
         return result.exitCode == 0 ? result.text.trimmingCharacters(in: .newlines) : nil
     }
@@ -1025,7 +1025,7 @@ public struct GitOperations: Sendable {
 
     /// Whether a stopped merge or rebase holds an auto-stash (`MERGE_AUTOSTASH`, `rebase-merge/autostash`,
     /// `rebase-apply/autostash`), which git puts back on continue or abort.
-    private func autostashPending() async -> Bool {
+    func autostashPending() async -> Bool {
         let names = ["MERGE_AUTOSTASH", "rebase-merge/autostash", "rebase-apply/autostash"]
         guard let paths = try? await exec(["rev-parse", "--path-format=absolute"] + names.flatMap { ["--git-path", $0] })
         else { return false }
