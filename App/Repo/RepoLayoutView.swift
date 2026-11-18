@@ -111,6 +111,15 @@ struct RepoLayoutView: View {
     /// stored widths are neither used nor written, so leaving Focus shows the panels as they were.
     private var isFocus: Bool { LayoutPreset.resolved(storedPreset) == .focus }
 
+    /// An open pull request over the graph (Classic, Focus) hides the detail and its divider: the pull request page
+    /// has its own side column, and the detail of a commit no longer in view only takes its room. Stacked keeps the
+    /// detail, since the graph stays on top there.
+    private var showsDetail: Bool {
+        if isFocus { return false }
+        if case .pullRequest = session.openHosted { return isStacked }
+        return true
+    }
+
     /// Stacked shows a file, pull request, issue or tool in its bottom pane.
     private var isStackedPaneOpen: Bool {
         isStacked && (session.openFile != nil || session.openHosted != nil || session.openTool != nil)
@@ -129,8 +138,8 @@ struct RepoLayoutView: View {
         .background(GitHubDriver(session: session))
     }
 
-    /// The three panels and their dividers (Focus: panel 2 alone). `height`: the layout's, which bounds the terminal
-    /// drawer until panel 2's own height is measured.
+    /// The three panels and their dividers (Focus: panel 2 alone; an open pull request: no detail). `height`: the
+    /// layout's, which bounds the terminal drawer until panel 2's own height is measured.
     private func panels(widths: PanelWidths, available: CGFloat, height: CGFloat) -> some View {
         HStack(spacing: 0) {
             // The panels' cards sit right on the page's sheet (MainView), a level between the window glass and
@@ -156,7 +165,7 @@ struct RepoLayoutView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
             }
             .frame(maxWidth: .infinity)
-            if !isFocus {
+            if showsDetail {
                 divider(.detail, widths: widths, available: available)
                 DetailPanel(session: session)
                     .frame(width: widths.detail)
