@@ -125,6 +125,8 @@ public struct GraphLayout: Sendable {
     private let reserved: Int
     /// Each pinned tip's lane, until the tip is laid out.
     private var pins: [String: Int] = [:]
+    /// The last row's bottom half, which equal halves of the next row reuse (one shared buffer).
+    private var lastBottom: [GraphSegment] = []
 
     /// `pinned` are the tips of the pinned branches, in pin order: each tip and its first-parent chain take
     /// the lane of its index, and every other line goes right of them. A tip that never comes leaves its
@@ -255,9 +257,13 @@ public struct GraphLayout: Sendable {
         return segments
     }
 
-    private func makeRow(
+    private mutating func makeRow(
         _ node: GraphRow.Node, lane: Int, color: Int, top: [GraphSegment], bottom: [GraphSegment]
     ) -> GraphRow {
+        // On a straight stretch both halves equal the last row's bottom: keep one buffer for all of them.
+        let top = top == lastBottom ? lastBottom : top
+        let bottom = bottom == top ? top : bottom
+        lastBottom = bottom
         var highest = lane
         for segment in top { highest = max(highest, segment.from, segment.to) }
         for segment in bottom { highest = max(highest, segment.from, segment.to) }

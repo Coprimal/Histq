@@ -3,14 +3,15 @@
 import Foundation
 import os
 
-/// DEBUG launch flags and the values that depend on them. In Release every flag reads as absent, so the app always
-/// uses the real Application Support folder, the standard preferences and the real Keychain service.
+/// DEBUG launch flags and the values that depend on them (also honoured by a `HISTQ_PERF` measurement build). In
+/// Release every flag reads as absent, so the app always uses the real Application Support folder, the standard
+/// preferences and the real Keychain service.
 enum AppState {
     /// The value after `name` in the launch arguments (`-HistqStateDir /path` -> "/path"), or nil when the flag is
-    /// absent or has no value. DEBUG only: always nil in Release. Later phases read their own flags through it, at
-    /// their point of use (`AppState.launchFlag("-HistqAvatarMode")`).
+    /// absent or has no value. DEBUG (or `HISTQ_PERF`) only: always nil in Release. Later phases read their own
+    /// flags through it, at their point of use (`AppState.launchFlag("-HistqAvatarMode")`).
     static func launchFlag(_ name: String) -> String? {
-        #if DEBUG
+        #if DEBUG || HISTQ_PERF
         let arguments = ProcessInfo.processInfo.arguments
         guard let index = arguments.firstIndex(of: name), index + 1 < arguments.count else { return nil }
         return arguments[index + 1]
@@ -300,7 +301,7 @@ struct SelectRequest: Equatable, Sendable {
 /// DEBUG timing log for the click-first checks: each line is `<ms since launch> <event> <detail>`, appended to
 /// `<stateDir>/timing.log` (`refresh` lines to `<stateDir>/refresh.log`) when `-HistqStateDir` is set, and mirrored
 /// to the unified log (category "timing", `.notice`). Callable from any thread; every function is a no-op in
-/// Release, so call sites need no `#if DEBUG`.
+/// Release (unless built with `HISTQ_PERF`), so call sites need no `#if DEBUG`.
 enum UITiming {
     /// A repo was opened in a tab.
     static func open(_ detail: String) { record("open", detail) }
@@ -317,11 +318,40 @@ enum UITiming {
     /// The commit detail's Files card in the detail panel: `layout <detail> <state> filesTop=<y> filesBottom=<y>
     /// panelBottom=<y>`.
     static func layout(_ detail: String) { record("layout", detail) }
-    /// A repo's whole log has been parsed and laid out: `content log-complete <commit count>`.
-    static func logComplete(commitCount: Int) { record("content", "log-complete \(commitCount)") }
+    /// A repo's whole log has been parsed and laid out: `content log-complete <commit count>`, then a `mem` line.
+    static func logComplete(commitCount: Int) {
+        record("content", "log-complete \(commitCount)")
+        memory()
+    }
+    /// A repo's log was read again after a change: `content log-reload incremental <new commits> <ms> env=<ms>
+    /// stashes=<ms> tips=<ms> delta=<ms> concat=<ms> index=<ms> layout=<ms>` when only the new commits were read,
+    /// `content log-reload full <ms>` when the whole history was.
+    static func logReload(_ detail: String) { record("content", "log-reload \(detail)") }
+    /// A log load started: `log-start <generation> incremental` when it first tries to read only the new commits,
+    /// `log-start <generation> full` when it reads the whole history.
+    static func logStart(generation: Int, incremental: Bool) {
+        record("log-start", "\(generation) " + (incremental ? "incremental" : "full"))
+    }
+    /// A finished load started another: `log-again synthetic` (a new log load: the WIP or stash rows changed
+    /// meanwhile) or `log-again worktree` (a new layout for the other worktrees' rows).
+    static func logAgain(_ reason: String) { record("log-again", reason) }
+    /// The main-actor work after a log load (publish, selection check, branch map start): `log-publish <ms>`.
+    static func logPublish(since start: UInt64) { record("log-publish", ms(since: start)) }
+    /// The branch attribution of a log started: `branch-map-start <log generation>`.
+    static func branchMapStart(generation: Int) { record("branch-map-start", "\(generation)") }
     /// The graph's branch attribution (`BranchAttribution`) is computed: `content branch-map <commits> <ms>`.
     static func branchMap(count: Int, ms: Double) {
         record("content", "branch-map \(count) " + String(format: "%.1f", ms))
+    }
+    /// A branch attribution was computed but a newer one replaced it: `content branch-map cancelled <ms>`.
+    static func branchMapCancelled(ms: Double) {
+        record("content", "branch-map cancelled " + String(format: "%.1f", ms))
+    }
+    /// A refresh read the status and the refs: `refresh-read <ms>`.
+    static func refreshRead(since start: UInt64) { record("refresh-read", ms(since: start)) }
+    /// The graph table reloaded for a new log generation: `graph-reload <generation> <ms>`.
+    static func graphReload(generation: Int, since start: UInt64) {
+        record("graph-reload", "\(generation) " + ms(since: start))
     }
     /// The repo watcher triggered a refresh (`status`, `refs`, `log`, `status+refs`); goes to `refresh.log`.
     static func refresh(_ scope: String) { record("refresh", scope, file: "refresh.log") }
@@ -334,8 +364,50 @@ enum UITiming {
     /// The graph search (⌘F) landed on a result or moved to a match: `find <query> matches=<m> current=<n>
     /// commit=<sha>` (`GraphSearch`).
     static func find(_ detail: String) { record("find", detail) }
+    /// The process's memory in MB: `mem footprint=<MB> peak=<MB>`, the current `phys_footprint` and its lifetime
+    /// peak (`ledger_phys_footprint_peak`) from `task_info(TASK_VM_INFO)`.
+    static func memory() {
+        #if DEBUG || HISTQ_PERF
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return }
+        let mb: (UInt64) -> String = { String(format: "%.1f", Double($0) / 1_048_576) }
+        record("mem", "footprint=\(mb(info.phys_footprint)) peak=\(mb(UInt64(info.ledger_phys_footprint_peak)))")
+        #endif
+    }
 
-    #if DEBUG
+    /// The ms since `start` (uptime nanoseconds), for a timing line.
+    private static func ms(since start: UInt64) -> String {
+        String(format: "%.1f", Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000)
+    }
+
+    /// The step times of one task for its timing line: `lap("tips")` adds the ms since the last lap (or since `init`)
+    /// to step "tips"; `description` is `<step>=<ms> …` in the order the steps first ended. Times nothing in Release.
+    struct Steps: Sendable {
+        private var last = DispatchTime.now().uptimeNanoseconds
+        private var names: [String] = []
+        private var ms: [String: Double] = [:]
+
+        mutating func lap(_ name: String) {
+            #if DEBUG || HISTQ_PERF
+            let now = DispatchTime.now().uptimeNanoseconds
+            if ms[name] == nil { names.append(name) }
+            ms[name, default: 0] += Double(now &- last) / 1_000_000
+            last = now
+            #endif
+        }
+
+        var description: String {
+            names.map { "\($0)=" + String(format: "%.1f", ms[$0] ?? 0) }.joined(separator: " ")
+        }
+    }
+
+    #if DEBUG || HISTQ_PERF
     /// The launch origin, in uptime nanoseconds; set by `markLaunch()` at the top of `main()`.
     nonisolated(unsafe) private static var launchNanos = DispatchTime.now().uptimeNanoseconds
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "timing")
@@ -345,13 +417,13 @@ enum UITiming {
 
     /// Sets the "ms since launch" origin. Call once, first thing in `main()`, before any other thread exists.
     static func markLaunch() {
-        #if DEBUG
+        #if DEBUG || HISTQ_PERF
         launchNanos = DispatchTime.now().uptimeNanoseconds
         #endif
     }
 
     private static func record(_ event: String, _ detail: String, file: String = "timing.log") {
-        #if DEBUG
+        #if DEBUG || HISTQ_PERF
         let ms = Double(DispatchTime.now().uptimeNanoseconds &- launchNanos) / 1_000_000
         let line = String(format: "%.1f", ms) + " \(event) \(detail)"
         logger.notice("\(line, privacy: .public)")

@@ -74,7 +74,8 @@ struct LogFilter: Equatable, Sendable {
     var pinned: [String] = []
 }
 
-/// The log of a repo with its graph rows, in `git log --all --topo-order` order. `rows[i]` is `commits[i]`'s row; the
+/// The log of a repo with its graph rows, in `git log --all --topo-order` order (after an incremental reload, the new
+/// commits on top of the previous ones, see `RepoSession.readLogIncrementally`). `rows[i]` is `commits[i]`'s row; the
 /// WIP row above the commits is in `syntheticRows`, the other worktrees' and the stash rows in `hung`, each right above
 /// its base (as GitKraken).
 struct LogSnapshot: Sendable {
@@ -92,15 +93,27 @@ struct LogSnapshot: Sendable {
     var stashes: [Stash] = []
     /// `commits`' index of each hash, filled with the pages off the main actor: a click finds its commit's header here.
     var commitIndex: [String: Int] = [:]
+    /// Once the log is complete, the hashes of its commits no other commit lists as a parent
+    /// (`LogReader.tips(of:index:)`): an incremental reload reads only what is new since them.
+    var tips: [String] = []
+    /// The most lanes a row of `syntheticRows`, `rows` or `hung` draws in (`GraphRow.width`), kept with the rows off
+    /// the main actor: the graph column fits it without going over every row.
+    var lanes = 0
     /// The other worktrees with changes whose WIP rows are laid out (after the WIP row, before the stashes).
     var worktrees: [WorktreeInfo] = []
     /// Every page has been parsed and laid out; false while only the first pages are in.
     var isComplete = false
+    /// The repo was shallow when the log was read (`<common dir>/shallow`): a deepening fetch gives old commits new
+    /// parents, so a reload reads the whole history again rather than only the new commits.
+    var isShallow = false
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
     /// inserts the rows a snapshot of the same load adds and reloads for a new one.
     var generation = 0
     /// The hidden, soloed and pinned branches the log was read and laid out with.
     var filter = LogFilter()
+    /// Timing only: the step times of the incremental read that made it (`readLogIncrementally`), for its
+    /// `log-reload` line.
+    var readSteps = ""
 
     /// What a table row of the graph shows.
     enum Entry {
@@ -766,6 +779,8 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var refreshScope: RefreshScope = []
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var branchMapTask: Task<Void, Never>?
+    /// The refs moved since `branchMap` was last computed: the log reload that follows maps them, or its failure does.
+    @ObservationIgnored private var branchMapRefsStale = false
     /// The last load's `LogSnapshot.generation`.
     @ObservationIgnored private var logGeneration = 0
     /// The stashes, read with the refs; nil until the first read. Compared with the log's to reload it when they change.
@@ -1531,7 +1546,7 @@ final class RepoSession: Identifiable {
             vanished = stashes.map { !$0.contains { $0.hash == hash } } ?? false
         case .commit(let hash):
             guard let previousLog, previousLog.isComplete, let log = log.value, log.isComplete else { return }
-            vanished = previousLog.commits.contains { $0.hash == hash } && !log.commits.contains { $0.hash == hash }
+            vanished = previousLog.commitIndex[hash] != nil && log.commitIndex[hash] == nil
         case .worktree(let path):
             // Its graph row goes once it is clean, removed or unreadable.
             guard worktrees.value != nil else { return }
@@ -1571,7 +1586,9 @@ final class RepoSession: Identifiable {
             let backend = try await backend()
             // A newer refresh took over (it owns `refreshTask` now).
             try Task.checkCancellation()
+            let readStart = DispatchTime.now().uptimeNanoseconds
             let refsMoved = try await readStatusAndRefs(backend, scope: scope)
+            UITiming.refreshRead(since: readStart)
             if scope.contains(.log) || refsMoved { loadLog(backend) }
             // A worktree added or removed, or a commit made in one, shows as a refs change. Never before the first log
             // page: that one starts the first read.
@@ -1622,8 +1639,9 @@ final class RepoSession: Identifiable {
             pruneView(newRefs)
             let filter = visibility
             updateVisibility()
-            // After the filter: the branch map attributes commits to the shown refs only.
-            if changed || filter != visibility { updateBranchMap() }
+            // Moved refs reload the log (every caller), whose completion maps them; else after the filter: the branch
+            // map attributes commits to the shown refs only.
+            if moved { branchMapRefsStale = true } else if changed || filter != visibility { updateBranchMap() }
         }
         dropVanishedSelection()
         return moved || syntheticRowsChanged
@@ -1704,9 +1722,9 @@ final class RepoSession: Identifiable {
 
     // MARK: Log
 
-    /// (Re)loads the whole log and lays out its graph off the main actor. The first load publishes the first page
-    /// as soon as it is parsed; a reload keeps the old log on screen until the new one is complete. A newer load
-    /// cancels this one.
+    /// (Re)loads the log and lays out its graph off the main actor. The first load publishes the first page as soon as
+    /// it is parsed; a reload first tries to read only the new commits (`readLogIncrementally`), else reads the whole
+    /// log, and keeps the old log on screen until the new one is complete. A newer load cancels this one.
     private func loadLog(_ backend: Backend) {
         logTask?.cancel()
         let isFirstLoad = log.value == nil
@@ -1719,31 +1737,70 @@ final class RepoSession: Identifiable {
         // The first load starts beside the first refs read: with a saved view and no refs yet, `readLog` reads them.
         let filter: LogFilter? = view == .empty || refs.value != nil ? visibility : nil
         let view = view
+        // A complete log on screen read with the same hidden branches, none soloed: a reload first reads only the commits
+        // that are new since it. Hiding, showing or soloing a branch reads the whole log again (a soloed log always).
+        let oldLog = log.value.flatMap { old in
+            old.isComplete && filter?.hidden == old.filter.hidden && filter?.solo.isEmpty == true
+                && old.filter.solo.isEmpty ? old : nil
+        }
         logTask = Task { [weak self] in
+            // Keeps App Nap from throttling the load while the app is in the background.
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiated, reason: "Reloading the commit log")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             do {
-                let snapshot = try await Self.readLog(
-                    backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view
-                ) { first in
-                    guard isFirstLoad, !Task.isCancelled else { return }
-                    await MainActor.run {
-                        self?.log = .loaded(first)
-                        self?.updateBranchMap()
-                        self?.loadWorktrees(backend)
+                let start = DispatchTime.now().uptimeNanoseconds
+                UITiming.logStart(generation: generation, incremental: oldLog != nil)
+                var incremental: LogSnapshot?
+                if let oldLog, let filter {
+                    do {
+                        incremental = try await Self.readLogIncrementally(
+                            backend, previous: oldLog, cwd: cwd, generation: generation, worktrees: worktrees,
+                            filter: filter)
+                    } catch where !Self.isCancellation(error) {
+                        Self.logger.error("incremental log reload failed: \(error, privacy: .public)")
+                    }
+                }
+                let snapshot: LogSnapshot
+                if let incremental {
+                    snapshot = incremental
+                } else {
+                    snapshot = try await Self.readLog(
+                        backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view
+                    ) { first in
+                        guard isFirstLoad, !Task.isCancelled else { return }
+                        await MainActor.run {
+                            self?.log = .loaded(first)
+                            self?.updateBranchMap()
+                            self?.loadWorktrees(backend)
+                        }
                     }
                 }
                 try Task.checkCancellation()
+                if !isFirstLoad {
+                    let ms = String(format: "%.1f", Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+                    if let incremental, let oldLog {
+                        UITiming.logReload("incremental \(incremental.commits.count - oldLog.commits.count) \(ms) "
+                            + incremental.readSteps)
+                    } else {
+                        UITiming.logReload("full \(ms)")
+                    }
+                }
                 guard let self else { return }
+                let publishStart = DispatchTime.now().uptimeNanoseconds
                 let previous = log.value
                 log = .loaded(snapshot)
                 logTask = nil
                 UITiming.logComplete(commitCount: snapshot.commits.count)
                 updateBranchMap()
                 if !isFirstLoad { dropVanishedSelection(previousLog: previous) }
+                UITiming.logPublish(since: publishStart)
                 // A log without a page (an unborn branch) never started the worktrees' first read.
                 if case .idle = self.worktrees { loadWorktrees(backend) }
                 // The status or the stashes changed while it loaded, or the worktrees were read meanwhile; or the
                 // refs it read itself differ from the session's.
                 if syntheticRowsChanged || (filter == nil && refs.value != nil && snapshot.filter != visibility) {
+                    UITiming.logAgain(syntheticRowsChanged ? "synthetic" : "filter")
                     loadLog(backend)
                 } else {
                     updateWorktreeRows(backend)
@@ -1755,6 +1812,8 @@ final class RepoSession: Identifiable {
                     log = .failed(Self.message(for: error))
                 } else {
                     Self.logger.error("log reload failed: \(error, privacy: .public)")
+                    // The old log stays: map it to the refs that moved.
+                    if branchMapRefsStale { updateBranchMap() }
                 }
             }
         }
@@ -1779,6 +1838,7 @@ final class RepoSession: Identifiable {
                 view: view, refs: try await RefReader.read(runner: backend.runner, cwd: cwd, env: env))
         }
         let filter = snapshot.filter
+        snapshot.isShallow = isShallow(backend)
         // Read first: the log also reads the stashes' bases, which no branch may hold any more (not in solo mode).
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
         let pages = LogReader.pages(
@@ -1794,8 +1854,10 @@ final class RepoSession: Identifiable {
                 snapshot.commitIndex[commit.hash] = snapshot.commits.count + offset
             }
             snapshot.commits += page
-            snapshot.rows += layout.append(page)
+            let rows = layout.append(page)
+            snapshot.rows += rows
             snapshot.hung = layout.hung
+            snapshot.lanes = max(snapshot.lanes, lanes(of: rows), lanes(of: snapshot.hung.map(\.row)))
             if isFirst {
                 isFirst = false
                 await firstPage(snapshot)
@@ -1803,7 +1865,11 @@ final class RepoSession: Identifiable {
         }
         try Task.checkCancellation()
         snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
+        snapshot.lanes = max(snapshot.lanes, lanes(of: snapshot.syntheticRows))
         snapshot.isComplete = true
+        snapshot.tips = LogReader.tips(of: snapshot.commits, index: snapshot.commitIndex)
+        // Made shallow while git read the history: the next reload must not trust it.
+        snapshot.isShallow = snapshot.isShallow || isShallow(backend)
         return snapshot
     }
 
@@ -1822,6 +1888,75 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// The log after a reload, from `previous` (a complete snapshot) and only the commits that are new since it
+    /// (`LogReader.newCommits`), with the status and stashes read again, every row laid out again off the main actor.
+    /// `filter` has `previous`'s hidden branches and no soloed one (the caller checks): the new commits leave out the
+    /// same refs, and its pinned tips (which move with their branches) lay the rows out. Nil when the new commits cannot be proven to be the whole difference (a commit of `previous` no longer
+    /// reachable, a shallow repo, a graft file or a replace ref): the caller reads the whole log. Throws
+    /// `CancellationError` when cancelled.
+    ///
+    /// It has the same commits as a fresh read, in a valid topological order, but not always in the order of git's
+    /// `--topo-order`: the commits of `previous` keep their order and the new ones come on top, while a fresh read
+    /// after a commit on a branch other than the newest one would list that branch's whole line first.
+    @concurrent
+    private nonisolated static func readLogIncrementally(
+        _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
+        filter: LogFilter
+    ) async throws -> LogSnapshot? {
+        var steps = UITiming.Steps()
+        guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
+        let env = try await backend.readEnvironment(cwd: cwd)
+        async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        steps.lap("env")
+        var snapshot = LogSnapshot(generation: generation)
+        snapshot.filter = filter
+        snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        steps.lap("stashes")
+        let tips = previous.tips
+        steps.lap("tips")
+        guard let delta = try await LogReader.newCommits(
+            runner: backend.runner, cwd: cwd, env: env, previousTips: tips,
+            alsoFrom: snapshot.stashes.map(\.base), hidden: filter.hidden.sorted()),
+            !delta.contains(where: { previous.commitIndex[$0.hash] != nil })
+        else { return nil }
+        steps.lap("delta")
+        snapshot.tips = LogReader.tips(adding: delta, to: tips)
+        steps.lap("tips")
+        snapshot.worktrees = worktrees
+        snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
+        // The status's wait (it runs alongside the steps above) counts with the environment.
+        steps.lap("env")
+        try Task.checkCancellation()
+        if delta.isEmpty {
+            snapshot.commits = previous.commits
+            steps.lap("concat")
+            snapshot.commitIndex = previous.commitIndex
+        } else {
+            snapshot.commits = delta + previous.commits
+            steps.lap("concat")
+            snapshot.commitIndex.reserveCapacity(snapshot.commits.count)
+            for (index, commit) in snapshot.commits.enumerated() { snapshot.commitIndex[commit.hash] = index }
+        }
+        steps.lap("index")
+        try Task.checkCancellation()
+        snapshot.isComplete = true
+        layOutAll(&snapshot)
+        steps.lap("layout")
+        snapshot.readSteps = steps.description
+        try Task.checkCancellation()
+        return snapshot
+    }
+
+    /// Whether the repo is a shallow clone now (`<common dir>/shallow` exists).
+    nonisolated private static func isShallow(_ backend: Backend) -> Bool {
+        FileManager.default.fileExists(atPath: backend.directories.commonDir.appending(path: "shallow").path)
+    }
+
+    /// Whether the repo has a graft file (`<common dir>/info/grafts`), which can give an old commit other parents.
+    nonisolated private static func hasGrafts(_ backend: Backend) -> Bool {
+        FileManager.default.fileExists(atPath: backend.directories.commonDir.appending(path: "info/grafts").path)
+    }
+
     /// Lays out `snapshot.synthetic`'s WIP row at the top and hangs the other worktrees' rows and its stashes above
     /// their bases (as GitKraken: another worktree's changes sit on its HEAD, not above every commit). Returns the
     /// layout to feed the commits, and the top rows' layout: the hung rows whose base never came are laid out with it
@@ -1832,6 +1967,7 @@ final class RepoSession: Identifiable {
         snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind == .wip }.map { row in
             isMissingBase(row, in: snapshot) ? GraphSyntheticRow(kind: row.kind, id: row.id, base: nil) : row
         })
+        snapshot.lanes = lanes(of: snapshot.syntheticRows)
         let top = layout
         layout.hang(snapshot.synthetic.filter { $0.kind != .wip })
         return (layout, top)
@@ -2032,6 +2168,24 @@ final class RepoSession: Identifiable {
         local.upstream.map { $0.drop { $0 != "/" }.dropFirst() == local.name } ?? false
     }
 
+    /// Lays out `snapshot`'s synthetic rows and all its commits in one go (`beginLayout`); once the log is complete,
+    /// the hung rows whose base is not in it go at the top without a line.
+    nonisolated private static func layOutAll(_ snapshot: inout LogSnapshot) {
+        var (layout, top) = beginLayout(&snapshot)
+        snapshot.rows = layout.append(snapshot.commits)
+        snapshot.hung = layout.hung
+        if snapshot.isComplete {
+            snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
+        }
+        snapshot.lanes = max(
+            lanes(of: snapshot.syntheticRows), lanes(of: snapshot.rows), lanes(of: snapshot.hung.map(\.row)))
+    }
+
+    /// The most lanes one of `rows` draws in (`LogSnapshot.lanes`).
+    nonisolated private static func lanes(of rows: [GraphRow]) -> Int {
+        rows.reduce(0) { max($0, $1.width) }
+    }
+
     // MARK: Worktrees
 
     /// The other worktrees whose changes get a graph row, in `git worktree list` order.
@@ -2143,15 +2297,24 @@ final class RepoSession: Identifiable {
         guard logTask == nil, let current = log.value, current.isComplete else { return }
         let worktrees = dirtyWorktrees
         guard worktrees != current.worktrees || Self.hasLineToMissingBase(current) else { return }
+        UITiming.logAgain("worktree")
         logGeneration &+= 1
         let generation = logGeneration
         logTask = Task { [weak self] in
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiated, reason: "Laying out the commit graph")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             let snapshot = await Self.relayout(current, worktrees: worktrees, generation: generation)
             guard !Task.isCancelled, let self else { return }
             log = .loaded(snapshot)
             logTask = nil
             updateBranchMap()
-            if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
+            if syntheticRowsChanged {
+                UITiming.logAgain("synthetic")
+                loadLog(backend)
+            } else {
+                updateWorktreeRows(backend)
+            }
         }
     }
 
@@ -2159,10 +2322,16 @@ final class RepoSession: Identifiable {
     /// both are read.
     private func updateBranchMap() {
         guard let log = log.value, let refs = visibleRefs else { return }
+        branchMapRefsStale = false
         branchMapTask?.cancel()
+        UITiming.branchMapStart(generation: log.generation)
         branchMapTask = Task { [weak self] in
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiated, reason: "Mapping commits to branches")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             let (names, claims, ms) = await Self.attributeBranches(log, refs: refs)
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled else { return UITiming.branchMapCancelled(ms: ms) }
+            guard let self else { return }
             branchMap = BranchMap(
                 names: names, claims: claims, logGeneration: log.generation, generation: branchMap.generation &+ 1)
             branchMapTask = nil
@@ -2190,12 +2359,7 @@ final class RepoSession: Identifiable {
         snapshot.worktrees = worktrees
         snapshot.synthetic = log.synthetic.filter { $0.kind == .wip } + worktreeRows(worktrees)
             + log.synthetic.filter { $0.kind == .stash }
-        var (layout, top) = beginLayout(&snapshot)
-        snapshot.rows = layout.append(log.commits)
-        snapshot.hung = layout.hung
-        if log.isComplete {
-            snapshot.syntheticRows += top.append(layout.waiting.map { .init(kind: $0.kind, id: $0.id, base: nil) })
-        }
+        layOutAll(&snapshot)
         return snapshot
     }
 
@@ -2726,6 +2890,17 @@ final class RepoSession: Identifiable {
                 size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
                 objects = ["\(base):\(oldPath)"]
             }
+        }
+        // One cat-file for every side, names on stdin. A line break in a name would split it (git also drops a CR at
+        // the end of a line), so such a name takes one call per object below.
+        if !objects.contains(where: { $0.utf8.contains { $0 == 0x0A || $0 == 0x0D } }) {
+            let input = Data(objects.map { $0 + "\n" }.joined().utf8)
+            // One line per object, in order; "<name> missing" (no such object on that side) counts as 0.
+            if let result = try? await runner.run(
+                ["cat-file", "--batch-check=%(objectsize)"], cwd: cwd, env: env, stdin: input) {
+                for line in result.text.split(separator: "\n") { size = max(size, Int(line) ?? 0) }
+            }
+            return size
         }
         for object in objects {
             // Exit 128: no such object on that side (an added file, a root commit, an unborn branch).

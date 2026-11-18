@@ -21,12 +21,13 @@ public enum BranchAttribution {
     }
 
     /// The same as `map`, by position: `claims[i]` is `commits[i]`'s branch, an index into `names` (-1 for none).
-    /// Cheaper for a long log than the map by hash.
+    /// Cheaper for a long log than the map by hash. A cancelled task gets a partial result early (unclaimed commits).
     public static func claims(commits: [Commit], refs: Refs, index: [String: Int]? = nil)
         -> (names: [String], claims: [Int32])
     {
         let index = index ?? Dictionary(commits.enumerated().map { ($1.hash, $0) }, uniquingKeysWith: { a, _ in a })
         let tips = tips(refs)
+        var claims = [Int32](repeating: -1, count: commits.count)
         // Every commit's parents by position (-1 for one outside the log), looked up once: commit `i`'s are
         // `parents[starts[i]..<starts[i + 1]]`, first parent first.
         var starts = [Int32]()
@@ -34,16 +35,19 @@ public enum BranchAttribution {
         var parents = [Int32]()
         parents.reserveCapacity(commits.count + commits.count / 4)
         for commit in commits {
+            if starts.count & 0xFFFF == 0, Task.isCancelled { return (tips.map(\.name), claims) }
             starts.append(Int32(parents.count))
             for parent in commit.parents { parents.append(index[parent].map(Int32.init) ?? -1) }
         }
         starts.append(Int32(parents.count))
-        var claims = [Int32](repeating: -1, count: commits.count)
 
         // Pass 1: first-parent walks.
+        var steps = 0
         for (tip, branch) in tips.enumerated() {
             var position = index[branch.commit] ?? -1
             while position >= 0, claims[position] < 0 {
+                steps += 1
+                if steps & 0xFFFF == 0, Task.isCancelled { return (tips.map(\.name), claims) }
                 claims[position] = Int32(tip)
                 let start = Int(starts[position])
                 position = start < Int(starts[position + 1]) ? Int(parents[start]) : -1
@@ -51,7 +55,9 @@ public enum BranchAttribution {
         }
 
         // Pass 2: an unclaimed commit takes its first claimed child's claim, handed down in log order.
-        for position in commits.indices where claims[position] >= 0 {
+        for position in commits.indices {
+            if position & 0xFFFF == 0, Task.isCancelled { return (tips.map(\.name), claims) }
+            guard claims[position] >= 0 else { continue }
             for slot in Int(starts[position])..<Int(starts[position + 1]) {
                 let parent = Int(parents[slot])
                 if parent > position, claims[parent] < 0 { claims[parent] = claims[position] }

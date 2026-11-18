@@ -57,6 +57,36 @@ export HISTQ_BIG_FIXTURE="$PWD/build/qa/fx/big"
 cd Packages/HistqCore && swift test -c release --filter GraphLayoutTests
 ```
 
+## Reload benchmark
+
+`scripts/perf-reload.sh <Histq.app> <repo> <cycles> [extra app args...]` measures how long the app takes to show a
+new commit. It launches the app in the background (`open -g`, `-HistqBackground YES`, state in `build/qa/perf/state`,
+wiped first), waits for the first full load, then per cycle edits a tracked file and commits it, and prints one row
+for the WIP reload (`<k>w`) and one for the commit reload (`<k>`): M1 (`graph-reload` minus the watcher's `refresh`,
+in ms), the counts of `log-start`, `log-again`, `graph-reload`, `branch-map-start` and cancelled branch maps, the
+`log-reload` steps and the last `mem` line. A summary follows (M1 median and max, cycle 5 / median, peak memory after
+the first load and at the end). It quits only the instance it started.
+
+Use the Debug app or a measurement build (Release with `HISTQ_PERF`, which honours the state dir and writes the
+timing logs), never the plain Release build (it ignores `-HistqBackground` and would come to front). The repo is a
+disposable APFS clone of a big fixture, with a commit-graph and git maintenance off. After the runs, build plain
+Release again so DerivedData does not keep the perf build:
+
+```sh
+scripts/make-fixtures.sh build/qa/bigfx --big 1000000
+mkdir -p build/qa/perf && cp -cR build/qa/bigfx/big build/qa/perf/big-cg
+git -C build/qa/perf/big-cg -c maintenance.auto=false -c gc.auto=0 commit-graph write --reachable
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation \
+  SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) HISTQ_PERF' build
+# the app: <BUILT_PRODUCTS_DIR of -configuration Release -showBuildSettings>/Histq.app
+scripts/perf-reload.sh <Histq.app> build/qa/perf/big-cg 5
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation build
+```
+
+The script refuses a repo outside `build/qa/perf/` or with uncommitted changes, and resets it to its starting tip at
+the end (`git reset --hard`), so its test commits are dropped. They are dated after the fixture's tip (its commits are
+dated up to 2027), a minute apart, with `maintenance.auto` and `gc.auto` off.
+
 ## Screenshots
 
 `scripts/shot.sh <out.png> [--keep-state] [--wait <s>] [repo paths...] [-- app args...]` launches the Debug app (build
@@ -82,7 +112,15 @@ timings. In a state-dir run, Debug builds append `<ms since launch> <event> <det
 
 - `open`, `select`, `placeholder`, `spinner` (only when a load takes over about 150 ms) and `content` (for every
   select; `content log-complete <n>` when the whole history is laid out; `content branch-map <commits> <ms>` when the
-  faded branch labels are computed).
+  faded branch labels are computed, `content branch-map cancelled <ms>` when a newer one replaced them; `content
+  log-reload incremental <new commits> <ms> env=<ms> stashes=<ms> tips=<ms> delta=<ms> concat=<ms> index=<ms>
+  layout=<ms>` (the read's steps, the status's wait counted in `env`) or `content log-reload full <ms>` when a change
+  reloads the log).
+- Log reloads: `log-start <generation> incremental|full` when a log load starts; `log-again synthetic|worktree` when a
+  finished load starts another load or a worktree-row layout; `log-publish <ms>` for the main-actor work after a load;
+  `branch-map-start <log generation>` when a branch attribution starts; `refresh-read <ms>` when a refresh has read
+  the status and refs; `graph-reload <generation> <ms>` when the graph table reloads for a new generation; `mem
+  footprint=<MB> peak=<MB>` after every `log-complete`.
 - `content-info` (a commit's info card is on screen; its files may still load) and `layout <detail> <state>
   filesTop=<y> filesBottom=<y> panelBottom=<y>` (the Files card edges, for `placeholder`, `pending` or `loaded`).
 - `find <query> matches=<m> current=<n> commit=<sha>` (Cmd-F search), `graph-col` (the graph column fitted to its

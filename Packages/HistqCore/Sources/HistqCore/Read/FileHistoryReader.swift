@@ -53,12 +53,14 @@ public enum FileHistoryReader {
         let tokens = output.split(separator: 0, omittingEmptySubsequences: false)
         var entries: [FileHistoryEntry] = []
         var tracked = path
+        var names: [Substring: String] = [:]
         var index = 0
         while index < tokens.count {
             let token = tokens[index]
             index += 1
             guard token.first == 0x1E,
-                  let commit = LogParser.parse(Substring(String(decoding: token.dropFirst(), as: UTF8.self)))
+                  let commit = LogParser.parse(
+                      Substring(String(decoding: token.dropFirst(), as: UTF8.self)), names: &names)
             else { continue }
             var status: Character?
             var current = tracked

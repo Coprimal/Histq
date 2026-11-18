@@ -708,23 +708,24 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         {
             // A new load (or a new layout): every row may have changed. A reload of a log already on screen keeps the
             // top visible row where it was (rows above it may have come or gone) and does not scroll to the selection.
+            let start = DispatchTime.now().uptimeNanoseconds
             let anchor = old.rowCount > 0 ? scrollAnchor(table) : nil
             log = new
             // A load's first pages may need fewer lanes than the whole log: the column keeps the last log's until the
             // load completes, so it does not narrow and widen again on every refresh.
-            let lanes = Self.lanes(in: new)
-            logLanes = new.isComplete ? lanes : max(lanes, logLanes)
+            logLanes = new.isComplete ? new.lanes : max(new.lanes, logLanes)
             hideStack()
             table.reloadData()
             if let anchor {
                 restoreScroll(anchor, in: table)
                 needsScroll = false
             }
+            UITiming.graphReload(generation: new.generation, since: start)
             return
         }
         log = new
         if new.isComplete, !old.isComplete {
-            logLanes = Self.lanes(in: new)
+            logLanes = new.lanes
         } else if new.rows.count > old.rows.count {
             logLanes = max(logLanes, Self.lanes(of: new.rows[old.rows.count...]))
         }
@@ -745,11 +746,6 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The most lanes one of `rows` draws in.
     private static func lanes(of rows: ArraySlice<GraphRow>) -> Int {
         rows.reduce(0) { max($0, $1.width) }
-    }
-
-    /// The most lanes a row of `log` draws in.
-    private static func lanes(in log: LogSnapshot) -> Int {
-        max(lanes(of: log.syntheticRows[...]), lanes(of: log.rows[...]), lanes(of: log.hung.map(\.row)[...]))
     }
 
     // MARK: Graph column width

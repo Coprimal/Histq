@@ -1,6 +1,7 @@
 // Commit avatars for the graph's nodes, in the mode `PrefKey.avatarMode` names (DEBUG `-HistqAvatarMode` overrides it):
 // "real" (Gravatar by the SHA-256 of the email, the GitHub avatar for `@users.noreply.github.com`), "generated" (a
-// deterministic pattern and color from the email's hash) or "initials" (monochrome initials).
+// deterministic pattern and color from the email's hash) or "initials" (monochrome initials). In every mode, a provider's
+// no-reply address (GitHub's web-flow committer, ...) shows the provider's bundled logo and GitHub's bots their real avatar.
 // `avatar(email:name:pixels:)` never waits: in real mode it returns the generated avatar until the real one is loaded
 // (memory, then the disk cache under `StatePaths`, then the network, off the main thread), then posts `didChange` so
 // the graphs redraw the rows of that email. A 404 is remembered on disk for 7 days; an offline or failed load keeps
@@ -65,21 +66,20 @@ final class AvatarStore {
 
     /// The avatar to draw now for an author: `pixels` is the node's diameter in device pixels (the size real avatars
     /// are fetched at). Never blocks; in real mode a missing avatar starts its load and the generated one stands in.
+    /// A hosting provider's own address (GitHub's web-flow committer, ...) shows its bundled logo, and GitHub's bots
+    /// (`dependabot[bot]`, ...) their real avatar, in every mode.
     func avatar(email: String, name: String, pixels: Int) -> NSImage? {
         let identity = Self.identity(email: email, name: name)
-        switch mode {
-        case .initials:
-            return initialsAvatar(name: name)
-        case .generated:
-            return generatedAvatar(identity: identity)
-        case .real:
-            // An author email can spell an owner identity (`owner:<host>/<x>`): never a remote owner's logo or load.
-            if identity.hasPrefix("owner:") { return generatedAvatar(identity: identity) }
-            let key = "\(identity)|\(pixels)" as String
-            if let image = images.object(forKey: key as NSString) { return image }
-            if !missing.contains(key), !email.isEmpty { load(identity: identity, key: key, pixels: pixels) }
-            return generatedAvatar(identity: identity)
-        }
+        if let provider = Self.provider(of: identity) { return providerAvatar(provider) }
+        let fallback = mode == .initials ? initialsAvatar(name: name) : generatedAvatar(identity: identity)
+        // An author email can spell an owner identity (`owner:<host>/<x>`): never a remote owner's logo or load.
+        if identity.hasPrefix("owner:") { return fallback }
+        // A bot's avatar sends only the bot's login to GitHub.
+        guard mode == .real || identity.hasSuffix("[bot]@users.noreply.github.com") else { return fallback }
+        let key = "\(identity)|\(pixels)" as String
+        if let image = images.object(forKey: key as NSString) { return image }
+        if !missing.contains(key), !email.isEmpty { load(identity: identity, key: key, pixels: pixels) }
+        return fallback
     }
 
     /// The trimmed, lowercased email (the name when there is none): what the hash, the caches and the files use.
@@ -135,6 +135,57 @@ final class AvatarStore {
     /// Whether `email` is the identity `didChange` named (the graph compares its rows' emails with it).
     static func matches(email: String, name: String, changed: String) -> Bool {
         identity(email: email, name: name) == changed
+    }
+
+    // MARK: Provider logos
+
+    /// A hosting provider whose own no-reply address commits (web merges and edits, pipelines): `rawValue` is its
+    /// domain, its asset is `logo-<rawValue>` (simple-icons, CC0).
+    enum Provider: String {
+        case github = "github.com", gitlab = "gitlab.com", bitbucket = "bitbucket.org", codeberg = "codeberg.org"
+
+        var asset: String { "logo-" + rawValue.prefix { $0 != "." } }
+        /// The brand color, but white for GitHub's near-black.
+        var color: NSColor {
+            switch self {
+            case .github: .white
+            case .gitlab: NSColor(srgbRed: 0xFC / 255, green: 0x6D / 255, blue: 0x26 / 255, alpha: 1)
+            case .bitbucket: NSColor(srgbRed: 0x00 / 255, green: 0x52 / 255, blue: 0xCC / 255, alpha: 1)
+            case .codeberg: NSColor(srgbRed: 0x21 / 255, green: 0x85 / 255, blue: 0xD0 / 255, alpha: 1)
+            }
+        }
+    }
+
+    /// `noreply@`, `no-reply@` or `commits-noreply@` one of the providers' domains (the identity is lowercased).
+    private static func provider(of identity: String) -> Provider? {
+        guard let at = identity.lastIndex(of: "@"),
+              ["noreply", "no-reply", "commits-noreply"].contains(identity[..<at])
+        else { return nil }
+        return Provider(rawValue: String(identity[identity.index(after: at)...]))
+    }
+
+    /// The provider's logo in its color on the generated avatar's dark disc.
+    private func providerAvatar(_ provider: Provider) -> NSImage? {
+        let cacheKey = "p|\(provider.rawValue)" as NSString
+        if let image = drawn.object(forKey: cacheKey) { return image }
+        guard let logo = NSImage(named: provider.asset) else { return nil }
+        let background = Self.background
+        let color = provider.color
+        let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
+            background.setFill()
+            rect.fill()
+            let mark = rect.insetBy(dx: rect.width * 0.2, dy: rect.height * 0.2)
+            let tinted = NSImage(size: mark.size, flipped: false) { markRect in
+                logo.draw(in: markRect)
+                color.setFill()
+                markRect.fill(using: .sourceAtop)
+                return true
+            }
+            tinted.draw(in: mark)
+            return true
+        }
+        drawn.setObject(image, forKey: cacheKey)
+        return image
     }
 
     // MARK: Generated and initials avatars
@@ -285,6 +336,8 @@ private enum AvatarLoader {
         if let id, (1...20).contains(id.count), id.allSatisfy(\.isASCII), id.allSatisfy(\.isNumber) {
             return URL(string: "https://avatars.githubusercontent.com/u/\(id)?s=\(pixels)")
         }
+        // A bot without its id (`github-actions[bot]@`): the account of the same name has its picture.
+        if login.hasSuffix("[bot]") { login = login.dropLast(5) }
         guard isValidLogin(login) else { return nil }
         return URL(string: "https://avatars.githubusercontent.com/\(login)?s=\(pixels)")
     }
