@@ -116,9 +116,27 @@ enum FileListMode: String {
     case path, tree
 }
 
-/// The path / tree switch of a files card's header; every file list follows it.
+/// A files card whose list keeps its own path / tree mode (its header's switch); Settings › Appearance sets them all.
+enum FileListCard: String, CaseIterable {
+    case conflicted, unstaged, staged, commit
+
+    /// The card's mode in `Preferences.defaults`; unset, the Settings one (`PrefKey.fileListMode`).
+    var key: String { "\(PrefKey.fileListMode.rawValue).\(rawValue)" }
+
+    /// The card's mode, stored under `key`.
+    var storage: AppStorage<String> {
+        let mode = Preferences.defaults.string(forKey: PrefKey.fileListMode.rawValue) ?? FileListMode.tree.rawValue
+        return AppStorage(wrappedValue: mode, key, store: Preferences.defaults)
+    }
+}
+
+/// The path / tree switch of a files card's header; only that card's list follows it.
 struct FileListModeToggle: View {
-    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.tree.rawValue
+    @AppStorage private var mode: String
+
+    init(card: FileListCard) {
+        _mode = card.storage
+    }
 
     var body: some View {
         let isTree = mode == FileListMode.tree.rawValue
@@ -170,7 +188,17 @@ struct FileListView<Trailing: View>: View {
     var sizes: [String: Int64]?
     /// A folder row's buttons (the tree), given its path and the files under it; nil gives it none.
     var folderTrailing: ((String, [FileChange]) -> AnyView)?
-    @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.tree.rawValue
+    /// The card's mode (`FileListModeToggle`).
+    @AppStorage private var mode: String
+
+    init(files: [FileChange], repoURL: URL, card: FileListCard,
+         @ViewBuilder trailing: @escaping (FileChange) -> Trailing)
+    {
+        self.files = files
+        self.repoURL = repoURL
+        self.trailing = trailing
+        _mode = card.storage
+    }
 
     static var rowHeight: CGFloat { 26 }
 
@@ -250,8 +278,8 @@ struct FileListView<Trailing: View>: View {
 }
 
 extension FileListView where Trailing == EmptyView {
-    init(files: [FileChange], repoURL: URL) {
-        self.init(files: files, repoURL: repoURL) { _ in EmptyView() }
+    init(files: [FileChange], repoURL: URL, card: FileListCard) {
+        self.init(files: files, repoURL: repoURL, card: card) { _ in EmptyView() }
     }
 }
 

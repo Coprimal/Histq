@@ -143,7 +143,7 @@ enum PrefKey: String, CaseIterable {
     /// The Welcome page's recent repositories: folder paths, most recent first (`RecentRepos`).
     case recentRepos
     /// The detail panel's file lists: "tree" (rows under their folders) or "path" (one row per file). Settings ›
-    /// Appearance and each files card's header switch it.
+    /// Appearance sets it for every card; each files card keeps its own (`FileListCard.key`), switched from its header.
     case fileListMode
     /// A commit's Files card lists every file of the commit's tree, the unchanged ones dimmed (GitKraken's "View all
     /// files"); its header switches it.

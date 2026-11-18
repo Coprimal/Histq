@@ -67,7 +67,7 @@ struct WIPPanel: View {
                 EmptyFilesText(text: "No conflicts left")
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: session.url) { file in
+                    FileListView(files: files, repoURL: session.url, card: .conflicted) { file in
                         rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
                             run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
                         }
@@ -93,7 +93,7 @@ struct WIPPanel: View {
             }
             ErrorText(message: errors[.conflicted])
         } accessory: {
-            FileListModeToggle()
+            FileListModeToggle(card: .conflicted)
         }
     }
 
@@ -103,7 +103,7 @@ struct WIPPanel: View {
                 EmptyFilesText(text: "No unstaged changes")
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: session.url) { file in
+                    FileListView(files: files, repoURL: session.url, card: .unstaged) { file in
                         HStack(spacing: 10) {
                             rowButton("arrow.uturn.backward",
                                       help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
@@ -149,7 +149,7 @@ struct WIPPanel: View {
             ErrorText(message: errors[.unstaged])
         } accessory: {
             HStack(spacing: 10) {
-                FileListModeToggle()
+                FileListModeToggle(card: .unstaged)
                 headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty, fill: Palette.stageAllFill) {
                     run(.stageAll, busy: .stageAll, part: .unstaged)
                 }
@@ -167,7 +167,7 @@ struct WIPPanel: View {
                 EmptyFilesText(text: "No staged changes")
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: session.url) { file in
+                    FileListView(files: files, repoURL: session.url, card: .staged) { file in
                         rowButton("minus.circle", help: "Unstage File", busy: .unstage(file.path)) {
                             run(.unstage(Self.unstagePaths(file)), busy: .unstage(file.path), part: .staged)
                         }
@@ -193,7 +193,7 @@ struct WIPPanel: View {
             ErrorText(message: errors[.staged])
         } accessory: {
             HStack(spacing: 10) {
-                FileListModeToggle()
+                FileListModeToggle(card: .staged)
                 headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty,
                              fill: Palette.unstageAllFill) {
                     run(.unstageAll, busy: .unstageAll, part: .staged)
@@ -379,18 +379,21 @@ struct WorktreeChangesPanel: View {
         VStack(spacing: SectionCardMetrics.spacing) {
             WorktreeHeaderCard(path: path, branch: status.branch.name)
             if !conflicted.isEmpty {
-                filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder)
+                filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder,
+                          card: .conflicted)
             }
             filesCard("Unstaged", systemImage: "doc.badge.ellipsis", unstaged, empty: "No unstaged changes",
-                      folder: folder)
-            filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder)
+                      folder: folder, card: .unstaged)
+            filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder,
+                      card: .staged)
             if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
         }
     }
 
-    private func filesCard(_ title: String, systemImage: String, _ files: [FileChange], empty: String, folder: URL)
+    private func filesCard(_ title: String, systemImage: String, _ files: [FileChange], empty: String, folder: URL,
+                           card: FileListCard)
         -> some View
     {
         SectionCard(title, systemImage: systemImage, count: files.count, contentPadding: 6) {
@@ -398,11 +401,11 @@ struct WorktreeChangesPanel: View {
                 EmptyFilesText(text: empty)
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: folder)
+                    FileListView(files: files, repoURL: folder, card: card)
                 }
             }
         } accessory: {
-            FileListModeToggle()
+            FileListModeToggle(card: card)
         }
     }
 }

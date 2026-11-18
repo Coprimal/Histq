@@ -129,10 +129,14 @@ struct AppearanceSettings: View {
                                 title: { $0 == FileListMode.path.rawValue ? Text("Flat") : Text("Tree") },
                                 compact: true)
                         .fixedSize()
+                        // Every card follows the new layout; a card's header switches only that card.
+                        .onChange(of: fileListMode) { _, new in
+                            for card in FileListCard.allCases { Preferences.defaults.set(new, forKey: card.key) }
+                        }
                 } label: {
                     Text("Layout")
-                    SettingsHint("Tree: files under their folders. Flat: one row per file. Also switched from each "
-                        + "list's header.")
+                    SettingsHint("Tree: files under their folders. Flat: one row per file. For every "
+                        + "list; each list's header switches only that list.")
                 }
                 SettingsDivider()
                 SettingsSwitchRow(title: "File sizes",
