@@ -76,6 +76,8 @@ enum Palette {
     static let sheetCardOpaque = srgb(0x252527)
     /// Controls on a card, a step above `surface`. #3A3A3C
     static let inputSurface = color(srgb(0x3A3A3C))
+    /// The field of a single-input modal (`.textFieldStyle(.modal)`): darker than the modal's `bgCard`, set into it. #1A1A1C
+    static let modalInput = color(srgb(0x1A1A1C))
     /// The 1 pt edge of cards and panels.
     static let surfaceBorder = color(.white.withAlphaComponent(0.08))
     /// The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom.
@@ -1110,6 +1112,29 @@ struct SettingsTextFieldStyle: @MainActor TextFieldStyle {
 
 extension TextFieldStyle where Self == SettingsTextFieldStyle {
     static var settings: SettingsTextFieldStyle { SettingsTextFieldStyle() }
+}
+
+/// The one field of a single-input modal (Set Alias…, Rename Group…, Set Emoji…): `.textFieldStyle(.modal)`, straight
+/// on the modal's container with no card around it (user, 2026-11-18). Larger than `.settings`, on a darker fill, with
+/// no focus ring: the caret shows the focus.
+@MainActor
+struct ModalTextFieldStyle: @MainActor TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        configuration
+            .textFieldStyle(.plain)
+            .font(.system(size: 15))
+            .focusEffectDisabled()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(minHeight: 38)
+            .background(shape.fill(Palette.modalInput))
+            .overlay(shape.strokeBorder(Palette.surfaceBorder, lineWidth: 1))
+    }
+}
+
+extension TextFieldStyle where Self == ModalTextFieldStyle {
+    static var modal: ModalTextFieldStyle { ModalTextFieldStyle() }
 }
 
 extension View {

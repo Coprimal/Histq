@@ -262,14 +262,13 @@ private struct TabAliasModal: View {
         ModalCard(title: "Set an alias for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
                   subtitle: "The tab shows this name instead of the folder's. Leave it empty to show the folder's name.",
                   width: 420) {
-            ModalSection {
-                TextField("Alias", text: $alias, prompt: Text(tab?.repoURL?.lastPathComponent ?? "Alias"))
-                    .textFieldStyle(.settings)
-                    .labelsHidden()
-                    .autocorrectionDisabled()
-                    .focused($fieldFocused)
-                    .onSubmit(save)
-            }
+            TextField("Alias", text: $alias, prompt: Text(tab?.repoURL?.lastPathComponent ?? "Alias"))
+                .textFieldStyle(.modal)
+                .labelsHidden()
+                .autocorrectionDisabled()
+                .focused($fieldFocused)
+                .onSubmit(save)
+                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             Button("Cancel", action: onClose)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -305,14 +304,13 @@ private struct GroupNameModal: View {
                   subtitle: "The group's name shows this instead of the folder's, in every window. Leave it empty to "
                       + "show the folder's name.",
                   width: 420) {
-            ModalSection {
-                TextField("Name", text: $name, prompt: Text(folder))
-                    .textFieldStyle(.settings)
-                    .labelsHidden()
-                    .autocorrectionDisabled()
-                    .focused($fieldFocused)
-                    .onSubmit(save)
-            }
+            TextField("Name", text: $name, prompt: Text(folder))
+                .textFieldStyle(.modal)
+                .labelsHidden()
+                .autocorrectionDisabled()
+                .focused($fieldFocused)
+                .onSubmit(save)
+                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             Button("Cancel", action: onClose)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -349,22 +347,21 @@ private struct TabEmojiModal: View {
         ModalCard(title: "Set an emoji for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
                   subtitle: "The tab shows this emoji at its left, and a pinned tab shows only it. Leave it empty for none.",
                   width: 420) {
-            ModalSection {
-                HStack(spacing: 8) {
-                    TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
-                        .textFieldStyle(.settings)
-                        .labelsHidden()
-                        .autocorrectionDisabled()
-                        .focused($fieldFocused)
-                        .onSubmit(save)
-                        .onChange(of: emoji) { _, new in
-                            let kept = TabEmoji.normalized(new) ?? ""
-                            if kept != new { emoji = kept }
-                        }
-                    Button("Choose…", action: choose)
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                }
+            HStack(spacing: 8) {
+                TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
+                    .textFieldStyle(.modal)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .onSubmit(save)
+                    .onChange(of: emoji) { _, new in
+                        let kept = TabEmoji.normalized(new) ?? ""
+                        if kept != new { emoji = kept }
+                    }
+                Button("Choose…", action: choose)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
             }
+            .padding(.horizontal, ModalFooterMetrics.trailingPadding)
         } actions: {
             if tab?.emoji != nil {
                 Button("Remove", action: remove)
