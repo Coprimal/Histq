@@ -6,9 +6,9 @@
 // (memory, then the disk cache under `StatePaths`, then the network, off the main thread), then posts `didChange` so
 // the graphs redraw the rows of that email. A 404 is remembered on disk for 7 days; an offline or failed load keeps
 // the generated avatar for the session. Only the hash or the GitHub login leaves the Mac, over https only.
-// `ownerAvatar(of:pixels:)` loads, in real mode only, the logo of the account or organization owning a remote's
-// repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows), the same way; only the owner's
-// name leaves the Mac, to its own host.
+// `ownerAvatar(of:pixels:)` loads, in every mode, the logo of the account or organization owning a remote's
+// repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows and the graph's remote badges), the
+// same way; only the owner's name leaves the Mac, to its own host.
 import AppKit
 import CryptoKit
 import HistqCore
@@ -116,10 +116,11 @@ final class AvatarStore {
     // MARK: Remote owners
 
     /// The logo of the account or organization owning `repository` (`Coprimal` of `github.com/Coprimal/Histq`), at
-    /// `pixels` on its longer side. Never blocks: nil (the caller keeps its own icon) outside real mode, on another
-    /// host, until it is loaded, or when it cannot be; its arrival posts `didChange` with `ownerIdentity(_:)`.
+    /// `pixels` on its longer side, whatever the commit avatars' mode. Never blocks: nil (the caller keeps its own
+    /// icon) on another host, until it is loaded, or when it cannot be; its arrival posts `didChange` with
+    /// `ownerIdentity(_:)`.
     func ownerAvatar(of repository: HostedRepository, pixels: Int) -> NSImage? {
-        guard mode == .real, AvatarLoader.ownerHosts.contains(repository.host) else { return nil }
+        guard AvatarLoader.ownerHosts.contains(repository.host) else { return nil }
         let identity = Self.ownerIdentity(repository)
         let key = "\(identity)|\(pixels)"
         if let image = images.object(forKey: key as NSString) { return image }

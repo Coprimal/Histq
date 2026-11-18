@@ -72,6 +72,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Double-clicking the title bar or the tab row zooms or minimizes the window, as set in System Settings.
 - The repository and branch dropdowns in the toolbar have a fixed width and cut long names with "…".
 - The graph's selection highlight starts at the avatar, and avatars are as tall as the row.
+- Remotes in the sidebar and the graph's remote badges show their owner's real logo whatever the Commit avatars setting is (Generated or Initials too).
 - The graph column can be widened only as far as its lanes need.
 - The conflict editor highlights the lines of each side and of the Output like GitKraken.
 - New branch and laptop icons, and a filled check on the checked-out branch.

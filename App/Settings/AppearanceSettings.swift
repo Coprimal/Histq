@@ -99,9 +99,9 @@ struct AppearanceSettings: View {
                 }
                 SettingsDivider()
                 Label {
-                    Text("Real avatars send each author's email hash to gravatar.com, GitHub logins to GitHub, and "
-                        + "the owners of your remotes to GitHub, GitLab or Bitbucket, to download their pictures. "
-                        + "GitHub's bots always show theirs.")
+                    Text("Real avatars send each author's email hash to gravatar.com and GitHub logins to GitHub "
+                        + "to download their pictures. GitHub's bots always show theirs, and your remotes always "
+                        + "show their owners' logos (the owner's name goes to GitHub, GitLab or Bitbucket).")
                         .font(.settingsCaption)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {
