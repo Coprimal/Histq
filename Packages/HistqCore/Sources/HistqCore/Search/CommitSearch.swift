@@ -79,7 +79,7 @@ public enum CommitSearch {
     }
 
     /// The commits whose folded message contains every word of the folded `needle`, in any order and each anywhere
-    /// (also inside a longer word), as GitKraken: "update lib" finds "Refactored imports from lib updates".
+    /// (also inside a longer word): "update lib" finds "Refactored imports from lib updates".
     private static func messageMatches(in index: Index, needle: String) -> [Int] {
         var folded: [UInt8] = []
         appendFolded(needle, to: &folded)
@@ -167,7 +167,7 @@ public enum CommitSearch {
 
     /// Appends `text` lowercased and without diacritics, as UTF-8: an ASCII text byte by byte (most messages), any
     /// other through Foundation's folding. Each run of word separators (spaces, tabs, line breaks, `-`, `_`, `/`) becomes one
-    /// space, so "urgent fix", "urgent-fix" and "URGENT_fix" find each other, as in GitKraken.
+    /// space, so "urgent fix", "urgent-fix" and "URGENT_fix" find each other.
     fileprivate static func appendFolded(_ text: String, to bytes: inout [UInt8]) {
         let start = bytes.count
         bytes.append(contentsOf: text.utf8)

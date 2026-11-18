@@ -920,7 +920,7 @@ private struct RepositoryRow: View {
     }
 }
 
-/// The GitHub repositories as a search field, as GitKraken's clone picker: typing fuzzy-filters them (`FuzzyRank` on the
+/// The GitHub repositories as a search field: typing fuzzy-filters them (`FuzzyRank` on the
 /// name and `owner/name`, off the main actor) in a list under the field, grouped by owner. Up/Down move the highlight,
 /// Return picks it, Escape closes the list, the chevron opens or closes it. A pick fills the field with `owner/name`;
 /// that text lists every repository again.

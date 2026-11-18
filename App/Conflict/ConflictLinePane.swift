@@ -1,7 +1,7 @@
 // Pane A or B of the conflict editor: that side's whole file in an NSTableView with fixed rows (18 pt at the default code
 // font size) that never wrap.
 // Lines inside a conflict get one checkbox in the gutter (the pane's header checkbox takes the whole side) and, right of
-// it as in GitKraken, an edge bar and a band over the number and the text (A blue, B gold; stronger once ticked). ⌘C copies the selected lines whole.
+// it, an edge bar and a band over the number and the text (A blue, B gold; stronger once ticked). ⌘C copies the selected lines whole.
 import AppKit
 import HistqCore
 import SwiftUI

@@ -127,7 +127,7 @@ public enum LogReader {
     /// the iteration early stops git; a cancelled consumer's loop ends without an error.
     ///
     /// `alsoFrom`: commit hashes whose history is read too, e.g. the stashes' bases, so a stash made on a
-    /// commit no branch holds any more still has its base in the log, as GitKraken shows it. Anything but a
+    /// commit no branch holds any more still has its base in the log. Anything but a
     /// hex hash is left out, so it can never be read as an option. `hidden` and `solo`: full ref names, see
     /// `arguments(hidden:solo:alsoFrom:order:)`. `order`: the order of the commits.
     public static func pages(

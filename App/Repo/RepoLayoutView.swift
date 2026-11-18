@@ -787,7 +787,7 @@ private struct DetailPanel: View {
     }
 }
 
-/// Over a commit's or a stash's detail while the working tree has changes (as GitKraken): how many files changed and
+/// Over a commit's or a stash's detail while the working tree has changes: how many files changed and
 /// a View Changes button that selects the WIP row. Nothing for the WIP itself or a clean tree.
 private struct WorkingChangesNotice: View {
     let session: RepoSession

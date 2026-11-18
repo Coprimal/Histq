@@ -187,8 +187,8 @@ enum PrefKey: String, CaseIterable {
     /// The detail panel's file lists: "tree" (rows under their folders) or "path" (one row per file). Settings ›
     /// Appearance sets it for every card; each files card keeps its own (`FileListCard.key`), switched from its header.
     case fileListMode
-    /// A commit's Files card lists every file of the commit's tree, the unchanged ones dimmed (GitKraken's "View all
-    /// files"); its header switches it.
+    /// A commit's Files card lists every file of the commit's tree, the unchanged ones dimmed ("View all files"); its
+    /// header switches it.
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes

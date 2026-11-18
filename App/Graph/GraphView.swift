@@ -1,4 +1,4 @@
-// The commit graph: an NSTableView with gk's columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, TIME).
+// The commit graph: an NSTableView with its columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, TIME).
 // Rows: the WIP row (when the working tree has changes), a WIP row per other worktree with changes (labeled with its
 // folder's name; a click shows its changes), the stash rows, then the commits, laid out by `GraphLayout`.
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
@@ -20,7 +20,7 @@ enum GraphItem: Hashable, Sendable {
     case worktree(String)
 }
 
-/// The graph's columns, in gk's order. Widths are resizable and saved in `PrefKey.graphColumnWidths`; the message
+/// The graph's columns, left to right. Widths are resizable and saved in `PrefKey.graphColumnWidths`; the message
 /// column takes what the others leave. Settings › Appearance can hide the message, author and date columns.
 enum GraphColumn: String, CaseIterable {
     case refs, graph, message, author, date
@@ -233,7 +233,7 @@ final class GraphTableView: NSTableView {
         updateCursor(at: convert(window?.mouseLocationOutsideOfEventStream ?? event.locationInWindow, from: nil))
     }
 
-    // A branch badge shows the open hand under the pointer (it drags, as in GitKraken), the closed hand while held.
+    // A branch badge shows the open hand under the pointer (it drags), the closed hand while held.
 
     /// The hand is the cursor this table set (the arrow is set back only then).
     private var showsOpenHand = false
@@ -799,7 +799,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// Fits the graph column to the log's lanes when their count or the row density changed: at least lane 0's node
     /// (`GraphMetrics.minColumnWidth`, every lane folded onto it), at most all of them (`GraphMetrics.width(lanes:)`,
-    /// as in GitKraken: only the `trailing` gap right of the last lane), and the wanted width within that. AppKit's
+    /// only the `trailing` gap right of the last lane), and the wanted width within that. AppKit's
     /// border drag stops at these bounds; the message column fills (`tile`).
     /// The cells on screen take the new lane count. Logs `graph-col max=<w> lanes=<n> visible=<v> width=<w>` (v: the
     /// unpinned lanes, `GraphMetrics.isPinned`).
@@ -945,7 +945,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let column = table.column(withIdentifier: GraphColumn.graph.identifier)
         guard column >= 0, let graphRow = log.graphRow(at: row) else { return 0 }
         let rect = table.rect(ofColumn: column)
-        // From the node's center, as GitKraken: the node hides the highlight's left end (no corner beside it).
+        // From the node's center: the node hides the highlight's left end (no corner beside it).
         let nodeX = rect.minX + metrics.drawnX(lane: graphRow.lane, width: rect.width)
         return min(max(nodeX, rect.minX), rect.maxX)
     }
@@ -1379,7 +1379,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     // MARK: Badge stack
 
-    /// Shows the hovered row's badges whole, one under the other, as GitKraken does, while the pointer is on its refs
+    /// Shows the hovered row's badges whole, one under the other, while the pointer is on its refs
     /// cell or on the stack's badges, when the cell does not show them all whole; the badge under the pointer is lit.
     /// The table keeps the events and routes those on a stacked badge to it (`badgeView`, `routedRow`): a click
     /// selects the stack's row, a right-click opens the badge's menu, a branch badge drags and takes drops.

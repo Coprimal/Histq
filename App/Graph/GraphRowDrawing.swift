@@ -15,7 +15,7 @@ struct GraphMetrics: Equatable {
     /// of `textSize`'s body text and 5 pt above and below it: the same heights as before at Regular and Small, Compact
     /// 28 at Large.
     init(density: String, textSize: TextSize = .regular) {
-        // Closer to GitKraken's spacing (user, 2026-11-13): regular 28 -> 32, the others scaled with it.
+        // More row spacing (user, 2026-11-13): regular 28 -> 32, the others scaled with it.
         let height: CGFloat = switch density {
         case "compact": 26
         case "comfortable": 38
@@ -26,7 +26,7 @@ struct GraphMetrics: Equatable {
     }
 
     /// The height shared by the band, its edge bar, the selection and the node (the avatar), centered in the row: a
-    /// 3 pt gap above and below, where the lane lines run between two rows, as in GitKraken (20 / 26 / 32 pt).
+    /// 3 pt gap above and below, where the lane lines run between two rows (20 / 26 / 32 pt).
     var bandHeight: CGFloat { rowHeight - 6 }
     /// A commit's node (its avatar's circle): as tall as the band.
     var nodeDiameter: CGFloat { bandHeight }
@@ -35,7 +35,7 @@ struct GraphMetrics: Equatable {
     /// Before lane 0.
     var leading: CGFloat { 6 }
     /// After the last lane at the column's widest (`width(lanes:)`): the gap between its node and the band's 2 pt bar
-    /// at the column's right edge (GitKraken's is about 4 times the 6 pt it was).
+    /// at the column's right edge (4 times the 6 pt it was).
     var trailing: CGFloat { 24 }
     /// The least gap between a node's right edge and the column's right edge: a narrower column shrinks the gap down to
     /// this, then pushes the right-most nodes left (`drawnX`), so a width saved before `trailing` grew still shows its
@@ -63,7 +63,7 @@ struct GraphMetrics: Equatable {
     func foldLimit(width: CGFloat) -> CGFloat { max(x(lane: 0), width - minTrailing - nodeDiameter / 2) }
 
     /// Where `lane`'s node is drawn in a graph column `width` wide, from its left edge: its own center, or the fold
-    /// limit when the column has no room for it. As in GitKraken the column folds continuously: narrowed point by
+    /// limit when the column has no room for it. The column folds continuously: narrowed point by
     /// point, the right-most node slides left, pinned to the right edge, onto its left neighbour's line, then both
     /// slide together, down to lane 0.
     func drawnX(lane: Int, width: CGFloat) -> CGFloat { min(x(lane: lane), foldLimit(width: width)) }
@@ -74,7 +74,7 @@ struct GraphMetrics: Equatable {
 
     /// The lane lines' opacity in a graph column `width` wide, for a log of `logLanes` lanes: 1 until lane 1 is pinned,
     /// then fading to 0 as lane 1's nodes slide onto lane 0, so the narrowest column draws no lane line at all
-    /// (GitKraken's collapsed column) without a pop. A one-lane log keeps its line.
+    /// (the collapsed column) without a pop. A one-lane log keeps its line.
     func lineAlpha(width: CGFloat, logLanes: Int) -> CGFloat {
         guard logLanes > 1 else { return 1 }
         return min(1, max(0, (foldLimit(width: width) - x(lane: 0)) / laneWidth))
@@ -89,7 +89,7 @@ enum GraphNodeStyle: Equatable {
     case merge
     /// The working tree's changes: a dashed circle.
     case wip
-    /// A stash: a dashed square around a tray, as GitKraken.
+    /// A stash: a dashed square around a tray.
     case stash
 }
 
@@ -104,7 +104,7 @@ enum GraphRowDrawing {
     /// lane are not drawn. A line between an unpinned lane and a pinned one is drawn only when its pinned end is this
     /// row's node (it then ends under the node); one that would run on down or up a pinned lane is left out, so no
     /// line dangles. As lane 1 folds onto lane 0 the remaining lines fade out (`GraphMetrics.lineAlpha`): the
-    /// narrowest column draws none (GitKraken's collapsed column), the nodes' ring colors and the band's edge bar tell
+    /// narrowest column draws none (the collapsed column), the nodes' ring colors and the band's edge bar tell
     /// the branches apart.
     static func draw(
         _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, avatar: NSImage?,
@@ -119,7 +119,7 @@ enum GraphRowDrawing {
         let midY = bounds.midY
         let laneColor = Palette.graphLane(row.color)
 
-        // The band, from the node to the column's edge, ending in a 2 pt bar in the lane color (gk's message marker).
+        // The band, from the node to the column's edge, ending in a 2 pt bar in the lane color (the band's edge bar).
         let band = CGRect(x: nodeX, y: midY - metrics.bandHeight / 2,
                           width: max(0, bounds.maxX - nodeX), height: metrics.bandHeight)
         if band.width > 0 {

@@ -41,7 +41,7 @@ struct FileChange: Hashable, Sendable, Identifiable {
         self.init(kind: kind, path: path, originalPath: originalPath)
     }
 
-    /// The bare glyph, no circle or square behind it (GitKraken's file rows), drawn in `tint`.
+    /// The bare glyph, no circle or square behind it, drawn in `tint`.
     var systemImage: String {
         switch kind {
         case .added: "plus"
@@ -54,7 +54,7 @@ struct FileChange: Hashable, Sendable, Identifiable {
         }
     }
 
-    /// GitKraken's colors: orange edited, green added, light red removed, purple conflicted, cyan renamed.
+    /// File-kind colors: orange edited, green added, light red removed, purple conflicted, cyan renamed.
     var tint: Color {
         switch kind {
         case .added, .untracked: Color(nsColor: Palette.graphLanes[2])

@@ -90,7 +90,7 @@ struct RefBadge: Hashable {
     }
 
     /// A remote branch's badge text when the repo has a single remote: its name without the remote (`feature` for
-    /// `origin/feature`, the cloud icon telling it is remote), as GitKraken shows it. Nil (the full name) when there
+    /// `origin/feature`, the cloud icon telling it is remote). Nil (the full name) when there
     /// are several remotes.
     static func remoteLabel(of branch: RemoteBranch, singleRemote: String?) -> String? {
         guard let singleRemote else { return nil }
@@ -105,8 +105,8 @@ struct RefBadge: Hashable {
 /// request chip, cut with "…" (at least 3 characters), then its icons alone (HEAD's check, the laptop and
 /// the cloud always stay); "+N" always stays. Nothing is drawn outside a badge, or past the cell. A line in the lane
 /// color runs from the last badge to the column's right edge, where the graph cell continues it to the node. With
-/// `stack` set it is the hover overlay instead (`GraphTableController`): every badge whole, one under the other, as in
-/// GitKraken; the table routes its clicks, menus, drags and drops to them.
+/// `stack` set it is the hover overlay instead (`GraphTableController`): every badge whole, one under the other; the
+/// table routes its clicks, menus, drags and drops to them.
 final class RefBadgeCellView: NSView {
     var badges: [RefBadge] = []
     /// The row's lane color (`GraphRow.color`).
@@ -436,7 +436,7 @@ final class RefBadgeCellView: NSView {
                 context.setAlpha(Palette.graphGhostAlpha)
                 context.beginTransparencyLayer(auxiliaryInfo: nil)
             }
-            // In the stack, as in GitKraken: the row's own badge as it is, those under it fainter, the hovered one lit.
+            // In the stack: the row's own badge as it is, those under it fainter, the hovered one lit.
             let fill: Fill = stack == nil ? .normal
                 : index == hovered && !badge.isGhost ? .lit : index == 0 ? .normal : .faint
             drawBadge(badge, in: rect, level: level, fill: fill, context: context)
@@ -701,7 +701,7 @@ final class GraphTextCellView: NSView {
     enum Tone { case primary, secondary }
 
     var text = "" { didSet { refreshAccessibilityLabel(); refreshToolTip() } }
-    /// A WIP row's files after the text, as GitKraken: each kind's glyph in its file-list color, then its count.
+    /// A WIP row's files after the text: each kind's glyph in its file-list color, then its count.
     var changes: WorktreeChanges? { didSet { refreshAccessibilityLabel(); refreshToolTip() } }
     var tone = Tone.primary
     var isItalic = false { didSet { refreshToolTip() } }
@@ -883,7 +883,7 @@ final class GraphTextCellView: NSView {
 // MARK: - Row and header
 
 /// A graph row: the selection is a neutral square fill (no accent, no edge) from the row's node to the table's right
-/// edge, as tall as the band and the node (`GraphMetrics.bandHeight`), as in GitKraken; drawn under the cells so the
+/// edge, as tall as the band and the node (`GraphMetrics.bandHeight`); drawn under the cells so the
 /// lanes stay on top. Its text cells draw in full white while it is selected.
 final class GraphRowView: NSTableRowView {
     override var isSelected: Bool {
@@ -915,7 +915,7 @@ final class GraphRowView: NSTableRowView {
     }
 }
 
-/// The column titles as gk shows them: small uppercase secondary text on the card's own fill (opaque, so scrolled rows
+/// The column titles: small uppercase secondary text on the card's own fill (opaque, so scrolled rows
 /// never show through it); a hairline below.
 final class GraphHeaderView: NSTableHeaderView {
     override var isOpaque: Bool { true }

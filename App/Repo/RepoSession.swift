@@ -77,7 +77,7 @@ struct LogFilter: Equatable, Sendable {
 /// The log of a repo with its graph rows, in its `order` (git's `--date-order` or `--topo-order`; after an incremental
 /// reload, the new commits merged in, see `RepoSession.readLogIncrementally`). `rows[i]` is `commits[i]`'s row; the
 /// WIP row above the commits is in `syntheticRows`, the other worktrees' and the stash rows in `hung`, each right above
-/// its base (as GitKraken).
+/// its base.
 struct LogSnapshot: Sendable {
     var commits: [Commit] = []
     var rows: [GraphRow] = []
@@ -334,7 +334,7 @@ struct WorktreeInfo: Hashable, Sendable {
 }
 
 /// A working tree's change counts: "3 unstaged · 2 staged" (untracked and conflicted files count as unstaged), and the
-/// WIP row's edited, added and deleted files (GitKraken's icons; each file once, staged or not).
+/// WIP row's edited, added and deleted files (each file once, staged or not).
 struct WorktreeChanges: Hashable, Sendable {
     let unstaged: Int
     let staged: Int
@@ -2100,7 +2100,7 @@ final class RepoSession: Identifiable {
     }
 
     /// Lays out `snapshot.synthetic`'s WIP row at the top and hangs the other worktrees' rows and its stashes above
-    /// their bases (as GitKraken: another worktree's changes sit on its HEAD, not above every commit). Returns the
+    /// their bases (another worktree's changes sit on its HEAD, not above every commit). Returns the
     /// layout to feed the commits, and the top rows' layout: the hung rows whose base never came are laid out with it
     /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are).
     /// The pinned branches take the leftmost lanes.

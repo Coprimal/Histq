@@ -94,15 +94,15 @@ enum SidebarMetrics {
     /// tight, so the name sits close to a narrow branch glyph (user, 2026-11-13).
     static let iconSlot: CGFloat = 20
     static let iconGap: CGFloat = 4
-    /// The extra indent of a remote's branches under the remote's row: one step, as GitKraken nests them.
+    /// The extra indent of a remote's branches under the remote's row: one step.
     static let nestedIndent: CGFloat = 16
-    /// The section and row icons (GitKraken's): Local is this Mac, Remote the cloud, each branch a branch.
+    /// The section and row icons: Local is this Mac, Remote the cloud, each branch a branch.
     static let localImage = "lucide-laptop-minimal"
     static let remoteImage = "cloud"
     /// The checked-out branch and the current worktree: a filled check in place of their own glyph.
     static let currentImage = "checkmark.circle.fill"
     static let branchImage = "lucide-git-branch"
-    /// The Worktrees card and each worktree's row: a folder, as GitKraken draws them.
+    /// The Worktrees card and each worktree's row: a folder.
     static let worktreeImage = "folder"
     /// The Stashes card and each stash's row: the tray of the graph's stash node.
     static let stashImage = "tray"
@@ -257,7 +257,7 @@ private struct BranchSections: View {
                 EmptyRow(text: "No matching branches")
             }
             ForEach(branches, id: \.refName) { branch in
-                // As in GitKraken, the checked-out branch shows a check in place of the branch icon.
+                // The checked-out branch shows a check in place of the branch icon.
                 BranchRow(session: session, item: .local(branch.name), name: branch.name,
                           systemImage: branch.isHead ? SidebarMetrics.currentImage : SidebarMetrics.branchImage) {
                     AheadBehind(branch: branch)

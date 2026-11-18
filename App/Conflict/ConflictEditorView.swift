@@ -1,4 +1,4 @@
-// A conflicted file in panel2, in place of the graph (GitKraken's layout), each part in its own card: the header (the
+// A conflicted file in panel2, in place of the graph, each part in its own card: the header (the
 // file, its conflict count, the encoding, "Open in external merge tool", Save, close), then panes A and B side by
 // side in one card (the two sides' whole files, conflict lines tinted with checkboxes) above Output (the merge,
 // editable, with "conflict k of N", the AI buttons Suggest Resolution and Suggest All, and Undo AI). A binary file or
@@ -436,7 +436,7 @@ private struct ConflictOutputCard: View {
     }
 }
 
-/// Save with conflicts left unresolved (GitKraken's prompt): Save Output writes Output as shown and marks the file
+/// Save with conflicts left unresolved: Save Output writes Output as shown and marks the file
 /// resolved, Create Conflict Chunks writes git's conflict markers for the unresolved ones and leaves the file
 /// conflicted, Cancel (Escape) changes nothing. No button is one Return away: both writes change the file.
 struct ConflictSaveModal: View {

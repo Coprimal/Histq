@@ -1,5 +1,5 @@
 // Tells which branch each commit of the log is on, for the graph's faded badge on a selected commit that is not a
-// branch tip (as GitKraken does). A heuristic, in two passes over the log, O(n):
+// branch tip. A heuristic, in two passes over the log, O(n):
 //   1. First-parent walks from the branch tips in priority order: HEAD's branch, the other local branches by name,
 //      then the remote branches by name. A walk stops at a commit an earlier walk claimed.
 //   2. In log order (children before parents), a commit no walk reached takes the claim of its first claimed child:

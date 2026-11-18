@@ -1,4 +1,4 @@
-// Every user-initiated write of a repository (the gk command inventory): checkout, commit, stage, fetch,
+// Every user-initiated write of a repository: checkout, commit, stage, fetch,
 // pull, push, branches, remotes, worktrees, merge/rebase/cherry-pick/revert/reset, stashes, tags, continue/abort/skip,
 // clone and init. Each public operation (but `optimizeRepository`, which git locks itself) takes the runner's `mutate`
 // lane exactly once (compound operations run their steps inside that one lane; never call another public operation or

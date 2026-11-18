@@ -31,8 +31,8 @@ struct GraphDimming: Sendable {
 
 /// A repo tab's graph search. Each query change searches the log's commits and stash messages off the main actor
 /// (`CommitSearch`, on an index of the log built once per snapshot) and cancels the search before it; a new log snapshot
-/// searches again. A typed query goes to its first match at or after the selected row (wrapping to the first), as
-/// GitKraken does; a new log keeps the current match when its row is still there.
+/// searches again. A typed query goes to its first match at or after the selected row (wrapping to the first); a
+/// new log keeps the current match when its row is still there.
 @Observable
 @MainActor
 final class GraphSearch {
