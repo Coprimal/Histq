@@ -1,8 +1,8 @@
-// A file's diff in panel2, in place of the graph (Esc or the back button returns to it), each part in its own card:
-// the header (back, the file, its status, +N −M, Diff / Full file, close), then one card per side of the change (a WIP file's
-// Unstaged and Staged changes, a commit's changes), or a card that says why there are no lines (binary, too large, no
-// change). An image whose diff is binary shows its versions before and after the change instead of lines. The diff
-// loads off the main actor; until then the cards are skeletons.
+// A file's diff in panel2, in place of the graph (Esc or close returns to it), each part in its own card: one card per
+// side of the change (a WIP file's Unstaged and Staged changes, a commit's changes), or a card that says why there are
+// no lines (binary, too large, no change). The first card's header is the file's row (its status, folder / name, the
+// tools, +N −M, Diff / Full file, close). An image whose diff is binary shows its versions before and after the change
+// instead of lines. The diff loads off the main actor; until then the card's body is a skeleton.
 import HistqCore
 import ImageIO
 import SwiftUI
@@ -130,103 +130,172 @@ struct FileDiffDetail: Sendable {
     }
 }
 
-/// Panel2 while a file is open: the header card at once, then the diff's cards (skeletons until loaded).
+/// Panel2 while a file is open: the diff's cards (skeletons until loaded). The first card's header is the file's own row
+/// (`DiffFileHeader`), there at once, so its actions work while the diff loads.
 struct DiffView: View {
     let session: RepoSession
     let target: FileTarget
     @Environment(WindowModel.self) private var model
 
     var body: some View {
-        VStack(spacing: SectionCardMetrics.spacing) {
-            DiffHeaderCard(session: session, target: target)
-            Group {
-                switch session.fileDiff {
-                case .idle, .loading:
+        Group {
+            switch session.fileDiff {
+            case .idle, .loading:
+                DiffCard(header: DiffFileHeader(session: session, target: target, counts: .loading),
+                         contentPadding: target.isImage ? SettingsMetrics.cardPadding : 0) {
                     PlaceholderCard(
                         token: session.fileToken, detail: session.fileDetail,
                         isCurrent: { [model, session] in model.selectedSession === session && session.openFile != nil }
                     ) {
                         if target.isImage { ImageDiffPlaceholder() } else { DiffPlaceholder() }
                     }
-                case .loaded(let detail):
-                    DiffContent(session: session, detail: detail)
-                        .onAppear { UITiming.content(session.fileDetail) }
-                case .failed(let message):
-                    DiffNoticeCard(title: "Diff", systemImage: "exclamationmark.triangle", message: message)
-                        .onAppear { UITiming.content("\(session.fileDetail) failed") }
                 }
+            case .loaded(let detail):
+                DiffContent(session: session, target: target, detail: detail)
+                    .onAppear { UITiming.content(session.fileDetail) }
+            case .failed(let message):
+                DiffCard(header: DiffFileHeader(session: session, target: target, counts: .none),
+                         contentPadding: SettingsMetrics.cardPadding) {
+                    FileNotice(systemImage: "exclamationmark.triangle", message: message)
+                }
+                .onAppear { UITiming.content("\(session.fileDetail) failed") }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+/// A card of the open file. The first one's header is the file's row (`DiffFileHeader`), at a titled `SectionCard`
+/// header's height and insets; a later one (`header` nil) has its side's title and `accessory` instead. The body keeps
+/// one place in the view tree either way, so a side that becomes the first card or stops being it (a quiet reload after
+/// a stage or an unstage) keeps its line table and the table's scroll offset.
+private struct DiffCard<Content: View, Accessory: View>: View {
+    let header: DiffFileHeader?
+    /// The card's title and icon when it has no `header`.
+    let title: String?
+    let systemImage: String?
+    /// Around the body, below the header (0 for the line tables, which run to the card's edges).
+    let contentPadding: CGFloat
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let accessory: () -> Accessory
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
+
+    init(header: DiffFileHeader?, title: String? = nil, systemImage: String? = nil, contentPadding: CGFloat = 0,
+         @ViewBuilder content: @escaping () -> Content, @ViewBuilder accessory: @escaping () -> Accessory) {
+        self.header = header
+        self.title = title
+        self.systemImage = systemImage
+        self.contentPadding = contentPadding
+        self.content = content
+        self.accessory = accessory
+    }
+
+    var body: some View {
+        SectionCard(header == nil ? title : nil, systemImage: systemImage, contentPadding: 0) {
+            if let header {
+                header
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, contentPadding == 0 ? 0 : contentPadding + extraPadding)
+            .padding(.bottom, contentPadding == 0 ? 0 : contentPadding + extraVerticalPadding)
+        } accessory: {
+            accessory()
         }
     }
 }
 
-/// Back, the file's icon, name and folder, its status, File History and Blame icons (a tracked file), the line counts,
-/// the mode switch and close; a commit's file adds "Checkout This Version". The actions fold into a "…" menu when the
-/// row is narrow. The counts are skeletons until the diff is in.
-private struct DiffHeaderCard: View {
+extension DiffCard where Accessory == EmptyView {
+    init(header: DiffFileHeader?, title: String? = nil, systemImage: String? = nil, contentPadding: CGFloat = 0,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.init(header: header, title: title, systemImage: systemImage, contentPadding: contentPadding,
+                  content: content, accessory: { EmptyView() })
+    }
+}
+
+/// The open file's row, the header of its first card: the status icon, "folder / name" (and the card's side, such as
+/// Unstaged, when a second card follows), Checkout This Version (a commit's file), File History and Blame (a tracked
+/// file), the card's line counts, the mode switch and close (Esc). As the row narrows, the folder truncates (the
+/// tooltip has the full path), Checkout This Version turns into an icon, then the actions fold into a "…" menu.
+private struct DiffFileHeader: View {
+    enum Counts {
+        /// A skeleton until the diff is in.
+        case loading
+        case none
+        case lines(additions: Int, deletions: Int)
+    }
+
     let session: RepoSession
     let target: FileTarget
+    /// The card's side, shown when the file has more than one card.
+    var side: String?
+    let counts: Counts
     @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var storedPreset = "classic"
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
+
+    /// The folder's width when the row decides whether the actions fit: the folder truncates first, down to this.
+    private static let folderFitWidth: CGFloat = 60
+    /// The narrowest truncated folder; narrower, it hides.
+    private static let folderMinWidth: CGFloat = 40
+    /// Between the buttons, the counts and the mode switch: wider than the title's gaps, so the icons don't crowd.
+    private static let controlSpacing: CGFloat = 12
 
     var body: some View {
         @Bindable var session = session
         let detail = session.fileDiff.value
-        SectionCard(nil, contentPadding: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    session.closeFile()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(RowIconButtonStyle())
-                .keyboardShortcut(.cancelAction)
-                .help(closesPane ? "Close the diff (Esc)" : "Back to the \(backName) (Esc)")
-                .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
-                .padding(.leading, 4)
-                // The name first: the secondary actions fold into a "…" menu when the row is too narrow for them.
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        title
-                        Spacer(minLength: 8)
-                        actions
-                    }
-                    HStack(spacing: 8) {
-                        title
-                        Spacer(minLength: 8)
-                        actionsMenu
-                    }
-                }
-                counts(detail)
-                    .fixedSize()
-                // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
-                if !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true {
-                    CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
-                                compact: true)
-                        .fixedSize()
-                }
-                Button {
-                    session.closeFile()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(RowIconButtonStyle())
-                .help(closesPane ? "Close the diff" : "Close (back to the \(backName))")
-                .accessibilityLabel("Close the diff")
-                .padding(.trailing, 4)
+        HStack(spacing: Self.controlSpacing) {
+            ViewThatFits(in: .horizontal) {
+                row { actions(checkoutAsIcon: false) }
+                row { actions(checkoutAsIcon: true) }
+                row { actionsMenu }
             }
-            // As tall as the compact tabs' padded track (24 pt pills inset 4 pt), the sidebar's look.
-            .frame(height: 32)
+            countsView
+                .fixedSize()
+            // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
+            if !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true {
+                CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
+                            compact: true)
+                    .fixedSize()
+            }
+            Button {
+                session.closeFile()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(RowIconButtonStyle())
+            .keyboardShortcut(.cancelAction)
+            .help(closesPane ? "Close the diff (Esc)" : "Back to the \(backName) (Esc)")
+            .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
+        }
+        .padding(.horizontal, SettingsMetrics.cardPadding + extraPadding)
+        .frame(height: SectionCardMetrics.headerHeight)
+        .padding(.top, extraVerticalPadding * 2 / 3)
+    }
+
+    private func row(@ViewBuilder _ actions: () -> some View) -> some View {
+        HStack(spacing: 8) {
+            title
+            Spacer(minLength: 8)
+            HStack(spacing: Self.controlSpacing) {
+                actions()
+            }
         }
     }
 
-    /// The file's icon, name and folder, and its status; the name keeps its width before the folder and the status.
+    private func folderText(_ folder: String) -> some View {
+        Text("\(folder) /")
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+
+    /// The status icon, "folder / name" in one font (the folder secondary, truncating from its head) and the side.
     private var title: some View {
         let file = target.file
         return HStack(spacing: 8) {
@@ -234,35 +303,53 @@ private struct DiffHeaderCard: View {
                 .foregroundStyle(file.tint)
                 .accessibilityHidden(true)
             HStack(spacing: 4) {
+                if !file.folder.isEmpty {
+                    // Whole, else truncated from its head while that still shows a few letters, else hidden: the
+                    // name keeps its width.
+                    ViewThatFits(in: .horizontal) {
+                        folderText(file.folder)
+                        folderText(file.folder)
+                            .truncationMode(.head)
+                            .frame(minWidth: Self.folderMinWidth, idealWidth: Self.folderMinWidth, alignment: .leading)
+                        Color.clear
+                            .frame(width: 0)
+                    }
+                    .frame(idealWidth: Self.folderFitWidth, alignment: .leading)
+                }
                 Text(file.name)
-                    .font(.body.weight(.semibold))
                     .lineLimit(1)
                     .layoutPriority(1)
-                if !file.folder.isEmpty {
-                    Text(file.folder)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
             }
             .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
+            .accessibilityElement(children: .ignore)
+            // The status icon is hidden from VoiceOver and the status is not shown as text: the label says both.
+            .accessibilityLabel(file.originalPath.map { "\(file.kindName): \($0) → \(file.path)" }
+                                ?? "\(file.kindName): \(file.path)")
             .layoutPriority(1)
-            Text(file.kindName)
-                .font(.settingsCaption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if let side {
+                Text(side)
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
         }
     }
 
-    /// "Checkout This Version" (a commit's file), then File History and Blame (a tracked file; no Blame for an image).
-    @ViewBuilder private var actions: some View {
+    /// Checkout This Version (a commit's file), as a button or an icon, then File History and Blame (a tracked file; no
+    /// Blame for an image).
+    @ViewBuilder private func actions(checkoutAsIcon: Bool) -> some View {
         let file = target.file
         if case .commit = target.source, file.kind != .deleted {
-            Button("Checkout This Version") { session.checkoutVersion(of: target) }
-                .buttonStyle(RowTextButtonStyle())
-                .lineLimit(1)
-                .fixedSize()
-                .help("Replace the file in the working tree with this commit's version")
+            if checkoutAsIcon {
+                toolButton("arrow.down.doc", help: "Checkout This Version") { session.checkoutVersion(of: target) }
+            } else {
+                Button("Checkout This Version") { session.checkoutVersion(of: target) }
+                    .buttonStyle(RowTextButtonStyle())
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("Replace the file in the working tree with this commit's version")
+            }
         }
         if file.kind != .untracked {
             toolButton("clock.arrow.circlepath", help: "File History") {
@@ -306,7 +393,7 @@ private struct DiffHeaderCard: View {
         }
     }
 
-    /// An icon button opening a tool (File History, Blame), the back button's look.
+    /// An icon button opening a tool (File History, Blame), the close button's look.
     private func toolButton(_ icon: String, help: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             IconImage(icon)
@@ -329,12 +416,12 @@ private struct DiffHeaderCard: View {
         }
     }
 
-    /// Stacked, not opened from a tool: Back and close hide the bottom pane under the graph, which stays in view.
+    /// Stacked, not opened from a tool: close (and Esc) hides the bottom pane under the graph, which stays in view.
     private var closesPane: Bool {
         session.returnTool == nil && LayoutPreset.resolved(storedPreset) == .stacked
     }
 
-    /// Where Back and close return: the tool the diff was opened from, else the graph.
+    /// Where close (and Esc) returns: the tool the diff was opened from, else the graph.
     private var backName: String {
         switch session.returnTool {
         case .fileHistory?: "History"
@@ -344,28 +431,31 @@ private struct DiffHeaderCard: View {
         }
     }
 
-    @ViewBuilder private func counts(_ detail: FileDiffDetail?) -> some View {
-        if let detail {
-            if let additions = detail.additions, let deletions = detail.deletions {
-                HStack(spacing: 6) {
-                    Text("+\(additions)")
-                        .foregroundStyle(Color(nsColor: Palette.diffAddedSign))
-                    Text("−\(deletions)")
-                        .foregroundStyle(Color(nsColor: Palette.diffRemovedSign))
-                }
-                .font(.callout.monospacedDigit().weight(.medium))
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(additions) added, \(deletions) removed")
-            }
-        } else {
+    @ViewBuilder private var countsView: some View {
+        switch counts {
+        case .loading:
             SkeletonLine(width: 56, height: 11)
+        case .none:
+            EmptyView()
+        case .lines(let additions, let deletions):
+            HStack(spacing: 6) {
+                Text("+\(additions)")
+                    .foregroundStyle(Color(nsColor: Palette.diffAddedSign))
+                Text("−\(deletions)")
+                    .foregroundStyle(Color(nsColor: Palette.diffRemovedSign))
+            }
+            .font(.callout.monospacedDigit().weight(.medium))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(additions) added, \(deletions) removed")
         }
     }
 }
 
-/// The loaded diff: a card per side (filling the panel together), or a card that says why there are no lines.
+/// The loaded diff: a card per side (filling the panel together; the first one's header is the file's row), or a card
+/// that says why there are no lines.
 private struct DiffContent: View {
     let session: RepoSession
+    let target: FileTarget
     let detail: FileDiffDetail
 
     var body: some View {
@@ -375,7 +465,7 @@ private struct DiffContent: View {
             // lines fits its text.
             VStack(spacing: SectionCardMetrics.spacing) {
                 ForEach(sections) { section in
-                    sectionCard(section)
+                    sectionCard(section, in: sections)
                 }
                 if sections.allSatisfy({ $0.rows(session.diffMode).isEmpty }) {
                     Spacer(minLength: 0)
@@ -384,43 +474,47 @@ private struct DiffContent: View {
         case .images(let sides):
             VStack(spacing: SectionCardMetrics.spacing) {
                 ForEach(sides) { side in
-                    ImageDiffCard(side: side)
+                    ImageDiffCard(side: side, header: side.id == sides.first?.id
+                        ? header(side: sides.count > 1 ? side.side.title : nil, counts: .none) : nil)
                 }
             }
         case .binary:
-            DiffNoticeCard(title: "Binary file", systemImage: "doc.zipper",
-                           message: "Histq does not show the contents of binary files.")
+            noticeCard(FileNotice(systemImage: "doc.zipper",
+                                  message: "Histq does not show the contents of binary files."))
         case .tooLarge(let bytes):
-            DiffNoticeCard(
-                title: "Large file", systemImage: "doc.badge.clock",
+            noticeCard(FileNotice(
+                systemImage: "doc.badge.clock",
                 message: "This file is \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)), "
                     + "over the \(ByteCountFormatter.string(fromByteCount: Int64(RepoSession.fileSizeLimit), countStyle: .file)) "
                     + "Histq shows at once."
             ) {
                 Button("Load Anyway") { session.loadFileAnyway() }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
-            }
+            })
         case .unchanged:
-            DiffNoticeCard(title: "No changes", systemImage: "checkmark.circle",
-                           message: "This file has no changes to show.")
+            noticeCard(FileNotice(systemImage: "checkmark.circle", message: "This file has no changes to show."))
         }
     }
 
-    private func sectionCard(_ section: DiffSection) -> some View {
-        let rows = section.rows(session.diffMode)
-        return SectionCard(section.side.title, systemImage: section.side.systemImage, contentPadding: 0) {
-            if rows.isEmpty {
-                Text(modeOnlyText(section))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
-            } else {
-                DiffLineTable(
-                    section: section, mode: session.diffMode, loadID: detail.loadID,
-                    onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
-                    onClose: { [session] in session.closeFile() })
-                    .frame(maxHeight: .infinity)
-            }
+    private func header(side: String?, counts: DiffFileHeader.Counts) -> DiffFileHeader {
+        DiffFileHeader(session: session, target: target, side: side, counts: counts)
+    }
+
+    private func noticeCard(_ notice: some View) -> some View {
+        DiffCard(header: header(side: nil, counts: .none), contentPadding: SettingsMetrics.cardPadding) { notice }
+    }
+
+    /// The first side's card has the file's row as its header (naming the side when another card follows); the others
+    /// keep their side's title, with the line counts as their accessory. One `DiffCard` for both, so the body keeps its
+    /// table when the side moves to or from the first place.
+    private func sectionCard(_ section: DiffSection, in sections: [DiffSection]) -> some View {
+        let isFirst = section.id == sections.first?.id
+        return DiffCard(
+            header: isFirst ? header(side: sections.count > 1 ? section.side.title : nil,
+                                     counts: .lines(additions: section.additions, deletions: section.deletions)) : nil,
+            title: section.side.title, systemImage: section.side.systemImage
+        ) {
+            sectionBody(section)
         } accessory: {
             HStack(spacing: 6) {
                 Text("+\(section.additions)")
@@ -431,6 +525,22 @@ private struct DiffContent: View {
             .font(.settingsCaption.monospacedDigit())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(section.additions) added, \(section.deletions) removed")
+        }
+    }
+
+    @ViewBuilder private func sectionBody(_ section: DiffSection) -> some View {
+        let rows = section.rows(session.diffMode)
+        if rows.isEmpty {
+            Text(modeOnlyText(section))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+        } else {
+            DiffLineTable(
+                section: section, mode: session.diffMode, loadID: detail.loadID,
+                onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
+                onClose: { [session] in session.closeFile() })
+                .frame(maxHeight: .infinity)
         }
     }
 
@@ -448,29 +558,34 @@ private struct DiffContent: View {
 /// never up, over a checkerboard that shows transparency.
 private struct ImageDiffCard: View {
     let side: ImageDiffSide
+    /// The file's row, on the first side's card, in place of the side's title.
+    let header: DiffFileHeader?
 
     private static let spacing: CGFloat = 12
     /// A pane's label row and the gap under it.
     private static let labelHeight: CGFloat = 24
 
     var body: some View {
-        SectionCard(side.side.title, systemImage: side.side.systemImage) {
-            GeometryReader { proxy in
-                let layout = Self.stacks(side, in: proxy.size)
-                    ? AnyLayout(VStackLayout(spacing: Self.spacing))
-                    : AnyLayout(HStackLayout(alignment: .top, spacing: Self.spacing))
-                layout {
-                    if let before = side.before {
-                        ImagePane(title: "Before", tint: Color(nsColor: Palette.diffRemovedSign), image: before)
-                    }
-                    if let after = side.after {
-                        ImagePane(title: side.side == .file ? "This version" : "After",
-                                  tint: side.side == .file ? nil : Color(nsColor: Palette.diffAddedSign), image: after)
-                    }
+        DiffCard(header: header, title: side.side.title, systemImage: side.side.systemImage,
+                 contentPadding: SettingsMetrics.cardPadding) { panes }
+    }
+
+    private var panes: some View {
+        GeometryReader { proxy in
+            let layout = Self.stacks(side, in: proxy.size)
+                ? AnyLayout(VStackLayout(spacing: Self.spacing))
+                : AnyLayout(HStackLayout(alignment: .top, spacing: Self.spacing))
+            layout {
+                if let before = side.before {
+                    ImagePane(title: "Before", tint: Color(nsColor: Palette.diffRemovedSign), image: before)
+                }
+                if let after = side.after {
+                    ImagePane(title: side.side == .file ? "This version" : "After",
+                              tint: side.side == .file ? nil : Color(nsColor: Palette.diffAddedSign), image: after)
                 }
             }
-            .frame(maxHeight: .infinity)
         }
+        .frame(maxHeight: .infinity)
     }
 
     /// Whether Before and After show larger one above the other than side by side in `size`: the smaller of their two
@@ -563,59 +678,83 @@ struct DiffNoticeCard<Action: View>: View {
     }
 }
 
+/// The body of the open file's card when it has no lines (binary, too large, no change, a failed read): the reason's
+/// icon and message, and an optional action.
+private struct FileNotice<Action: View>: View {
+    let systemImage: String
+    let message: String
+    @ViewBuilder let action: () -> Action
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                Text(message)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            } icon: {
+                IconImage(systemImage)
+            }
+            .foregroundStyle(.secondary)
+            action()
+        }
+        // Fills panel2 like the line cards, no empty space below.
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+extension FileNotice where Action == EmptyView {
+    init(systemImage: String, message: String) {
+        self.init(systemImage: systemImage, message: message) { EmptyView() }
+    }
+}
+
 extension DiffNoticeCard where Action == EmptyView {
     init(title: String, systemImage: String, message: String) {
         self.init(title: title, systemImage: systemImage, message: message) { EmptyView() }
     }
 }
 
-/// The diff's skeleton: one card with a hunk header bar and line rows (number gutters and text capsules).
+/// The diff's skeleton, under the file's row: a hunk header bar and line rows (number gutters and text capsules).
 private struct DiffPlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
 
     var body: some View {
-        VStack(spacing: SectionCardMetrics.spacing) {
-            SectionCard("Changes", systemImage: "doc.text", countIsLoading: true, contentPadding: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 8) {
-                        SkeletonLine(fraction: 0.35, height: 10)
-                        SkeletonLine(width: 72, height: 18)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: DiffLayout.hunkHeight)
-                    ForEach(Self.widths.indices, id: \.self) { index in
-                        HStack(spacing: 10) {
-                            SkeletonLine(width: 20, height: 9)
-                            SkeletonLine(width: 20, height: 9)
-                            SkeletonLine(fraction: Self.widths[index], height: 10)
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(height: DiffLayout.lineHeight)
-                    }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                SkeletonLine(fraction: 0.35, height: 10)
+                SkeletonLine(width: 72, height: 18)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: DiffLayout.hunkHeight)
+            ForEach(Self.widths.indices, id: \.self) { index in
+                HStack(spacing: 10) {
+                    SkeletonLine(width: 20, height: 9)
+                    SkeletonLine(width: 20, height: 9)
+                    SkeletonLine(fraction: Self.widths[index], height: 10)
                 }
-                .padding(.bottom, 8)
-                // The loaded cards fill panel2: so does their skeleton.
-                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 10)
+                .frame(height: DiffLayout.lineHeight)
             }
         }
+        .padding(.bottom, 8)
+        // The loaded cards fill panel2: so does their skeleton.
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
-/// An image diff's skeleton: one card with two image boxes side by side.
+/// An image diff's skeleton, under the file's row: two image boxes side by side.
 private struct ImageDiffPlaceholder: View {
     var body: some View {
-        SectionCard("Changes", systemImage: "photo", countIsLoading: true) {
-            HStack(alignment: .top, spacing: 12) {
-                ForEach(0 ..< 2, id: \.self) { _ in
-                    VStack(alignment: .leading, spacing: 8) {
-                        SkeletonLine(width: 120, height: 10)
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Palette.skeletonFill)
-                            .frame(maxWidth: .infinity, maxHeight: 240)
-                    }
+        HStack(alignment: .top, spacing: 12) {
+            ForEach(0 ..< 2, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 8) {
+                    SkeletonLine(width: 120, height: 10)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Palette.skeletonFill)
+                        .frame(maxWidth: .infinity, maxHeight: 240)
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
