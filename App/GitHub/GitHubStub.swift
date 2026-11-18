@@ -79,7 +79,7 @@ enum GitHubStub {
         case "\(repo)/assignees", "\(repo)/collaborators": return (200, "[\(user), \(reviewer)]")
         case "\(repo)/pulls": return (200, "[\(pull(1, full: false))]")
         case "\(repo)/pulls/1": return (200, pull(1, full: true))
-        case "\(repo)/pulls/1/reviews": return (200, "[\(review)]")
+        case "\(repo)/pulls/1/reviews": return (200, "[\(review), \(replyReview)]")
         case "\(repo)/pulls/1/comments": return (200, reviewComments)
         case "\(repo)/pulls/1/commits": return (200, commits)
         case "\(repo)/pulls/1/files": return (200, files)
@@ -91,7 +91,7 @@ enum GitHubStub {
         case "\(repo)/issues": return (200, "[\(issue), \(pullAsIssue)]")
         case "\(repo)/issues/1": return (200, pullAsIssue)
         case "\(repo)/issues/2": return (200, issue)
-        case "\(repo)/issues/1/comments": return (200, "[\(comment)]")
+        case "\(repo)/issues/1/comments": return (200, "[\(pullComments)]")
         case "\(repo)/issues/2/comments": return (200, "[\(issueComment)]")
         case "\(repo)/commits/\(headSHA)/check-runs", "\(repo)/commits/feature/check-runs":
             return (200, #"{"total_count": 1, "check_runs": [\#(checkRun)]}"#)
@@ -206,15 +206,45 @@ enum GitHubStub {
          "html_url": "https://github.com/stub/stub/pull/1#pullrequestreview-701", "submitted_at": "2026-11-12T15:00:00Z"}
         """
 
+    /// The review GitHub made for `stub`'s reply 812 in thread A, as it lists it: commented, without text of its own.
+    /// The timeline hides it, as GitHub does.
+    private static let replyReview = """
+        {"id": 702, "user": \(user), "state": "COMMENTED", "body": "", "body_html": "",
+         "html_url": "https://github.com/stub/stub/pull/1#pullrequestreview-702",
+         "submitted_at": "2026-11-12T16:00:00Z"}
+        """
+
     private static let comment = """
         {"id": 801, "user": \(reviewer), "body": "Nice work.", "body_html": "<p>Nice work.</p>",
          "html_url": "https://github.com/stub/stub/pull/1#issuecomment-801",
          "created_at": "2026-11-12T14:00:00Z", "updated_at": "2026-11-12T14:00:00Z"}
         """
 
+    /// DEBUG `-HistqPRStubComments <n>` (up to 600): PR #1's issue comments are n generated ones instead of `comment`,
+    /// a minute apart from 12:00, for a conversation longer than the panel. Every third has a long line of code, which
+    /// a fit page must wrap.
+    private static let pullComments: String = {
+        guard let count = AppState.launchFlag("-HistqPRStubComments").flatMap(Int.init), count >= 0 else {
+            return comment
+        }
+        return (0..<min(count, 600)).map { index in
+            let id = 10_000 + index
+            let text = "Comment \(index + 1) of a long conversation."
+            let line = "let total = items.map { $0.price * $0.count }.reduce(0, +); "
+            let code = index % 3 != 2 ? "" : "<pre><code>\(String(repeating: line, count: 4))</code></pre>"
+            let date = String(format: "2026-11-12T%02d:%02d:00Z", 12 + index / 60, index % 60)
+            return """
+                {"id": \(id), "user": \(index.isMultiple(of: 2) ? reviewer : user), "body": "\(text)",
+                 "body_html": "<p>\(text)</p>\(code)",
+                 "html_url": "https://github.com/stub/stub/pull/1#issuecomment-\(id)",
+                 "created_at": "\(date)", "updated_at": "\(date)"}
+                """
+        }.joined(separator: ", ")
+    }()
+
     /// PR #1's inline review comments on `feature.txt`, as GitHub lists them: thread A (root 811 on lines 4-6,
-    /// unresolved) with `stub`'s reply 812, which GitHub files in a review of its own (702, left out of `/reviews` so
-    /// the timeline keeps its entries), and thread B (root 813 on line 10, resolved), both roots in review 701.
+    /// unresolved) with `stub`'s reply 812, which GitHub files in a review of its own (`replyReview`, 702), and
+    /// thread B (root 813 on line 10, resolved), both roots in review 701.
     private static let reviewComments = "[" + [
         reviewComment(811, review: 701, root: nil, body: "Could the three steps be one sentence?", at: "14:55"),
         reviewComment(812, review: 702, root: 811, body: "I kept the list: it reads better.", at: "16:00"),

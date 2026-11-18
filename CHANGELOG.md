@@ -66,6 +66,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Interactive rebase: Improve next to a reworded commit's message asks AI for a better message from the commit's diff and its current message; Apply puts it in the row.
 - Create Pull Request: Generate next to Description writes the title and description with AI from the branch's commit messages, its diff against the base and the repository's pull request template; Apply fills the form.
 - Settings › AI › Pull requests: Custom instructions, as for commit messages, with Reset to Default.
+- Write a reply and Resolve or Unresolve conversation under each review thread of a pull request; threads collapse and expand with their chevron, and resolved ones start collapsed.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.
@@ -88,6 +89,10 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - The pull request page has a labelled Open on GitHub button, and its "wants to merge 2 commits into main from owner:feature" line shows the two branches as chips.
 - GitHub accounts on the PRs tab and the pull request and issue pages show their real GitHub avatars whatever the Commit avatars setting is (github.com only).
 - The pull request's merge box sits between the Conversation and Comment cards and says whether the branch can be merged: no conflicts (with a green Merge), conflicts that must be resolved (Merge disabled), blocked, out of date, or still checking (asked again a few times until GitHub knows); Close pull request has its own icon.
+- The pull request and issue conversations scroll as one column with the comment box (and a pull request's merge box) under them.
+
+### Fixed
+- Inline review comments now show under their review, with the file, the lines and the diff they comment on.
 
 ## [0.1.0] - YYYY-MM-DD
 

@@ -1,9 +1,9 @@
 // An issue in panel2, laid out like the pull request detail, each part in its own card: the header (back, title,
 // number, state pill, "author opened this issue on <date> · N comments"), the Conversation (the body and the comments
-// in one `GitHubHTMLView`, the same page as a pull request's), the comment box, and a side column with Close/Reopen
-// (confirmed), the assignees and the labels. The row click shows the header and skeleton cards in the same frame
-// (`PlaceholderCard`); the issue and its comments load off the main actor in one go (`IssueDetailModel`). The
-// actions call GitHub through the tab's `GitHubStore` client.
+// in one `GitHubHTMLView` with native avatars on it, the same page as a pull request's, `PRTimelinePage`) and the
+// comment box in one scroll, and a side column with Close/Reopen (confirmed), the assignees and the labels. The row
+// click shows the header and skeleton cards in the same frame (`PlaceholderCard`); the issue and its comments load
+// off the main actor in one go (`IssueDetailModel`). The actions call GitHub through the tab's `GitHubStore` client.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -12,10 +12,11 @@ import SwiftUI
 
 /// Everything the detail shows, read in one load.
 struct IssueDetail: Sendable {
+    let loadID: Int
     let issue: GitHubIssue
     let commentCount: Int
-    /// The body, then the comments by date.
-    let timelineHTML: String
+    /// The body, then the comments by date (`PRTimeline.page`).
+    let timeline: PRTimelineHTML
 
     var isOpen: Bool { issue.state == "open" }
 }
@@ -107,11 +108,12 @@ final class IssueDetailModel {
         }
         let generation = generation
         task = Task { [weak self] in
-            let result = await Self.fetch(api.client, api.repository, number: number)
+            let result = await Self.fetch(api.client, api.repository, number: number, loadID: generation)
             guard let self, generation == self.generation, !Task.isCancelled else { return }
             switch result {
             case .success(let detail):
                 state = .loaded(detail)
+                if quiet { UITiming.content("issue \(number) reloaded") }
                 #if DEBUG
                 if let action = Self.launchAction {
                     Self.launchAction = nil
@@ -175,36 +177,23 @@ final class IssueDetailModel {
         return true
     }
 
+    /// `loadID` is the load's generation: a new one measures the page again, even when its HTML did not change.
     @concurrent
-    private nonisolated static func fetch(_ client: GitHubClient, _ repository: HostedRepository, number: Int) async
-        -> Result<IssueDetail, any Error>
-    {
+    private nonisolated static func fetch(
+        _ client: GitHubClient, _ repository: HostedRepository, number: Int, loadID: Int
+    ) async -> Result<IssueDetail, any Error> {
         async let issue = client.issue(number, in: repository)
         async let comments = client.comments(on: number, in: repository)
         do {
             let (issue, comments) = try await (issue, comments)
-            return .success(IssueDetail(issue: issue, commentCount: comments.count,
-                                        timelineHTML: timeline(issue, comments)))
+            let timeline = PRTimeline.page(
+                author: issue.user, action: "opened this issue", date: issue.createdAt, html: issue.bodyHTML,
+                markdown: issue.body, comments: comments)
+            return .success(IssueDetail(loadID: loadID, issue: issue, commentCount: comments.count,
+                                        timeline: timeline))
         } catch {
             return .failure(error)
         }
-    }
-
-    /// The body, then the comments, oldest first, in the pull request timeline's boxes.
-    private nonisolated static func timeline(_ issue: GitHubIssue, _ comments: [GitHubComment]) -> String {
-        let body = PRTimeline.item(
-            author: issue.user?.login, action: "opened this issue", badge: nil, date: issue.createdAt,
-            bodyHTML: PRTimeline.bodyHTML(issue.bodyHTML, issue.body), emptyText: "No description provided.")
-        let sorted = comments.enumerated().sorted { a, b in
-            switch (a.element.createdAt, b.element.createdAt) {
-            case let (x?, y?) where x != y: x < y
-            default: a.offset < b.offset
-            }
-        }.map(\.element)
-        return ([body] + sorted.map { comment in
-            PRTimeline.item(author: comment.user?.login, action: "commented", badge: nil, date: comment.createdAt,
-                            bodyHTML: PRTimeline.bodyHTML(comment.bodyHTML, comment.body), emptyText: nil)
-        }).joined()
     }
 
     @concurrent
@@ -365,50 +354,51 @@ private struct IssueStatePill: View {
     }
 }
 
-/// The conversation and the comment box, with the side column on the right (below them when panel2 is narrow).
+/// The conversation and the comment box in one scroll view, as the pull request's Conversation tab, with the side
+/// column on the right in its own (at the end of the same scroll when panel2 is narrow).
 private struct IssueContent: View {
     let session: RepoSession
     let detail: IssueDetail
 
     private static let sideWidth: CGFloat = 220
-    /// Narrower than this, the side column goes under the conversation.
-    private static let wideEnough: CGFloat = 560
+    /// Narrower than this, the side cards go at the end of the conversation's column (`IssueSkeleton` too).
+    static let wideEnough: CGFloat = 560
 
     var body: some View {
         GeometryReader { proxy in
-            if proxy.size.width >= Self.wideEnough {
-                HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
-                    main
+            let wide = proxy.size.width >= Self.wideEnough
+            // One tree at both widths: the column keeps its page (and its web view) when panel2 crosses
+            // `wideEnough`, and only the side cards move.
+            HStack(alignment: .top, spacing: PRConversationTab.columnGap) {
+                ScrollView {
+                    main(sideCards: !wide)
+                }
+                if wide {
                     ScrollView {
                         IssueSideColumn(session: session, detail: detail)
                     }
                     .scrollIndicators(.never)
                     .frame(width: Self.sideWidth)
                 }
-            } else {
-                VStack(spacing: SectionCardMetrics.spacing) {
-                    main
-                    ScrollView {
-                        IssueSideColumn(session: session, detail: detail)
-                    }
-                    .frame(maxHeight: min(240, proxy.size.height / 2))
-                }
             }
         }
     }
 
-    private var main: some View {
+    /// The column's cards, each as tall as its content: a long conversation pushes the comment box down.
+    private func main(sideCards: Bool) -> some View {
         VStack(spacing: SectionCardMetrics.spacing) {
             SectionCard("Conversation", systemImage: "text.bubble", count: detail.commentCount) {
-                GitHubHTMLView(html: detail.timelineHTML) { [number = detail.issue.number] in
-                    UITiming.content("issue \(number) conversation html")
-                }
-                .frame(maxWidth: .infinity)
+                // The page fits its content and never scrolls itself: a wheel over it scrolls this column.
+                PRTimelinePage(session: session, number: detail.issue.number, timeline: detail.timeline,
+                               loadID: detail.loadID, kind: "issue",
+                               realAvatars: GitHubUserAvatar.allowsReal(session.github))
+                    .frame(maxWidth: .infinity)
             }
             IssueCommentCard(session: session)
+            if sideCards {
+                IssueSideColumn(session: session, detail: detail)
+            }
         }
-        // At the top: a short conversation's card hugs its text, with the comment box right under it.
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -522,34 +512,61 @@ private struct IssueSideColumn: View {
     }
 }
 
-/// The loading detail: the Conversation card's lines and the side column's cards, in their loaded places.
+/// The loading detail in the loaded issue's arrangement (`IssueContent`): the Conversation card's lines and the
+/// comment box under it, and the side column's cards on the right, or at the end of the column when panel2 is narrow.
 private struct IssueSkeleton: View {
     var body: some View {
-        HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
-            SectionCard("Conversation", systemImage: "text.bubble", countIsLoading: true) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        SkeletonLine(width: 20, height: 20)
-                        SkeletonLine(width: 120, height: 11)
-                    }
-                    SkeletonLine(fraction: 0.9, height: 11)
-                    SkeletonLine(fraction: 0.75, height: 11)
-                    SkeletonLine(fraction: 0.55, height: 11)
-                }
-                .frame(maxHeight: .infinity, alignment: .top)
-            }
-            VStack(spacing: SectionCardMetrics.spacing) {
-                ForEach(["Actions", "Assignees", "Labels"], id: \.self) { title in
-                    SectionCard(title, countIsLoading: true) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            SkeletonLine(fraction: 0.8, height: 11)
-                            SkeletonLine(fraction: 0.5, height: 11)
+        GeometryReader { proxy in
+            let wide = proxy.size.width >= IssueContent.wideEnough
+            HStack(alignment: .top, spacing: PRConversationTab.columnGap) {
+                // A scroll view like the loaded column's (still: the placeholder takes no events), so a column taller
+                // than the panel is cut at its bottom edge as the loaded one is.
+                ScrollView {
+                    VStack(spacing: SectionCardMetrics.spacing) {
+                        SectionCard("Conversation", systemImage: "text.bubble", countIsLoading: true) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 8) {
+                                    SkeletonLine(width: 20, height: 20)
+                                    SkeletonLine(width: 120, height: 11)
+                                }
+                                SkeletonLine(fraction: 0.9, height: 11)
+                                SkeletonLine(fraction: 0.75, height: 11)
+                                SkeletonLine(fraction: 0.55, height: 11)
+                            }
                         }
+                        SectionCard("Comment", systemImage: "square.and.pencil") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+                                    .fill(Palette.skeletonFill)
+                                    .frame(height: 64)
+                                HStack {
+                                    Spacer(minLength: 0)
+                                    SkeletonLine(width: 90, height: 24)
+                                }
+                            }
+                        }
+                        if !wide { sideCards }
                     }
                 }
-                Spacer(minLength: 0)
+                if wide {
+                    VStack(spacing: SectionCardMetrics.spacing) {
+                        sideCards
+                        Spacer(minLength: 0)
+                    }
+                    .frame(width: 220)
+                }
             }
-            .frame(width: 220)
+        }
+    }
+
+    private var sideCards: some View {
+        ForEach(["Actions", "Assignees", "Labels"], id: \.self) { title in
+            SectionCard(title, countIsLoading: true) {
+                VStack(alignment: .leading, spacing: 8) {
+                    SkeletonLine(fraction: 0.8, height: 11)
+                    SkeletonLine(fraction: 0.5, height: 11)
+                }
+            }
         }
     }
 }
