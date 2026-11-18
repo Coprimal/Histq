@@ -668,6 +668,8 @@ final class RepoSession: Identifiable {
     var remoteExpanded = true
     var tagsExpanded = true
     var worktreesExpanded = true
+    /// The Stashes card, last in the Branches tab: collapsed until opened.
+    var stashesExpanded = false
     /// The Local, Remote and Tags cards list their hidden rows too (dimmed), so they can be shown again: the card
     /// header's eye button.
     var localShowsHidden = false

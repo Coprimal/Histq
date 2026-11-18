@@ -1,4 +1,4 @@
-// A repo tab's sidebar (panel 1): tabs Branches (Local, Remote and Worktrees cards, ahead/behind counts), Tags, and
+// A repo tab's sidebar (panel 1): tabs Branches (Local, Remote, Worktrees and Stashes cards, ahead/behind counts), Tags, and
 // Pull requests & Issues (`PullRequestSections`: the GitHub lists, or the Connect card). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
 // for it); a right-click opens the same menu as its badge in the graph. A branch the graph hides is dimmed, with an eye
@@ -104,6 +104,8 @@ enum SidebarMetrics {
     static let branchImage = "lucide-git-branch"
     /// The Worktrees card and each worktree's row: a folder, as GitKraken draws them.
     static let worktreeImage = "folder"
+    /// The Stashes card and each stash's row: the tray of the graph's stash node.
+    static let stashImage = "tray"
 }
 
 /// The sidebar of a repo tab: the tab picker across its width (icon and short name; the full name is the tooltip),
@@ -175,6 +177,10 @@ struct SidebarView: View {
             SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
                            isExpanded: $session.worktreesExpanded) { _ in
                 SkeletonRows(fractions: [0.4, 0.55])
+            }
+            SidebarSection(title: "Stashes", systemImage: SidebarMetrics.stashImage, count: nil,
+                           isExpanded: $session.stashesExpanded) { _ in
+                SkeletonRows(fractions: [0.5, 0.35])
             }
         case (.tags, .idle), (.tags, .loading):
             SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) { _ in
@@ -274,6 +280,7 @@ private struct BranchSections: View {
             .accessibilityLabel("Remote actions")
         }
         WorktreeSection(session: session)
+        StashSection(session: session)
     }
 
     /// Remote branches by remote: the remotes in git's order (also those with no fetched branch), then any other remote
@@ -414,6 +421,80 @@ private struct WorktreeRow: View {
     private func open() {
         guard !info.isCurrent, !info.worktree.isPrunable else { return }
         session.openWorktree(info.path)
+    }
+}
+
+/// The Stashes card, last in the Branches tab and collapsed by default: the repo's stashes, newest first, read with the
+/// graph's log (skeleton rows until its first page).
+private struct StashSection: View {
+    @Bindable var session: RepoSession
+
+    var body: some View {
+        let stashes = session.log.value?.stashes
+        SidebarSection(title: "Stashes", systemImage: SidebarMetrics.stashImage, count: stashes?.count,
+                       isExpanded: $session.stashesExpanded) { query in
+            if let stashes {
+                let shown = stashes.filter { FileSearch.matches("\($0.selector) \($0.message)", query: query) }
+                if stashes.isEmpty {
+                    EmptyRow(text: "No stashes")
+                } else if shown.isEmpty {
+                    EmptyRow(text: "No matching stashes")
+                }
+                ForEach(shown) { stash in
+                    StashRow(session: session, stash: stash)
+                }
+            } else {
+                SkeletonRows(fractions: [0.5, 0.35])
+            }
+        }
+    }
+}
+
+/// A stash's row: a tray, its message, then its `stash@{n}`. A click selects its row in the graph and shows its
+/// detail at once; its context menu is the graph row's (Apply, Pop, Drop).
+private struct StashRow: View {
+    let session: RepoSession
+    let stash: Stash
+    @State private var hovered = false
+
+    var body: some View {
+        let selected = session.graphSelection == [.stash(stash.hash)]
+        HStack(spacing: SidebarMetrics.iconGap) {
+            Image(systemName: SidebarMetrics.stashImage)
+                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+            HStack(spacing: 4) {
+                Text(stash.message)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Text(stash.selector)
+                    .font(.settingsCaption)
+                    .lineLimit(1)
+            }
+        }
+        .foregroundStyle(selected ? Color.primary : Color.secondary)
+        .padding(.leading, SidebarMetrics.capsuleLeading)
+        .padding(.trailing, 10)
+        .frame(minHeight: SidebarItemStyle.height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
+        .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
+        .contentShape(Capsule())
+        .padding(.leading, SidebarMetrics.rowLeading - SidebarMetrics.capsuleLeading)
+        .animation(Motion.hover, value: hovered)
+        .onHover { hovered = $0 }
+        .onTapGesture { select() }
+        .contextMenu { MenuEntriesView(entries: RepoMenus.stash(stash.hash, session)) }
+        .help("\(stash.selector): \(stash.message)")
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityLabel("Stash \(stash.selector), \(stash.message)")
+        .accessibilityAction { select() }
+    }
+
+    /// A sidebar click shows the graph, in Stacked too (as `selectWorktree`).
+    private func select() {
+        session.selectGraph([.stash(stash.hash)], keepsPanel2: false)
     }
 }
 
