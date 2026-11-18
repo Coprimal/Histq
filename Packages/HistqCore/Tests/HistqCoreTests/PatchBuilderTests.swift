@@ -204,6 +204,21 @@ struct PatchBuilderTests {
         #expect(try await !DiffReader.file(at: "HEAD", path: "README.md", runner: fx.copy.runner, cwd: fx.repo, env: fx.readEnv).isEmpty)
     }
 
+    @Test("a diff read with whitespace ignored is marked and refuses to build a patch")
+    func whitespaceFilteredDiffRefusesPatch() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        let plain = try await fx.unstaged("README.md")
+        #expect(!plain.ignoresWhitespace)
+        let filtered = try #require(try await DiffReader.unstaged(
+            runner: fx.copy.runner, cwd: fx.repo, env: fx.readEnv, paths: ["README.md"], ignoringWhitespace: true
+        ).first)
+        #expect(filtered.ignoresWhitespace)
+        #expect(throws: PatchBuilder.BuildError.whitespaceFiltered) {
+            try PatchBuilder.patch(for: filtered, selecting: Set(filtered.changedLineIDs), action: .stage)
+        }
+    }
+
     @Test(
         "benchmark: stage and unstage one file 20 times through journaled operations",
         .enabled(if: ProcessInfo.processInfo.environment["HISTQ_STAGE_BENCH"] == "1"))

@@ -15,6 +15,8 @@ struct GitHubDriver: View {
     let session: RepoSession
     @Environment(WindowModel.self) private var model
     @Environment(WindowState.self) private var windowState
+    @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
+    @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
 
     var body: some View {
         Color.clear
@@ -23,9 +25,18 @@ struct GitHubDriver: View {
                 await session.github.watch(source, profile: session.profile)
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                if windowState.isVisible, session.sidebarTab == .prs { session.github.refreshIfStale() }
+                if windowState.isVisible, listsShown { session.github.refreshIfStale() }
+            }
+            // The store reads only the shown lists: a list shown again loads now, not at the next refresh.
+            .onChange(of: layout.pullRequestLists) { old, new in
+                if new.contains(where: { !old.contains($0) }) { session.github.refreshNow() }
             }
     }
+
+    private var layout: SidebarSections { SidebarSections(order: sectionOrder, hidden: hiddenSections) }
+
+    /// The sidebar shows the PRs tab (not hidden, `SidebarSections`).
+    private var listsShown: Bool { layout.shownTab(session.sidebarTab) == .prs }
 
     private var source: GitHubStore.Source {
         let profile = session.profile
@@ -42,16 +53,20 @@ struct GitHubDriver: View {
         return GitHubStore.Source(
             profilesLoaded: profilesLoaded, profileID: profile?.id, account: profile?.github,
             remotes: session.remotes, remotesKnown: session.refs.value != nil, settingsOpen: model.isSettingsOpen,
-            windowVisible: windowState.isVisible, listsShown: session.sidebarTab == .prs, isStub: isStub)
+            windowVisible: windowState.isVisible, listsShown: listsShown, isStub: isStub)
     }
 }
 
-/// The PRs tab's cards; `GitHubDriver` keeps their lists fresh while they show.
+/// The PRs tab's cards, the shown lists in the user's order (`SidebarSections`); `GitHubDriver` keeps their lists
+/// fresh while they show.
 struct PullRequestSections: View {
     let session: RepoSession
+    @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
+    @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
 
     var body: some View {
         let store = session.github
+        let lists = SidebarSections(order: sectionOrder, hidden: hiddenSections).pullRequestLists
         VStack(alignment: .leading, spacing: SidebarMetrics.cardSpacing) {
             if let notice = store.actionNotice {
                 PRActionErrorCard(message: notice) { store.actionNotice = nil }
@@ -59,7 +74,7 @@ struct PullRequestSections: View {
             }
             switch store.connection {
             case .resolving:
-                ForEach(GitHubStore.List.allCases, id: \.self) { list in
+                ForEach(lists, id: \.self) { list in
                     ListCard(session: session, list: list, realAvatars: false)
                 }
             case .notConnected(let account):
@@ -76,7 +91,7 @@ struct PullRequestSections: View {
                     }
                 }
             case .connected(let repository):
-                ForEach(GitHubStore.List.allCases, id: \.self) { list in
+                ForEach(lists, id: \.self) { list in
                     ListCard(session: session, list: list,
                              realAvatars: repository.host == "github.com" && !isStub)
                 }

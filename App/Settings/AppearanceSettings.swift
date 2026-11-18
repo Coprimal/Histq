@@ -1,5 +1,6 @@
-// Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the commit graph's
-// avatars, date format, row height and text columns, and the file lists' layout and file sizes.
+// Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the sidebar's sections
+// (shown, and their order in each tab), the commit graph's avatars, date format, row height and text columns, the file
+// lists' layout and file sizes, the WIP panel's order, and the diffs' default view and whitespace.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -18,6 +19,13 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showFileSizes = true
     @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var fileListMode =
         FileListMode.tree.rawValue
+    @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
+    @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
+    @AppStorage(PrefKey.commitBoxPosition.rawValue, store: Preferences.defaults) private var commitBoxPosition = "bottom"
+    @AppStorage(PrefKey.stagedPosition.rawValue, store: Preferences.defaults) private var stagedPosition = "below"
+    @AppStorage(PrefKey.diffDefaultMode.rawValue, store: Preferences.defaults) private var diffDefaultMode =
+        DiffMode.diff.rawValue
+    @AppStorage(PrefKey.diffIgnoreWhitespace.rawValue, store: Preferences.defaults) private var ignoresWhitespace = false
 
     /// The date formats offered, the shortest (the default, 24 h) first; a format set by hand (`defaults write`) is
     /// listed too.
@@ -86,6 +94,22 @@ struct AppearanceSettings: View {
                 } label: {
                     Text("Layout")
                     SettingsHint("Stacked: a file opens under the graph. Focus (⌥⌘F): the sidebar and detail panel hide.")
+                }
+            }
+            SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {
+                let order = sidebarOrder
+                let hidden = hiddenSidebarIDs
+                ForEach(SidebarTab.allCases, id: \.self) { tab in
+                    if tab != SidebarTab.allCases.first { SettingsDivider() }
+                    Text(tab.title)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 6)
+                    let ids = order.filter { $0.tab == tab }
+                    ForEach(ids, id: \.self) { id in
+                        if id != ids.first { SettingsDivider() }
+                        sidebarRow(id, in: ids, isHidden: hidden.contains(id))
+                    }
                 }
             }
             SettingsGroup("Avatars") {
@@ -159,8 +183,113 @@ struct AppearanceSettings: View {
                                   hint: "In the Unstaged card: yellow from 1 MB, red from 10 MB.",
                                   isOn: $showFileSizes)
             }
+            SettingsGroup("WIP panel") {
+                LabeledContent {
+                    CapsuleTabs(selection: $commitBoxPosition, tabs: ["top", "bottom"],
+                                title: { Text($0.capitalized) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Commit box")
+                    SettingsHint("Above or under the file cards.")
+                }
+                SettingsDivider()
+                LabeledContent {
+                    CapsuleTabs(selection: $stagedPosition, tabs: ["above", "below"],
+                                title: { Text($0.capitalized) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Staged")
+                    SettingsHint("The Staged card, above or below Unstaged; also in another worktree's changes.")
+                }
+            }
+            SettingsGroup("Diff") {
+                LabeledContent {
+                    CapsuleTabs(selection: Binding(get: { DiffMode(rawValue: diffDefaultMode) ?? .diff },
+                                                   set: { diffDefaultMode = $0.rawValue }),
+                                tabs: DiffMode.allCases, title: { Text($0.title) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Default view")
+                    SettingsHint("Where a newly opened repository's diffs start. Split: old and new side by side.")
+                }
+                SettingsDivider()
+                SettingsSwitchRow(title: "Ignore whitespace",
+                                  hint: "Line staging is off while whitespace is ignored.",
+                                  isOn: $ignoresWhitespace)
+            }
         } skeleton: {
             EmptyView()
+        }
+    }
+
+    /// Every sidebar section, hidden ones too, in the user's order.
+    private var sidebarOrder: [SidebarSectionID] {
+        SidebarSections(order: sectionOrder, hidden: "").visible
+    }
+
+    private var hiddenSidebarIDs: Set<SidebarSectionID> {
+        Set(SidebarSectionID.allCases).subtracting(SidebarSections(order: sectionOrder, hidden: hiddenSections).visible)
+    }
+
+    /// A section's row: up and down (inside its tab, `ids`; none for a tab of one section), then its switch.
+    private func sidebarRow(_ id: SidebarSectionID, in ids: [SidebarSectionID], isHidden: Bool) -> some View {
+        let title = Self.sectionTitle(id)
+        return LabeledContent {
+            HStack(spacing: 8) {
+                if ids.count > 1 {
+                    HStack(spacing: 4) {
+                        moveButton(id, title: title, up: true, disabled: id == ids.first)
+                        moveButton(id, title: title, up: false, disabled: id == ids.last)
+                    }
+                }
+                Toggle(title, isOn: Binding(get: { !isHidden }, set: { setHidden(id, !$0) }))
+                    .toggleStyle(CompactSwitch())
+                    .labelsHidden()
+            }
+        } label: {
+            Text(title)
+            if id == .allOpen {
+                SettingsHint("Still loads when hidden: it feeds the graph's pull request badges.")
+            }
+        }
+    }
+
+    private func moveButton(_ id: SidebarSectionID, title: String, up: Bool, disabled: Bool) -> some View {
+        Button { move(id, up: up) } label: {
+            Image(systemName: up ? "chevron.up" : "chevron.down")
+        }
+        .buttonStyle(RowTextButtonStyle(formRow: true))
+        .disabled(disabled)
+        .help(up ? "Move Up" : "Move Down")
+        .accessibilityLabel(up ? "Move \(title) up" : "Move \(title) down")
+    }
+
+    /// Swaps `id` with its neighbor in its tab, and writes the whole order back.
+    private func move(_ id: SidebarSectionID, up: Bool) {
+        var order = sidebarOrder
+        let tabIDs = order.filter { $0.tab == id.tab }
+        guard let index = tabIDs.firstIndex(of: id) else { return }
+        let neighbor = index + (up ? -1 : 1)
+        guard tabIDs.indices.contains(neighbor), let from = order.firstIndex(of: id),
+              let to = order.firstIndex(of: tabIDs[neighbor]) else { return }
+        order.swapAt(from, to)
+        sectionOrder = order.map(\.rawValue).joined(separator: ",")
+    }
+
+    private func setHidden(_ id: SidebarSectionID, _ hides: Bool) {
+        var hidden = hiddenSidebarIDs
+        if hides { hidden.insert(id) } else { hidden.remove(id) }
+        hiddenSections = SidebarSectionID.allCases.filter(hidden.contains).map(\.rawValue).joined(separator: ",")
+    }
+
+    /// The section's title in the sidebar.
+    private static func sectionTitle(_ id: SidebarSectionID) -> String {
+        switch id {
+        case .local: "Local"
+        case .remote: "Remote"
+        case .worktrees: "Worktrees"
+        case .tags: "Tags"
+        case .mine, .reviewRequested, .allOpen, .assigned: GitHubStore.List(rawValue: id.rawValue)?.title ?? id.rawValue
         }
     }
 

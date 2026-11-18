@@ -861,11 +861,14 @@ final class RepoSession: Identifiable {
     private(set) var fileDiff: Loadable<FileDiffDetail> = .idle
     /// Changes with every file select (and "Load anyway"): the diff placeholder logs a line per select.
     private(set) var fileToken = 0
-    /// Hunks only, side by side, or the whole file with its changes; kept while other files are opened. DEBUG
-    /// `-HistqDiffMode diff|split|full` sets the first one.
-    var diffMode: DiffMode = AppState.launchFlag("-HistqDiffMode").flatMap(DiffMode.init(rawValue:)) ?? .diff
-    /// The diffs ignore whitespace changes (`git diff -w`, `PrefKey.diffIgnoreWhitespace`): set with
-    /// `setIgnoresWhitespace`, which reads the open file again.
+    /// Hunks only, side by side, or the whole file with its changes; kept while other files are opened. Starts in
+    /// `PrefKey.diffDefaultMode`; DEBUG `-HistqDiffMode diff|split|full` overrides it.
+    var diffMode: DiffMode = AppState.launchFlag("-HistqDiffMode").flatMap(DiffMode.init(rawValue:))
+        ?? Preferences.defaults.string(forKey: PrefKey.diffDefaultMode.rawValue).flatMap(DiffMode.init(rawValue:))
+        ?? .diff
+    /// The diffs ignore whitespace changes (`git diff -w`, `PrefKey.diffIgnoreWhitespace`, one pref for every window):
+    /// set with `setIgnoresWhitespace`, which reads the open file again; `DiffView` calls it when the pref changes
+    /// elsewhere (Settings, another window), and each file load reads the pref again.
     private(set) var ignoresWhitespace = Preferences.defaults.bool(forKey: PrefKey.diffIgnoreWhitespace.rawValue)
     /// The last Previous / Next Change press: the open file's tables scroll to that change.
     private(set) var diffJump: DiffJump?
@@ -2851,6 +2854,9 @@ final class RepoSession: Identifiable {
         fileTask?.cancel()
         let token = fileToken
         let ignoresSizeLimit = fileIgnoresSizeLimit
+        // Settings or another window may have changed the pref while no diff of this session was on screen.
+        let stored = Preferences.defaults.bool(forKey: PrefKey.diffIgnoreWhitespace.rawValue)
+        if stored != ignoresWhitespace { ignoresWhitespace = stored }
         let ignoresWhitespace = ignoresWhitespace
         fileLoadCount &+= 1
         let loadID = fileLoadCount

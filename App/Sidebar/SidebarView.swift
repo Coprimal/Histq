@@ -112,18 +112,25 @@ enum SidebarMetrics {
 /// rows in the same cards until then); the tab capsules and the cards' chevrons work at once.
 struct SidebarView: View {
     @Bindable var session: RepoSession
+    @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
+    @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
+
+    /// The sections the user shows, in their order (`SidebarSections`).
+    private var layout: SidebarSections { SidebarSections(order: sectionOrder, hidden: hiddenSections) }
+    /// The session's tab, or Branches while that one is hidden.
+    private var tab: SidebarTab { layout.shownTab(session.sidebarTab) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             CapsuleTabs(
-                selection: Binding(get: { session.sidebarTab }, set: { session.selectSidebarTab($0) }),
-                tabs: SidebarTab.allCases,
+                selection: Binding(get: { tab }, set: { session.selectSidebarTab($0) }),
+                tabs: layout.tabs,
                 title: { Text($0.shortTitle) },
                 compact: true,
                 help: \.title,
                 fillsWidth: true,
                 systemImage: \.systemImage)
-            if session.sidebarTab == .prs {
+            if tab == .prs {
                 ScrollView {
                     cards
                 }
@@ -147,11 +154,14 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var sections: some View {
-        switch (session.sidebarTab, session.refs) {
+        let branchIDs = layout.ids(in: .branches)
+        switch (tab, session.refs) {
         case (.prs, _):
             PullRequestSections(session: session)
+        case (.branches, _) where branchIDs.isEmpty:
+            HiddenSectionsCard()
         case (.branches, .loaded(let refs)):
-            BranchSections(session: session, refs: refs)
+            BranchSections(session: session, refs: refs, ids: branchIDs)
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.tags, .loaded(let refs)):
             let hidden = refs.tags.count { session.isHidden($0.refName) }
@@ -164,17 +174,24 @@ struct SidebarView: View {
             }
             .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.branches, .idle), (.branches, .loading):
-            SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: nil,
-                           isExpanded: $session.localExpanded) { _ in
-                SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
-            }
-            SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
-                           isExpanded: $session.remoteExpanded) { _ in
-                SkeletonRows(fractions: [0.3, 0.55, 0.4])
-            }
-            SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
-                           isExpanded: $session.worktreesExpanded) { _ in
-                SkeletonRows(fractions: [0.4, 0.55])
+            ForEach(branchIDs, id: \.self) { id in
+                switch id {
+                case .local:
+                    SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: nil,
+                                   isExpanded: $session.localExpanded) { _ in
+                        SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
+                    }
+                case .remote:
+                    SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
+                                   isExpanded: $session.remoteExpanded) { _ in
+                        SkeletonRows(fractions: [0.3, 0.55, 0.4])
+                    }
+                default:
+                    SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
+                                   isExpanded: $session.worktreesExpanded) { _ in
+                        SkeletonRows(fractions: [0.4, 0.55])
+                    }
+                }
             }
         case (.tags, .idle), (.tags, .loading):
             SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) { _ in
@@ -191,16 +208,28 @@ struct SidebarView: View {
     }
 }
 
-/// The Local and Remote cards. Remote branches are grouped by remote inside their card.
+/// The Local, Remote and Worktrees cards, those of `ids` in its order. Remote branches are grouped by remote inside
+/// their card.
 private struct BranchSections: View {
     @Bindable var session: RepoSession
     let refs: Refs
+    /// The Branches tab's visible sections (`SidebarSections`), in order.
+    let ids: [SidebarSectionID]
 
     var body: some View {
-        // The headers count the listed rows: the hidden ones only while their card lists them.
+        ForEach(ids, id: \.self) { id in
+            switch id {
+            case .local: localCard
+            case .remote: remoteCard
+            default: WorktreeSection(session: session)
+            }
+        }
+    }
+
+    // The headers count the listed rows: the hidden ones only while their card lists them.
+    private var localCard: some View {
         let hiddenLocal = refs.localBranches.count { session.isHidden($0.refName) }
-        let hiddenRemote = refs.remoteBranches.count { session.isHidden($0.refName) }
-        SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage,
+        return SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage,
                        count: refs.localBranches.count - (session.localShowsHidden ? 0 : hiddenLocal),
                        isExpanded: $session.localExpanded) { query in
             let listed = refs.localBranches.filter { session.localShowsHidden || !session.isHidden($0.refName) }
@@ -236,7 +265,11 @@ private struct BranchSections: View {
             .help("Local branches")
             .accessibilityLabel("Local branch actions")
         }
-        SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage,
+    }
+
+    private var remoteCard: some View {
+        let hiddenRemote = refs.remoteBranches.count { session.isHidden($0.refName) }
+        return SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage,
                        count: refs.remoteBranches.count - (session.remoteShowsHidden ? 0 : hiddenRemote),
                        isExpanded: $session.remoteExpanded) { query in
             let shown = filteredRemotes(query)
@@ -273,7 +306,6 @@ private struct BranchSections: View {
             .help("Remotes")
             .accessibilityLabel("Remote actions")
         }
-        WorktreeSection(session: session)
     }
 
     /// Remote branches by remote: the remotes in git's order (also those with no fetched branch), then any other remote
@@ -297,6 +329,27 @@ private struct BranchSections: View {
             let branches = remote.branches.filter { FileSearch.matches($0.name, query: query) }
             guard !branches.isEmpty || FileSearch.matches(remote.name, query: query) else { return nil }
             return (remote.name, branches)
+        }
+    }
+}
+
+/// The Branches tab with Local, Remote and Worktrees all hidden: says so, with the button to Settings › Appearance.
+private struct HiddenSectionsCard: View {
+    @Environment(WindowModel.self) private var model
+
+    var body: some View {
+        SectionCard("Branches", systemImage: SidebarTab.branches.systemImage) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("All sections are hidden")
+                    .font(.body.weight(.medium))
+                Text("Local, Remote and Worktrees are hidden in Settings › Appearance.")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Show Sections…") { model.selectSettings(.appearance) }
+                    .buttonStyle(RowTextButtonStyle(prominent: true))
+                    .help("Settings › Appearance")
+            }
         }
     }
 }

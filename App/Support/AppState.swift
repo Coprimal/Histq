@@ -142,6 +142,13 @@ enum PrefKey: String, CaseIterable {
     /// Global, like `layoutPreset`; Focus hides both whatever they are.
     case showSidebar
     case showDetail
+    /// The sidebar's sections in the user's order, inside each tab: section ids separated by commas, "local", "remote",
+    /// "worktrees" (Branches), "tags" (Tags), "mine", "reviewRequested", "allOpen", "assigned" (PRs); empty = the
+    /// default order. Read by `SidebarSections`. Global.
+    case sidebarSectionOrder
+    /// The sidebar sections hidden: section ids separated by commas, as `sidebarSectionOrder`; empty = none. Hiding
+    /// Tags, or all four PR lists, removes their tab. Global.
+    case hiddenSidebarSections
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
     /// The graph's Commit message, Author and Time columns show (Branch / Tag and Graph always do).
@@ -172,10 +179,17 @@ enum PrefKey: String, CaseIterable {
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The WIP panel's commit box: "bottom" (under the file cards) or "top" (above them).
+    case commitBoxPosition
+    /// The Staged card, in the WIP panel and another worktree's changes: "below" or "above" the Unstaged card.
+    case stagedPosition
     /// The file diffs ignore whitespace changes (`git diff -w`); their hunks are then read-only.
     case diffIgnoreWhitespace
     /// The file diffs wrap long lines instead of scrolling sideways.
     case diffWrapLines
+    /// The view a newly opened repository's diffs start in: a `DiffMode` raw value, "diff", "split" or "full";
+    /// switching in an open diff changes only that window's session.
+    case diffDefaultMode
     /// The blame wraps long lines instead of scrolling sideways; its header switches it.
     case blameWrapLines
     /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
@@ -230,6 +244,7 @@ enum PrefKey: String, CaseIterable {
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
         case .showSidebar, .showDetail: true
+        case .sidebarSectionOrder, .hiddenSidebarSections: ""
         case .graphColumnWidths: ""
         case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
         case .terminalFontName: ""
@@ -243,7 +258,10 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .commitBoxPosition: "bottom"
+        case .stagedPosition: "below"
         case .diffIgnoreWhitespace, .diffWrapLines: false
+        case .diffDefaultMode: "diff"
         case .blameWrapLines: false
         case .aiShowFeatures: true
         case .aiProvider: "openAI"

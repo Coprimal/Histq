@@ -141,12 +141,16 @@ struct DiffView: View {
     let session: RepoSession
     let target: FileTarget
     @Environment(WindowModel.self) private var model
+    @AppStorage(PrefKey.diffIgnoreWhitespace.rawValue, store: Preferences.defaults) private var ignoresWhitespace = false
 
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
             DiffControlsCard(session: session, target: target)
             cards
         }
+        // One pref for every window: a switch in Settings or another window's diff reads this file again (a no-op
+        // when the session already has the value).
+        .onChange(of: ignoresWhitespace, initial: true) { _, new in session.setIgnoresWhitespace(new) }
     }
 
     private var cards: some View {
