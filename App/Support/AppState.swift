@@ -86,6 +86,10 @@ enum Preferences {
     /// Registers every `PrefKey` default, so a read of a key never set returns its default. Called once at launch.
     static func registerDefaults() {
         defaults.register(defaults: Dictionary(uniqueKeysWithValues: PrefKey.allCases.map { ($0.rawValue, $0.defaultValue) }))
+        // Toasts "off" is gone (a failure shows only in its toast): it hides the successes only.
+        if defaults.string(forKey: PrefKey.toastLevel.rawValue) == "off" {
+            defaults.set(ToastLevel.errors.rawValue, forKey: PrefKey.toastLevel.rawValue)
+        }
     }
 }
 
@@ -184,7 +188,7 @@ enum PrefKey: String, CaseIterable {
     case aiConflictInstructions
     /// The user's own instructions added to the pull request Generate prompt (empty: none).
     case aiPullRequestInstructions
-    /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
+    /// The operation toasts shown: a `ToastLevel` raw value, "all" or "errors" (a failure always shows).
     case toastLevel
     /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
     /// its `RepoViewState` (`RepoSession.migrateHiddenRefs`).
