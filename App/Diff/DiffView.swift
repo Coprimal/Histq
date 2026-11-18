@@ -685,8 +685,8 @@ struct DiffNoticeCard<Action: View>: View {
 }
 
 /// The body of the open file's card when it has no lines (binary, too large, no change, a failed read): the reason's
-/// icon and message, and an optional action.
-private struct FileNotice<Action: View>: View {
+/// icon and message, and an optional action. The blame's card uses it too.
+struct FileNotice<Action: View>: View {
     let systemImage: String
     let message: String
     @ViewBuilder let action: () -> Action

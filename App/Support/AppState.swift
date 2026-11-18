@@ -172,6 +172,8 @@ enum PrefKey: String, CaseIterable {
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The blame wraps long lines instead of scrolling sideways; its header switches it.
+    case blameWrapLines
     /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
     case aiShowFeatures
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
@@ -237,6 +239,7 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .blameWrapLines: false
         case .aiShowFeatures: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
