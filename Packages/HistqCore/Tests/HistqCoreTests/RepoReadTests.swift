@@ -211,6 +211,33 @@ struct RepoReadTests {
         #expect(DiffReader.compareFilesArguments(base: "HEAD", head: nil).suffix(3) == ["--end-of-options", "HEAD", "--"])
     }
 
+    @Test("-w is passed only when asked, and never to the patch text: a whitespace-only edit still shows there")
+    func whitespaceIgnoredOnlyWhenAsked() async throws {
+        let plain = DiffReader.compareArguments(base: "HEAD", head: nil, paths: [], context: nil)
+        #expect(!plain.contains("-w"))
+        let ignoring = DiffReader.compareArguments(
+            base: "HEAD", head: nil, paths: [], context: nil, ignoringWhitespace: true)
+        let end = try #require(ignoring.firstIndex(of: "--end-of-options"))
+        #expect(ignoring.firstIndex(of: "-w").map { $0 < end } == true)
+
+        let graph = try await Graph()
+        defer { graph.copy.remove() }
+        let path = "src/config.swift"
+        let file = graph.repo.appending(path: path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        try #require(text.contains("    var debug"))
+        try Data(text.replacing("    var debug", with: "\tvar debug").utf8).write(to: file)
+
+        let read = { (ignoring: Bool) in
+            try await DiffReader.unstaged(
+                runner: graph.runner, cwd: graph.repo, env: graph.env, paths: [path], ignoringWhitespace: ignoring)
+        }
+        #expect(try await read(false).map(\.path) == [path])
+        #expect(try await read(true).isEmpty, "-w hides a whitespace-only edit")
+        let patch = try await DiffReader.patchText(.unstaged, runner: graph.runner, cwd: graph.repo, env: graph.env)
+        #expect(patch.contains("+++ b/\(path)") && patch.contains("+\tvar debug"))
+    }
+
     @Test("compare reads two commits like diff-tree, and the working tree without untracked files")
     func compareReadsCommitsAndWorktree() async throws {
         let graph = try await Graph()

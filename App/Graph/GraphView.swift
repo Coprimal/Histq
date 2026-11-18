@@ -55,6 +55,27 @@ enum GraphColumn: String, CaseIterable {
         }
     }
 
+    /// `defaultWidth` at `textSize`, for a column without a stored width: Branch / Tag and Author grow with a larger
+    /// text (never narrower than at Regular, so Small cuts no badge), and Time fits a date in `dateFormat` whole. The
+    /// same as `defaultWidth` at Regular with the default format.
+    @MainActor func defaultWidth(textSize: TextSize, dateFormat: String) -> CGFloat {
+        switch self {
+        case .refs, .author: max(defaultWidth, textSize.scaled(defaultWidth))
+        case .date: max(defaultWidth, textSize.scaled(defaultWidth),
+                        GraphTextCellView.fittingWidth(Self.sampleDate(dateFormat), textSize: textSize))
+        case .graph, .message: defaultWidth
+        }
+    }
+
+    /// A wide date in `dateFormat` (Wednesday, December 31 at 23:58), formatted as the date cells are.
+    private static func sampleDate(_ dateFormat: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: Locale.current.identifier)
+        formatter.dateFormat = dateFormat
+        let date = Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 31, hour: 23, minute: 58))
+        return date.map(formatter.string(from:)) ?? ""
+    }
+
     var minWidth: CGFloat {
         switch self {
         case .refs: 40
@@ -80,9 +101,10 @@ enum GraphColumn: String, CaseIterable {
     }
 }
 
-/// The graph table. `log` gives the rows; `refs` the badges; `status` the WIP row's counts. `dateFormat` and
-/// `rowDensity` are `PrefKey.dateFormat` and `PrefKey.rowDensity`. `onSelect` gets the selected rows (in row order) as
-/// soon as the selection changes (a click, ⌘/⇧-click, the arrow keys); `onActivate` gets a double-clicked row.
+/// The graph table. `log` gives the rows; `refs` the badges; `status` the WIP row's counts. `dateFormat`,
+/// `rowDensity` and `textSize` are `PrefKey.dateFormat`, `PrefKey.rowDensity` and `PrefKey.textSize`. `onSelect` gets
+/// the selected rows (in row order) as soon as the selection changes (a click, ⌘/⇧-click, the arrow keys);
+/// `onActivate` gets a double-clicked row.
 /// `selection` is the selection the table follows: a new one (a parent jump) is selected and scrolled to, without an
 /// `onSelect` echo. ⌘Z / ⇧⌘Z while the table has the focus ask `canUndo` and run `onUndo` (`redo` true for Redo);
 /// a text field keeps its own undo, since its field editor answers first.
@@ -92,6 +114,7 @@ struct GraphView: NSViewRepresentable {
     let status: WorkingStatus?
     let dateFormat: String
     let rowDensity: String
+    var textSize = TextSize.regular
     var selection: [GraphItem] = []
     var onSelect: @MainActor ([GraphItem]) -> Void = { _ in }
     var onActivate: @MainActor (GraphItem) -> Void = { _ in }
@@ -156,7 +179,7 @@ struct GraphView: NSViewRepresentable {
             tableColumn.headerCell = header
             if header.symbolName != nil { tableColumn.headerToolTip = column.title }
             tableColumn.minWidth = column.minWidth
-            tableColumn.width = stored[column] ?? column.defaultWidth
+            tableColumn.width = stored[column] ?? column.defaultWidth(textSize: textSize, dateFormat: dateFormat)
             #if DEBUG
             // DEBUG `-HistqRefColumnWidth <pt>`: the Branch / Tag column's width at launch (not saved).
             if column == .refs, let width = AppState.launchFlag("-HistqRefColumnWidth").flatMap(Double.init) {
@@ -459,7 +482,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The lane count and metrics the graph column was last fitted to.
     private var fittedLanes = -1
     private var fittedMetrics: GraphMetrics?
-    /// The row density changed in this `update`: the table reloads after the graph column is fitted again.
+    /// The row density or the text size changed in this `update`: the table reloads after the graph column is fitted
+    /// again.
     private var densityChanged = false
     /// The last selection sent to `onSelect`: a click reports at mouse down (selection change) and again at mouse up
     /// (`action`), only the first goes out.
@@ -662,14 +686,38 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         refreshGhost()
     }
 
+    /// The text columns without a stored width take their default for the view's text size and date format
+    /// (`GraphColumn.defaultWidth(textSize:dateFormat:)`); a stored width, and the column that fills, keep theirs. Not
+    /// saved: only a drag saves the widths.
+    private func fitDefaultWidths(_ view: GraphView) {
+        guard let table = table as? GraphTableView else { return }
+        let stored = GraphColumn.storedWidths(
+            Preferences.defaults.string(forKey: PrefKey.graphColumnWidths.rawValue) ?? "")
+        for column in [GraphColumn.refs, .author, .date] where stored[column] == nil {
+            guard let tableColumn = table.tableColumn(withIdentifier: column.identifier),
+                  tableColumn !== table.fillColumn
+            else { continue }
+            let width = column.defaultWidth(textSize: view.textSize, dateFormat: view.dateFormat)
+            if abs(tableColumn.width - width) > 0.5 { tableColumn.width = width }
+        }
+    }
+
     private func updateRows(_ view: GraphView) {
         guard let table else { return }
         var reloadVisible = false
 
-        let newMetrics = GraphMetrics(density: view.rowDensity)
+        let newMetrics = GraphMetrics(density: view.rowDensity, textSize: view.textSize)
+        // Not on the first update (`dateFormat` still nil): `makeNSView` has set the widths for this view already, and
+        // a refit would drop the DEBUG `-HistqRefColumnWidth`.
+        if dateFormat != nil, newMetrics.textSize != metrics.textSize || view.dateFormat != dateFormat {
+            fitDefaultWidths(view)
+        }
         if newMetrics != metrics {
             metrics = newMetrics
             table.rowHeight = metrics.rowHeight
+            // The column titles take the text size too; the reload does not redraw the header.
+            for column in table.tableColumns { (column.headerCell as? GraphHeaderCell)?.textSize = metrics.textSize }
+            table.headerView?.needsDisplay = true
             // `update` reloads the table once `fitGraphColumn` has fitted the column to the new lane width.
             densityChanged = true
         }
@@ -966,6 +1014,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case .message:
             let cell = reuse(tableView, column) { GraphTextCellView() }
+            cell.textSize = metrics.textSize
             cell.changes = nil
             cell.isDimmed = dimming.isDimmed(row: row, in: log)
             if let commit {
@@ -991,6 +1040,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case .author:
             let cell = reuse(tableView, column) { GraphTextCellView() }
+            cell.textSize = metrics.textSize
             cell.compactTitle = column.title
             // 80 % of the node, kept even so it centers on a whole point in the (even) row height.
             cell.avatarDiameter = (metrics.nodeDiameter * 0.8 / 2).rounded() * 2
@@ -1004,6 +1054,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return cell
         case .date:
             let cell = reuse(tableView, column) { GraphTextCellView() }
+            cell.textSize = metrics.textSize
             // Formatted only for the rows on screen.
             let date = commit?.authorDate ?? (synthetic?.kind == .stash ? stash(synthetic?.id)?.date : nil)
             cell.text = date.map(formatter.string(from:)) ?? ""

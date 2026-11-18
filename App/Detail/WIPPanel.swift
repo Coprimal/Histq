@@ -24,6 +24,8 @@ struct WIPPanel: View {
     /// The unstaged files' sizes on disk, by path (read off the main actor).
     @State private var sizes: [String: Int64] = [:]
     @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showsSizes = true
+    @AppStorage(PrefKey.commitBoxPosition.rawValue, store: Preferences.defaults)
+    private var commitBoxPosition = "bottom"
     /// The window's modal (`ModalHost`) asks before a discard.
     @Environment(WindowModel.self) private var model
 
@@ -41,20 +43,27 @@ struct WIPPanel: View {
         let unstaged = status.map(Self.unstaged) ?? []
         let staged = status.map(Self.staged) ?? []
         // The panel's height is always used: a card with files scrolls inside and shares the free height equally with
-        // the other cards that have files; an empty card fits its text; the commit box stays at the bottom.
+        // the other cards that have files; an empty card fits its text; the commit box stays at the bottom, or at the
+        // top (`PrefKey.commitBoxPosition`).
         VStack(spacing: SectionCardMetrics.spacing) {
+            if commitBoxOnTop { commitBox(staged: staged, unstaged: unstaged) }
             // During an operation the card stays once its files are resolved, saying nothing is left.
             if !conflicted.isEmpty || session.repoState?.isOperationInProgress == true {
                 conflictedCard(conflicted)
             }
-            unstagedCard(unstaged)
-            stagedCard(staged)
+            UnstagedStagedCards { unstagedCard(unstaged) } staged: { stagedCard(staged) }
             if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
-            CommitBox(session: session, stagedCount: staged.count, changeCount: staged.count + unstaged.count,
-                      busy: $busy, error: errorBinding(.commit))
+            if !commitBoxOnTop { commitBox(staged: staged, unstaged: unstaged) }
         }
+    }
+
+    private var commitBoxOnTop: Bool { commitBoxPosition == "top" }
+
+    private func commitBox(staged: [FileChange], unstaged: [FileChange]) -> some View {
+        CommitBox(session: session, stagedCount: staged.count, changeCount: staged.count + unstaged.count,
+                  busy: $busy, error: errorBinding(.commit))
     }
 
     // MARK: Cards
@@ -403,10 +412,13 @@ struct WorktreeChangesPanel: View {
                 filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder,
                           card: .conflicted, tone: Palette.conflictTone)
             }
-            filesCard("Unstaged", systemImage: "doc.badge.ellipsis", unstaged, empty: "No unstaged changes",
-                      folder: folder, card: .unstaged)
-            filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder,
-                      card: .staged)
+            UnstagedStagedCards {
+                filesCard("Unstaged", systemImage: "doc.badge.ellipsis", unstaged, empty: "No unstaged changes",
+                          folder: folder, card: .unstaged)
+            } staged: {
+                filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder,
+                          card: .staged)
+            }
             if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
@@ -462,14 +474,7 @@ struct WorktreeChangesPlaceholder: View {
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
             WorktreeHeaderCard(path: path, branch: nil)
-            SectionCard("Unstaged", systemImage: "doc.badge.ellipsis", countIsLoading: true, contentPadding: 6) {
-                SkeletonFileRows(fractions: [0.55, 0.4, 0.65, 0.5])
-                    .frame(maxHeight: .infinity, alignment: .top)
-            }
-            SectionCard("Staged", systemImage: "tray.full", countIsLoading: true, contentPadding: 6) {
-                SkeletonFileRows(fractions: [0.5, 0.35])
-                    .frame(maxHeight: .infinity, alignment: .top)
-            }
+            SkeletonUnstagedStagedCards()
         }
     }
 }
@@ -478,11 +483,14 @@ struct WorktreeChangesPlaceholder: View {
 /// conflicts).
 struct WIPPlaceholder: View {
     var hasConflicts = false
+    @AppStorage(PrefKey.commitBoxPosition.rawValue, store: Preferences.defaults)
+    private var commitBoxPosition = "bottom"
 
     var body: some View {
         // The loaded panel's shape: the file cards share the height (no scroll views here, the placeholder stays
-        // cheap in the click's frame), the commit box at the bottom.
+        // cheap in the click's frame), the commit box at the bottom or the top.
         VStack(spacing: SectionCardMetrics.spacing) {
+            if commitBoxPosition == "top" { commitBox }
             if hasConflicts {
                 SectionCard("Conflicted", systemImage: "exclamationmark.triangle", countIsLoading: true, contentPadding: 6,
                             tone: Palette.conflictTone) {
@@ -490,25 +498,57 @@ struct WIPPlaceholder: View {
                         .frame(maxHeight: .infinity, alignment: .top)
                 }
             }
+            SkeletonUnstagedStagedCards()
+            if commitBoxPosition != "top" { commitBox }
+        }
+    }
+
+    private var commitBox: some View {
+        SectionCard("Commit", systemImage: "checkmark.circle") {
+            VStack(alignment: .leading, spacing: 10) {
+                SkeletonLine(fraction: 1, height: 28)
+                SkeletonLine(fraction: 1, height: 64)
+                HStack {
+                    SkeletonLine(width: 80, height: 14)
+                    Spacer()
+                    SkeletonLine(width: 120, height: 24)
+                }
+            }
+        }
+    }
+}
+
+/// The placeholders' Unstaged and Staged cards with capsule rows, in `UnstagedStagedCards`' order.
+private struct SkeletonUnstagedStagedCards: View {
+    var body: some View {
+        UnstagedStagedCards {
             SectionCard("Unstaged", systemImage: "doc.badge.ellipsis", countIsLoading: true, contentPadding: 6) {
                 SkeletonFileRows(fractions: [0.55, 0.4, 0.65, 0.5])
                     .frame(maxHeight: .infinity, alignment: .top)
             }
+        } staged: {
             SectionCard("Staged", systemImage: "tray.full", countIsLoading: true, contentPadding: 6) {
                 SkeletonFileRows(fractions: [0.5, 0.35])
                     .frame(maxHeight: .infinity, alignment: .top)
             }
-            SectionCard("Commit", systemImage: "checkmark.circle") {
-                VStack(alignment: .leading, spacing: 10) {
-                    SkeletonLine(fraction: 1, height: 28)
-                    SkeletonLine(fraction: 1, height: 64)
-                    HStack {
-                        SkeletonLine(width: 80, height: 14)
-                        Spacer()
-                        SkeletonLine(width: 120, height: 24)
-                    }
-                }
-            }
+        }
+    }
+}
+
+/// The Unstaged and Staged cards in `PrefKey.stagedPosition`'s order, as two children of the caller's stack (so they
+/// share its height and spacing like the other cards).
+private struct UnstagedStagedCards<Unstaged: View, Staged: View>: View {
+    @ViewBuilder let unstaged: () -> Unstaged
+    @ViewBuilder let staged: () -> Staged
+    @AppStorage(PrefKey.stagedPosition.rawValue, store: Preferences.defaults) private var stagedPosition = "below"
+
+    var body: some View {
+        if stagedPosition == "above" {
+            staged()
+            unstaged()
+        } else {
+            unstaged()
+            staged()
         }
     }
 }
@@ -710,12 +750,14 @@ private struct FilesScroll<Content: View>: View {
 
 private struct EmptyFilesText: View {
     let text: String
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         Text(text)
+            .font(textSize.body)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 6)
-            .frame(height: FileListView<EmptyView>.rowHeight)
+            .frame(height: FileListView<EmptyView>.rowHeight(textSize))
     }
 }
 

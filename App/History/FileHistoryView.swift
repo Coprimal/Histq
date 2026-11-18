@@ -1,7 +1,8 @@
 // A file's history in panel 1, in place of the sidebar: one card with the commits that changed it, newest first. A
 // click on a commit selects it (panel 3) and opens the file's diff at that commit in panel 2 (the newest opens when the
 // history loads); a file clicked in panel 3 shows that file's history. Panel 2's controls card has "Follow renames" and
-// close: close or Esc shows the graph and the sidebar again (RepoLayoutView).
+// close: close or Esc shows the graph and the sidebar again (RepoLayoutView). Columns shows the diff in column 4,
+// beside the graph: its close empties the column and keeps the history, a second close ends it.
 // The history loads off the main actor (`RepoSession.selectTool`); until then the card holds skeleton rows.
 import HistqCore
 import SwiftUI
@@ -200,7 +201,7 @@ private struct HistoryPlaceholder: View {
 
 /// Panel 2 while a file history shows and no commit's diff is open yet: the controls card (Follow renames, close), then
 /// the diff's skeleton while the history loads (its newest commit opens then), or why there is no diff (no commit
-/// changed the file, a failed read).
+/// changed the file, a failed read, Columns' diff closed).
 struct FileHistoryDiffPlaceholder: View {
     let session: RepoSession
     let path: String
@@ -219,6 +220,9 @@ struct FileHistoryDiffPlaceholder: View {
                            message: "No commit changed \((path as NSString).lastPathComponent).")
         case .failed(let message):
             DiffNoticeCard(title: "File History", systemImage: "exclamationmark.triangle", message: message)
+        case .loaded:
+            // Columns: the diff was closed, the history stays (elsewhere its newest commit opens with the read).
+            DiffNoticeCard(title: "Diff", systemImage: "doc.text", message: "Select a commit to see its changes")
         default:
             SectionCard(nil, contentPadding: 0) {
                 DiffPlaceholder()

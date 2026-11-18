@@ -200,7 +200,11 @@ struct FileListView<Trailing: View>: View {
         _mode = card.storage
     }
 
-    static var rowHeight: CGFloat { 26 }
+    /// A row's height at the text size: 26 unless a line of text and 5 pt above and below need more. The skeleton and
+    /// empty rows share it, so a list does not jump when it loads.
+    static func rowHeight(_ textSize: TextSize) -> CGFloat {
+        max(26, textSize.lineHeight + 10)
+    }
 
     /// The list with `menu`'s entries in each row's context menu.
     func fileMenu(_ menu: @escaping (FileChange) -> [MenuEntry]) -> Self {
@@ -286,6 +290,7 @@ extension FileListView where Trailing == EmptyView {
 /// A file list's placeholder rows: an icon circle and a name capsule of the given widths.
 struct SkeletonFileRows: View {
     var fractions: [CGFloat] = [0.6, 0.45, 0.7]
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         ForEach(fractions.indices, id: \.self) { index in
@@ -294,7 +299,7 @@ struct SkeletonFileRows: View {
                 SkeletonLine(fraction: fractions[index], height: 11)
             }
             .padding(.horizontal, 6)
-            .frame(height: FileListView<EmptyView>.rowHeight)
+            .frame(height: FileListView<EmptyView>.rowHeight(textSize))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -313,6 +318,7 @@ private struct FileRow<Trailing: View>: View {
     let isSelected: Bool
     let onSelect: ((FileChange) -> Void)?
     let size: Int64?
+    @Environment(\.textSize) private var textSize
     @State private var hovered = false
 
     var body: some View {
@@ -336,6 +342,7 @@ private struct FileRow<Trailing: View>: View {
                 Spacer(minLength: 4)
             }
             .truncationMode(.middle)
+            .font(textSize.body)
             // The path's tooltip on the name part only: on the whole row it would hide the icon's and the buttons'.
             .contentShape(Rectangle())
             .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
@@ -347,7 +354,7 @@ private struct FileRow<Trailing: View>: View {
         }
         .padding(.leading, 6 + CGFloat(depth) * 14)
         .padding(.trailing, 6)
-        .frame(height: FileListView<EmptyView>.rowHeight)
+        .frame(height: FileListView<EmptyView>.rowHeight(textSize))
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
             .fill(isSelected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .contentShape(Rectangle())
@@ -393,6 +400,7 @@ private struct FolderRow: View {
     let trailing: AnyView?
     /// The caller's context menu entries, above Reveal in Finder.
     let menu: () -> [MenuEntry]
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         HStack(spacing: 6) {
@@ -404,6 +412,7 @@ private struct FolderRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            .font(textSize.body)
             .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
             if let size {
@@ -414,7 +423,7 @@ private struct FolderRow: View {
         }
         .padding(.leading, 6 + CGFloat(depth) * 14)
         .padding(.trailing, 6)
-        .frame(height: FileListView<EmptyView>.rowHeight)
+        .frame(height: FileListView<EmptyView>.rowHeight(textSize))
         .contentShape(Rectangle())
         .contextMenu {
             let entries = menu()
@@ -432,10 +441,11 @@ private struct FolderRow: View {
 private struct FileSizeText: View {
     let size: Int64
     var warnsWhenLarge = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         Text(size.formatted(.byteCount(style: .file, spellsOutZero: false)))
-            .font(.settingsCaption)
+            .font(textSize.caption)
             .monospacedDigit()
             .foregroundStyle(style)
             .lineLimit(1)

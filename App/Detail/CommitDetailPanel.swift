@@ -13,6 +13,7 @@ struct CommitDetailPanel: View {
     let token: Int
     let timingDetail: String
     @AppStorage(PrefKey.commitShowsAllFiles.rawValue, store: Preferences.defaults) private var showsAll = false
+    @Environment(\.textSize) private var textSize
     /// Every file of a commit's tree ("View all files"), read while the switch is on; kept for its commit only.
     @State private var allFiles: AllFiles?
 
@@ -66,9 +67,10 @@ struct CommitDetailPanel: View {
             let files = FileSearch.filter(shown, query: query)
             if files.isEmpty {
                 Text(shown.isEmpty ? "No file changes" : "No matching files")
+                    .font(textSize.body)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
-                    .frame(height: FileListView<EmptyView>.rowHeight)
+                    .frame(height: FileListView<EmptyView>.rowHeight(textSize))
             } else {
                 CardScrollView {
                     FileListView(files: files, repoURL: session.url, card: .commit)

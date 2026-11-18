@@ -40,6 +40,8 @@ public enum PatchBuilder {
         case binaryFile
         /// A merge's combined diff is read-only.
         case combinedDiff
+        /// A diff read with whitespace ignored is read-only: its lines need not match the file.
+        case whitespaceFiltered
         /// No added or removed line is selected (a mode-only change has none).
         case emptySelection
     }
@@ -49,6 +51,7 @@ public enum PatchBuilder {
     /// kept (so a new, deleted, renamed or mode-changed file is staged or unstaged as a whole); otherwise
     /// the header is a plain modification of the path that exists on the side being patched.
     public static func patch(for file: FileDiff, selecting selection: Set<DiffLineID>, action: Action) throws -> Data {
+        if file.ignoresWhitespace { throw BuildError.whitespaceFiltered }
         if file.isCombined { throw BuildError.combinedDiff }
         if file.isBinary { throw BuildError.binaryFile }
         let reverse = action.isReverse

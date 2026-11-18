@@ -5,18 +5,24 @@
 import AppKit
 import HistqCore
 
-/// Sizes of the graph, from the row height (`PrefKey.rowDensity`).
+/// Sizes of the graph, from the row height (`PrefKey.rowDensity`) and the text size (`PrefKey.textSize`).
 struct GraphMetrics: Equatable {
     let rowHeight: CGFloat
+    /// The cells' fonts; kept apart from `rowHeight`, which a text size changes only in a short row.
+    let textSize: TextSize
 
-    /// "compact", "regular" (the default) or "comfortable"; anything else reads as regular.
-    init(density: String) {
+    /// "compact", "regular" (the default) or "comfortable"; anything else reads as regular. A row is at least one line
+    /// of `textSize`'s body text and 5 pt above and below it: the same heights as before at Regular and Small, Compact
+    /// 28 at Large.
+    init(density: String, textSize: TextSize = .regular) {
         // Closer to GitKraken's spacing (user, 2026-11-13): regular 28 -> 32, the others scaled with it.
-        switch density {
-        case "compact": rowHeight = 26
-        case "comfortable": rowHeight = 38
-        default: rowHeight = 32
+        let height: CGFloat = switch density {
+        case "compact": 26
+        case "comfortable": 38
+        default: 32
         }
+        rowHeight = max(height, textSize.lineHeight + 10)
+        self.textSize = textSize
     }
 
     /// The height shared by the band, its edge bar, the selection and the node (the avatar), centered in the row: a

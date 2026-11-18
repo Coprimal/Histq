@@ -141,12 +141,16 @@ struct DiffView: View {
     let session: RepoSession
     let target: FileTarget
     @Environment(WindowModel.self) private var model
+    @AppStorage(PrefKey.diffIgnoreWhitespace.rawValue, store: Preferences.defaults) private var ignoresWhitespace = false
 
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
             DiffControlsCard(session: session, target: target)
             cards
         }
+        // One pref for every window: a switch in Settings or another window's diff reads this file again (a no-op
+        // when the session already has the value).
+        .onChange(of: ignoresWhitespace, initial: true) { _, new in session.setIgnoresWhitespace(new) }
     }
 
     private var cards: some View {
@@ -498,8 +502,10 @@ struct DiffControlsCard: View {
         }
         .buttonStyle(RowIconButtonStyle())
         .keyboardShortcut(.cancelAction)
-        .help(closesPane ? "Close the diff (Esc)" : "Back to the \(backName) (Esc)")
-        .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
+        .help(closesPane ? "Close the diff (Esc)"
+            : closesHistory ? "Close the File History (Esc)" : "Back to the \(backName) (Esc)")
+        .accessibilityLabel(closesPane ? "Close the diff"
+            : closesHistory ? "Close the file history" : "Back to the \(backName.lowercased())")
     }
 
     /// An icon button (a tool, a jump, a switch shown on with the selected fill and the accent color), the close
@@ -529,8 +535,20 @@ struct DiffControlsCard: View {
     }
 
     /// Stacked, not opened from a tool: close (and Esc) hides the bottom pane under the graph, which stays in view.
+    /// Columns: close empties column 4 beside the graph (a blame or reflog it was opened from stays over panel 2, a
+    /// file history in panel 1).
     private var closesPane: Bool {
-        target != nil && session.returnTool == nil && LayoutPreset.resolved(storedPreset) == .stacked
+        switch LayoutPreset.resolved(storedPreset) {
+        case .stacked: target != nil && session.returnTool == nil
+        case .columns: target != nil
+        case .classic, .focus: false
+        }
+    }
+
+    /// Columns, a file history with no diff open (column 4's controls card): close ends the history; the graph is
+    /// already in view.
+    private var closesHistory: Bool {
+        target == nil && LayoutPreset.resolved(storedPreset) == .columns
     }
 
     /// Where close (and Esc) returns: the tool the diff was opened from, else the graph (a file history closes with
@@ -819,15 +837,17 @@ extension DiffNoticeCard where Action == EmptyView {
 /// The diff's skeleton, under the file's row: a hunk header bar and line rows (number gutters and text capsules).
 struct DiffPlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private var fontSize = 12.0
 
     var body: some View {
+        let metrics = DiffLayout.Metrics.of(fontSize)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 SkeletonLine(fraction: 0.35, height: 10)
                 SkeletonLine(width: 72, height: 18)
             }
             .padding(.horizontal, 10)
-            .frame(height: DiffLayout.hunkHeight)
+            .frame(height: metrics.hunkHeight)
             ForEach(Self.widths.indices, id: \.self) { index in
                 HStack(spacing: 10) {
                     SkeletonLine(width: 20, height: 9)
@@ -835,7 +855,7 @@ struct DiffPlaceholder: View {
                     SkeletonLine(fraction: Self.widths[index], height: 10)
                 }
                 .padding(.horizontal, 10)
-                .frame(height: DiffLayout.lineHeight)
+                .frame(height: metrics.lineHeight)
             }
         }
         .padding(.bottom, 8)

@@ -48,7 +48,12 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Undo of resolving a conflicted file in the conflict editor while the merge, rebase, cherry-pick or revert is still stopped: the file's conflict comes back.
 - Stacked layout (View menu, command palette or Settings › Appearance): a file diff, the conflict editor, file history, blame or a pull request opens in a pane under the graph, so the graph stays visible.
 - Focus layout (Option-Cmd-F): the sidebar and detail panel hide and the graph or diff takes the whole width; Option-Cmd-F again returns to the layout used before.
-- View › Reset Layout restores the default panel widths, the Stacked split and the Classic layout.
+- Columns layout (View menu, command palette or Settings › Appearance): a file diff opens in a 4th column beside the detail panel, so the graph and the commit details stay visible.
+- Customize Toolbar (right-click the toolbar or View › Customize Toolbar…): remove, move or add back the toolbar's groups and spaces; every window follows.
+- View › Reset Layout restores the default panel widths and the Stacked split; the layout stays.
+- Settings › Appearance can put the commit box on top, Staged above Unstaged, hide or reorder sidebar sections, and pick the default diff view (Diff, Split or Full file); ignore whitespace is also a setting.
+- Text size (Settings › Appearance): Small, Regular or Large for the commit graph, the sidebar and the file lists, separate from row height.
+- Code font size (Settings › Appearance › Diff): 11 to 16 pt for the diff, Blame, the conflict editor and the pull request diff; wrap long lines is also a setting.
 - Optimize Repository, from the toolbar's repository menu or the command palette: writes a commit-graph so history and the graph load faster in big repositories.
 - Show Reflog: where HEAD has been, with Checkout, Create Branch Here and Copy SHA on each entry, and the commit's details even when it is no longer in the graph.
 - Ignore an untracked file, all files with its extension or its folder from the WIP file and folder menus, in `.gitignore` or, with Exclude Locally, in `.git/info/exclude` (this clone only).

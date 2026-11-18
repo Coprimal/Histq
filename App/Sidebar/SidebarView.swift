@@ -106,6 +106,12 @@ enum SidebarMetrics {
     static let worktreeImage = "folder"
     /// The Stashes card and each stash's row: the tray of the graph's stash node.
     static let stashImage = "tray"
+
+    /// A row's height at the text size: `SidebarItemStyle.height` (28) unless a line of text and 5 pt above and below
+    /// need more. Not `SidebarItemStyle.height` itself, which the Settings sidebar shares.
+    static func rowHeight(_ textSize: TextSize) -> CGFloat {
+        max(SidebarItemStyle.height, textSize.lineHeight + 10)
+    }
 }
 
 /// The sidebar of a repo tab: the tab picker across its width (icon and short name; the full name is the tooltip),
@@ -114,18 +120,26 @@ enum SidebarMetrics {
 /// rows in the same cards until then); the tab capsules and the cards' chevrons work at once.
 struct SidebarView: View {
     @Bindable var session: RepoSession
+    @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
+    @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
+    @Environment(\.textSize) private var textSize
+
+    /// The sections the user shows, in their order (`SidebarSections`).
+    private var layout: SidebarSections { SidebarSections(order: sectionOrder, hidden: hiddenSections) }
+    /// The session's tab, or Branches while that one is hidden.
+    private var tab: SidebarTab { layout.shownTab(session.sidebarTab) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             CapsuleTabs(
-                selection: Binding(get: { session.sidebarTab }, set: { session.selectSidebarTab($0) }),
-                tabs: SidebarTab.allCases,
+                selection: Binding(get: { tab }, set: { session.selectSidebarTab($0) }),
+                tabs: layout.tabs,
                 title: { Text($0.shortTitle) },
                 compact: true,
                 help: \.title,
                 fillsWidth: true,
                 systemImage: \.systemImage)
-            if session.sidebarTab == .prs {
+            if tab == .prs {
                 ScrollView {
                     cards
                 }
@@ -149,11 +163,14 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var sections: some View {
-        switch (session.sidebarTab, session.refs) {
+        let branchIDs = layout.ids(in: .branches)
+        switch (tab, session.refs) {
         case (.prs, _):
             PullRequestSections(session: session)
+        case (.branches, _) where branchIDs.isEmpty:
+            HiddenSectionsCard()
         case (.branches, .loaded(let refs)):
-            BranchSections(session: session, refs: refs)
+            BranchSections(session: session, refs: refs, ids: branchIDs)
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.tags, .loaded(let refs)):
             let hidden = refs.tags.count { session.isHidden($0.refName) }
@@ -166,17 +183,24 @@ struct SidebarView: View {
             }
             .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.branches, .idle), (.branches, .loading):
-            SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: nil,
-                           isExpanded: $session.localExpanded) { _ in
-                SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
-            }
-            SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
-                           isExpanded: $session.remoteExpanded) { _ in
-                SkeletonRows(fractions: [0.3, 0.55, 0.4])
-            }
-            SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
-                           isExpanded: $session.worktreesExpanded) { _ in
-                SkeletonRows(fractions: [0.4, 0.55])
+            ForEach(branchIDs, id: \.self) { id in
+                switch id {
+                case .local:
+                    SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: nil,
+                                   isExpanded: $session.localExpanded) { _ in
+                        SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
+                    }
+                case .remote:
+                    SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
+                                   isExpanded: $session.remoteExpanded) { _ in
+                        SkeletonRows(fractions: [0.3, 0.55, 0.4])
+                    }
+                default:
+                    SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
+                                   isExpanded: $session.worktreesExpanded) { _ in
+                        SkeletonRows(fractions: [0.4, 0.55])
+                    }
+                }
             }
             SidebarSection(title: "Stashes", systemImage: SidebarMetrics.stashImage, count: nil,
                            isExpanded: $session.stashesExpanded) { _ in
@@ -188,6 +212,7 @@ struct SidebarView: View {
             }
         case (_, .failed(let message)):
             Label(message, systemImage: "exclamationmark.triangle")
+                .font(textSize.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(SidebarMetrics.cardPadding + 4)
@@ -197,16 +222,29 @@ struct SidebarView: View {
     }
 }
 
-/// The Local and Remote cards. Remote branches are grouped by remote inside their card.
+/// The Local, Remote and Worktrees cards, those of `ids` in its order. Remote branches are grouped by remote inside
+/// their card.
 private struct BranchSections: View {
     @Bindable var session: RepoSession
     let refs: Refs
+    /// The Branches tab's visible sections (`SidebarSections`), in order.
+    let ids: [SidebarSectionID]
 
     var body: some View {
-        // The headers count the listed rows: the hidden ones only while their card lists them.
+        ForEach(ids, id: \.self) { id in
+            switch id {
+            case .local: localCard
+            case .remote: remoteCard
+            default: WorktreeSection(session: session)
+            }
+        }
+        StashSection(session: session)
+    }
+
+    // The headers count the listed rows: the hidden ones only while their card lists them.
+    private var localCard: some View {
         let hiddenLocal = refs.localBranches.count { session.isHidden($0.refName) }
-        let hiddenRemote = refs.remoteBranches.count { session.isHidden($0.refName) }
-        SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage,
+        return SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage,
                        count: refs.localBranches.count - (session.localShowsHidden ? 0 : hiddenLocal),
                        isExpanded: $session.localExpanded) { query in
             let listed = refs.localBranches.filter { session.localShowsHidden || !session.isHidden($0.refName) }
@@ -242,7 +280,11 @@ private struct BranchSections: View {
             .help("Local branches")
             .accessibilityLabel("Local branch actions")
         }
-        SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage,
+    }
+
+    private var remoteCard: some View {
+        let hiddenRemote = refs.remoteBranches.count { session.isHidden($0.refName) }
+        return SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage,
                        count: refs.remoteBranches.count - (session.remoteShowsHidden ? 0 : hiddenRemote),
                        isExpanded: $session.remoteExpanded) { query in
             let shown = filteredRemotes(query)
@@ -279,8 +321,6 @@ private struct BranchSections: View {
             .help("Remotes")
             .accessibilityLabel("Remote actions")
         }
-        WorktreeSection(session: session)
-        StashSection(session: session)
     }
 
     /// Remote branches by remote: the remotes in git's order (also those with no fetched branch), then any other remote
@@ -304,6 +344,28 @@ private struct BranchSections: View {
             let branches = remote.branches.filter { FileSearch.matches($0.name, query: query) }
             guard !branches.isEmpty || FileSearch.matches(remote.name, query: query) else { return nil }
             return (remote.name, branches)
+        }
+    }
+}
+
+/// The Branches tab with Local, Remote and Worktrees all hidden: says so, with the button to Settings › Appearance.
+private struct HiddenSectionsCard: View {
+    @Environment(WindowModel.self) private var model
+    @Environment(\.textSize) private var textSize
+
+    var body: some View {
+        SectionCard("Branches", systemImage: SidebarTab.branches.systemImage) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("All sections are hidden")
+                    .font(textSize.bodyMedium)
+                Text("Local, Remote and Worktrees are hidden in Settings › Appearance.")
+                    .font(textSize.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Show Sections…") { model.selectSettings(.appearance) }
+                    .buttonStyle(RowTextButtonStyle(prominent: true))
+                    .help("Settings › Appearance")
+            }
         }
     }
 }
@@ -362,6 +424,7 @@ private struct WorktreeRow: View {
     let session: RepoSession
     let info: WorktreeInfo
     @State private var hovered = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         HStack(spacing: SidebarMetrics.iconGap) {
@@ -370,6 +433,7 @@ private struct WorktreeRow: View {
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(info.name)
+                    .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
@@ -379,7 +443,7 @@ private struct WorktreeRow: View {
                         .help("Uncommitted changes: \(changes)")
                 }
                 Text(info.worktree.isPrunable ? "missing" : info.headLabel)
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -387,7 +451,7 @@ private struct WorktreeRow: View {
         .foregroundStyle(.secondary)
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(hovered ? Palette.hoverFill : .clear))
         .contentShape(Capsule())
@@ -456,6 +520,7 @@ private struct StashRow: View {
     let session: RepoSession
     let stash: Stash
     @State private var hovered = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         let selected = session.graphSelection == [.stash(stash.hash)]
@@ -464,18 +529,19 @@ private struct StashRow: View {
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(stash.message)
+                    .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 4)
                 Text(stash.selector)
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .lineLimit(1)
             }
         }
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
@@ -647,13 +713,15 @@ struct CardSearchField: View {
 /// The text of an empty section.
 struct EmptyRow: View {
     let text: String
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         Text(text)
+            .font(textSize.body)
             .foregroundStyle(.secondary)
             .padding(.leading, SidebarMetrics.rowLeading)
             .padding(.trailing, 10)
-            .frame(height: SidebarItemStyle.height)
+            .frame(height: SidebarMetrics.rowHeight(textSize))
     }
 }
 
@@ -665,6 +733,7 @@ private struct RemoteRow: View {
     let url: String?
     @State private var ownerAvatar: NSImage?
     @Environment(\.displayScale) private var scale
+    @Environment(\.textSize) private var textSize
     private static let avatarSide: CGFloat = 16
 
     var body: some View {
@@ -682,14 +751,14 @@ private struct RemoteRow: View {
             }
             .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             Text(name)
-                .font(.body.weight(.medium))
+                .font(textSize.bodyMedium)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
         .foregroundStyle(.secondary)
         .padding(.leading, SidebarMetrics.rowLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .help(name)
@@ -727,6 +796,7 @@ private struct BranchRow<Trailing: View>: View {
     var indent: CGFloat = 0
     @ViewBuilder let trailing: () -> Trailing
     @State private var hovered = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         let selected = session.sidebarSelection == item
@@ -743,6 +813,7 @@ private struct BranchRow<Trailing: View>: View {
                 .opacity(dimmed)
             HStack(spacing: 4) {
                 Text(name)
+                    .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .opacity(dimmed)
@@ -757,7 +828,7 @@ private struct BranchRow<Trailing: View>: View {
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
@@ -789,6 +860,7 @@ private struct BranchRow<Trailing: View>: View {
 /// `↑2 ↓1` against the upstream; "gone" when the upstream was deleted. Nothing when in sync or without upstream.
 private struct AheadBehind: View {
     let branch: LocalBranch
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         HStack(spacing: 4) {
@@ -799,7 +871,7 @@ private struct AheadBehind: View {
                 if branch.behind > 0 { Text("\(Image(systemName: "arrow.down"))\(branch.behind)") }
             }
         }
-        .font(.settingsCaption)
+        .font(textSize.caption)
         .monospacedDigit()
         .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
@@ -817,6 +889,7 @@ private struct AheadBehind: View {
 /// row).
 struct SkeletonRows: View {
     let fractions: [CGFloat]
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         ForEach(fractions.indices, id: \.self) { index in
@@ -827,7 +900,7 @@ struct SkeletonRows: View {
             }
             .padding(.leading, SidebarMetrics.rowLeading)
             .padding(.trailing, 10)
-            .frame(height: SidebarItemStyle.height)
+            .frame(height: SidebarMetrics.rowHeight(textSize))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

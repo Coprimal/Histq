@@ -108,6 +108,9 @@ public struct FileDiff: Sendable, Hashable {
     public let isBinary: Bool
     /// A combined diff of a merge (`--cc`): read-only, PatchBuilder refuses it.
     public let isCombined: Bool
+    /// Read with whitespace ignored (`-w`): its lines need not match the file, so it is read-only, PatchBuilder
+    /// refuses it.
+    public let ignoresWhitespace: Bool
     public let hunks: [DiffHunk]
     /// The raw header lines, `diff ...` through `+++ ...`, as git printed them.
     let headerLines: [Data]
@@ -117,7 +120,7 @@ public struct FileDiff: Sendable, Hashable {
 
     init(
         change: Change, oldPath: Data?, newPath: Data?, oldMode: String?, newMode: String?, similarity: Int?,
-        isBinary: Bool, isCombined: Bool, hunks: [DiffHunk], headerLines: [Data]
+        isBinary: Bool, isCombined: Bool, ignoresWhitespace: Bool = false, hunks: [DiffHunk], headerLines: [Data]
     ) {
         self.change = change
         oldPathBytes = oldPath
@@ -129,6 +132,7 @@ public struct FileDiff: Sendable, Hashable {
         self.similarity = similarity
         self.isBinary = isBinary
         self.isCombined = isCombined
+        self.ignoresWhitespace = ignoresWhitespace
         self.hunks = hunks
         self.headerLines = headerLines
     }
@@ -168,7 +172,7 @@ public enum DiffReader {
     ) async throws -> [FileDiff] {
         try await load(
             unstagedArguments(paths: paths, context: context, ignoringWhitespace: ignoringWhitespace), runner: runner,
-            cwd: cwd, env: env)
+            cwd: cwd, env: env, ignoringWhitespace: ignoringWhitespace)
     }
 
     /// The index against HEAD (staged changes; against the empty tree on an unborn branch).
@@ -178,7 +182,7 @@ public enum DiffReader {
     ) async throws -> [FileDiff] {
         try await load(
             stagedArguments(paths: paths, context: context, ignoringWhitespace: ignoringWhitespace), runner: runner,
-            cwd: cwd, env: env)
+            cwd: cwd, env: env, ignoringWhitespace: ignoringWhitespace)
     }
 
     /// A commit against its first parent (a root commit against the empty tree). A merge commit (and a stash)
@@ -190,7 +194,7 @@ public enum DiffReader {
     ) async throws -> [FileDiff] {
         try await load(
             commitArguments(revision, paths: paths, context: context, ignoringWhitespace: ignoringWhitespace),
-            runner: runner, cwd: cwd, env: env)
+            runner: runner, cwd: cwd, env: env, ignoringWhitespace: ignoringWhitespace)
     }
 
     /// `base` against `head` (two commit-ishes), or against the working tree when `head` is nil. A worktree compare
@@ -202,7 +206,7 @@ public enum DiffReader {
         try await load(
             compareArguments(base: base, head: head, paths: paths, context: context,
                              ignoringWhitespace: ignoringWhitespace),
-            runner: runner, cwd: cwd, env: env)
+            runner: runner, cwd: cwd, env: env, ignoringWhitespace: ignoringWhitespace)
     }
 
     /// The files `compare` diffs, as git's raw `--name-status -z` output (the app parses it like a commit's file
@@ -326,10 +330,11 @@ public enum DiffReader {
 
     // MARK: Running
 
-    private static func load(_ args: [String], runner: GitRunner, cwd: URL, env: [String: String]) async throws
-        -> [FileDiff]
-    {
-        parse(try await run(args, runner: runner, cwd: cwd, env: env).stdout)
+    /// `ignoringWhitespace`: `args` pass `-w`; the parsed files are marked so PatchBuilder refuses them.
+    private static func load(
+        _ args: [String], runner: GitRunner, cwd: URL, env: [String: String], ignoringWhitespace: Bool
+    ) async throws -> [FileDiff] {
+        parse(try await run(args, runner: runner, cwd: cwd, env: env).stdout, ignoringWhitespace: ignoringWhitespace)
     }
 
     /// Runs a read and turns a missing-object failure on a partial clone into `DiffReadError.missingObjects`.
@@ -365,7 +370,7 @@ public enum DiffReader {
     // MARK: Parsing
 
     /// Parses `git diff`/`git diff-tree -p`/`--cc` output.
-    static func parse(_ output: Data) -> [FileDiff] {
+    static func parse(_ output: Data, ignoringWhitespace: Bool = false) -> [FileDiff] {
         var lines = output.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
         if lines.last?.isEmpty == true { lines.removeLast() }
         var files: [FileDiff] = []
@@ -375,7 +380,7 @@ public enum DiffReader {
             if line.starts(with: Bytes.diffGit) || line.starts(with: Bytes.diffCC)
                 || line.starts(with: Bytes.diffCombined)
             {
-                files.append(parseFile(lines, &index))
+                files.append(parseFile(lines, &index, ignoringWhitespace: ignoringWhitespace))
             } else {
                 index += 1
             }
@@ -415,7 +420,9 @@ public enum DiffReader {
     }
 
     /// Parses one file starting at its `diff ...` line and leaves `index` on the line after it.
-    private static func parseFile(_ lines: [Data.SubSequence], _ index: inout Int) -> FileDiff {
+    private static func parseFile(
+        _ lines: [Data.SubSequence], _ index: inout Int, ignoringWhitespace: Bool
+    ) -> FileDiff {
         let first = lines[index]
         let isCombined = !first.starts(with: Bytes.diffGit)
         var header = [Data(first)]
@@ -499,7 +506,8 @@ public enum DiffReader {
         if change == .deleted { newPath = nil }
         return FileDiff(
             change: change, oldPath: oldPath, newPath: newPath, oldMode: oldMode, newMode: newMode,
-            similarity: similarity, isBinary: isBinary, isCombined: isCombined, hunks: hunks, headerLines: header)
+            similarity: similarity, isBinary: isBinary, isCombined: isCombined, ignoresWhitespace: ignoringWhitespace,
+            hunks: hunks, headerLines: header)
     }
 
     /// A two-way hunk, read by its line counts. An empty line inside the body is a blank context line

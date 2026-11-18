@@ -185,7 +185,7 @@ enum PaletteCommands {
         // The View menu's layout presets: Focus again leaves Focus.
         let preset = LayoutPreset.current
         for (row, image) in [(LayoutPreset.classic, "rectangle.split.3x1"), (.stacked, "rectangle.split.1x2"),
-                             (.focus, "rectangle")] {
+                             (.columns, "rectangle.rightthird.inset.filled"), (.focus, "rectangle")] {
             let title = row == .focus && preset == .focus ? "Leave Focus Layout" : "\(row.rawValue.capitalized) Layout"
             let detail = row == .focus ? "View › Layout ⌥⌘F" : "View › Layout"
             snapshot.add(title, detail: preset == row ? detail + " (current)" : detail, section: .app,

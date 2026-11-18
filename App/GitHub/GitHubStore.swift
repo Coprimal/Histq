@@ -376,18 +376,21 @@ final class GitHubStore {
 
     // MARK: Loading
 
-    /// Reloads the four lists (rows already shown stay until the new ones are in), then the checks of their pull
-    /// requests. Skipped while a rate limit holds.
+    /// Reloads the lists the sidebar shows (`SidebarSections`; rows already shown stay until the new ones are in),
+    /// then the checks of their pull requests. Skipped while a rate limit holds.
     private func refresh() async {
         guard case .connected(let repository) = connection, let client, let remote = identity?.remote else { return }
         if let pausedUntil, pausedUntil > .now { return }
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        let (results, heads) = await Self.fetchLists(client, repository, remote: remote)
+        let shown = Set(SidebarSections.current.pullRequestLists)
+        let (results, heads) = await Self.fetchLists(client, repository, remote: remote, shown: shown)
         guard generation == refreshGeneration, !Task.isCancelled else { return }
         // A failed All open keeps the badges it last gave.
         if let heads, heads != branchPullRequests { branchPullRequests = heads }
         var lists = self.lists
+        // A hidden list keeps no rows or error: shown again, it starts on its skeleton and loads.
+        for list in List.allCases where list != .allOpen && !shown.contains(list) { lists[list] = nil }
         for (list, result) in results {
             switch result {
             case .success(let rows):
@@ -454,25 +457,29 @@ final class GitHubStore {
         }
     }
 
-    /// The four lists at once. My PRs and Review requested come from the search API (issue-shaped hits); the hits
-    /// that All open has take its head commit (for the checks) and draft flag. Also All open's badges by remote branch
-    /// (`branchPullRequests`), nil when it failed.
+    /// The `shown` lists at once. My PRs and Review requested come from the search API (issue-shaped hits); the hits
+    /// that All open has take its head commit (for the checks) and draft flag. All open is read even when hidden: the
+    /// graph's badges by remote branch (`branchPullRequests`, nil when it failed) and the other lists need it.
     @concurrent
-    private nonisolated static func fetchLists(_ client: GitHubClient, _ repository: HostedRepository, remote: String)
-        async -> (lists: [List: Result<[HostedRow], any Error>], heads: [String: RefBadge.PullRequest]?)
-    {
+    private nonisolated static func fetchLists(
+        _ client: GitHubClient, _ repository: HostedRepository, remote: String, shown: Set<List>
+    ) async -> (lists: [List: Result<[HostedRow], any Error>], heads: [String: RefBadge.PullRequest]?) {
         async let open = capture { try await client.pullRequests(in: repository, state: .open) }
-        async let mine = capture { try await client.myOpenPullRequests(in: repository) }
-        async let review = capture { try await client.reviewRequestedPullRequests(in: repository) }
-        async let assigned = capture { try await client.assignedOpenIssues(in: repository) }
+        async let mine = capture(if: shown.contains(.mine)) { try await client.myOpenPullRequests(in: repository) }
+        async let review = capture(if: shown.contains(.reviewRequested)) {
+            try await client.reviewRequestedPullRequests(in: repository)
+        }
+        async let assigned = capture(if: shown.contains(.assigned)) {
+            try await client.assignedOpenIssues(in: repository)
+        }
         let (pulls, mineHits, reviewHits, issueHits) = await (open, mine, review, assigned)
         let byNumber = Dictionary(((try? pulls.get()) ?? []).map { ($0.number, $0) }, uniquingKeysWith: { a, _ in a })
-        let lists: [List: Result<[HostedRow], any Error>] = [
-            .allOpen: pulls.map { $0.map(HostedRow.init(pull:)) },
-            .mine: mineHits.map { $0.map { HostedRow(searchHit: $0, pull: byNumber[$0.number]) } },
-            .reviewRequested: reviewHits.map { $0.map { HostedRow(searchHit: $0, pull: byNumber[$0.number]) } },
-            .assigned: issueHits.map { $0.filter { !$0.isPullRequest }.map { HostedRow(searchHit: $0, pull: nil) } },
-        ]
+        var lists: [List: Result<[HostedRow], any Error>] = [.allOpen: pulls.map { $0.map(HostedRow.init(pull:)) }]
+        lists[.mine] = mineHits?.map { $0.map { HostedRow(searchHit: $0, pull: byNumber[$0.number]) } }
+        lists[.reviewRequested] = reviewHits?.map { $0.map { HostedRow(searchHit: $0, pull: byNumber[$0.number]) } }
+        lists[.assigned] = issueHits?.map {
+            $0.filter { !$0.isPullRequest }.map { HostedRow(searchHit: $0, pull: nil) }
+        }
         return (lists, (try? pulls.get()).map { branchPullRequests($0, repository: repository, remote: remote) })
     }
 
@@ -517,5 +524,12 @@ final class GitHubStore {
         } catch {
             return .failure(error)
         }
+    }
+
+    /// `capture`, or nil without a call when the list is not `wanted`.
+    private nonisolated static func capture<T>(
+        if wanted: Bool, _ body: () async throws -> T
+    ) async -> Result<T, any Error>? {
+        wanted ? await capture(body) : nil
     }
 }

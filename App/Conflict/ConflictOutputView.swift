@@ -1,5 +1,5 @@
-// The conflict editor's Output: the merged file in an editable NSTextView (plain text, fixed 18 pt lines that never
-// wrap) with a line-number ruler. Unresolved conflicts are tinted magenta, lines taken from A blue and from B gold,
+// The conflict editor's Output: the merged file in an editable NSTextView (plain text, fixed lines that never wrap, 18 pt
+// at the default code font size) with a line-number ruler. Unresolved conflicts are tinted magenta, lines taken from A blue and from B gold,
 // typed lines grey. A tick changes only the characters that differ; a typed edit becomes a manual override of the
 // regions it touched in `ThreeWayMerge`, and the text then matches the merge again, so what is saved is what shows.
 import AppKit
@@ -17,6 +17,7 @@ struct ConflictOutputView: NSViewRepresentable {
     var isEditable = true
     /// A typed edit: the new text of the first region of the range (the others become empty). Returns the new merge.
     var onEdit: @MainActor (String, ClosedRange<Int>) -> ThreeWayMerge? = { _, _ in nil }
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
 
     func makeCoordinator() -> ConflictOutputController { ConflictOutputController() }
 
@@ -40,10 +41,9 @@ struct ConflictOutputView: NSViewRepresentable {
         textView.smartInsertDeleteEnabled = false
         textView.drawsBackground = false
         textView.insertionPointColor = .white
-        textView.font = DiffLayout.font
         textView.textColor = Palette.diffText
-        textView.defaultParagraphStyle = ConflictOutputController.paragraph
-        textView.typingAttributes = ConflictOutputController.attributes
+        DiffLayout.use(fontSize)
+        ConflictOutputController.applyFont(to: textView)
         textView.textContainerInset = NSSize(width: 6, height: 0)
         // No wrap: the text view grows sideways with its longest line.
         textView.isHorizontallyResizable = true
@@ -84,7 +84,7 @@ final class ConflictOutputController: NSObject, NSTextViewDelegate {
     private weak var textView: ConflictTextView?
     private weak var ruler: ConflictLineRuler?
     private var view: ConflictOutputView?
-    private var shown: (loadID: Int, revision: Int)?
+    private var shown: (loadID: Int, revision: Int, fontSize: Double)?
     /// The merge the text shows.
     private var merge: ThreeWayMerge?
     /// True while the controller itself changes the text: not a user edit.
@@ -93,21 +93,34 @@ final class ConflictOutputController: NSObject, NSTextViewDelegate {
     /// before it.
     private var pending: (regions: ClosedRange<Int>, span: NSRange, delta: Int)?
 
-    static let paragraph: NSParagraphStyle = {
-        let style = NSMutableParagraphStyle()
-        style.minimumLineHeight = ConflictLayout.lineHeight
-        style.maximumLineHeight = ConflictLayout.lineHeight
-        style.tabStops = []
-        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-        style.lineBreakMode = .byClipping
-        return style
-    }()
+    private static var styles: [CGFloat: [NSAttributedString.Key: Any]] = [:]
 
-    static let attributes: [NSAttributedString.Key: Any] = [
-        .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph,
-        // The fixed line is taller than the font: lift the glyphs to its middle.
-        .baselineOffset: (ConflictLayout.lineHeight - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2,
-    ]
+    /// The text's attributes at the current code font size, made once per size.
+    static var attributes: [NSAttributedString.Key: Any] {
+        let metrics = DiffLayout.metrics
+        if let attributes = styles[metrics.size] { return attributes }
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = metrics.lineHeight
+        style.maximumLineHeight = metrics.lineHeight
+        style.tabStops = []
+        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * metrics.charWidth
+        style.lineBreakMode = .byClipping
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: metrics.font, .foregroundColor: Palette.diffText, .paragraphStyle: style,
+            // The fixed line is taller than the font: lift the glyphs to its middle.
+            .baselineOffset: (metrics.lineHeight - (metrics.font.ascender - metrics.font.descender)) / 2,
+        ]
+        styles[metrics.size] = attributes
+        return attributes
+    }
+
+    /// The text view's font, paragraph and typing attributes at the current code font size.
+    static func applyFont(to textView: NSTextView) {
+        let attributes = attributes
+        textView.font = attributes[.font] as? NSFont
+        textView.defaultParagraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle
+        textView.typingAttributes = attributes
+    }
 
     func attach(_ textView: ConflictTextView, ruler: ConflictLineRuler) {
         self.textView = textView
@@ -129,8 +142,12 @@ final class ConflictOutputController: NSObject, NSTextViewDelegate {
     func update(_ view: ConflictOutputView) {
         self.view = view
         if textView?.isEditable != view.isEditable { textView?.isEditable = view.isEditable }
-        guard shown?.loadID != view.loadID || shown?.revision != view.revision else { return }
-        shown = (view.loadID, view.revision)
+        guard shown?.loadID != view.loadID || shown?.revision != view.revision || shown?.fontSize != view.fontSize
+        else { return }
+        let resized = shown.map { $0.fontSize != view.fontSize } ?? false
+        shown = (view.loadID, view.revision, view.fontSize)
+        DiffLayout.use(view.fontSize)
+        if resized { resize() }
         show(view.merge)
     }
 
@@ -174,6 +191,16 @@ final class ConflictOutputController: NSObject, NSTextViewDelegate {
         ruler?.tints = textView.tints
         ruler?.lineCount = merge.outputLines.count
         ruler?.needsDisplay = true
+    }
+
+    /// A new code font size: the whole text, the typing and the ruler's width take it.
+    private func resize() {
+        guard let textView, let storage = textView.textStorage else { return }
+        Self.applyFont(to: textView)
+        isSyncing = true
+        storage.setAttributes(Self.attributes, range: NSRange(location: 0, length: storage.length))
+        isSyncing = false
+        ruler?.fitThickness()
     }
 
     /// The band of each Output line: magenta for an unresolved conflict (its base text), blue for lines ticked in A,
@@ -277,11 +304,14 @@ final class ConflictTextView: NSTextView {
 final class ConflictLineRuler: NSRulerView {
     var tints: [Int: (fill: NSColor, bar: NSColor?)] = [:]
     var lineCount = 0 {
-        didSet {
-            let digits = max(3, String(lineCount).count)
-            let thickness = CGFloat(digits) * DiffLayout.charWidth + 16
-            if abs(ruleThickness - thickness) > 0.5 { ruleThickness = thickness }
-        }
+        didSet { fitThickness() }
+    }
+
+    /// As wide as the largest line number at the code font size.
+    func fitThickness() {
+        let digits = max(3, String(lineCount).count)
+        let thickness = CGFloat(digits) * DiffLayout.charWidth + 16
+        if abs(ruleThickness - thickness) > 0.5 { ruleThickness = thickness }
     }
 
     private weak var textView: NSTextView?
@@ -300,11 +330,20 @@ final class ConflictLineRuler: NSRulerView {
     override var isFlipped: Bool { true }
     override var requiredThickness: CGFloat { ruleThickness }
 
-    private static let attributes: [NSAttributedString.Key: Any] = {
+    private static var styles: [CGFloat: [NSAttributedString.Key: Any]] = [:]
+
+    /// The numbers' attributes at the current code font size, made once per size.
+    private static var attributes: [NSAttributedString.Key: Any] {
+        let metrics = DiffLayout.metrics
+        if let attributes = styles[metrics.size] { return attributes }
         let style = NSMutableParagraphStyle()
         style.alignment = .right
-        return [.font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style]
-    }()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: metrics.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style,
+        ]
+        styles[metrics.size] = attributes
+        return attributes
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         drawHashMarksAndLabels(in: dirtyRect)
@@ -319,6 +358,7 @@ final class ConflictLineRuler: NSRulerView {
         let last = min(lineCount - 1, Int(((visible.maxY - top) / height).rounded(.up)))
         guard first <= last else { return }
         let numberHeight = DiffLayout.numberFont.boundingRectForFont.height
+        let attributes = Self.attributes
         for line in first...last {
             let y = convert(NSPoint(x: 0, y: top + CGFloat(line) * height), from: textView).y
             if let tint = tints[line] {
@@ -331,7 +371,7 @@ final class ConflictLineRuler: NSRulerView {
             }
             NSString(string: "\(line + 1)").draw(
                 in: NSRect(x: 0, y: y + (height - numberHeight) / 2, width: ruleThickness - 8, height: height),
-                withAttributes: Self.attributes)
+                withAttributes: attributes)
         }
     }
 }

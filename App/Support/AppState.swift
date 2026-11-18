@@ -101,6 +101,8 @@ enum PrefKey: String, CaseIterable {
     case dateFormat
     /// Graph row height: "compact", "regular" or "comfortable".
     case rowDensity
+    /// The graph's, sidebar's and file lists' text: a `TextSize` raw value, "small", "regular" or "large".
+    case textSize
     /// Commit avatars: "real" (Gravatar / GitHub), "generated" or "initials".
     case avatarMode
     /// Pull button: a `GitOperations.PullMode` case name, "fastForward" (merge if needed), "fastForwardOnly" or "rebase".
@@ -132,16 +134,28 @@ enum PrefKey: String, CaseIterable {
     case panelWidths
     /// The file history's commit list (panel 1 while a file history shows), in points; 0 = the layout's default.
     case historyPanelWidth
-    /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked" or "focus". Global, like `panelWidths`.
+    /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked", "focus" or "columns". Global, like
+    /// `panelWidths`.
     case layoutPreset
     /// Stacked's split: the graph's share of panel 2's height above the bottom pane, 0...1. Global.
     case stackedSplit
-    /// The preset leaving Focus returns to: "classic" or "stacked" (never "focus"), set when Focus turns on. Global.
+    /// The preset leaving Focus returns to: "classic", "stacked" or "columns" (never "focus"), set when Focus turns
+    /// on. Global.
     case presetBeforeFocus
+    /// Columns' panel widths, "sidebar,detail,diff" in points; empty = the layout's defaults. Global, kept apart
+    /// from `panelWidths` (Classic, Stacked and Focus).
+    case columnsWidths
     /// A repo tab shows its sidebar (panel 1) and its detail (panel 3): the toolbar's Sidebar and Detail toggles.
     /// Global, like `layoutPreset`; Focus hides both whatever they are.
     case showSidebar
     case showDetail
+    /// The sidebar's sections in the user's order, inside each tab: section ids separated by commas, "local", "remote",
+    /// "worktrees" (Branches), "tags" (Tags), "mine", "reviewRequested", "allOpen", "assigned" (PRs); empty = the
+    /// default order. Read by `SidebarSections`. Global.
+    case sidebarSectionOrder
+    /// The sidebar sections hidden: section ids separated by commas, as `sidebarSectionOrder`; empty = none. Hiding
+    /// Tags, or all four PR lists, removes their tab. Global.
+    case hiddenSidebarSections
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
     /// The graph's Commit message, Author and Time columns show (Branch / Tag and Graph always do).
@@ -172,12 +186,21 @@ enum PrefKey: String, CaseIterable {
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The WIP panel's commit box: "bottom" (under the file cards) or "top" (above them).
+    case commitBoxPosition
+    /// The Staged card, in the WIP panel and another worktree's changes: "below" or "above" the Unstaged card.
+    case stagedPosition
     /// The file diffs ignore whitespace changes (`git diff -w`); their hunks are then read-only.
     case diffIgnoreWhitespace
     /// The file diffs wrap long lines instead of scrolling sideways.
     case diffWrapLines
+    /// The view a newly opened repository's diffs start in: a `DiffMode` raw value, "diff", "split" or "full";
+    /// switching in an open diff changes only that window's session.
+    case diffDefaultMode
     /// The blame wraps long lines instead of scrolling sideways; its header switches it.
     case blameWrapLines
+    /// The code's font size in points (the diffs, the blame and the conflict editor): 11, 12, 13, 14 or 16.
+    case codeFontSize
     /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
     case aiShowFeatures
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
@@ -211,6 +234,7 @@ enum PrefKey: String, CaseIterable {
         switch self {
         case .dateFormat: "MM/dd/yy @ HH:mm"
         case .rowDensity: "regular"
+        case .textSize: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"
         case .autoStash: "ask"
@@ -229,7 +253,9 @@ enum PrefKey: String, CaseIterable {
         case .layoutPreset: "classic"
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
+        case .columnsWidths: ""
         case .showSidebar, .showDetail: true
+        case .sidebarSectionOrder, .hiddenSidebarSections: ""
         case .graphColumnWidths: ""
         case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
         case .terminalFontName: ""
@@ -243,8 +269,12 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .commitBoxPosition: "bottom"
+        case .stagedPosition: "below"
         case .diffIgnoreWhitespace, .diffWrapLines: false
+        case .diffDefaultMode: "diff"
         case .blameWrapLines: false
+        case .codeFontSize: 12.0
         case .aiShowFeatures: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
@@ -261,12 +291,12 @@ enum PrefKey: String, CaseIterable {
 
 /// How a repo tab lays out its panels (`PrefKey.layoutPreset`). Classic: sidebar | graph | detail, a file opens over
 /// the graph. Stacked: a file opens in a pane under the graph. Focus: sidebar and detail collapse, panel 2 goes full
-/// width.
+/// width. Columns: a file opens in a 4th column next to the detail, the graph stays visible.
 enum LayoutPreset: String {
-    case classic, stacked, focus
+    case classic, stacked, focus, columns
 
-    /// DEBUG `-HistqLayout classic|stacked|focus`, read once. It wins over the preference (as `-HistqTabPosition`
-    /// does) and is never written to it.
+    /// DEBUG `-HistqLayout classic|stacked|focus|columns`, read once. It wins over the preference (as
+    /// `-HistqTabPosition` does) and is never written to it.
     private static let launchOverride = AppState.launchFlag("-HistqLayout").flatMap(LayoutPreset.init(rawValue:))
 
     /// The preset for a stored `PrefKey.layoutPreset` value; anything unknown reads as classic.
@@ -294,10 +324,10 @@ enum LayoutPreset: String {
         defaults.set(next.rawValue, forKey: PrefKey.layoutPreset.rawValue)
     }
 
-    /// View › Reset Layout: the default panel widths (the file history's too) and Stacked split, both side panels shown, and Classic.
+    /// View › Reset Layout: the default panel widths (the file history's and Columns' too) and Stacked split, both
+    /// side panels shown. The preset stays, and so does the one Focus returns to.
     static func reset() {
-        for key in [PrefKey.panelWidths, .historyPanelWidth, .stackedSplit, .layoutPreset, .presetBeforeFocus,
-                    .showSidebar, .showDetail] {
+        for key in [PrefKey.panelWidths, .historyPanelWidth, .stackedSplit, .columnsWidths, .showSidebar, .showDetail] {
             Preferences.defaults.removeObject(forKey: key.rawValue)
         }
     }

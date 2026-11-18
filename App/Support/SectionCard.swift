@@ -32,6 +32,8 @@ struct SectionCard<Content: View, Accessory: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.cardExtraPadding) private var extraPadding
     @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
+    /// The repo layout's text size for the title and count; Regular outside it (Settings, Welcome).
+    @Environment(\.textSize) private var textSize
 
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
@@ -112,13 +114,14 @@ struct SectionCard<Content: View, Accessory: View>: View {
                     .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
             }
             Text(title)
-                .font(.body.weight(.semibold))
+                .font(textSize.bodySemibold)
                 .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
                 .lineLimit(1)
             if countIsLoading {
                 SkeletonLine(width: 14, height: 11)
             } else if let count {
                 Text("\(count)")
+                    .font(textSize.body)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }

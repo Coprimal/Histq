@@ -327,9 +327,10 @@ enum DiffRowBuilder {
 
 // MARK: - Table
 
-/// One diff section's table. `loadID`, `mode` and `wraps` say which rows it shows and how: a new load (after a stage),
-/// another mode or a wrap change reloads them; any other update only refreshes the hunk buttons. `onApply` gets the
-/// action, the lines (the selected changed lines of a hunk, or the whole hunk) and the diff they belong to.
+/// One diff section's table. `loadID`, `mode`, `wraps` and the code font size say which rows it shows and how: a new
+/// load (after a stage), another mode, a wrap or a font size change reloads them; any other update only refreshes the
+/// hunk buttons. `onApply` gets the action, the lines (the selected changed lines of a hunk, or the whole hunk) and the
+/// diff they belong to.
 struct DiffLineTable: NSViewRepresentable {
     let section: DiffSection
     let mode: DiffMode
@@ -346,6 +347,8 @@ struct DiffLineTable: NSViewRepresentable {
     var isFirst = true
     var onApply: @MainActor (PatchBuilder.Action, Set<DiffLineID>, FileDiff) -> Void = { _, _, _ in }
     var onClose: @MainActor () -> Void = {}
+    /// The code font size: a new one reloads the rows at it.
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
 
     func makeCoordinator() -> DiffTableController { DiffTableController() }
 
@@ -397,17 +400,70 @@ struct DiffJump: Equatable {
 /// longest line, so an unwrapped table scrolls sideways. A file's own lines (untracked, or unchanged) have one number
 /// each, so they get one gutter; so does each half of a split row.
 struct DiffLayout {
-    @MainActor static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    @MainActor static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-    @MainActor static let charWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
-    static let lineHeight: CGFloat = 18
-    static let hunkHeight: CGFloat = 36
-    /// A wrapped line's height: a row of `n` lines is `n * wrapLineHeight + wrapPadding` high (one line: `lineHeight`).
-    static let wrapLineHeight: CGFloat = 15
-    static let wrapPadding: CGFloat = lineHeight - wrapLineHeight
+    /// The code font at one size (`PrefKey.codeFontSize`) and the sizes that follow from it, made once per size.
+    @MainActor
+    final class Metrics {
+        let size: CGFloat
+        let font: NSFont
+        let numberFont: NSFont
+        let charWidth: CGFloat
+        /// One line's row: 18 at 12 pt.
+        let lineHeight: CGFloat
+        let hunkHeight: CGFloat
+        /// A wrapped line's height: a row of `n` lines is `n * wrapLineHeight + wrapPadding` high (one line:
+        /// `lineHeight`).
+        let wrapLineHeight: CGFloat
+        let wrapPadding: CGFloat
+        /// The `+`/`−` gutter: 16 at 12 pt.
+        let signWidth: CGFloat
+
+        private init(size: CGFloat) {
+            self.size = size
+            font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+            numberFont = NSFont.monospacedDigitSystemFont(ofSize: size - 1, weight: .regular)
+            charWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+            lineHeight = (size * 1.5).rounded()
+            // 36 at 12 pt: room for the hunk buttons.
+            hunkHeight = max(36, lineHeight + 18)
+            wrapLineHeight = (size * 1.25).rounded()
+            wrapPadding = lineHeight - wrapLineHeight
+            signWidth = (16 * size / 12).rounded()
+        }
+
+        private static var cache: [CGFloat: Metrics] = [:]
+
+        /// The metrics at `size` points (kept between 8 and 32).
+        static func of(_ size: CGFloat) -> Metrics {
+            let size = min(max(size, 8), 32)
+            if let metrics = cache[size] { return metrics }
+            let metrics = Metrics(size: size)
+            cache[size] = metrics
+            return metrics
+        }
+    }
+
+    /// The code font size the views show: the preference until a view sets the one it reads (`use`).
+    @MainActor private(set) static var metrics: Metrics = {
+        let stored = Preferences.defaults.double(forKey: PrefKey.codeFontSize.rawValue)
+        return Metrics.of(stored > 0 ? stored : 12)
+    }()
+
+    /// The code font size every code view draws at from now on (a view calls it with the preference it reads, before
+    /// it reloads for a new size).
+    @MainActor static func use(_ size: CGFloat) {
+        if metrics.size != size { metrics = Metrics.of(size) }
+    }
+
+    @MainActor static var font: NSFont { metrics.font }
+    @MainActor static var numberFont: NSFont { metrics.numberFont }
+    @MainActor static var charWidth: CGFloat { metrics.charWidth }
+    @MainActor static var lineHeight: CGFloat { metrics.lineHeight }
+    @MainActor static var hunkHeight: CGFloat { metrics.hunkHeight }
+    @MainActor static var wrapLineHeight: CGFloat { metrics.wrapLineHeight }
+    @MainActor static var wrapPadding: CGFloat { metrics.wrapPadding }
+    @MainActor static var signWidth: CGFloat { metrics.signWidth }
     /// Spaces per tab.
     static let tabWidth = 4
-    static let signWidth: CGFloat = 16
     /// Room kept after the text at the trailing edge.
     static let trailingPadding: CGFloat = 8
 
@@ -417,9 +473,9 @@ struct DiffLayout {
 
     var newNumberX: CGFloat { oneGutter ? 0 : numberWidth }
     var signX: CGFloat { newNumberX + numberWidth }
-    var textX: CGFloat { signX + Self.signWidth }
+    @MainActor var textX: CGFloat { signX + Self.signWidth }
     /// A split half's text, after its one number and its sign.
-    var splitTextX: CGFloat { numberWidth + Self.signWidth }
+    @MainActor var splitTextX: CGFloat { numberWidth + Self.signWidth }
 
     @MainActor init(rows: [DiffRow], oneGutter: Bool) {
         var largest = 0
@@ -564,6 +620,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         let mode: DiffMode
         let side: DiffSide
         let wraps: Bool
+        let fontSize: Double
     }
 
     private var shown: Shown?
@@ -583,7 +640,9 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     func update(_ view: DiffLineTable) {
         self.view = view
         guard let table else { return }
-        let key = Shown(loadID: view.loadID, mode: view.mode, side: view.section.side, wraps: view.wraps)
+        let key = Shown(loadID: view.loadID, mode: view.mode, side: view.section.side, wraps: view.wraps,
+                        fontSize: view.fontSize)
+        DiffLayout.use(view.fontSize)
         if key != shown {
             let modeChanged = shown.map { $0.mode != key.mode } ?? false
             // A table that just appeared takes the press before it as seen.
@@ -910,41 +969,51 @@ enum DiffLineDrawing {
         var wrapWidth: CGFloat?
     }
 
-    private static let paragraph: NSParagraphStyle = {
-        let style = NSMutableParagraphStyle()
-        style.tabStops = []
-        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-        style.lineBreakMode = .byClipping
+    /// The attributes at one code font size.
+    @MainActor
+    private struct Style {
+        let text: [NSAttributedString.Key: Any]
+        let wrappedText: [NSAttributedString.Key: Any]
+        let number: [NSAttributedString.Key: Any]
+        let addedSign: [NSAttributedString.Key: Any]
+        let removedSign: [NSAttributedString.Key: Any]
+
+        init(_ metrics: DiffLayout.Metrics) {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.tabStops = []
+            paragraph.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * metrics.charWidth
+            paragraph.lineBreakMode = .byClipping
+            let wrappedParagraph = NSMutableParagraphStyle()
+            wrappedParagraph.tabStops = []
+            wrappedParagraph.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * metrics.charWidth
+            // By character, as `DiffLayout.wrappedLines` counts, with a fixed line height.
+            wrappedParagraph.lineBreakMode = .byCharWrapping
+            wrappedParagraph.minimumLineHeight = metrics.wrapLineHeight
+            wrappedParagraph.maximumLineHeight = metrics.wrapLineHeight
+            let numberParagraph = NSMutableParagraphStyle()
+            numberParagraph.alignment = .right
+            text = [.font: metrics.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph]
+            wrappedText = [.font: metrics.font, .foregroundColor: Palette.diffText, .paragraphStyle: wrappedParagraph]
+            number = [.font: metrics.numberFont, .foregroundColor: Palette.diffLineNumber,
+                      .paragraphStyle: numberParagraph]
+            addedSign = [.font: metrics.font, .foregroundColor: Palette.diffAddedSign]
+            removedSign = [.font: metrics.font, .foregroundColor: Palette.diffRemovedSign]
+        }
+    }
+
+    private static var styles: [CGFloat: Style] = [:]
+
+    /// The attributes at the current code font size, made once per size.
+    private static var style: Style {
+        let metrics = DiffLayout.metrics
+        if let style = styles[metrics.size] { return style }
+        let style = Style(metrics)
+        styles[metrics.size] = style
         return style
-    }()
-    private static let wrappedParagraph: NSParagraphStyle = {
-        let style = NSMutableParagraphStyle()
-        style.tabStops = []
-        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-        // By character, as `DiffLayout.wrappedLines` counts, with a fixed line height.
-        style.lineBreakMode = .byCharWrapping
-        style.minimumLineHeight = DiffLayout.wrapLineHeight
-        style.maximumLineHeight = DiffLayout.wrapLineHeight
-        return style
-    }()
-    private static let text: [NSAttributedString.Key: Any] = [
-        .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph,
-    ]
+    }
+
     /// The attributes of wrapped text (what `DiffLayout.wrappedLines` measures with).
-    static let wrappedText: [NSAttributedString.Key: Any] = [
-        .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: wrappedParagraph,
-    ]
-    private static let number: [NSAttributedString.Key: Any] = {
-        let style = NSMutableParagraphStyle()
-        style.alignment = .right
-        return [.font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style]
-    }()
-    private static let addedSign: [NSAttributedString.Key: Any] = [
-        .font: DiffLayout.font, .foregroundColor: Palette.diffAddedSign,
-    ]
-    private static let removedSign: [NSAttributedString.Key: Any] = [
-        .font: DiffLayout.font, .foregroundColor: Palette.diffRemovedSign,
-    ]
+    static var wrappedText: [NSAttributedString.Key: Any] { style.wrappedText }
 
     private static func color(_ kind: TokenKind) -> NSColor {
         switch kind {
@@ -960,6 +1029,7 @@ enum DiffLineDrawing {
 
     /// Draws `row` in `rect` (a flipped view's coordinates). The numbers and the sign sit on the first line.
     static func draw(_ row: DiffRow, in rect: NSRect, spots: Spots) {
+        let style = style
         switch row.kind {
         case .added:
             Palette.diffAddedFill.setFill()
@@ -977,20 +1047,20 @@ enum DiffLineDrawing {
             guard let value else { continue }
             NSString(string: "\(value)").draw(
                 in: NSRect(x: rect.minX + x, y: numberY, width: spots.numberWidth - 8, height: lineHeight),
-                withAttributes: number)
+                withAttributes: style.number)
         }
         let textY = rect.minY + (lineHeight - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2
         switch row.kind {
         case .added:
-            NSString(string: "+").draw(at: NSPoint(x: rect.minX + spots.signX + 4, y: textY), withAttributes: addedSign)
+            NSString(string: "+").draw(at: NSPoint(x: rect.minX + spots.signX + 4, y: textY), withAttributes: style.addedSign)
         case .removed:
-            NSString(string: "−").draw(at: NSPoint(x: rect.minX + spots.signX + 4, y: textY), withAttributes: removedSign)
+            NSString(string: "−").draw(at: NSPoint(x: rect.minX + spots.signX + 4, y: textY), withAttributes: style.removedSign)
         case .context, .hunk:
             break
         }
 
         let wraps = spots.wrapWidth != nil
-        let text = NSMutableAttributedString(string: row.text, attributes: wraps ? wrappedText : text)
+        let text = NSMutableAttributedString(string: row.text, attributes: wraps ? style.wrappedText : style.text)
         let length = text.length
         for token in row.tokens where NSMaxRange(token.range) <= length {
             text.addAttribute(.foregroundColor, value: color(token.kind), range: token.range)
@@ -1119,7 +1189,6 @@ final class DiffHunkCellView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        label.font = DiffLayout.numberFont
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1155,6 +1224,7 @@ final class DiffHunkCellView: NSView {
                    onAction: @escaping (PatchBuilder.Action) -> Void)
     {
         label.stringValue = text
+        label.font = DiffLayout.numberFont
         self.onAction = onAction
         actions = buttons.map(\.0)
         for view in stack.arrangedSubviews {
