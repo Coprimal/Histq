@@ -102,6 +102,9 @@ struct RepoLayoutView: View {
     @State private var dragGraphHeight: CGFloat?
     /// The graph's height when that drag began.
     @State private var splitDragStart: CGFloat?
+    /// The toolbar's sidebar and detail toggles (`HeaderToolbar`).
+    @AppStorage(PrefKey.showSidebar.rawValue, store: Preferences.defaults) private var sidebarShown = true
+    @AppStorage(PrefKey.showDetail.rawValue, store: Preferences.defaults) private var detailShown = true
 
     private enum DividerSide { case sidebar, detail }
 
@@ -115,9 +118,16 @@ struct RepoLayoutView: View {
     /// has its own side column, and the detail of a commit no longer in view only takes its room. Stacked keeps the
     /// detail, since the graph stays on top there.
     private var showsDetail: Bool {
-        if isFocus { return false }
-        if case .pullRequest = session.openHosted { return isStacked }
-        return true
+        detailShown && !Self.hidesDetail(session: session, preset: LayoutPreset.resolved(storedPreset))
+    }
+
+    /// The detail is hidden whatever its toggle says (`showsDetail`): Focus, or an open pull request outside Stacked.
+    /// The toolbar's detail toggle is off then. It reads `openHosted` on every path, Focus included, so the toolbar's
+    /// observation tracks it and wakes when a pull request opens or closes.
+    static func hidesDetail(session: RepoSession, preset: LayoutPreset) -> Bool {
+        var isPullRequest = false
+        if case .pullRequest = session.openHosted { isPullRequest = true }
+        return preset == .focus || (isPullRequest && preset != .stacked)
     }
 
     /// Stacked shows a file, pull request, issue or tool in its bottom pane.
@@ -138,13 +148,14 @@ struct RepoLayoutView: View {
         .background(GitHubDriver(session: session))
     }
 
-    /// The three panels and their dividers (Focus: panel 2 alone; an open pull request: no detail). `height`: the
-    /// layout's, which bounds the terminal drawer until panel 2's own height is measured.
+    /// The three panels and their dividers (Focus: panel 2 alone; an open pull request: no detail; the toolbar's
+    /// toggles hide the sidebar or the detail). `height`: the layout's, which bounds the terminal drawer until panel
+    /// 2's own height is measured.
     private func panels(widths: PanelWidths, available: CGFloat, height: CGFloat) -> some View {
         HStack(spacing: 0) {
             // The panels' cards sit right on the page's sheet (MainView), a level between the window glass and
             // the cards.
-            if !isFocus {
+            if !isFocus && sidebarShown {
                 SidebarView(session: session)
                     .frame(width: widths.sidebar)
                 divider(.sidebar, widths: widths, available: available)
