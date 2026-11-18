@@ -40,13 +40,15 @@ public enum LogReader {
     public static let defaultPageSize = 500
 
     /// `--exclude` must come before `--all` (git applies it to the next `--all`/`--branches`/...), so stash
-    /// internals (`stash@{n}` and its index and untracked commits) and notes never become rows. `-z` ends
+    /// internals (`stash@{n}` and its index and untracked commits), notes and `git maintenance`'s prefetch refs
+    /// (hidden copies of the remotes, as scalar's `log.excludeDecoration` hides them) never become rows. `-z` ends
     /// every record with NUL, which git cannot emit inside a name or message (its formatter stops at a NUL,
     /// and the read environment pins UTF-8 output), so no commit text can start a record of its own. Fields
     /// are separated by `\x1f`, which git does not escape: the fixed-format fields come first and the body
     /// last, so a stray `\x1f` in a name or message cannot shift the hash, parents or dates (see `LogParser`).
     public static let arguments = [
-        "log", "-z", "--exclude=refs/stash", "--exclude=refs/notes/*", "--all", "--topo-order",
+        "log", "-z", "--exclude=refs/stash", "--exclude=refs/notes/*", "--exclude=refs/prefetch/*", "--all",
+        "--topo-order",
         "--format=%H%x1f%P%x1f%at%x1f%ct%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%b",
     ]
 
@@ -100,6 +102,15 @@ public enum LogReader {
         return commits.indices.filter { !isParent[$0] }.map { commits[$0].hash }
     }
 
+    /// The tips of a history after `delta` (the commits new since a read whose tips were `previous`, `newCommits`) comes
+    /// on top of it, as `tips(of:index:)` would give for the whole history: the delta commits no other delta commit
+    /// lists as a parent, then the previous tips no delta commit lists as a parent.
+    public static func tips(adding delta: [Commit], to previous: [String]) -> [String] {
+        var parents = Set<String>()
+        for commit in delta { parents.formUnion(commit.parents) }
+        return delta.map(\.hash).filter { !parents.contains($0) } + previous.filter { !parents.contains($0) }
+    }
+
     /// The commits a history read (`pages`) would list now that are not in a previous read whose tips were
     /// `previousTips` (`tips(of:index:)`), in git's order (children before parents); `[]` when none. Nil when this
     /// cannot be proven to be the whole difference, so the caller reads the whole history again: no previous tip,
@@ -127,7 +138,8 @@ public enum LogReader {
         // revisions on stdin as given whatever `--not` says on the command line, so the previous tips count as
         // positive and the refs (with the same exclusions as the log) and `extra` as negative.
         let check = try await runner.run(
-            ["rev-list", "--count", "--stdin", "--not", "--exclude=refs/stash", "--exclude=refs/notes/*", "--all"]
+            ["rev-list", "--count", "--stdin", "--not", "--exclude=refs/stash", "--exclude=refs/notes/*",
+             "--exclude=refs/prefetch/*", "--all"]
                 + extra,
             cwd: cwd, env: env, stdin: Data(previousTips.map { $0 + "\n" }.joined().utf8))
         let count = check.text.trimmingCharacters(in: .whitespacesAndNewlines)

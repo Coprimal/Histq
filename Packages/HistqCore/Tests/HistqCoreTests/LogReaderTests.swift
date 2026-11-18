@@ -168,6 +168,33 @@ struct LogReaderTests {
         #expect(delta.first?.parents == [first])
     }
 
+    @Test("tips updated from a delta equal the tips of the whole log")
+    func tipsFromDelta() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        try await sandbox.git(["checkout", "-q", "-b", "side"], in: repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "side one"], in: repo)
+        try await sandbox.git(["checkout", "-q", "-b", "other", "main"], in: repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "other one"], in: repo)
+        try await sandbox.git(["checkout", "-q", "main"], in: repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "main two"], in: repo)
+        let oldTips = try await tipsOfFullRead(sandbox, repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "main three"], in: repo)
+        try await sandbox.git(["merge", "-q", "--no-ff", "-m", "merge side", "side"], in: repo)
+        try await sandbox.git(["checkout", "-q", "-b", "topic", "HEAD~2"], in: repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "topic one"], in: repo)
+
+        let delta = try #require(try await newCommits(sandbox, repo, previousTips: oldTips))
+        let tips = LogReader.tips(adding: delta, to: oldTips)
+
+        let fresh = try await tipsOfFullRead(sandbox, repo)
+        #expect(oldTips.count == 3)
+        #expect(delta.count == 3)
+        #expect(Set(tips) == Set(fresh), "the merged side tip and the old main tip are gone, other stays")
+        #expect(tips.count == fresh.count)
+    }
+
     @Test("nothing new gives no commit, not nil")
     func nothingChanged() async throws {
         let sandbox = try await Sandbox()
@@ -224,6 +251,23 @@ struct LogReaderTests {
         try await sandbox.git(["stash", "drop", "-q"], in: repo)
 
         #expect(try await newCommits(sandbox, repo, previousTips: tips) == nil)
+    }
+
+    @Test("a commit only a prefetch ref reaches is no row and no new commit")
+    func prefetchRefIsHidden() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        let tips = try await tipsOfFullRead(sandbox, repo)
+        try await sandbox.git(["checkout", "-q", "-b", "side"], in: repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "fetched"], in: repo)
+        let fetched = try await sandbox.git(["rev-parse", "HEAD"], in: repo)
+        try await sandbox.git(["update-ref", "refs/prefetch/remotes/origin/side", fetched], in: repo)
+        try await sandbox.git(["checkout", "-q", "main"], in: repo)
+        try await sandbox.git(["branch", "-q", "-D", "side"], in: repo)
+
+        #expect(try await !readAll(sandbox, repo).contains { $0.hash == fetched })
+        #expect(try await newCommits(sandbox, repo, previousTips: tips) == [])
     }
 
     @Test("a replace ref gives nil: it can give an old commit other parents")
