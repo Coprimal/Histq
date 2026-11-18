@@ -16,6 +16,8 @@
 // `generate` (commit box), `explain-wip` (commit box), `explain` (commit details), `improve-message` (a reword row
 // of the rebase sheet, with `-HistqRewordRow <n>`; its prompt is a commit message's, so it gets the same answer),
 // `pr-describe` (Create Pull Request form, Generate; a title line, a blank line and a short Markdown body),
+// `pr-resolve-ai` (a conflicting pull request's merge box, Resolve with AI: merges the base into the head branch, then
+// starts Suggest All in the first conflicted file that both sides still have, UU or AA),
 // `resolve` (conflict editor), `test` (Settings › AI, Test Connection), `load-models` (Settings › AI, Load models),
 // `resolve-all` (conflict editor, Suggest All: logs `batch finished ok=<n> failed=<m>` once every region ended; with
 // `apply` it clicks Apply N and logs

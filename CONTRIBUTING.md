@@ -42,9 +42,11 @@ CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=
 
 `scripts/make-fixtures.sh build/qa/fx` builds deterministic git repositories for tests and QA, isolated from your git
 config: `graph` (branches, merges, tags, stashes, a remote, a worktree, uncommitted changes), `graph-origin.git`,
-`graph-wt`, `conflict` (a merge stopped on 3 conflicted files), `conflict-rebase` and `expected/`. `--big N` adds
-`big` (N commits); `--portable` skips `graph-wt`, for git older than 2.48. The script refuses `/`, your home folder
-and any non-empty folder it did not create. Everything under `build/` is git-ignored.
+`graph-wt`, `conflict` (a merge stopped on 3 conflicted files), `conflict-rebase`, `conflict-pr` (a clean `main` with
+no local `feature`; `origin/feature` conflicts with `main` in 3 files, the stub's pull request #1),
+`conflict-pr-origin.git` (its bare remote: `main`, `feature` and `refs/pull/1/head` = `feature`) and `expected/`.
+`--big N` adds `big` (N commits); `--portable` skips `graph-wt`, for git older than 2.48. The script refuses `/`, your
+home folder and any non-empty folder it did not create. Everything under `build/` is git-ignored.
 
 ## Benchmark
 
@@ -95,7 +97,15 @@ it first) and captures its window. Set `HISTQ_APP` to use a built `Histq.app` fr
 ```sh
 scripts/shot.sh build/qa/shots/graph.png build/qa/fx/graph
 scripts/shot.sh build/qa/shots/terminal.png build/qa/fx/graph -- -HistqOpenTerminal YES
+# Resolve a conflicting pull request: manually, then (after rebuilding the fixtures) with AI.
+scripts/shot.sh build/qa/shots/pr-resolve.png --wait 10 build/qa/fx/conflict-pr -- -HistqGitHubStub YES \
+  -HistqSelect pr:1 -HistqPRMergeable false -HistqPRAction resolve-manual
+scripts/shot.sh build/qa/shots/pr-resolve-ai.png --wait 10 build/qa/fx/conflict-pr -- -HistqGitHubStub YES \
+  -HistqSelect pr:1 -HistqPRMergeable false -HistqAIStub YES -HistqKeychain memory -HistqAI pr-resolve-ai
 ```
+
+A Resolve run leaves `conflict-pr` on `feature` in the middle of a merge: run `scripts/make-fixtures.sh build/qa/fx`
+again before the next one.
 
 - **Background only**: `open -g` and `-HistqBackground YES`, so the app never activates and its window is never key.
   Shots show an inactive window (grey traffic lights).
@@ -173,13 +183,13 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |
-| `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. `-HistqPRAction reply` posts "QA reply" to the first review thread, `resolve` resolves the first unresolved thread and `unresolve` unresolves the first resolved one. Stub only. |
+| `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. `-HistqPRAction reply` posts "QA reply" to the first review thread, `resolve` resolves the first unresolved thread and `unresolve` unresolves the first resolved one. `resolve-manual` clicks Resolve manually in the merge box of a pull request with conflicts (needs `-HistqPRMergeable false`) once it can start, and logs `content resolve pr <n> manual stopped <N>\|clean\|failed\|refused <reason>` in `timing.log` (`refused busy\|in-progress\|dirty` when another operation, a stopped one or uncommitted changes showed up after the click; `refused diverged` when the local head branch has commits that `<remote>/<head>` lacks; one only behind is fast-forwarded first). Stub only. |
 | `-HistqPRMergeable true\|false\|null` | Whether the stub's PR #1 merges: `true` (default, `clean`), `false` (conflicts, `dirty`) or `null` (GitHub still checking, `unknown`; the detail asks again up to 3 times, 3 s apart, and logs `pr 1 mergeable <value>` in `timing.log` for each answer). Stub only. |
 | `-HistqPRStubComments <n>` | The stub's PR #1 gets n generated comments (up to 600, a minute apart, every third with a long line of code) instead of one, for a conversation longer than the panel. Stub only. |
 | `-HistqOpenCreatePR <branch>` / `-HistqCreatePRSubmit YES` | Opens the Create Pull Request form; fills and submits it. Stub only. |
 | `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |
 | `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network; logs each request's data block labels as `blocks [<label>, ...]` in `ai.log` (labels only, never content). |
-| `-HistqAI <hook>[,amend][,apply\|,cancel][,regenerate][,undo][,close-tab\|,close-window]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `resolve-all`, `improve-message`, `pr-describe`, `test` or `load-models`. `improve-message` clicks Improve on the reword row (see `-HistqRewordRow`). `pr-describe` clicks Generate in the Create Pull Request form (needs `-HistqOpenCreatePR` and `-HistqGitHubStub YES`). `generate,amend` turns Amend on and clicks Generate Message once the last message has loaded. `regenerate` clicks Regenerate once after the first answer and logs `regenerate` in `ai.log`. `resolve-all` (Suggest All) logs `batch finished ok=<n> failed=<m>` once the batch ends; with `apply` it clicks Apply N and logs `apply-batch regions [...]`, and `undo` then does Undo AI and logs `unresolved <a>-><b>`. `close-tab` (another tab must stay open) or `close-window` closes the card's tab or window as soon as the card opens, while the job still reads its content (`resolve-all`: while the batch runs), as Cmd-W would, and logs a `close-tab …` or `close-window …` line; no stub request may follow. When AI is set up but the named hook's button is unavailable, `ai.log` gets `unavailable <hook>: <reason>` once per reason. Each single-card `apply` also logs `form-open <logName> <true\|false>` (whether the rebase or pull request form is still shown). Stub only. |
+| `-HistqAI <hook>[,amend][,apply\|,cancel][,regenerate][,undo][,close-tab\|,close-window]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `resolve-all`, `improve-message`, `pr-describe`, `pr-resolve-ai`, `test` or `load-models`. `improve-message` clicks Improve on the reword row (see `-HistqRewordRow`). `pr-describe` clicks Generate in the Create Pull Request form (needs `-HistqOpenCreatePR` and `-HistqGitHubStub YES`). `pr-resolve-ai` clicks Resolve with AI in the merge box of a pull request with conflicts (needs `-HistqGitHubStub YES`, `-HistqSelect pr:1` and `-HistqPRMergeable false`): `timing.log` gets `content resolve pr <n> ai stopped <N>`, then `select ai resolve-all` as Suggest All starts in the first conflicted file that both sides still have (UU or AA), and `ai.log` gets `batch finished ok=<n> failed=<m>`. `generate,amend` turns Amend on and clicks Generate Message once the last message has loaded. `regenerate` clicks Regenerate once after the first answer and logs `regenerate` in `ai.log`. `resolve-all` (Suggest All) logs `batch finished ok=<n> failed=<m>` once the batch ends; with `apply` it clicks Apply N and logs `apply-batch regions [...]`, and `undo` then does Undo AI and logs `unresolved <a>-><b>`. `close-tab` (another tab must stay open) or `close-window` closes the card's tab or window as soon as the card opens, while the job still reads its content (`resolve-all`: while the batch runs), as Cmd-W would, and logs a `close-tab …` or `close-window …` line; no stub request may follow. When AI is set up but the named hook's button is unavailable, `ai.log` gets `unavailable <hook>: <reason>` once per reason. Each single-card `apply` also logs `form-open <logName> <true\|false>` (whether the rebase or pull request form is still shown). Stub only. |
 
 ## Project layout
 

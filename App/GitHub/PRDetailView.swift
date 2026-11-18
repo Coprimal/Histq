@@ -240,6 +240,7 @@ final class PullRequestDetailModel {
     /// DEBUG `-HistqPRAction comment|approve|request-changes|merge|merge-stale|merge-stale-closed|close|reopen`: runs
     /// that action once, on the first load, without its confirmation (the stub answers it), so a launch exercises the
     /// action path and its reload. Only with `-HistqGitHubStub YES`: never an unconfirmed action on a real account.
+    /// `resolve-manual` is the merge box's own (`PRActionsCard.launchResolve`): a local merge, not a GitHub action.
     private static var launchAction: PullRequestAction? = switch GitHubStub.isEnabled
         ? AppState.launchFlag("-HistqPRAction") : nil {
     case "comment": .comment("QA comment")
@@ -1107,11 +1108,19 @@ private struct PRSideColumn: View {
 
 /// The merge box under the timeline, as on GitHub: for an open pull request, a status box saying whether its branch
 /// merges (green, red with conflicts, amber when blocked, neutral otherwise) and Merge (method, then a confirmation);
-/// then Checkout locally, Close or Reopen (confirmed), and the running action.
+/// then Checkout locally, Close or Reopen (confirmed), and the running action. With conflicts, the red box holds
+/// Resolve with AI and Resolve manually.
 private struct PRActionsCard: View {
     let session: RepoSession
     let detail: PullRequestDetail
     @Environment(WindowModel.self) private var model
+
+    #if DEBUG
+    /// DEBUG `-HistqPRAction resolve-manual`: clicks Resolve manually once, as soon as it can start (the status read,
+    /// no other operation running). Only with `-HistqGitHubStub YES`, like the detail's other launch actions.
+    @MainActor private static var launchResolve = GitHubStub.isEnabled
+        && AppState.launchFlag("-HistqPRAction") == "resolve-manual"
+    #endif
 
     var body: some View {
         let pull = detail.pull
@@ -1161,7 +1170,7 @@ private struct PRActionsCard: View {
     private var status: (tone: Color?, symbol: String, title: String, note: String?) {
         let pull = detail.pull
         let base = pull.base.ref
-        if pull.mergeable == false || pull.mergeableState == "dirty" {
+        if hasConflicts {
             return (Color(nsColor: Palette.diffRemovedSign), "exclamationmark.triangle.fill",
                     "This branch has conflicts that must be resolved",
                     "Resolve the conflicts with \(base) to merge it.")
@@ -1187,6 +1196,11 @@ private struct PRActionsCard: View {
         return (nil, "clock", "Checking whether this branch can be merged…", nil)
     }
 
+    /// GitHub says the branch conflicts with its base: one test for the red box, its Resolve buttons and Merge off.
+    private var hasConflicts: Bool {
+        detail.pull.mergeable == false || detail.pull.mergeableState == "dirty"
+    }
+
     /// GitHub says the branch merges as it is: the status box is green, and only then Merge too. Blocked, out of date
     /// or still checking keeps Merge neutral but on, since GitHub itself refuses a merge it cannot do.
     private var mergesCleanly: Bool {
@@ -1196,7 +1210,7 @@ private struct PRActionsCard: View {
     }
 
     /// The status in a box tinted with its tone (neutral without one), so whether the branch merges reads at a glance
-    /// (user, 2026-11-17).
+    /// (user, 2026-11-17). The red one holds the Resolve buttons under its text.
     private var statusBox: some View {
         let status = status
         let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
@@ -1205,22 +1219,108 @@ private struct PRActionsCard: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(status.tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(status.title)
-                    .font(.body.weight(.semibold))
-                if let note = status.note {
-                    Text(note)
-                        .font(.settingsCaption)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(status.title)
+                        .font(.body.weight(.semibold))
+                    if let note = status.note {
+                        Text(note)
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                // The text reads as one element; the buttons under it stay buttons.
+                .accessibilityElement(children: .combine)
+                if hasConflicts { resolveControls }
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(shape.fill(status.tone?.opacity(0.14) ?? Palette.tabFill))
         .overlay(shape.strokeBorder(status.tone?.opacity(0.35) ?? Palette.surfaceBorder, lineWidth: 1))
-        .accessibilityElement(children: .combine)
+    }
+
+    /// "Merge <base> into <head>": the running entry `RepoSession.resolvePullRequestConflicts` adds for this pull
+    /// request, so the buttons show it busy from the click on.
+    private var resolveTitle: String { "Merge \(detail.pull.base.ref) into \(detail.pull.head.ref)" }
+
+    /// Why Resolve cannot start now; nil when it can. The merge needs the head branch from the GitHub remote (a fork's
+    /// lives elsewhere, and a branch of the same name there would be the wrong one), a clean tree and no operation in
+    /// progress, and nothing else running (another resolve, or a write its checks would miss).
+    private var resolveBlocked: String? {
+        let pull = detail.pull
+        guard session.github.api?.remote != nil else { return "No remote of this repository is on GitHub" }
+        let headOwner = pull.head.label?.split(separator: ":").first
+        guard let headOwner, headOwner == pull.base.label?.split(separator: ":").first else {
+            return "The branch is in a fork: resolve its conflicts there"
+        }
+        if let other = session.running.first { return "Waiting for \(other.title) to finish" }
+        if session.repoState?.isOperationInProgress == true {
+            return "A merge, rebase, cherry-pick or revert is in progress: finish or abort it first"
+        }
+        guard let status = session.status.value else { return "Reading the working tree…" }
+        if !status.conflicted.isEmpty || !status.staged.isEmpty || !status.unstaged.isEmpty {
+            return "Commit or stash the uncommitted changes first"
+        }
+        return nil
+    }
+
+    /// Resolve with AI and Resolve manually: both merge the base into the head branch here and open the conflict
+    /// editor, the AI one with Suggest All. While one cannot start, both are off with the reason under them; the
+    /// running merge shows there in the click's frame.
+    private var resolveControls: some View {
+        let pull = detail.pull
+        let resolving = session.running.contains { $0.title == resolveTitle }
+        let blocked = resolving ? "Merging \(pull.base.ref) into \(pull.head.ref)…" : resolveBlocked
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                AIHookButton(title: "Resolve with AI", systemImage: "sparkles",
+                             help: "Merge \(pull.base.ref) into \(pull.head.ref) here, then suggest resolutions "
+                                 + "with AI", unavailable: blocked, seam: "pr-resolve-ai") {
+                    resolve(withAI: true)
+                }
+                Button { resolve(withAI: false) } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.merge")
+                            .accessibilityHidden(true)
+                        Text("Resolve manually")
+                    }
+                }
+                .buttonStyle(RowTextButtonStyle())
+                .fixedSize()
+                .disabled(blocked != nil)
+                .help(blocked ?? "Merge \(pull.base.ref) into \(pull.head.ref) here and open the conflict editor")
+                #if DEBUG
+                .task(id: blocked) {
+                    guard blocked == nil, Self.launchResolve else { return }
+                    Self.launchResolve = false
+                    resolve(withAI: false)
+                }
+                #endif
+            }
+            if let blocked {
+                HStack(spacing: 6) {
+                    if resolving { ProgressView().controlSize(.mini) }
+                    Text(blocked)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// The Resolve buttons' click (and their DEBUG hooks): checks again, since a hook or a second click may come after
+    /// the render that enabled it. It never asks: only the refs read after the session's fetch tell a local head
+    /// branch that is just behind (fast-forwarded) from one with commits of its own (refused), and the session checks
+    /// the tree again then (`RepoSession.resolvePullRequestConflicts`).
+    private func resolve(withAI: Bool) {
+        let pull = detail.pull
+        guard !session.running.contains(where: { $0.title == resolveTitle }), resolveBlocked == nil,
+              let remote = session.github.api?.remote else { return }
+        session.resolvePullRequestConflicts(
+            head: pull.head.ref, base: pull.base.ref, remote: remote, number: pull.number, withAI: withAI)
     }
 
     /// The merge method and Merge: green (white text) with the green status box, neutral while blocked, out of date or
@@ -1237,7 +1337,7 @@ private struct PRActionsCard: View {
             .buttonStyle(RowTextButtonStyle(
                 formRow: true,
                 fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
-            .disabled(busy != nil || pull.draft == true || pull.mergeable == false)
+            .disabled(busy != nil || pull.draft == true || hasConflicts)
             .fixedSize()
     }
 

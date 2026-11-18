@@ -75,8 +75,9 @@ enum Fixtures {
     private static let builtRoot = Mutex<URL?>(nil)
 
     /// A private copy of the whole fixture root (`graph`, `graph-origin.git`, `graph-wt`, `conflict`,
-    /// `conflict-rebase`, `expected`): the relative remote `../graph-origin.git` and the relative worktree
-    /// link to `../graph-wt` only resolve next to their siblings. Remove it with `remove()`.
+    /// `conflict-rebase`, `conflict-pr`, `conflict-pr-origin.git`, `expected`): the relative remotes
+    /// `../graph-origin.git` and `../conflict-pr-origin.git` and the relative worktree link to `../graph-wt` only
+    /// resolve next to their siblings. Remove it with `remove()`.
     static func copy() async throws -> FixtureCopy {
         let source = try await built.value
         let folder = try makeTempDirectory("HistqFixtureCopy")
@@ -96,7 +97,7 @@ enum Fixtures {
 /// One test's copy of the fixture root, with the hermetic base environment its git calls must use.
 struct FixtureCopy: Sendable {
     let folder: URL
-    /// The copied fixture root, holding `graph`, `graph-origin.git`, `graph-wt`, `conflict`, ...
+    /// The copied fixture root, holding `graph`, `graph-origin.git`, `graph-wt`, `conflict`, `conflict-pr`, ...
     let root: URL
     /// `Fixtures.hermeticEnvironment` with HOME in this copy's own folder.
     let base: [String: String]

@@ -8,6 +8,8 @@
 #   <dir>/graph-wt         linked worktree of graph on branch wt (not built with --portable)
 #   <dir>/conflict         main merging feature, stopped with 3 conflicted files
 #   <dir>/conflict-rebase  feature rebasing onto main, stopped with the same 3 conflicts
+#   <dir>/conflict-pr      clean main, no local feature: origin/feature conflicts with main in 3 files
+#   <dir>/conflict-pr-origin.git bare remote of conflict-pr: main, feature, refs/pull/1/head = feature
 #   <dir>/expected/        expected results (long-A1-B2-AB3.txt)
 #   <dir>/big              --big N: N commits (linear plus merges) via git fast-import
 #
@@ -59,7 +61,8 @@ fi
 : > "$root/$MARKER"
 
 rm -rf "${root:?}/graph" "${root:?}/graph-origin.git" "${root:?}/graph-wt" \
-  "${root:?}/conflict" "${root:?}/conflict-rebase" "${root:?}/expected" "${root:?}/.home"
+  "${root:?}/conflict" "${root:?}/conflict-rebase" "${root:?}/conflict-pr" "${root:?}/conflict-pr-origin.git" \
+  "${root:?}/expected" "${root:?}/.home"
 if [ -n "$big" ]; then rm -rf "${root:?}/big"; fi
 
 # ---- Isolation ----
@@ -324,6 +327,18 @@ make_conflict_rebase() (
   [ "$(unmerged_count .)" = 3 ] || die "conflict-rebase: expected 3 unmerged paths"
 )
 
+# A pull request (feature into main) that conflicts: the clone sits on a clean main, feature exists only on
+# origin (as the branch and as GitHub's refs/pull/1/head), so resolving it has to check feature out first.
+make_conflict_pr() (
+  conflict_base "$root/conflict-pr"
+  cd "$root/conflict-pr"
+  git init -q --bare "$root/conflict-pr-origin.git"
+  git remote add origin ../conflict-pr-origin.git
+  git push -q -u origin main
+  git push -q origin feature feature:refs/pull/1/head
+  git branch -q -D feature
+)
+
 # A = main (ours, stage 2), B = feature (theirs, stage 3). Conflicts: #1 line 10, #2 line 40,
 # #3 line 70. One-sided changes applied: line 20 (feature), line 55 (main).
 make_expected() {
@@ -374,6 +389,7 @@ make_big() (
 make_graph
 make_conflict
 make_conflict_rebase
+make_conflict_pr
 make_expected
 if [ -n "$big" ]; then make_big "$big"; fi
 echo "fixtures ready in $root"

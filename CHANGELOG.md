@@ -67,6 +67,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Create Pull Request: Generate next to Description writes the title and description with AI from the branch's commit messages, its diff against the base and the repository's pull request template; Apply fills the form.
 - Settings › AI › Pull requests: Custom instructions, as for commit messages, with Reset to Default.
 - Write a reply and Resolve or Unresolve conversation under each review thread of a pull request; threads collapse and expand with their chevron, and resolved ones start collapsed.
+- Resolve with AI and Resolve manually in the merge box of a pull request with conflicts: Histq checks out its branch, merges the base branch into it and opens the conflict editor (Resolve with AI also starts Suggest All); commit and push to update the pull request.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

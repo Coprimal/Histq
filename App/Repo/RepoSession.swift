@@ -870,6 +870,10 @@ final class RepoSession: Identifiable {
     private(set) var conflictBusy: String?
     /// The conflict editor's last failed write, shown in its header card.
     var conflictError: String?
+    /// The conflicted path a pull request's Resolve with AI opened (`resolvePullRequestConflicts`): its Suggest All
+    /// can only start once the file has loaded, so it waits here. Selecting another file, closing the editor or a
+    /// failed load drops it.
+    @ObservationIgnored private var pendingAIBatchPath: String?
 
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "repo")
 
@@ -2500,6 +2504,8 @@ final class RepoSession: Identifiable {
             if target == openFile { return }
             if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target, returnTool: returnTool) }) { return }
         }
+        // A pending Suggest All belongs to the conflict Resolve with AI opened, never to another file.
+        if !(target.isConflict && target.path == pendingAIBatchPath) { pendingAIBatchPath = nil }
         UITiming.select(fileDetail(target))
         if openHosted != nil {
             openHosted = nil
@@ -2538,6 +2544,7 @@ final class RepoSession: Identifiable {
         openTool = nil
         let back = openFile != nil ? returnTool : nil
         returnTool = nil
+        pendingAIBatchPath = nil
         guard openFile != nil else { return }
         fileTask?.cancel()
         fileTask = nil
@@ -3030,11 +3037,24 @@ final class RepoSession: Identifiable {
                 try Task.checkCancellation()
                 guard token == fileToken, openFile == target else { return }
                 conflict = .loaded(loaded)
+                // Resolve with AI opened this file: Suggest All starts on its first load only (a reload after a
+                // write finds the path dropped). Without a text conflict (only modify/delete or binary ones), it
+                // says so rather than open without AI.
+                if pendingAIBatchPath == target.path {
+                    pendingAIBatchPath = nil
+                    if aiResolutionTargets().isEmpty {
+                        postToast(.warning("Resolve with AI", detail: "No text conflicts for AI to suggest — resolve "
+                            + "them in the conflict editor."))
+                    } else {
+                        startAIBatch()
+                    }
+                }
                 #if DEBUG
                 runLaunchResolve()
                 #endif
             } catch {
                 guard token == fileToken, openFile == target, !Self.isCancellation(error) else { return }
+                pendingAIBatchPath = nil
                 conflict = .failed(Self.message(for: error))
             }
         }
@@ -4308,6 +4328,109 @@ final class RepoSession: Identifiable {
                 }
             }
             running.removeAll { $0.id == operation.id }
+        }
+    }
+
+    /// A pull request's Resolve with AI / Resolve manually (its merge box): fetches every remote without pruning (only
+    /// that refreshes `<remote>/<base>`), checks out `head` (tracking `<remote>/<head>` when there is no local branch)
+    /// and merges `<remote>/<base>` into it, so the conflicts GitHub reports show here. A local `head` that is only
+    /// behind `<remote>/<head>` (checked out before a teammate pushed) is fast-forwarded first; one with commits of its
+    /// own is refused, never merged into: its conflicts would not be GitHub's, and its push would be rejected. The
+    /// click's checks (a clean tree, no operation in progress, nothing else running) are made again after the fetch
+    /// and before the merge, since changes made meanwhile would be carried onto `head`: a stop is a warning toast. Each
+    /// step goes through `perform` (the journal takes back the checkout and the merge, not the fast-forward) and the
+    /// banner can abort the merge. Like `run`, it is in `running` when this returns. A merge that stops on conflicts is
+    /// the expected outcome, not a failure: the conflict editor opens on the first conflicted file, and `withAI`
+    /// starts Suggest All once it has loaded. The caller checks that the pull request is from this repository.
+    func resolvePullRequestConflicts(head: String, base: String, remote: String, number: Int, withAI: Bool) {
+        let title = "Merge \(base) into \(head)"
+        nextOperationID &+= 1
+        let operation = RunningOperation(id: nextOperationID, title: title, key: nil)
+        running.append(operation)
+        failure = nil
+        let timing = "resolve pr \(number) \(withAI ? "ai" : "manual")"
+        Task { [weak self] in
+            guard let self else { return }
+            defer { running.removeAll { $0.id == operation.id } }
+            // Why the next step must not run (a timing token and the toast's text), read after a write: `perform`
+            // rereads the status and the refs, so it sees what changed while that write ran.
+            @MainActor func refusal() -> (reason: String, detail: String)? {
+                if running.contains(where: { $0.id != operation.id }) {
+                    return ("busy", "Another operation started meanwhile: resolve again once it has finished.")
+                }
+                if repoState?.isOperationInProgress == true {
+                    return ("in-progress", "A merge, rebase, cherry-pick or revert is in progress: finish or abort it, "
+                        + "then resolve again.")
+                }
+                guard let status = status.value, status.conflicted.isEmpty, status.staged.isEmpty,
+                      status.unstaged.isEmpty
+                else { return ("dirty", "The working tree has uncommitted changes: commit or stash them, then resolve "
+                    + "again.") }
+                return nil
+            }
+            @MainActor func refuse(_ refusal: (reason: String, detail: String)) {
+                UITiming.content("\(timing) refused \(refusal.reason)")
+                postToast(.warning("\(title) not started", detail: refusal.detail))
+            }
+            // The step in flight: a failure names it, and only the merge's conflicts are expected.
+            var write = Write.fetchAll(prune: false)
+            do {
+                try await perform(write)
+                if let refusal = refusal() {
+                    refuse(refusal)
+                    return
+                }
+                // Read after the fetch: its write reread the refs, so `tip` is the pull request's head as pushed.
+                let local = refs.value?.localBranches.first { $0.name == head }?.commit
+                let tip = refs.value?.remoteBranches.first { $0.name == "\(remote)/\(head)" }?.commit
+                if let local, local != tip {
+                    let backend = try await self.backend()
+                    let env = try await backend.readEnvironment(cwd: url)
+                    guard let tip, try await backend.runner.run(
+                        ["merge-base", "--is-ancestor", local, tip], cwd: url, env: env, allowedExitCodes: [0, 1]
+                    ).exitCode == 0 else {
+                        refuse(("diverged", "The local branch \(head) has commits that are not on \(remote)/\(head): "
+                            + "pull and push it (or reset it) first, then resolve again."))
+                        return
+                    }
+                    write = .fastForward(head, to: "refs/remotes/\(remote)/\(head)")
+                    try await perform(write)
+                }
+                write = local != nil
+                    ? .checkoutBranch(head) : .checkoutTracking(remoteBranch: "\(remote)/\(head)", as: head)
+                try await perform(write)
+                if let refusal = refusal() {
+                    refuse(refusal)
+                    return
+                }
+                write = .merge("\(remote)/\(base)", checkoutFirst: nil)
+                try await perform(write)
+                UITiming.content("\(timing) clean")
+                postToast(.success(title, detail: "Merged \(base) into \(head) with no conflicts. "
+                    + "Push to update the pull request."))
+            } catch {
+                // `perform` reread the status before it threw: the conflicted paths are the merge's.
+                let conflicted = status.value?.conflicted ?? []
+                if case GitError.conflict = error, case .merge = write, let first = conflicted.first {
+                    UITiming.content("\(timing) stopped \(conflicted.count)")
+                    let count = conflicted.count == 1 ? "1 conflict" : "\(conflicted.count) conflicts"
+                    postToast(.warning("\(title) stopped on conflicts", detail: "\(count) — resolve them, commit, "
+                        + "then push to update the pull request."))
+                    // Suggest All needs both sides as text: with AI, the first path both sides still have (UU or
+                    // AA, never a modify/delete; a binary one only shows once loaded), else the first: its load then
+                    // says AI has nothing to suggest.
+                    let opened = withAI
+                        ? conflicted.first { $0.index == $0.worktree && $0.index != .deleted } ?? first : first
+                    pendingAIBatchPath = withAI ? opened.path : nil
+                    selectConflict(opened.path)
+                    return
+                }
+                UITiming.content("\(timing) failed")
+                if !(error is CancellationError) {
+                    let message = Self.message(for: error)
+                    report(OperationFailure(title: title, write: write, error: error, message: message))
+                }
+            }
         }
     }
 
