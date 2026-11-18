@@ -84,6 +84,10 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - A stash apply or pop that stops on conflicts shows a warning toast ("Applied with conflicts: this apply cannot be undone") instead of a failure; the conflicted files are in the WIP panel.
 - A failed operation shows only in its toast, no longer also in a card above the panels: the toast keeps the hint and its button (Delete Anyway…, Pull, …), has a button that copies the whole error, and stays while the pointer is over it; a toast with a button stays until it is used or closed. The toasts setting has no Off any more; it shows errors only.
 - Faster refresh and less memory on very large repositories: after a commit, a 1M-commit history reloads in about 0.7 s instead of 0.85 s (and no longer slows down while Histq is in the background), with about 29% lower peak memory; refs under `refs/prefetch/` no longer show in the graph.
+- The pull request page's tabs and its Comment/Review switch sit on a lighter track, and Comment/Review is smaller so it fits its card's header.
+- The pull request page has a labelled Open on GitHub button, and its "wants to merge 2 commits into main from owner:feature" line shows the two branches as chips.
+- GitHub accounts on the PRs tab and the pull request and issue pages show their real GitHub avatars whatever the Commit avatars setting is (github.com only).
+- The pull request's merge box sits between the Conversation and Comment cards and says whether the branch can be merged: no conflicts (with a green Merge), conflicts that must be resolved (Merge disabled), blocked, out of date, or still checking (asked again a few times until GitHub knows); Close pull request has its own icon.
 
 ## [0.1.0] - YYYY-MM-DD
 

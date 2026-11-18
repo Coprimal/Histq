@@ -98,7 +98,7 @@ struct PullRequestSections: View {
 private struct ListCard: View {
     let session: RepoSession
     let list: GitHubStore.List
-    /// The authors' GitHub avatars may load (github.com, not the stub); `AvatarStore`'s mode still decides.
+    /// The authors' GitHub avatars load (github.com, not the stub), whatever `AvatarStore`'s mode.
     let realAvatars: Bool
     /// The header's search (`CardSearchButton`): the field above the rows, which then show only the matching ones.
     @State private var isSearching = false
@@ -266,16 +266,19 @@ private struct HostedRowView: View {
 
     private var login: String { row.authorLogin ?? "?" }
 
-    /// GitHub's noreply address of the author: `AvatarStore` loads its GitHub avatar in real mode. Empty (a drawn
-    /// avatar from the login, never a request) for the stub and for Enterprise hosts, whose avatars are elsewhere.
+    /// GitHub's noreply address of the author: `AvatarStore.gitHubAvatar` loads its GitHub avatar in every mode, so
+    /// an account looks the same here and on the pull request page. Empty (a drawn avatar from the login, never a
+    /// request) for the stub and for Enterprise hosts, whose avatars are elsewhere.
     private var email: String {
-        guard realAvatars, let id = row.authorID, let login = row.authorLogin else { return "" }
-        return "\(id)+\(login)@users.noreply.github.com"
+        guard realAvatars, let login = row.authorLogin else { return "" }
+        return AvatarStore.gitHubEmail(login: login, id: row.authorID)
     }
 
     @ViewBuilder private var avatar: some View {
         let pixels = Int((Self.avatarSize * displayScale).rounded())
-        if let image = AvatarStore.shared.avatar(email: email, name: login, pixels: pixels) {
+        let image = email.isEmpty ? AvatarStore.shared.avatar(email: "", name: login, pixels: pixels)
+            : AvatarStore.shared.gitHubAvatar(login: login, id: row.authorID, pixels: pixels)
+        if let image {
             Image(nsImage: image)
                 .resizable()
                 .frame(width: Self.avatarSize, height: Self.avatarSize)

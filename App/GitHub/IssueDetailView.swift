@@ -491,7 +491,11 @@ private struct IssueSideColumn: View {
                     PRSideEmpty(text: "No one assigned")
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(assignees, id: \.id) { PRPersonRow(login: $0.login, state: nil, showsState: false) }
+                        let realAvatars = GitHubUserAvatar.allowsReal(session.github)
+                        ForEach(assignees, id: \.id) {
+                            PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
+                                        showsState: false)
+                        }
                     }
                 }
             }

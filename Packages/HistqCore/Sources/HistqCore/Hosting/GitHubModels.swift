@@ -107,6 +107,10 @@ public struct GitHubPullRequest: Codable, Sendable, Equatable, Identifiable {
     /// Only a single pull request (`GET .../pulls/<n>`) has these.
     public var merged: Bool?
     public var mergeable: Bool?
+    /// Why it merges or not: `clean`, `unstable` (failing checks that are not required), `has_hooks`, `blocked`
+    /// (required reviews or checks), `behind` (out of date with the base), `dirty` (conflicts), `draft`, or `unknown`
+    /// while GitHub still computes it.
+    public var mergeableState: String?
     public var commits: Int?
     public var additions: Int?
     public var deletions: Int?
@@ -121,6 +125,7 @@ public struct GitHubPullRequest: Codable, Sendable, Equatable, Identifiable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case mergedAt = "merged_at"
+        case mergeableState = "mergeable_state"
         case changedFiles = "changed_files"
     }
 }

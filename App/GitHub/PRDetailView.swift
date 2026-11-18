@@ -48,6 +48,8 @@ struct PRFile: Identifiable, Sendable {
 /// A reviewer and where their review stands: requested (no review yet), or their latest review's state.
 struct PRReviewer: Identifiable, Sendable {
     let login: String
+    /// The account's user id, for its avatar.
+    let userID: Int?
     /// nil while the review is only requested.
     let state: String?
 
@@ -58,7 +60,8 @@ struct PRReviewer: Identifiable, Sendable {
 /// the checks permission still reads the pull request): their tab then says why.
 struct PullRequestDetail: Sendable {
     let loadID: Int
-    let pull: GitHubPullRequest
+    /// Replaced alone by the model's re-poll while GitHub still computes whether the branch merges.
+    var pull: GitHubPullRequest
     let timelineCount: Int
     /// The Conversation's page: the description, then comments and reviews by date (`PRTimeline`).
     let timelineHTML: String
@@ -240,6 +243,7 @@ final class PullRequestDetailModel {
             switch result {
             case .success(let detail):
                 state = .loaded(detail)
+                Self.logMergeable(detail.pull)
                 if quiet { UITiming.content("pr \(number) reloaded") }
                 #if DEBUG
                 if let action = Self.launchAction {
@@ -250,6 +254,7 @@ final class PullRequestDetailModel {
                 #endif
                 let names = detail.files.value?.map(\.id) ?? []
                 if selectedFile.map({ !names.contains($0) }) ?? true { selectedFile = names.first }
+                await pollMergeable(api.client, api.repository, number: number, generation: generation)
             case .failure(let error):
                 if quiet, state.value != nil {
                     actionError = "Could not reload the pull request: \(Self.message(for: error))"
@@ -258,6 +263,32 @@ final class PullRequestDetailModel {
                 }
             }
         }
+    }
+
+    /// GitHub answers `mergeable` null while it still computes whether the branch merges (right after an open or a
+    /// push): asks again for the pull request alone, 3 s apart and at most 3 times, so "Checking…" clears without a
+    /// reload. It runs in the load's task, so a newer load or `close` stops it. An answer with another head than the
+    /// shown one is dropped and ends it: Merge pins the head the user reviewed, and GitHub refuses it once it moved.
+    private func pollMergeable(
+        _ client: GitHubClient, _ repository: HostedRepository, number: Int, generation: Int
+    ) async {
+        for _ in 0..<3 {
+            guard case .loaded(let shown) = state, shown.isOpen, shown.pull.mergeable == nil else { return }
+            try? await Task.sleep(for: .seconds(3))
+            guard generation == self.generation, !Task.isCancelled else { return }
+            // A failed fetch only uses up a try: the box keeps saying it checks.
+            guard let pull = await Self.fetchPull(client, repository, number: number) else { continue }
+            guard generation == self.generation, !Task.isCancelled, case .loaded(var detail) = state,
+                  pull.head.sha == detail.pull.head.sha else { return }
+            detail.pull = pull
+            state = .loaded(detail)
+            Self.logMergeable(pull)
+        }
+    }
+
+    /// The timing log's `pr <n> mergeable true|false|null`, once for each answer (QA of the re-poll).
+    private static func logMergeable(_ pull: GitHubPullRequest) {
+        UITiming.content("pr \(pull.number) mergeable \(pull.mergeable.map { "\($0)" } ?? "null")")
     }
 
     /// The detail closed (Esc, another selection): an answer still on its way is dropped.
@@ -342,6 +373,13 @@ final class PullRequestDetailModel {
         }
     }
 
+    @concurrent
+    private nonisolated static func fetchPull(
+        _ client: GitHubClient, _ repository: HostedRepository, number: Int
+    ) async -> GitHubPullRequest? {
+        try? await client.pullRequest(number, in: repository)
+    }
+
     private nonisolated static func part<T: Sendable>(_ body: () async throws -> T) async -> Loadable<T> {
         do {
             return .loaded(try await body())
@@ -369,14 +407,15 @@ final class PullRequestDetailModel {
     /// not hide an approval or a change request, as on GitHub).
     private nonisolated static func reviewers(_ pull: GitHubPullRequest, _ reviews: [GitHubReview]) -> [PRReviewer] {
         var latest: [String: String] = [:]
-        var order: [String] = []
+        var order: [GitHubUser] = []
         for review in reviews where review.state != "PENDING" {
-            guard let login = review.user?.login else { continue }
-            if latest[login] == nil { order.append(login) }
-            if review.state != "COMMENTED" || latest[login] == nil { latest[login] = review.state }
+            guard let user = review.user else { continue }
+            if latest[user.login] == nil { order.append(user) }
+            if review.state != "COMMENTED" || latest[user.login] == nil { latest[user.login] = review.state }
         }
-        let requested = (pull.requestedReviewers ?? []).map(\.login).filter { latest[$0] == nil }
-        return requested.map { PRReviewer(login: $0, state: nil) } + order.map { PRReviewer(login: $0, state: latest[$0]) }
+        let requested = (pull.requestedReviewers ?? []).filter { latest[$0.login] == nil }
+        return requested.map { PRReviewer(login: $0.login, userID: $0.id, state: nil) }
+            + order.map { PRReviewer(login: $0.login, userID: $0.id, state: latest[$0.login]) }
     }
 
     @concurrent
@@ -561,15 +600,19 @@ private struct PRHeaderCard: View {
                     Spacer(minLength: 8)
                     if let value {
                         PRStatePill(detail: value)
+                        // Labelled, so it reads at a glance (user, 2026-11-17); the title gives way first.
                         Button {
                             GitHubLinks.open(value.pull.htmlURL)
                         } label: {
-                            Image(systemName: "safari")
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                Image(systemName: "safari")
+                                    .accessibilityHidden(true)
+                                Text("Open on GitHub")
+                            }
                         }
-                        .buttonStyle(RowIconButtonStyle())
-                        .help("Open on GitHub")
-                        .accessibilityLabel("Open on GitHub")
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                        .fixedSize()
+                        .help("Open the pull request in the browser")
                     } else {
                         SkeletonLine(width: 56, height: 20)
                     }
@@ -578,33 +621,73 @@ private struct PRHeaderCard: View {
                 Group {
                     if let value {
                         summary(value)
-                            .font(.settingsCaption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
                     } else {
-                        SkeletonLine(width: 260, height: 11)
+                        SkeletonLine(width: 260, height: 12)
                     }
                 }
+                // As tall as a chip while it loads too, so the tabs do not move when the sentence comes.
+                .frame(height: 20)
                 .padding(.leading, 8)
                 CapsuleTabs(selection: $detail.tab, tabs: PRTab.allCases, title: { tab in tabTitle(tab, value) },
-                            compact: true)
+                            compact: true, raisedTrack: true)
                     .fixedSize()
                     .padding(.leading, 4)
             }
         }
     }
 
-    /// "stub wants to merge 2 commits into main from feature" (merged: "merged"; closed: "wanted to merge").
-    private func summary(_ value: PullRequestDetail) -> Text {
+    /// "stub wants to merge 2 commits into [main] from [stub:feature]" in GitHub's order (merged: "merged"; closed:
+    /// "wanted to merge"), on one line. The two branches are blue chips, so which one goes into which reads at a glance
+    /// (user, 2026-11-17); the words keep their width and the chips give way first in a narrow panel.
+    private func summary(_ value: PullRequestDetail) -> some View {
         let pull = value.pull
         let count = pull.commits ?? value.commits.value?.count ?? 0
         let verb = value.isMerged ? "merged" : value.isOpen ? "wants to merge" : "wanted to merge"
-        return Text(pull.user?.login ?? "ghost").fontWeight(.semibold)
-            + Text(" \(verb) \(count) \(count == 1 ? "commit" : "commits") into ")
-            + Text(pull.base.ref).monospaced()
-            + Text(" from ")
-            + Text(pull.head.label ?? pull.head.ref).monospaced()
+        return HStack(spacing: 6) {
+            Text(pull.user?.login ?? "ghost")
+                .fontWeight(.semibold)
+                .layoutPriority(1)
+            Text("\(verb) \(count) \(count == 1 ? "commit" : "commits") into")
+                .foregroundStyle(.secondary)
+                .layoutPriority(1)
+            branchChip(pull.base.ref)
+            Text("from")
+                .foregroundStyle(.secondary)
+                .layoutPriority(1)
+            branchChip(pull.head.label ?? pull.head.ref)
+        }
+        .font(.body)
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A branch of the sentence: monospaced in a brand blue capsule, at most `maxWidth` wide and cut in the middle, so
+    /// both ends of a long name stay (the full name in the tooltip).
+    private func branchChip(_ name: String) -> some View {
+        CappedWidth(maxWidth: 420) {
+            Text(name)
+                .font(.callout.monospaced())
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 20)
+        .background(Capsule().fill(Color.accentColor.opacity(0.22)))
+        .help(name)
+    }
+
+    /// Its one subview at its own width, offered at most `maxWidth`: unlike `.frame(maxWidth:)`, which grows to what it
+    /// is offered, a short branch keeps its chip as wide as its name, and a narrow sentence can still shrink it.
+    private struct CappedWidth: Layout {
+        let maxWidth: CGFloat
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            let width = min(proposal.width ?? maxWidth, maxWidth)
+            return subviews.first?.sizeThatFits(ProposedViewSize(width: width, height: proposal.height)) ?? .zero
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
+        }
     }
 
     private func tabTitle(_ tab: PRTab, _ value: PullRequestDetail?) -> Text {
@@ -703,7 +786,8 @@ private struct PRContent: View {
 
 // MARK: Conversation
 
-/// The timeline card and the comment box, with the side column on the right (below them when panel2 is narrow).
+/// The timeline card, the merge box and the comment box in GitHub's order, with the side column on the right (below
+/// them when panel2 is narrow).
 private struct PRConversationTab: View {
     let session: RepoSession
     let detail: PullRequestDetail
@@ -711,11 +795,14 @@ private struct PRConversationTab: View {
     private static let sideWidth: CGFloat = 220
     /// Narrower than this, the side column goes under the timeline.
     private static let wideEnough: CGFloat = 560
+    /// Between the middle column and the side column: wider than between stacked cards, so the two columns read apart
+    /// (user, 2026-11-17). The skeleton's too.
+    static let columnGap: CGFloat = 16
 
     var body: some View {
         GeometryReader { proxy in
             if proxy.size.width >= Self.wideEnough {
-                HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
+                HStack(alignment: .top, spacing: Self.columnGap) {
                     main
                     ScrollView {
                         PRSideColumn(session: session, detail: detail)
@@ -743,9 +830,10 @@ private struct PRConversationTab: View {
                 }
                 .frame(maxWidth: .infinity)
             }
+            PRActionsCard(session: session, detail: detail)
             PRComposerCard(session: session, detail: detail)
         }
-        // At the top: a short conversation's card hugs its text, with the comment box right under it.
+        // At the top: a short conversation's card hugs its text, with the merge and comment boxes right under it.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
@@ -795,9 +883,11 @@ private struct PRComposerCard: View {
                           ? "A review that requests changes or comments needs a text" : "")
                 }
             }
+            // Room between the header (with its Comment / Review choice) and the text box (user, 2026-11-17).
+            .padding(.top, 8)
         } accessory: {
             CapsuleTabs(selection: $model.composer, tabs: PullRequestDetailModel.Composer.allCases,
-                        title: { Text($0.title) }, compact: true)
+                        title: { Text($0.title) }, compact: true, raisedTrack: true, small: true)
                 .fixedSize()
         }
     }
@@ -835,21 +925,22 @@ private struct PRComposerCard: View {
     }
 }
 
-/// The right column: the actions, then reviewers, assignees and labels, each in its own card.
+/// The right column: reviewers, assignees and labels, each in its own card.
 private struct PRSideColumn: View {
     let session: RepoSession
     let detail: PullRequestDetail
 
     var body: some View {
+        let realAvatars = GitHubUserAvatar.allowsReal(session.github)
         VStack(spacing: SectionCardMetrics.spacing) {
-            PRActionsCard(session: session, detail: detail)
             SectionCard("Reviewers", systemImage: "person.2", count: detail.reviewers.count) {
                 if detail.reviewers.isEmpty {
                     PRSideEmpty(text: "No reviews")
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(detail.reviewers) { reviewer in
-                            PRPersonRow(login: reviewer.login, state: reviewer.state, showsState: true)
+                            PRPersonRow(login: reviewer.login, userID: reviewer.userID, realAvatar: realAvatars,
+                                        state: reviewer.state, showsState: true)
                         }
                     }
                 }
@@ -860,7 +951,10 @@ private struct PRSideColumn: View {
                     PRSideEmpty(text: "No one assigned")
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(assignees, id: \.id) { PRPersonRow(login: $0.login, state: nil, showsState: false) }
+                        ForEach(assignees, id: \.id) {
+                            PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
+                                        showsState: false)
+                        }
                     }
                 }
             }
@@ -878,44 +972,43 @@ private struct PRSideColumn: View {
     }
 }
 
-/// Merge (method, then a confirmation), Checkout locally, Close or Reopen (confirmed), and the running action.
+/// The merge box under the timeline, as on GitHub: for an open pull request, a status box saying whether its branch
+/// merges (green, red with conflicts, amber when blocked, neutral otherwise) and Merge (method, then a confirmation);
+/// then Checkout locally, Close or Reopen (confirmed), and the running action.
 private struct PRActionsCard: View {
     let session: RepoSession
     let detail: PullRequestDetail
     @Environment(WindowModel.self) private var model
 
     var body: some View {
-        @Bindable var pullDetail = session.pullDetail
         let pull = detail.pull
-        let busy = pullDetail.busy[detail.pull.number]
+        let busy = session.pullDetail.busy[pull.number]
         SectionCard("Actions", systemImage: "bolt") {
             VStack(alignment: .leading, spacing: 10) {
                 if detail.isMerged {
                     Label("Merged into \(pull.base.ref)", systemImage: "arrow.triangle.merge")
                         .foregroundStyle(.secondary)
                 } else if detail.isOpen {
-                    Text(mergeNote)
-                        .font(.settingsCaption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 6) {
-                        CapsuleMenuPicker(label: "Merge method", selection: $pullDetail.mergeMethod,
-                                          title: Text(pullDetail.mergeMethod.title)) {
-                            ForEach(HostedMergeMethod.all, id: \.self) { Text($0.title).tag($0) }
-                        }
-                        Button("Merge…") { confirmMerge(pullDetail.mergeMethod) }
-                            .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
-                            .disabled(busy != nil || pull.draft == true || pull.mergeable == false)
-                            .fixedSize()
-                    }
+                    statusBox
                 }
-                Button("Checkout Locally") { checkout() }
-                    .buttonStyle(RowTextButtonStyle(formRow: true))
-                    .help("Fetch pull/\(pull.number)/head into the branch pr/\(pull.number) and check it out")
-                if !detail.isMerged {
-                    Button(detail.isOpen ? "Close Pull Request…" : "Reopen Pull Request…") { confirmSetOpen(!detail.isOpen) }
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                        .disabled(busy != nil)
+                // One row in a wide column; narrower, the merge controls above the other buttons, side by side or
+                // under each other.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        if detail.isOpen {
+                            mergeControls(busy: busy)
+                            Spacer(minLength: 8)
+                        }
+                        otherButtons(busy: busy)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if detail.isOpen { HStack(spacing: 8) { mergeControls(busy: busy) } }
+                        HStack(spacing: 8) { otherButtons(busy: busy) }
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if detail.isOpen { HStack(spacing: 8) { mergeControls(busy: busy) } }
+                        otherButtons(busy: busy)
+                    }
                 }
                 if let busy {
                     HStack(spacing: 6) {
@@ -929,13 +1022,120 @@ private struct PRActionsCard: View {
         }
     }
 
-    private var mergeNote: String {
+    /// GitHub's answer for an open pull request, from `mergeable` and `mergeable_state`: conflicts first, then a draft,
+    /// a blocked or out-of-date branch, then a clean merge. `mergeable` true with any other state (`clean`, `unstable`,
+    /// `has_hooks`, or none, as from the stub) merges; nil is GitHub still computing it.
+    private var status: (tone: Color?, symbol: String, title: String, note: String?) {
         let pull = detail.pull
-        if pull.draft == true { return "A draft: mark it ready for review on GitHub to merge it." }
-        return switch pull.mergeable {
-        case true?: "No conflicts with \(pull.base.ref)."
-        case false?: "Conflicts with \(pull.base.ref): resolve them before merging."
-        case nil: "GitHub is still checking whether it merges cleanly."
+        let base = pull.base.ref
+        if pull.mergeable == false || pull.mergeableState == "dirty" {
+            return (Color(nsColor: Palette.diffRemovedSign), "exclamationmark.triangle.fill",
+                    "This branch has conflicts that must be resolved",
+                    "Resolve the conflicts with \(base) to merge it.")
+        }
+        if pull.draft == true {
+            return (nil, "circle.dashed", "This pull request is still a draft",
+                    "Mark it ready for review on GitHub to merge it.")
+        }
+        switch pull.mergeableState {
+        case "blocked":
+            return (Palette.conflictTone, "lock.fill", "Merging is blocked",
+                    "Required reviews or checks have not passed yet.")
+        case "behind":
+            return (nil, "arrow.down.circle", "This branch is out-of-date with \(base)",
+                    "Merge the latest changes from \(base) into it.")
+        default:
+            break
+        }
+        if mergesCleanly {
+            return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill", "No conflicts with \(base)",
+                    "This branch can be merged.")
+        }
+        return (nil, "clock", "Checking whether this branch can be merged…", nil)
+    }
+
+    /// GitHub says the branch merges as it is: the status box is green, and only then Merge too. Blocked, out of date
+    /// or still checking keeps Merge neutral but on, since GitHub itself refuses a merge it cannot do.
+    private var mergesCleanly: Bool {
+        let pull = detail.pull
+        return pull.mergeable == true && pull.draft != true
+            && !["dirty", "blocked", "behind"].contains(pull.mergeableState ?? "")
+    }
+
+    /// The status in a box tinted with its tone (neutral without one), so whether the branch merges reads at a glance
+    /// (user, 2026-11-17).
+    private var statusBox: some View {
+        let status = status
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: status.symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(status.tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.title)
+                    .font(.body.weight(.semibold))
+                if let note = status.note {
+                    Text(note)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(shape.fill(status.tone?.opacity(0.14) ?? Palette.tabFill))
+        .overlay(shape.strokeBorder(status.tone?.opacity(0.35) ?? Palette.surfaceBorder, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The merge method and Merge: green (white text) with the green status box, neutral while blocked, out of date or
+    /// checking, off with conflicts, for a draft or while an action runs.
+    @ViewBuilder
+    private func mergeControls(busy: PullRequestAction?) -> some View {
+        @Bindable var pullDetail = session.pullDetail
+        let pull = detail.pull
+        CapsuleMenuPicker(label: "Merge method", selection: $pullDetail.mergeMethod,
+                          title: Text(pullDetail.mergeMethod.title)) {
+            ForEach(HostedMergeMethod.all, id: \.self) { Text($0.title).tag($0) }
+        }
+        Button("Merge…") { confirmMerge(pullDetail.mergeMethod) }
+            .buttonStyle(RowTextButtonStyle(
+                formRow: true,
+                fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
+            .disabled(busy != nil || pull.draft == true || pull.mergeable == false)
+            .fixedSize()
+    }
+
+    /// Checkout Locally, and Close or Reopen unless merged: capsules with an icon, the close one red and the reopen one
+    /// green like the state pill.
+    @ViewBuilder
+    private func otherButtons(busy: PullRequestAction?) -> some View {
+        let pull = detail.pull
+        Button { checkout() } label: {
+            HStack(spacing: 6) {
+                IconImage("lucide-laptop-minimal")
+                    .accessibilityHidden(true)
+                Text("Checkout Locally")
+            }
+        }
+        .buttonStyle(RowTextButtonStyle(formRow: true))
+        .fixedSize()
+        .help("Fetch pull/\(pull.number)/head into the branch pr/\(pull.number) and check it out")
+        if !detail.isMerged {
+            let open = detail.isOpen
+            Button { confirmSetOpen(!open) } label: {
+                HStack(spacing: 6) {
+                    IconImage(open ? "lucide-git-pull-request-closed" : "lucide-git-pull-request-arrow")
+                        .foregroundStyle(Color(nsColor: open ? Palette.diffRemovedSign : Palette.diffAddedSign))
+                        .accessibilityHidden(true)
+                    Text(open ? "Close Pull Request…" : "Reopen Pull Request…")
+                }
+            }
+            .buttonStyle(RowTextButtonStyle(formRow: true))
+            .fixedSize()
+            .disabled(busy != nil)
         }
     }
 
@@ -1006,17 +1206,18 @@ struct PRSideEmpty: View {
     }
 }
 
-/// A reviewer or an assignee: the login, and for a reviewer the state of their review.
+/// A reviewer or an assignee: the avatar, the login, and for a reviewer the state of their review.
 struct PRPersonRow: View {
     let login: String
+    let userID: Int?
+    /// `GitHubUserAvatar.allowsReal` of the repository.
+    let realAvatar: Bool
     let state: String?
     let showsState: Bool
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "person.crop.circle")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
+            GitHubUserAvatar(login: login, id: userID, size: 16, real: realAvatar)
             Text(login)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -1056,6 +1257,60 @@ struct PRPersonRow: View {
         case nil: "review requested"
         default: "commented"
         }
+    }
+}
+
+/// A GitHub account's avatar: with `real`, its GitHub avatar whatever the commit avatars' mode (user, 2026-11-17),
+/// the mode's generated or initials avatar until it arrives or when it cannot load; without `real`, that drawn avatar
+/// only, and no request. Redrawn when `AvatarStore` has a new image for the account or the mode changed, like the PRs
+/// tab's rows. Shared with the issue page.
+struct GitHubUserAvatar: View {
+    let login: String
+    let id: Int?
+    let size: CGFloat
+    /// `allowsReal` of the repository.
+    let real: Bool
+    /// Bumped when `AvatarStore` has a new image for this account (or the avatar mode changed).
+    @State private var revision = 0
+    @Environment(\.displayScale) private var displayScale
+
+    /// Whether the accounts of `store`'s repository show their GitHub avatars: only on github.com (an Enterprise host
+    /// has its avatars elsewhere), and never in a stub run, whose repository names github.com but must not reach it.
+    static func allowsReal(_ store: GitHubStore) -> Bool {
+        guard case .connected(let repository) = store.connection, repository.host == "github.com" else { return false }
+        #if DEBUG
+        return !GitHubStub.isEnabled
+        #else
+        return true
+        #endif
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .clipShape(Circle())
+            } else {
+                Circle().fill(Palette.skeletonFill)
+            }
+        }
+        .frame(width: size, height: size)
+        .id(revision)
+        .accessibilityHidden(true)
+        .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
+            guard let changed = note.userInfo?[AvatarStore.emailKey] as? String else { return revision &+= 1 }
+            if real, AvatarStore.matches(email: AvatarStore.gitHubEmail(login: login, id: id), name: login,
+                                         changed: changed) {
+                revision &+= 1
+            }
+        }
+    }
+
+    private var image: NSImage? {
+        let pixels = Int((size * displayScale).rounded(.up))
+        return real ? AvatarStore.shared.gitHubAvatar(login: login, id: id, pixels: pixels)
+            : AvatarStore.shared.avatar(email: "", name: login, pixels: pixels)
     }
 }
 
@@ -1393,24 +1648,60 @@ private struct PRCheckRow: View {
 
 // MARK: Skeleton
 
-/// The loading detail: the Conversation card's lines and the side column's cards, in their loaded places.
+/// The loading detail: the Conversation card's lines, the merge box and the comment box under it, and the side
+/// column's cards, in their loaded places.
 private struct PRSkeleton: View {
     var body: some View {
-        HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
-            SectionCard("Conversation", systemImage: "text.bubble", countIsLoading: true) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        SkeletonLine(width: 20, height: 20)
-                        SkeletonLine(width: 120, height: 11)
-                    }
-                    SkeletonLine(fraction: 0.9, height: 11)
-                    SkeletonLine(fraction: 0.75, height: 11)
-                    SkeletonLine(fraction: 0.55, height: 11)
-                }
-                .frame(maxHeight: .infinity, alignment: .top)
-            }
+        HStack(alignment: .top, spacing: PRConversationTab.columnGap) {
             VStack(spacing: SectionCardMetrics.spacing) {
-                ForEach(["Actions", "Reviewers", "Assignees"], id: \.self) { title in
+                SectionCard("Conversation", systemImage: "text.bubble", countIsLoading: true) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            SkeletonLine(width: 20, height: 20)
+                            SkeletonLine(width: 120, height: 11)
+                        }
+                        SkeletonLine(fraction: 0.9, height: 11)
+                        SkeletonLine(fraction: 0.75, height: 11)
+                        SkeletonLine(fraction: 0.55, height: 11)
+                    }
+                }
+                SectionCard("Actions", systemImage: "bolt") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        // The status box's shape, with its icon and two lines.
+                        HStack(spacing: 10) {
+                            SkeletonLine(width: 18, height: 18)
+                            VStack(alignment: .leading, spacing: 6) {
+                                SkeletonLine(width: 160, height: 11)
+                                SkeletonLine(width: 110, height: 11)
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius,
+                                                     style: .continuous).fill(Palette.tabFill))
+                        HStack(spacing: 8) {
+                            SkeletonLine(width: 110, height: 24)
+                            SkeletonLine(width: 70, height: 24)
+                        }
+                    }
+                }
+                SectionCard("Comment", systemImage: "square.and.pencil") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+                            .fill(Palette.skeletonFill)
+                            .frame(height: 64)
+                        HStack {
+                            Spacer(minLength: 0)
+                            SkeletonLine(width: 90, height: 24)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            // At the top, like the loaded column: the merge and comment boxes right under a short conversation.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            VStack(spacing: SectionCardMetrics.spacing) {
+                ForEach(["Reviewers", "Assignees", "Labels"], id: \.self) { title in
                     SectionCard(title, countIsLoading: true) {
                         VStack(alignment: .leading, spacing: 8) {
                             SkeletonLine(fraction: 0.8, height: 11)

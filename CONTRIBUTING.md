@@ -172,6 +172,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |
 | `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. Stub only. |
+| `-HistqPRMergeable true\|false\|null` | Whether the stub's PR #1 merges: `true` (default, `clean`), `false` (conflicts, `dirty`) or `null` (GitHub still checking, `unknown`; the detail asks again up to 3 times, 3 s apart, and logs `pr 1 mergeable <value>` in `timing.log` for each answer). Stub only. |
 | `-HistqOpenCreatePR <branch>` / `-HistqCreatePRSubmit YES` | Opens the Create Pull Request form; fills and submits it. Stub only. |
 | `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |
 | `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network; logs each request's data block labels as `blocks [<label>, ...]` in `ai.log` (labels only, never content). |

@@ -101,7 +101,9 @@ struct AppearanceSettings: View {
                 Label {
                     Text("Real avatars send each author's email hash to gravatar.com and GitHub logins to GitHub "
                         + "to download their pictures. GitHub's bots always show theirs, and your remotes always "
-                        + "show their owners' logos (the owner's name goes to GitHub, GitLab or Bitbucket).")
+                        + "show their owners' logos (the owner's name goes to GitHub, GitLab or Bitbucket). GitHub "
+                        + "accounts on the PRs tab and the pull request and issue pages always show their GitHub "
+                        + "avatars (their logins go to GitHub).")
                         .font(.settingsCaption)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {

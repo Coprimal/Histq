@@ -641,6 +641,12 @@ struct CapsuleTabs<Tab: Hashable>: View {
     var fillsWidth = false
     /// A tab's SF Symbol, drawn before its title.
     var systemImage: ((Tab) -> String)?
+    /// With `compact`: the track is filled lighter than the card it sits on (`Palette.inputSurface`), so it reads as a
+    /// control on a dark card instead of vanishing into the card's own color (a pull request's tabs, user 2026-11-17).
+    var raisedTrack = false
+    /// With `compact`: 20 pt tabs inset 3 pt in a 26 pt track, so it fits a `SectionCard` header (32 pt) without
+    /// making it taller (the pull request's Comment / Review choice).
+    var small = false
     @Namespace private var namespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -649,7 +655,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
         layout {
             ForEach(tabs, id: \.self) { tab in
                 Item(tab: tab, title: title(tab), help: help?(tab), systemImage: systemImage?(tab),
-                     selected: tab == selection, compact: compact, fillsWidth: fillsWidth, namespace: namespace) {
+                     selected: tab == selection, compact: compact, small: small, fillsWidth: fillsWidth,
+                     namespace: namespace) {
                     withAnimation(animation) { selection = tab }
                 }
             }
@@ -662,10 +669,10 @@ struct CapsuleTabs<Tab: Hashable>: View {
         }
         // Also animates a selection set from code (menus, shortcuts).
         .animation(animation, value: selection)
-        .modifier(SurfaceTrack(compact: compact, fillsWidth: fillsWidth))
+        .modifier(SurfaceTrack(compact: compact, fillsWidth: fillsWidth, raised: raisedTrack, small: small))
     }
 
-    /// The gap between a `fillsWidth` (or `compact`) track's edge and its tabs, on every side.
+    /// The gap between a `fillsWidth` (or `compact`, not `small`) track's edge and its tabs, on every side.
     static var fillInset: CGFloat { 6 }
 
     /// The `fillsWidth` row (user, 2026-11-13): each tab as wide as its label plus the same padding, then an equal share
@@ -705,6 +712,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
     private struct SurfaceTrack: ViewModifier {
         let compact: Bool
         let fillsWidth: Bool
+        let raised: Bool
+        let small: Bool
         @Environment(\.cardSurface) private var surface
 
         func body(content: Content) -> some View {
@@ -712,8 +721,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
                 content
             } else {
                 content
-                    .padding(fillsWidth || compact ? CapsuleTabs.fillInset : 3)
-                    .background(Capsule(style: .circular).fill(surface))
+                    .padding((fillsWidth || compact) && !small ? CapsuleTabs.fillInset : 3)
+                    .background(Capsule(style: .circular).fill(raised ? Palette.inputSurface : surface))
                     .overlay(Capsule(style: .circular).strokeBorder(Palette.surfaceBorder, lineWidth: 1)
                         .allowsHitTesting(false))
             }
@@ -727,12 +736,13 @@ struct CapsuleTabs<Tab: Hashable>: View {
         let systemImage: String?
         let selected: Bool
         let compact: Bool
+        let small: Bool
         let fillsWidth: Bool
         let namespace: Namespace.ID
         let action: () -> Void
         @State private var hovered = false
-        /// A toolbar button's highlight; a form row's control when compact.
-        private var height: CGFloat { compact ? 24 : 28 }
+        /// A toolbar button's highlight; a form row's control when compact; a card header's when small.
+        private var height: CGFloat { small ? 20 : compact ? 24 : 28 }
 
         var body: some View {
             Button(action: action) {

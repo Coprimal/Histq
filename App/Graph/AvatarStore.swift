@@ -8,7 +8,9 @@
 // the generated avatar for the session. Only the hash or the GitHub login leaves the Mac, over https only.
 // `ownerAvatar(of:pixels:)` loads, in every mode, the logo of the account or organization owning a remote's
 // repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows and the graph's remote badges), the
-// same way; only the owner's name leaves the Mac, to its own host.
+// same way; only the owner's name leaves the Mac, to its own host. `gitHubAvatar(login:id:pixels:)` loads, in every
+// mode too, the GitHub avatar of an account of github.com (the pull request and issue pages); only its id or login
+// leaves the Mac, to GitHub.
 import AppKit
 import CryptoKit
 import HistqCore
@@ -136,6 +138,28 @@ final class AvatarStore {
     /// Whether `email` is the identity `didChange` named (the graph compares its rows' emails with it).
     static func matches(email: String, name: String, changed: String) -> Bool {
         identity(email: email, name: name) == changed
+    }
+
+    // MARK: GitHub accounts
+
+    /// The GitHub avatar of the account `login` of github.com (`id`: its user id, when known), at `pixels`, whatever
+    /// the commit avatars' mode: the pull request and issue pages show GitHub's accounts as GitHub does. Never blocks:
+    /// the mode's generated or initials avatar stands in until it is loaded, and stays when it cannot be; its arrival
+    /// posts `didChange` with the identity of `gitHubEmail(login:id:)`. Only for github.com's accounts: the stub and
+    /// Enterprise hosts use `avatar(email: "", name: login, ...)`, which sends nothing.
+    func gitHubAvatar(login: String, id: Int?, pixels: Int) -> NSImage? {
+        let identity = Self.identity(email: Self.gitHubEmail(login: login, id: id), name: login)
+        let fallback = mode == .initials ? initialsAvatar(name: login) : generatedAvatar(identity: identity)
+        let key = "\(identity)|\(pixels)"
+        if let image = images.object(forKey: key as NSString) { return image }
+        if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
+        return fallback
+    }
+
+    /// GitHub's noreply address of the account (`<id>+<login>@`, `<login>@` without the id): `AvatarLoader` builds
+    /// the avatar's URL from it, and `matches` compares it with what `didChange` named.
+    static func gitHubEmail(login: String, id: Int?) -> String {
+        (id.map { "\($0)+" } ?? "") + login + "@users.noreply.github.com"
     }
 
     // MARK: Provider logos

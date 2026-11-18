@@ -5,10 +5,11 @@
 // the JSON below (PR #1's merge, a 409 when it is not pinned to its head, review, comment and close/reopen, issue #2's
 // comment and close/reopen, and a create that always makes PR #3 with its reviewers, labels and assignees succeed) and
 // 404 for anything else, so a stub run never reaches the network. The data: user `stub`, open pull request #1 "Add
-// feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 1 comment, 1 check run) by `stub`, open issue
-// #2 assigned to `stub` with 1 comment, the repository's labels, assignable users and collaborators (`stub`,
-// `reviewer`), default branch `main`, and the Welcome clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has
-// GitHub's shapes (search results are issue-shaped), so the stub exercises the same decoding as the real API.
+// feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 1 comment, 1 check run) by `stub`, mergeable
+// as `-HistqPRMergeable true|false|null` says (default true), open issue #2 assigned to `stub` with 1 comment, the
+// repository's labels, assignable users and collaborators (`stub`, `reviewer`), default branch `main`, and the Welcome
+// clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has GitHub's shapes (search results are
+// issue-shaped), so the stub exercises the same decoding as the real API.
 import Foundation
 import HistqCore
 
@@ -122,12 +123,21 @@ enum GitHubStub {
          "avatar_url": "https://avatars.githubusercontent.com/u/1002"}
         """
 
+    /// DEBUG `-HistqPRMergeable true|false|null` (default true): PR #1's `mergeable` with the `mergeable_state` GitHub
+    /// gives with it (`clean`, `dirty` for conflicts, `unknown` while it computes), for the merge box's states. The
+    /// stub keeps no state, so null stays null on every fetch and the detail's re-poll runs out.
+    private static let mergeable = switch AppState.launchFlag("-HistqPRMergeable") {
+    case "false": #""mergeable": false, "mergeable_state": "dirty""#
+    case "null": #""mergeable": null, "mergeable_state": "unknown""#
+    default: #""mergeable": true, "mergeable_state": "clean""#
+    }
+
     /// PR #1, or #3 as a create makes it (the fixture's one commit on `origin/feature` past `origin/main`).
     private static func pull(_ number: Int, full: Bool) -> String {
         let created = number == 3
         let detail = !full ? ""
             : created ? #", "merged": false, "mergeable": true, "commits": 1, "additions": 1, "deletions": 0, "changed_files": 0"#
-            : #", "merged": false, "mergeable": true, "commits": 2, "additions": 12, "deletions": 3, "changed_files": 1"#
+            : #", "merged": false, \#(mergeable), "commits": 2, "additions": 12, "deletions": 3, "changed_files": 1"#
         let title = created ? "Polish feature (pushed)" : "Add feature"
         let body = created ? "Polishes the feature." : "Adds the feature branch's work."
         return """
