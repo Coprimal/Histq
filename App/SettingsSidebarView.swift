@@ -28,10 +28,11 @@ struct SettingsModal: View {
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "gearshape")
+                .font(.title2)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             Text("Settings")
-                .font(.title3.weight(.semibold))
+                .font(.title2.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
             Button(action: onClose) {
