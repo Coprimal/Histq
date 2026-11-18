@@ -111,7 +111,11 @@ final class AvatarStore {
             return
         }
         let size = NSSize(width: image.cgImage.width, height: image.cgImage.height)
-        images.setObject(NSImage(cgImage: image.cgImage, size: size), forKey: key as NSString)
+        // An organization without its own avatar gets GitHub's default one (the `github` organization's white mark
+        // on light gray): the readable bundled mark stands in for it.
+        let shown = identity.hasPrefix("owner:github.com/") && Self.isGitHubDefaultAvatar(image.cgImage)
+            ? gitHubOwnerLogo() : nil
+        images.setObject(shown ?? NSImage(cgImage: image.cgImage, size: size), forKey: key as NSString)
         NotificationCenter.default.post(name: Self.didChange, object: self, userInfo: [Self.emailKey: identity])
     }
 
@@ -131,7 +135,7 @@ final class AvatarStore {
         return nil
     }
 
-    /// The `github` organization's logo: GitHub's own avatar (a white mark on light gray) is hard to read at 16 pt, so
+    /// The `github` organization's logo, and GitHub's default avatar: a white mark on light gray is hard to read at 16 pt, so
     /// the bundled mark is drawn black on that gray instead. #CBCBCB
     private func gitHubOwnerLogo() -> NSImage? {
         let cacheKey = "o|github" as NSString
@@ -153,6 +157,29 @@ final class AvatarStore {
         }
         drawn.setObject(image, forKey: cacheKey)
         return image
+    }
+
+    /// Whether `image` is GitHub's default avatar: only grays from its light gray background (#C9C9C9) to white, with
+    /// both the gray and the white mark present.
+    private static func isGitHubDefaultAvatar(_ image: CGImage) -> Bool {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data
+        else { return false }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        var gray = 0, white = 0
+        for index in 0..<(width * height) {
+            let r = pixels[index * 4], g = pixels[index * 4 + 1], b = pixels[index * 4 + 2], a = pixels[index * 4 + 3]
+            let low = min(r, g, b), high = max(r, g, b)
+            guard a >= 250, high - low <= 8, low >= 0xC0 else { return false }
+            if low <= 0xD0 { gray += 1 } else if low >= 0xF0 { white += 1 }
+        }
+        let count = width * height
+        return gray * 2 >= count && white * 20 >= count
     }
 
     /// The identity `didChange` names when the owner logo of `repository` arrives.
