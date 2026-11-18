@@ -4,6 +4,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-18
+
 ### Added
 - Commit graph of the whole history, fast even with tens of thousands of commits, with branches, tags, stashes, remotes, worktrees, and search by commit subject or hash (Cmd-F).
 - Commit details panel with the commit's message, author and changed files.
@@ -99,7 +101,3 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ### Fixed
 - Inline review comments now show under their review, with the file, the lines and the diff they comment on.
-
-## [0.1.0] - YYYY-MM-DD
-
-- First version.
