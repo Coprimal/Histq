@@ -1,7 +1,8 @@
-// The lines of one side of a file's diff: an NSTableView with fixed-height rows that never wrap. Each line row has the
-// old and new line numbers, a `+`/`−` gutter, a green or red band, a stronger mark on the changed part of a replaced
-// line, and syntax colors; each hunk starts with a header row whose buttons stage, unstage, discard or revert the hunk,
-// or only its selected lines. ⌘C copies the selected lines whole; Esc goes back to the graph.
+// The lines of one side of a file's diff: an NSTableView whose rows are one line high, or as high as their wrapped text
+// (Wrap Lines). Each line row has the old and new line numbers, a `+`/`−` gutter, a green or red band, a stronger mark
+// on the changed part of a replaced line, and syntax colors; in Split a row has the old line on the left and the new
+// one on the right. Each hunk starts with a header row whose buttons stage, unstage, discard or revert the hunk, or only
+// its selected lines (none while whitespace is ignored). ⌘C copies the selected lines whole; Esc goes back to the graph.
 //
 // The rows (with their tokens) are built off the main actor when the diff loads: the table only draws the rows on
 // screen, so its cost does not grow with the file.
@@ -77,6 +78,32 @@ struct DiffRow: Sendable {
     var isLine: Bool {
         if case .hunk = kind { false } else { true }
     }
+
+    var isChange: Bool { kind == .added || kind == .removed }
+}
+
+/// One row of the table: a unified row (a line or a hunk header), or in Split a pair of an old line (left) and a new
+/// line (right), either missing where the other side has more lines. A context line is the same row on both sides.
+enum DiffTableRow: Sendable {
+    case single(DiffRow)
+    case pair(old: DiffRow?, new: DiffRow?)
+
+    /// The hunk whose header this row is.
+    var hunk: Int? {
+        if case .single(let row) = self, case .hunk(let index) = row.kind { index } else { nil }
+    }
+
+    var isLine: Bool { hunk == nil }
+
+    /// The lines the row shows (a context line once).
+    var lines: [DiffRow] {
+        switch self {
+        case .single(let row): row.isLine ? [row] : []
+        case .pair(let old, let new): old?.kind == .context ? [old].compactMap { $0 } : [old, new].compactMap { $0 }
+        }
+    }
+
+    var isChange: Bool { lines.contains(where: \.isChange) }
 }
 
 /// One card of a file's diff: the changes of one side, as rows for both modes.
@@ -88,6 +115,8 @@ struct DiffSection: Sendable, Identifiable {
     let full: FileDiff?
     let rows: [DiffRow]
     let fullRows: [DiffRow]
+    /// `rows` side by side (Split); a file's own lines (untracked, unchanged) stay one column.
+    let splitRows: [DiffTableRow]
     let additions: Int
     let deletions: Int
 
@@ -95,6 +124,11 @@ struct DiffSection: Sendable, Identifiable {
     var isBinary: Bool { diff?.isBinary == true }
 
     func rows(_ mode: DiffMode) -> [DiffRow] { mode == .full ? fullRows : rows }
+
+    /// The table's rows in `mode`.
+    func tableRows(_ mode: DiffMode) -> [DiffTableRow] {
+        mode == .split ? splitRows : rows(mode).map(DiffTableRow.single)
+    }
 
     /// The diff whose line ids the rows of `mode` carry: the one a patch is built from.
     func file(_ mode: DiffMode) -> FileDiff? { mode == .full ? full ?? diff : diff }
@@ -109,6 +143,7 @@ struct DiffSection: Sendable, Identifiable {
         let tokens = DiffRowBuilder.tokens(full ?? diff, language: language)
         rows = DiffRowBuilder.rows(diff, tokens: tokens)
         fullRows = full.map { DiffRowBuilder.rows($0, tokens: tokens) } ?? rows
+        splitRows = DiffRowBuilder.split(rows)
         additions = diff.additions
         deletions = diff.deletions
     }
@@ -122,6 +157,7 @@ struct DiffSection: Sendable, Identifiable {
             DiffRow(kind: .added, id: nil, oldLine: nil, newLine: index + 1, text: text, tokens: tokens)
         }
         fullRows = rows
+        splitRows = rows.map(DiffTableRow.single)
         additions = rows.count
         deletions = 0
     }
@@ -135,6 +171,7 @@ struct DiffSection: Sendable, Identifiable {
             DiffRow(kind: .context, id: nil, oldLine: index + 1, newLine: index + 1, text: text, tokens: tokens)
         }
         fullRows = rows
+        splitRows = rows.map(DiffTableRow.single)
         additions = 0
         deletions = 0
     }
@@ -209,6 +246,37 @@ enum DiffRowBuilder {
         return rows
     }
 
+    /// `rows` side by side: a context line on both sides, each block of removed lines next to the block of added lines
+    /// right after it (line by line, the shorter block padded with empty cells), a hunk header across both.
+    nonisolated static func split(_ rows: [DiffRow]) -> [DiffTableRow] {
+        var result: [DiffTableRow] = []
+        result.reserveCapacity(rows.count)
+        var index = 0
+        while index < rows.count {
+            let row = rows[index]
+            switch row.kind {
+            case .hunk:
+                result.append(.single(row))
+                index += 1
+            case .context:
+                result.append(.pair(old: row, new: row))
+                index += 1
+            case .removed, .added:
+                let removedStart = index
+                while index < rows.count, rows[index].kind == .removed { index += 1 }
+                let addedStart = index
+                while index < rows.count, rows[index].kind == .added { index += 1 }
+                let removed = rows[removedStart..<addedStart]
+                let added = rows[addedStart..<index]
+                for offset in 0..<max(removed.count, added.count) {
+                    result.append(.pair(old: offset < removed.count ? removed[removedStart + offset] : nil,
+                                        new: offset < added.count ? added[addedStart + offset] : nil))
+                }
+            }
+        }
+        return result
+    }
+
     /// The text to show: without the CR of a CRLF line.
     nonisolated static func display(_ text: String) -> String {
         text.hasSuffix("\r") ? String(text.dropLast()) : text
@@ -259,15 +327,23 @@ enum DiffRowBuilder {
 
 // MARK: - Table
 
-/// One diff section's table. `loadID` and `mode` say which rows it shows: a new load (after a stage) or another mode
-/// reloads them; any other update only refreshes the hunk buttons. `onApply` gets the action, the lines (the selected
-/// changed lines of a hunk, or the whole hunk) and the diff they belong to.
+/// One diff section's table. `loadID`, `mode` and `wraps` say which rows it shows and how: a new load (after a stage),
+/// another mode or a wrap change reloads them; any other update only refreshes the hunk buttons. `onApply` gets the
+/// action, the lines (the selected changed lines of a hunk, or the whole hunk) and the diff they belong to.
 struct DiffLineTable: NSViewRepresentable {
     let section: DiffSection
     let mode: DiffMode
     let loadID: Int
     /// A commit's diff in the file history: its hunks (or selected lines) can be reverted in the working tree.
     var reverts = false
+    /// Read with whitespace ignored: its hunks no longer match the files, so nothing stages, discards or reverts them.
+    var readOnly = false
+    /// Long lines wrap to the card's width instead of scrolling sideways.
+    var wraps = false
+    /// The last Previous / Next Change press. The table with the keyboard focus follows it, or the first table of the
+    /// file (`isFirst`) when none has it.
+    var jump: DiffJump?
+    var isFirst = true
     var onApply: @MainActor (PatchBuilder.Action, Set<DiffLineID>, FileDiff) -> Void = { _, _, _ in }
     var onClose: @MainActor () -> Void = {}
 
@@ -296,7 +372,7 @@ struct DiffLineTable: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
-        // Lines never wrap: a long line scrolls sideways.
+        // Unwrapped, a long line scrolls sideways (wrapped or split, the table is the card's width).
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
 
@@ -309,18 +385,31 @@ struct DiffLineTable: NSViewRepresentable {
     }
 }
 
+/// A Previous / Next Change press; `serial` tells a new press from a redraw.
+struct DiffJump: Equatable {
+    enum Direction { case previous, next }
+
+    let direction: Direction
+    let serial: Int
+}
+
 /// Fonts and column positions of a table's rows. The gutters fit the largest line number; the content width fits the
-/// longest line, so the table scrolls sideways instead of wrapping. A file's own lines (untracked, or unchanged) have
-/// one number each, so they get one gutter.
+/// longest line, so an unwrapped table scrolls sideways. A file's own lines (untracked, or unchanged) have one number
+/// each, so they get one gutter; so does each half of a split row.
 struct DiffLayout {
     @MainActor static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     @MainActor static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     @MainActor static let charWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
     static let lineHeight: CGFloat = 18
     static let hunkHeight: CGFloat = 36
+    /// A wrapped line's height: a row of `n` lines is `n * wrapLineHeight + wrapPadding` high (one line: `lineHeight`).
+    static let wrapLineHeight: CGFloat = 15
+    static let wrapPadding: CGFloat = lineHeight - wrapLineHeight
     /// Spaces per tab.
     static let tabWidth = 4
     static let signWidth: CGFloat = 16
+    /// Room kept after the text at the trailing edge.
+    static let trailingPadding: CGFloat = 8
 
     let numberWidth: CGFloat
     let contentWidth: CGFloat
@@ -329,6 +418,8 @@ struct DiffLayout {
     var newNumberX: CGFloat { oneGutter ? 0 : numberWidth }
     var signX: CGFloat { newNumberX + numberWidth }
     var textX: CGFloat { signX + Self.signWidth }
+    /// A split half's text, after its one number and its sign.
+    var splitTextX: CGFloat { numberWidth + Self.signWidth }
 
     @MainActor init(rows: [DiffRow], oneGutter: Bool) {
         var largest = 0
@@ -349,10 +440,50 @@ struct DiffLayout {
         contentWidth = 0
         oneGutter = false
     }
+
+    /// The width a row's text wraps at in a row `rowWidth` wide: whole columns of the monospaced font (a little over,
+    /// so the last column always fits), at least one.
+    @MainActor func wrapWidth(rowWidth: CGFloat, split: Bool) -> CGFloat {
+        let room = split ? rowWidth / 2 - splitTextX : rowWidth - textX
+        let columns = max(1, Int((room - Self.trailingPadding) / Self.charWidth))
+        return CGFloat(columns) * Self.charWidth + 0.5
+    }
+
+    /// How many lines `text` takes wrapped at `width` (`wrapWidth`). ASCII is counted by columns (tabs to the next
+    /// stop), which is how the monospaced font lays it out; other text is measured.
+    @MainActor static func wrappedLines(_ text: String, width: CGFloat) -> Int {
+        guard !text.isEmpty else { return 1 }
+        if text.utf8.allSatisfy({ $0 < 0x80 }) {
+            let columns = max(1, Int(width / charWidth))
+            var lines = 1
+            var column = 0
+            for unit in text.utf8 {
+                var advance = unit == 0x09 ? tabWidth - column % tabWidth : 1
+                if column + advance > columns, column > 0 {
+                    lines += 1
+                    column = 0
+                    advance = unit == 0x09 ? tabWidth : 1
+                }
+                column += advance
+            }
+            return lines
+        }
+        let height = NSAttributedString(string: text, attributes: DiffLineDrawing.wrappedText)
+            .boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin])
+            .height
+        return max(1, Int((height / wrapLineHeight).rounded(.up)))
+    }
+
+    /// A row's height with its text wrapped at `width`.
+    @MainActor static func wrappedHeight(_ texts: [String], width: CGFloat) -> CGFloat {
+        let lines = texts.map { wrappedLines($0, width: width) }.max() ?? 1
+        return max(lineHeight, CGFloat(lines) * wrapLineHeight + wrapPadding)
+    }
 }
 
-/// The diff table: its one column is as wide as the longest line or the card, whichever is wider. Esc asks to go back,
-/// ⌘C copies the selected lines, a right-click opens the selection's menu.
+/// The diff table: its one column is as wide as the longest line or the card, whichever is wider (as wide as the card
+/// when the lines wrap or split). Esc asks to go back, ⌘C copies the selected lines, a right-click opens the
+/// selection's menu.
 final class DiffTableView: NSTableView {
     var contentWidth: CGFloat = 0 {
         didSet { if contentWidth != oldValue { tile() } }
@@ -366,6 +497,27 @@ final class DiffTableView: NSTableView {
         guard let clip = enclosingScrollView?.contentView, let column = tableColumns.first else { return }
         let width = max(contentWidth, clip.bounds.width)
         if abs(column.width - width) > 0.5 { column.width = width }
+        controller?.widthChanged()
+    }
+
+    /// The clip view whose width the column follows (`tile`), observed while the table is in it.
+    private weak var observedClip: NSClipView?
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        if let observedClip {
+            NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: observedClip)
+        }
+        observedClip = enclosingScrollView?.contentView
+        guard let clip = observedClip else { return }
+        // A card wider or narrower: the column follows (when the lines wrap or split, it is the card's width).
+        clip.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(clipResized), name: NSView.frameDidChangeNotification,
+                                               object: clip)
+    }
+
+    @objc private func clipResized() {
+        tile()
     }
 
     override func viewDidMoveToWindow() {
@@ -394,23 +546,30 @@ final class DiffTableView: NSTableView {
     }
 }
 
-/// The table's data source and delegate: it keeps the rows it shows and reloads only for a new load or mode.
+/// The table's data source and delegate: it keeps the rows it shows and reloads only for a new load, mode or wrap.
 @MainActor
 final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private weak var table: DiffTableView?
     private var view: DiffLineTable?
-    private var rows: [DiffRow] = []
+    private var rows: [DiffTableRow] = []
     private var layout = DiffLayout()
+    /// Wrapped rows' heights, for `heightsWidth` (the column's width they were measured at).
+    private var heights: [CGFloat] = []
+    private var heightsWidth: CGFloat = -1
+    /// The last jump this table saw (followed or not), so a redraw does not repeat it.
+    private var jumpSerial: Int?
 
     private struct Shown: Equatable {
         let loadID: Int
         let mode: DiffMode
         let side: DiffSide
+        let wraps: Bool
     }
 
     private var shown: Shown?
 
     private static let lineID = NSUserInterfaceItemIdentifier("diffLine")
+    private static let splitID = NSUserInterfaceItemIdentifier("diffSplit")
     private static let hunkID = NSUserInterfaceItemIdentifier("diffHunk")
     private static let rowID = NSUserInterfaceItemIdentifier("diffRow")
 
@@ -424,30 +583,69 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     func update(_ view: DiffLineTable) {
         self.view = view
         guard let table else { return }
-        let key = Shown(loadID: view.loadID, mode: view.mode, side: view.section.side)
-        guard key != shown else { return }
-        let modeChanged = shown.map { $0.mode != key.mode } ?? false
-        shown = key
-        rows = view.section.rows(view.mode)
-        layout = DiffLayout(rows: rows, oneGutter: [.untracked, .file].contains(view.section.side))
-        // A reload after a stage keeps the scroll offset; the selection goes (its lines may be gone).
-        // `reloadData` keeps the selected row indexes, which would now point at other lines, so clear them.
-        table.reloadData()
-        table.deselectAll(nil)
-        table.contentWidth = layout.contentWidth
-        if modeChanged { scrollToFirstChange(table) }
-        #if DEBUG
-        runLaunchStage()
-        #endif
+        let key = Shown(loadID: view.loadID, mode: view.mode, side: view.section.side, wraps: view.wraps)
+        if key != shown {
+            let modeChanged = shown.map { $0.mode != key.mode } ?? false
+            // A table that just appeared takes the press before it as seen.
+            if shown == nil { jumpSerial = view.jump?.serial }
+            shown = key
+            rows = view.section.tableRows(view.mode)
+            layout = DiffLayout(rows: view.section.rows(view.mode),
+                                oneGutter: [.untracked, .file].contains(view.section.side))
+            heightsWidth = -1
+            // A reload after a stage keeps the scroll offset; the selection goes (its lines may be gone).
+            // `reloadData` keeps the selected row indexes, which would now point at other lines, so clear them.
+            table.reloadData()
+            table.deselectAll(nil)
+            table.contentWidth = view.wraps || view.mode == .split ? 0 : layout.contentWidth
+            table.tile()
+            if modeChanged { scrollToFirstChange(table) }
+            #if DEBUG
+            runLaunchStage()
+            #endif
+        } else {
+            refreshHunkButtons()
+        }
+        if let jump = view.jump, jump.serial != jumpSerial {
+            jumpSerial = jump.serial
+            if isJumpTarget(table, view) { self.jump(jump.direction, in: table) }
+        }
     }
 
     /// In Full file mode the first change is the interesting part: it goes near the top.
     private func scrollToFirstChange(_ table: NSTableView) {
+        scroll(table, toRow: rows.firstIndex(where: \.isChange) ?? 0)
+    }
+
+    /// Scrolls so `row` sits three lines under the top.
+    private func scroll(_ table: NSTableView, toRow row: Int) {
         guard let clip = table.enclosingScrollView?.contentView else { return }
-        let first = rows.firstIndex { $0.kind == .added || $0.kind == .removed } ?? 0
-        let y = first < rows.count ? max(0, table.rect(ofRow: first).minY - 3 * DiffLayout.lineHeight) : 0
-        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: NSPoint(x: 0, y: y), size: clip.bounds.size)).origin)
+        let y = row < rows.count ? max(0, table.rect(ofRow: row).minY - 3 * DiffLayout.lineHeight) : 0
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: NSPoint(x: clip.bounds.minX, y: y),
+                                                        size: clip.bounds.size)).origin)
         table.enclosingScrollView?.reflectScrolledClipView(clip)
+    }
+
+    /// The table with the keyboard focus, else the file's first table.
+    private func isJumpTarget(_ table: NSTableView, _ view: DiffLineTable) -> Bool {
+        guard let responder = table.window?.firstResponder as? DiffTableView else { return view.isFirst }
+        return responder === table
+    }
+
+    /// Scrolls to the start of the previous or next block of changed rows, from where a jump leaves its change (three
+    /// lines under the top). A beep when there is none that way.
+    private func jump(_ direction: DiffJump.Direction, in table: NSTableView) {
+        guard let clip = table.enclosingScrollView?.contentView else { return }
+        let anchor = clip.bounds.minY + 3 * DiffLayout.lineHeight
+        let starts = rows.indices.filter { index in
+            rows[index].isChange && (index == 0 || !rows[index - 1].isChange)
+        }
+        let target = switch direction {
+        case .next: starts.first { table.rect(ofRow: $0).minY > anchor + 1 }
+        case .previous: starts.last { table.rect(ofRow: $0).minY < anchor - 1 }
+        }
+        guard let target else { return NSSound.beep() }
+        scroll(table, toRow: target)
     }
 
     func close() {
@@ -459,7 +657,43 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        rows.indices.contains(row) && !rows[row].isLine ? DiffLayout.hunkHeight : DiffLayout.lineHeight
+        guard rows.indices.contains(row) else { return DiffLayout.lineHeight }
+        guard rows[row].isLine else { return DiffLayout.hunkHeight }
+        guard view?.wraps == true else { return DiffLayout.lineHeight }
+        measureHeights()
+        return heights.indices.contains(row) ? heights[row] : DiffLayout.lineHeight
+    }
+
+    /// The column's width, which wrapped rows are measured at.
+    private var rowWidth: CGFloat {
+        table?.tableColumns.first?.width ?? 0
+    }
+
+    /// Measures every wrapped row at the column's width, unless that was done already.
+    private func measureHeights() {
+        let width = rowWidth
+        guard width != heightsWidth || heights.count != rows.count else { return }
+        heightsWidth = width
+        let split = view?.mode == .split
+        let wrapWidth = layout.wrapWidth(rowWidth: width, split: split)
+        heights = rows.map { row in
+            switch row {
+            case .single(let line):
+                line.isLine ? DiffLayout.wrappedHeight([line.text], width: wrapWidth) : DiffLayout.hunkHeight
+            case .pair(let old, let new):
+                DiffLayout.wrappedHeight([old?.text, new?.text].compactMap { $0 }, width: wrapWidth)
+            }
+        }
+    }
+
+    /// The column got wider or narrower: wrapped rows are measured again (after this layout pass).
+    func widthChanged() {
+        guard view?.wraps == true, abs(rowWidth - heightsWidth) > 0.5 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let table, view?.wraps == true, abs(rowWidth - heightsWidth) > 0.5 else { return }
+            measureHeights()
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<rows.count))
+        }
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -472,27 +706,41 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
-        let data = rows[row]
-        if case .hunk(let hunk) = data.kind {
-            let cell = tableView.makeView(withIdentifier: Self.hunkID, owner: nil) as? DiffHunkCellView ?? {
-                let cell = DiffHunkCellView()
-                cell.identifier = Self.hunkID
+        switch rows[row] {
+        case .single(let data):
+            if case .hunk(let hunk) = data.kind {
+                let cell = tableView.makeView(withIdentifier: Self.hunkID, owner: nil) as? DiffHunkCellView ?? {
+                    let cell = DiffHunkCellView()
+                    cell.identifier = Self.hunkID
+                    return cell
+                }()
+                cell.configure(text: data.text, buttons: buttons(forHunk: hunk)) { [weak self] action in
+                    self?.apply(action, hunk: hunk)
+                }
+                return cell
+            }
+            let cell = tableView.makeView(withIdentifier: Self.lineID, owner: nil) as? DiffLineCellView ?? {
+                let cell = DiffLineCellView()
+                cell.identifier = Self.lineID
                 return cell
             }()
-            cell.configure(text: data.text, buttons: buttons(forHunk: hunk)) { [weak self] action in
-                self?.apply(action, hunk: hunk)
-            }
+            cell.row = data
+            cell.layout = layout
+            cell.wraps = view?.wraps == true
+            cell.needsDisplay = true
+            return cell
+        case .pair(let old, let new):
+            let cell = tableView.makeView(withIdentifier: Self.splitID, owner: nil) as? DiffSplitCellView ?? {
+                let cell = DiffSplitCellView()
+                cell.identifier = Self.splitID
+                return cell
+            }()
+            cell.set(old: old, new: new)
+            cell.layout = layout
+            cell.wraps = view?.wraps == true
+            cell.needsDisplay = true
             return cell
         }
-        let cell = tableView.makeView(withIdentifier: Self.lineID, owner: nil) as? DiffLineCellView ?? {
-            let cell = DiffLineCellView()
-            cell.identifier = Self.lineID
-            return cell
-        }()
-        cell.row = data
-        cell.layout = layout
-        cell.needsDisplay = true
-        return cell
     }
 
     /// Hunk headers are not lines: a click or a drag never selects them.
@@ -506,19 +754,22 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
 
     // MARK: Actions
 
-    /// The changed lines selected in `hunk`.
+    /// The changed lines selected in `hunk` (a split row selects its old and its new line).
     private func selectedLines(inHunk hunk: Int) -> Set<DiffLineID> {
+        Set(selectedChangedRows().compactMap { $0.id?.hunk == hunk ? $0.id : nil })
+    }
+
+    /// The changed lines of the selected rows.
+    private func selectedChangedRows() -> [DiffRow] {
         guard let table else { return [] }
-        var lines = Set<DiffLineID>()
-        for index in table.selectedRowIndexes where rows.indices.contains(index) {
-            let row = rows[index]
-            if let id = row.id, id.hunk == hunk, row.kind == .added || row.kind == .removed { lines.insert(id) }
+        return table.selectedRowIndexes.flatMap { index in
+            rows.indices.contains(index) ? rows[index].lines.filter(\.isChange) : []
         }
-        return lines
     }
 
     /// The header's buttons: "Stage Hunk", or "Stage 2 Lines" while lines of that hunk are selected. None for a
-    /// read-only diff (a commit outside the file history, a merge's combined diff, an untracked file).
+    /// read-only diff (a commit outside the file history, a merge's combined diff, an untracked file, whitespace
+    /// ignored).
     private func buttons(forHunk hunk: Int) -> [(PatchBuilder.Action, String)] {
         guard let view, let file = view.section.file(view.mode), !file.isCombined else { return [] }
         let count = selectedLines(inHunk: hunk).count
@@ -535,20 +786,22 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     }
 
     /// The side's actions, and Revert for a commit's diff in the file history. Not in Full file: its one hunk has
-    /// the whole file as context, which no longer applies once the file changed after the commit.
+    /// the whole file as context, which no longer applies once the file changed after the commit. None while
+    /// whitespace is ignored.
     private func actions(_ view: DiffLineTable) -> [PatchBuilder.Action] {
+        guard !view.readOnly else { return [] }
         guard view.reverts, view.section.side == .commit else { return view.section.side.actions }
-        return view.mode == .diff ? [.revert] : []
+        return view.mode == .full ? [] : [.revert]
     }
 
     private func refreshHunkButtons() {
         guard let table else { return }
         let visible = table.rows(in: table.visibleRect)
         for index in visible.location..<NSMaxRange(visible) where rows.indices.contains(index) {
-            guard case .hunk(let hunk) = rows[index].kind,
+            guard let hunk = rows[index].hunk, case .single(let header) = rows[index],
                   let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? DiffHunkCellView
             else { continue }
-            cell.configure(text: rows[index].text, buttons: buttons(forHunk: hunk)) { [weak self] action in
+            cell.configure(text: header.text, buttons: buttons(forHunk: hunk)) { [weak self] action in
                 self?.apply(action, hunk: hunk)
             }
         }
@@ -561,19 +814,10 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         view.onApply(action, selected.isEmpty ? Set(file.changedLineIDs(inHunk: hunk)) : selected, file)
     }
 
-    /// The selected changed lines of every hunk.
-    private func selectedChangedLines() -> Set<DiffLineID> {
-        guard let table else { return [] }
-        return Set(table.selectedRowIndexes.compactMap { index in
-            rows.indices.contains(index) && (rows[index].kind == .added || rows[index].kind == .removed)
-                ? rows[index].id : nil
-        })
-    }
-
-    /// The selected lines, whole, one per line (no `+`/`−`, no line numbers).
+    /// The selected lines, whole, one per line (no `+`/`−`, no line numbers; a split row's old line, then its new one).
     func copySelection() {
         guard let table else { return }
-        let lines = table.selectedRowIndexes.compactMap { rows.indices.contains($0) && rows[$0].isLine ? rows[$0].text : nil }
+        let lines = table.selectedRowIndexes.flatMap { rows.indices.contains($0) ? rows[$0].lines.map(\.text) : [] }
         guard !lines.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n") + "\n", forType: .string)
@@ -587,8 +831,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
         var entries: [MenuEntry] = [.action("Copy") { [weak self] in self?.copySelection() }]
-        let lines = selectedChangedLines()
-        if let file = view.section.file(view.mode), !file.isCombined, !lines.isEmpty {
+        let lines = Set(selectedChangedRows().compactMap(\.id))
+        if let file = view.section.file(view.mode), !file.isCombined, !lines.isEmpty, !actions(view).isEmpty {
             let what = lines.count == 1 ? "1 Line" : "\(lines.count) Lines"
             entries.append(.separator)
             for action in actions(view) {
@@ -613,19 +857,21 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     /// line numbers (new numbers for added lines, old for removed) and presses their hunk's Stage button, the path a
     /// user's selection and click take.
     private func runLaunchStage() {
-        guard !Self.launchStageDone, let table, let view, view.section.side.actions.contains(.stage),
+        guard !Self.launchStageDone, let table, let view, actions(view).contains(.stage),
               let spec = AppState.launchFlag("-HistqStageLines")
         else { return }
         Self.launchStageDone = true
         let wanted = Set(spec.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
         let indexes = IndexSet(rows.indices.filter { index in
-            switch rows[index].kind {
-            case .added: wanted.contains(rows[index].newLine ?? -1)
-            case .removed: wanted.contains(rows[index].oldLine ?? -1)
-            case .context, .hunk: false
+            rows[index].lines.contains { line in
+                switch line.kind {
+                case .added: wanted.contains(line.newLine ?? -1)
+                case .removed: wanted.contains(line.oldLine ?? -1)
+                case .context, .hunk: false
+                }
             }
         })
-        guard let first = indexes.first, let hunk = rows[first].id?.hunk else { return }
+        guard let first = indexes.first, let hunk = rows[first].lines.first(where: \.isChange)?.id?.hunk else { return }
         table.selectRowIndexes(indexes, byExtendingSelection: false)
         apply(.stage, hunk: hunk)
     }
@@ -649,12 +895,137 @@ final class DiffRowView: NSTableRowView {
     }
 }
 
+/// How a line draws, shared by the unified and the split cells: its band, its numbers, the sign, the changed part's
+/// mark, then the text in syntax colors, on one line (clipped by the cell) or wrapped.
+@MainActor
+enum DiffLineDrawing {
+    /// Where a line's parts go, from the left of the rect it draws in.
+    struct Spots {
+        /// Each number gutter's line number (nil: blank) and left edge; each is `numberWidth` wide.
+        var numbers: [(Int?, CGFloat)]
+        var numberWidth: CGFloat
+        var signX: CGFloat
+        var textX: CGFloat
+        /// The width the text wraps at (`DiffLayout.wrapWidth`); nil for one line.
+        var wrapWidth: CGFloat?
+    }
+
+    private static let paragraph: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.tabStops = []
+        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
+        style.lineBreakMode = .byClipping
+        return style
+    }()
+    private static let wrappedParagraph: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.tabStops = []
+        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
+        // By character, as `DiffLayout.wrappedLines` counts, with a fixed line height.
+        style.lineBreakMode = .byCharWrapping
+        style.minimumLineHeight = DiffLayout.wrapLineHeight
+        style.maximumLineHeight = DiffLayout.wrapLineHeight
+        return style
+    }()
+    private static let text: [NSAttributedString.Key: Any] = [
+        .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph,
+    ]
+    /// The attributes of wrapped text (what `DiffLayout.wrappedLines` measures with).
+    static let wrappedText: [NSAttributedString.Key: Any] = [
+        .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: wrappedParagraph,
+    ]
+    private static let number: [NSAttributedString.Key: Any] = {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .right
+        return [.font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style]
+    }()
+    private static let addedSign: [NSAttributedString.Key: Any] = [
+        .font: DiffLayout.font, .foregroundColor: Palette.diffAddedSign,
+    ]
+    private static let removedSign: [NSAttributedString.Key: Any] = [
+        .font: DiffLayout.font, .foregroundColor: Palette.diffRemovedSign,
+    ]
+
+    private static func color(_ kind: TokenKind) -> NSColor {
+        switch kind {
+        case .keyword: Palette.syntaxKeyword
+        case .string: Palette.syntaxString
+        case .number: Palette.syntaxNumber
+        case .comment: Palette.syntaxComment
+        case .type: Palette.syntaxType
+        case .punctuation: Palette.syntaxPunctuation
+        case .plain: Palette.diffText
+        }
+    }
+
+    /// Draws `row` in `rect` (a flipped view's coordinates). The numbers and the sign sit on the first line.
+    static func draw(_ row: DiffRow, in rect: NSRect, spots: Spots) {
+        switch row.kind {
+        case .added:
+            Palette.diffAddedFill.setFill()
+            rect.fill(using: .sourceOver)
+        case .removed:
+            Palette.diffRemovedFill.setFill()
+            rect.fill(using: .sourceOver)
+        case .context, .hunk:
+            break
+        }
+        // One line's height: a wrapped row's numbers and sign stay on its first line.
+        let lineHeight = spots.wrapWidth == nil ? rect.height : DiffLayout.lineHeight
+        let numberY = rect.minY + (lineHeight - DiffLayout.numberFont.boundingRectForFont.height) / 2
+        for (value, x) in spots.numbers {
+            guard let value else { continue }
+            NSString(string: "\(value)").draw(
+                in: NSRect(x: rect.minX + x, y: numberY, width: spots.numberWidth - 8, height: lineHeight),
+                withAttributes: number)
+        }
+        let textY = rect.minY + (lineHeight - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2
+        switch row.kind {
+        case .added:
+            NSString(string: "+").draw(at: NSPoint(x: rect.minX + spots.signX + 4, y: textY), withAttributes: addedSign)
+        case .removed:
+            NSString(string: "−").draw(at: NSPoint(x: rect.minX + spots.signX + 4, y: textY), withAttributes: removedSign)
+        case .context, .hunk:
+            break
+        }
+
+        let wraps = spots.wrapWidth != nil
+        let text = NSMutableAttributedString(string: row.text, attributes: wraps ? wrappedText : text)
+        let length = text.length
+        for token in row.tokens where NSMaxRange(token.range) <= length {
+            text.addAttribute(.foregroundColor, value: color(token.kind), range: token.range)
+        }
+        let emphasisFill = row.kind == .added ? Palette.diffAddedEmphasis : Palette.diffRemovedEmphasis
+        if let wrapWidth = spots.wrapWidth {
+            // The mark may span lines: a background on the text itself.
+            if let emphasis = row.emphasis, NSMaxRange(emphasis) <= length {
+                text.addAttribute(.backgroundColor, value: emphasisFill, range: emphasis)
+            }
+            text.draw(with: NSRect(x: rect.minX + spots.textX, y: rect.minY + DiffLayout.wrapPadding / 2,
+                                   width: wrapWidth, height: rect.height),
+                      options: [.usesLineFragmentOrigin])
+            return
+        }
+        if let emphasis = row.emphasis, NSMaxRange(emphasis) <= length {
+            // Measured on the text itself, so tabs before the mark are counted as drawn.
+            let start = text.attributedSubstring(from: NSRange(location: 0, length: emphasis.location)).size().width
+            let width = text.attributedSubstring(from: emphasis).size().width
+            emphasisFill.setFill()
+            NSBezierPath(roundedRect: NSRect(x: rect.minX + spots.textX + start, y: rect.minY + 1, width: width,
+                                             height: rect.height - 2),
+                         xRadius: 2, yRadius: 2).fill()
+        }
+        text.draw(at: NSPoint(x: rect.minX + spots.textX, y: textY))
+    }
+}
+
 /// A line: its band, the old and new numbers, the sign, the changed part's mark, then the text in syntax colors.
 final class DiffLineCellView: NSView {
     var row: DiffRow? {
         didSet { setAccessibilityLabel(row?.text) }
     }
     var layout = DiffLayout()
+    var wraps = false
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -668,87 +1039,72 @@ final class DiffLineCellView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    @MainActor
-    private enum Style {
-        static let paragraph: NSParagraphStyle = {
-            let style = NSMutableParagraphStyle()
-            style.tabStops = []
-            style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-            style.lineBreakMode = .byClipping
-            return style
-        }()
-        static let text: [NSAttributedString.Key: Any] = [
-            .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph,
-        ]
-        static let number: [NSAttributedString.Key: Any] = {
-            let style = NSMutableParagraphStyle()
-            style.alignment = .right
-            return [.font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style]
-        }()
-        static let addedSign: [NSAttributedString.Key: Any] = [
-            .font: DiffLayout.font, .foregroundColor: Palette.diffAddedSign,
-        ]
-        static let removedSign: [NSAttributedString.Key: Any] = [
-            .font: DiffLayout.font, .foregroundColor: Palette.diffRemovedSign,
-        ]
-
-        static func color(_ kind: TokenKind) -> NSColor {
-            switch kind {
-            case .keyword: Palette.syntaxKeyword
-            case .string: Palette.syntaxString
-            case .number: Palette.syntaxNumber
-            case .comment: Palette.syntaxComment
-            case .type: Palette.syntaxType
-            case .punctuation: Palette.syntaxPunctuation
-            case .plain: Palette.diffText
-            }
-        }
+    override func setFrameSize(_ newSize: NSSize) {
+        // Wrapped text reflows with the width.
+        if wraps, newSize.width != frame.width { needsDisplay = true }
+        super.setFrameSize(newSize)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let row else { return }
-        let height = bounds.height
-        switch row.kind {
-        case .added:
-            Palette.diffAddedFill.setFill()
-            bounds.fill(using: .sourceOver)
-        case .removed:
-            Palette.diffRemovedFill.setFill()
-            bounds.fill(using: .sourceOver)
-        case .context, .hunk:
-            break
-        }
-        let numberY = (height - DiffLayout.numberFont.boundingRectForFont.height) / 2
-        if !layout.oneGutter, let old = row.oldLine {
-            NSString(string: "\(old)").draw(
-                in: NSRect(x: 0, y: numberY, width: layout.numberWidth - 8, height: height), withAttributes: Style.number)
-        }
-        if let new = row.newLine {
-            NSString(string: "\(new)").draw(
-                in: NSRect(x: layout.newNumberX, y: numberY, width: layout.numberWidth - 8, height: height),
-                withAttributes: Style.number)
-        }
-        let textY = (height - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2
-        switch row.kind {
-        case .added: NSString(string: "+").draw(at: NSPoint(x: layout.signX + 4, y: textY), withAttributes: Style.addedSign)
-        case .removed: NSString(string: "−").draw(at: NSPoint(x: layout.signX + 4, y: textY), withAttributes: Style.removedSign)
-        case .context, .hunk: break
-        }
+        let numbers: [(Int?, CGFloat)] = layout.oneGutter
+            ? [(row.newLine, layout.newNumberX)]
+            : [(row.oldLine, 0), (row.newLine, layout.newNumberX)]
+        DiffLineDrawing.draw(row, in: bounds, spots: DiffLineDrawing.Spots(
+            numbers: numbers, numberWidth: layout.numberWidth, signX: layout.signX, textX: layout.textX,
+            wrapWidth: wraps ? layout.wrapWidth(rowWidth: bounds.width, split: false) : nil))
+    }
+}
 
-        let text = NSMutableAttributedString(string: row.text, attributes: Style.text)
-        let length = text.length
-        for token in row.tokens where NSMaxRange(token.range) <= length {
-            text.addAttribute(.foregroundColor, value: Style.color(token.kind), range: token.range)
+/// A split row: the old line on the left half (its old number), the new line on the right half (its new number), a
+/// thin rule between them. A missing side stays empty; each half clips its own text.
+final class DiffSplitCellView: NSView {
+    private var old: DiffRow?
+    private var new: DiffRow?
+    var layout = DiffLayout()
+    var wraps = false
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func set(old: DiffRow?, new: DiffRow?) {
+        self.old = old
+        self.new = new
+        setAccessibilityLabel(old?.kind == .context ? old?.text
+            : [old.map { "Removed: \($0.text)" }, new.map { "Added: \($0.text)" }].compactMap { $0 }
+                .joined(separator: ", "))
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        if newSize.width != frame.width { needsDisplay = true }
+        super.setFrameSize(newSize)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let half = (bounds.width / 2).rounded(.down)
+        let wrapWidth = wraps ? layout.wrapWidth(rowWidth: bounds.width, split: true) : nil
+        for (row, rect, number) in [(old, NSRect(x: 0, y: 0, width: half, height: bounds.height), old?.oldLine),
+                                    (new, NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height),
+                                     new?.newLine)] {
+            guard let row else { continue }
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: rect).addClip()
+            DiffLineDrawing.draw(row, in: rect, spots: DiffLineDrawing.Spots(
+                numbers: [(number, 0)], numberWidth: layout.numberWidth, signX: layout.numberWidth,
+                textX: layout.splitTextX, wrapWidth: wrapWidth))
+            NSGraphicsContext.restoreGraphicsState()
         }
-        if let emphasis = row.emphasis, NSMaxRange(emphasis) <= length {
-            // Measured on the text itself, so tabs before the mark are counted as drawn.
-            let start = text.attributedSubstring(from: NSRange(location: 0, length: emphasis.location)).size().width
-            let width = text.attributedSubstring(from: emphasis).size().width
-            (row.kind == .added ? Palette.diffAddedEmphasis : Palette.diffRemovedEmphasis).setFill()
-            NSBezierPath(roundedRect: NSRect(x: layout.textX + start, y: 1, width: width, height: height - 2),
-                         xRadius: 2, yRadius: 2).fill()
-        }
-        text.draw(at: NSPoint(x: layout.textX, y: textY))
+        NSColor.separatorColor.setFill()
+        NSRect(x: half - 0.5, y: 0, width: 1, height: bounds.height).fill()
     }
 }
 

@@ -861,8 +861,14 @@ final class RepoSession: Identifiable {
     private(set) var fileDiff: Loadable<FileDiffDetail> = .idle
     /// Changes with every file select (and "Load anyway"): the diff placeholder logs a line per select.
     private(set) var fileToken = 0
-    /// Hunks only, or the whole file with its changes; kept while other files are opened.
-    var diffMode: DiffMode = .diff
+    /// Hunks only, side by side, or the whole file with its changes; kept while other files are opened. DEBUG
+    /// `-HistqDiffMode diff|split|full` sets the first one.
+    var diffMode: DiffMode = AppState.launchFlag("-HistqDiffMode").flatMap(DiffMode.init(rawValue:)) ?? .diff
+    /// The diffs ignore whitespace changes (`git diff -w`, `PrefKey.diffIgnoreWhitespace`): set with
+    /// `setIgnoresWhitespace`, which reads the open file again.
+    private(set) var ignoresWhitespace = Preferences.defaults.bool(forKey: PrefKey.diffIgnoreWhitespace.rawValue)
+    /// The last Previous / Next Change press: the open file's tables scroll to that change.
+    private(set) var diffJump: DiffJump?
     @ObservationIgnored private var fileTask: Task<Void, Never>?
     /// The user chose "Load anyway" on the open file's size card.
     @ObservationIgnored private var fileIgnoresSizeLimit = false
@@ -2765,6 +2771,20 @@ final class RepoSession: Identifiable {
         return output.text.split(separator: "\0").map(String.init).filter { !$0.isEmpty }
     }
 
+    /// Turns whitespace ignoring on or off for every diff (stored), and reads the open file again with it.
+    func setIgnoresWhitespace(_ ignores: Bool) {
+        guard ignores != ignoresWhitespace else { return }
+        ignoresWhitespace = ignores
+        Preferences.defaults.set(ignores, forKey: PrefKey.diffIgnoreWhitespace.rawValue)
+        guard let openFile, !openFile.isConflict else { return }
+        startFileLoad()
+    }
+
+    /// Scrolls the open file's diff to its previous or next change (the controls card's arrows).
+    func jumpToChange(_ direction: DiffJump.Direction) {
+        diffJump = DiffJump(direction: direction, serial: (diffJump?.serial ?? 0) &+ 1)
+    }
+
     /// Loads the open file past the size limit: its card's "Load anyway".
     func loadFileAnyway() {
         guard openFile != nil else { return }
@@ -2831,6 +2851,7 @@ final class RepoSession: Identifiable {
         fileTask?.cancel()
         let token = fileToken
         let ignoresSizeLimit = fileIgnoresSizeLimit
+        let ignoresWhitespace = ignoresWhitespace
         fileLoadCount &+= 1
         let loadID = fileLoadCount
         fileTask = Task { [weak self] in
@@ -2838,10 +2859,12 @@ final class RepoSession: Identifiable {
             do {
                 let backend = try await backend()
                 let loaded = try await Self.readFileDiff(
-                    backend, cwd: url, target: target, ignoresSizeLimit: ignoresSizeLimit, loadID: loadID)
+                    backend, cwd: url, target: target, ignoresSizeLimit: ignoresSizeLimit,
+                    ignoresWhitespace: ignoresWhitespace, loadID: loadID)
                 try Task.checkCancellation()
                 guard token == fileToken, openFile == target else { return }
-                if quietly, case .unchanged = loaded.content { return closeFile() }
+                // Ignoring whitespace, no diff can mean a whitespace-only change: the file stays open.
+                if quietly, !ignoresWhitespace, case .unchanged = loaded.content { return closeFile() }
                 fileDiff = .loaded(loaded)
             } catch {
                 guard token == fileToken, openFile == target, !Self.isCancellation(error) else { return }
@@ -2855,10 +2878,12 @@ final class RepoSession: Identifiable {
     /// (a pure rename, a mode change), shows its versions instead.
     @concurrent
     private nonisolated static func readFileDiff(
-        _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, loadID: Int
+        _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, ignoresWhitespace: Bool, loadID: Int
     ) async throws -> FileDiffDetail {
-        let detail = try await readLineDiff(
-            backend, cwd: cwd, target: target, ignoresSizeLimit: ignoresSizeLimit, loadID: loadID)
+        var detail = try await readLineDiff(
+            backend, cwd: cwd, target: target, ignoresSizeLimit: ignoresSizeLimit,
+            ignoresWhitespace: ignoresWhitespace, loadID: loadID)
+        detail.ignoresWhitespace = ignoresWhitespace
         let hasNoLines = switch detail.content {
         case .binary: true
         case .sections(let sections): sections.allSatisfy { $0.rows.isEmpty }
@@ -2873,10 +2898,10 @@ final class RepoSession: Identifiable {
     /// The diff of `target` with the read environment (no textconv, no external diff, no filters), off the main actor:
     /// a WIP file's unstaged and staged changes, or a commit's changes against its first parent. Each comes twice, with
     /// git's context (Diff mode) and with the whole file as context (Full file mode, and the syntax state of every
-    /// line). Untracked files are read from disk.
+    /// line). Untracked files are read from disk. `ignoresWhitespace` reads git's diffs with `-w`.
     @concurrent
     private nonisolated static func readLineDiff(
-        _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, loadID: Int
+        _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, ignoresWhitespace: Bool, loadID: Int
     ) async throws -> FileDiffDetail {
         if case .commit(let hash) = target.source, !GitOperations.isObjectID(hash) {
             throw CommitReadError.notACommit(hash)
@@ -2895,11 +2920,15 @@ final class RepoSession: Identifiable {
         case .wip where file.kind == .untracked:
             return FileDiffDetail(loadID: loadID, content: try untrackedContent(file.path, cwd: cwd, language: language))
         case .wip:
-            async let unstaged = DiffReader.unstaged(runner: runner, cwd: cwd, env: env, paths: [file.path])
+            async let unstaged = DiffReader.unstaged(
+                runner: runner, cwd: cwd, env: env, paths: [file.path], ignoringWhitespace: ignoresWhitespace)
             async let unstagedFull = DiffReader.unstaged(
-                runner: runner, cwd: cwd, env: env, paths: [file.path], context: full)
-            async let staged = DiffReader.staged(runner: runner, cwd: cwd, env: env, paths: paths)
-            async let stagedFull = DiffReader.staged(runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+                runner: runner, cwd: cwd, env: env, paths: [file.path], context: full,
+                ignoringWhitespace: ignoresWhitespace)
+            async let staged = DiffReader.staged(
+                runner: runner, cwd: cwd, env: env, paths: paths, ignoringWhitespace: ignoresWhitespace)
+            async let stagedFull = DiffReader.staged(
+                runner: runner, cwd: cwd, env: env, paths: paths, context: full, ignoringWhitespace: ignoresWhitespace)
             let sections = [
                 DiffSection(side: .unstaged, diff: pick(try await unstaged, file), full: pick(try await unstagedFull, file),
                             language: language),
@@ -2915,17 +2944,22 @@ final class RepoSession: Identifiable {
         case .commit(let hash):
             // A stash's untracked file is only in its untracked-files commit (a root commit: every line added).
             let revision = file.kind == .untracked ? "\(hash)^3" : hash
-            async let diff = DiffReader.commit(revision, runner: runner, cwd: cwd, env: env, paths: paths)
+            async let diff = DiffReader.commit(
+                revision, runner: runner, cwd: cwd, env: env, paths: paths, ignoringWhitespace: ignoresWhitespace)
             async let diffFull = DiffReader.commit(
-                revision, runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+                revision, runner: runner, cwd: cwd, env: env, paths: paths, context: full,
+                ignoringWhitespace: ignoresWhitespace)
             let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
                                       language: language)
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         case .compare(let base, let head):
             // Read-only like a commit's changes (no hunk buttons).
-            async let diff = DiffReader.compare(base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths)
+            async let diff = DiffReader.compare(
+                base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths,
+                ignoringWhitespace: ignoresWhitespace)
             async let diffFull = DiffReader.compare(
-                base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+                base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths, context: full,
+                ignoringWhitespace: ignoresWhitespace)
             let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
                                       language: language)
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })

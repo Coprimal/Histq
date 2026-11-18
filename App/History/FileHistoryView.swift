@@ -1,12 +1,12 @@
-// A file's history in panel 1, in place of the sidebar: the header card (back, the file, "Follow renames"), then one
-// card with the commits that changed it, newest first. A click on a commit selects it (panel 3) and opens the file's
-// diff at that commit in panel 2 (the newest opens when the history loads); a file clicked in panel 3 shows that
-// file's history. Back or Esc shows the graph and the sidebar again (RepoLayoutView).
+// A file's history in panel 1, in place of the sidebar: one card with the commits that changed it, newest first. A
+// click on a commit selects it (panel 3) and opens the file's diff at that commit in panel 2 (the newest opens when the
+// history loads); a file clicked in panel 3 shows that file's history. Panel 2's controls card has "Follow renames" and
+// close: close or Esc shows the graph and the sidebar again (RepoLayoutView).
 // The history loads off the main actor (`RepoSession.selectTool`); until then the card holds skeleton rows.
 import HistqCore
 import SwiftUI
 
-/// Panel 1 while a file's history shows: the header card at once, then the commits (skeletons until loaded).
+/// Panel 1 while a file's history shows: the commits (skeletons until loaded).
 struct FileHistoryView: View {
     let session: RepoSession
     /// The file history (`.fileHistory` of `path`, `rev`, `follow`): a row's diff keeps it in panel 1.
@@ -17,93 +17,27 @@ struct FileHistoryView: View {
         if case .fileHistory(let path, _, _) = tool { path } else { "" }
     }
 
-    private var rev: String? {
-        if case .fileHistory(_, let rev, _) = tool { rev } else { nil }
-    }
-
-    private var follow: Bool {
-        if case .fileHistory(_, _, let follow) = tool { follow } else { false }
-    }
-
     var body: some View {
-        VStack(spacing: SectionCardMetrics.spacing) {
-            header
-            Group {
-                switch session.toolState {
-                case .loaded(.history(let entries)):
-                    HistoryCard(session: session, tool: tool, path: path, entries: entries)
-                        .onAppear { UITiming.content(session.toolDetail) }
-                case .failed(let message):
-                    DiffNoticeCard(title: "File History", systemImage: "exclamationmark.triangle", message: message)
-                        .onAppear { UITiming.content("\(session.toolDetail) failed") }
-                default:
-                    PlaceholderCard(
-                        token: session.toolToken, detail: session.toolDetail,
-                        isCurrent: { [model, session, tool] in
-                            model.selectedSession === session && session.historyTool == tool
-                        }
-                    ) {
-                        HistoryPlaceholder()
+        Group {
+            switch session.toolState {
+            case .loaded(.history(let entries)):
+                HistoryCard(session: session, tool: tool, path: path, entries: entries)
+                    .onAppear { UITiming.content(session.toolDetail) }
+            case .failed(let message):
+                DiffNoticeCard(title: "File History", systemImage: "exclamationmark.triangle", message: message)
+                    .onAppear { UITiming.content("\(session.toolDetail) failed") }
+            default:
+                PlaceholderCard(
+                    token: session.toolToken, detail: session.toolDetail,
+                    isCurrent: { [model, session, tool] in
+                        model.selectedSession === session && session.historyTool == tool
                     }
+                ) {
+                    HistoryPlaceholder()
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-    }
-
-    /// Back, the file's name and folder, and the "Follow renames" switch (reads the history again).
-    private var header: some View {
-        let name = (path as NSString).lastPathComponent
-        let folder = (path as NSString).deletingLastPathComponent
-        return SectionCard(nil, contentPadding: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    session.closeFile()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(RowIconButtonStyle())
-                // While a diff shows, its close button takes Esc (and closes the history too).
-                .keyboardShortcut(session.openTool == tool ? .cancelAction : nil)
-                .help("Back to the Graph (Esc)")
-                .accessibilityLabel("Back to the graph")
-                .padding(.leading, 4)
-                IconImage("clock.arrow.circlepath")
-                    .foregroundStyle(.secondary)
-                    .help("File History")
-                    .accessibilityHidden(true)
-                HStack(spacing: 4) {
-                    Text(name)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                    if !folder.isEmpty {
-                        Text(folder)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                    }
-                }
-                .help(path)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("History of \(path)")
-                Spacer(minLength: 8)
-                Toggle("Follow renames", isOn: Binding(
-                    get: { follow },
-                    set: { session.selectTool(.fileHistory(path: path, rev: rev, follow: $0)) }))
-                    .toggleStyle(CompactSwitch())
-                    .help("Also list the commits before the file was renamed (slower)")
-                Text("Follow renames")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.trailing, 8)
-            }
-            .frame(height: 32)
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -264,13 +198,21 @@ private struct HistoryPlaceholder: View {
     }
 }
 
-/// Panel 2 while a file history shows and no commit's diff is open yet: the diff's skeleton while the history loads
-/// (its newest commit opens then), or why there is no diff (no commit changed the file, a failed read).
+/// Panel 2 while a file history shows and no commit's diff is open yet: the controls card (Follow renames, close), then
+/// the diff's skeleton while the history loads (its newest commit opens then), or why there is no diff (no commit
+/// changed the file, a failed read).
 struct FileHistoryDiffPlaceholder: View {
     let session: RepoSession
     let path: String
 
     var body: some View {
+        VStack(spacing: SectionCardMetrics.spacing) {
+            DiffControlsCard(session: session, target: nil)
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
         switch session.toolState {
         case .loaded(.history(let entries)) where entries.isEmpty:
             DiffNoticeCard(title: "File History", systemImage: "clock.arrow.circlepath",

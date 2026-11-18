@@ -172,6 +172,10 @@ enum PrefKey: String, CaseIterable {
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The file diffs ignore whitespace changes (`git diff -w`); their hunks are then read-only.
+    case diffIgnoreWhitespace
+    /// The file diffs wrap long lines instead of scrolling sideways.
+    case diffWrapLines
     /// The blame wraps long lines instead of scrolling sideways; its header switches it.
     case blameWrapLines
     /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
@@ -239,6 +243,7 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .diffIgnoreWhitespace, .diffWrapLines: false
         case .blameWrapLines: false
         case .aiShowFeatures: true
         case .aiProvider: "openAI"

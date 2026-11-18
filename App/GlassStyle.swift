@@ -379,24 +379,29 @@ struct RowTextButtonStyle: ButtonStyle {
 }
 
 /// The icon buttons of a row: a round highlight on hover, darker and a bit smaller while pressed, dimmed when
-/// disabled. The highlight reaches past the label without changing the row's layout.
+/// disabled. The highlight reaches past the label without changing the row's layout. A switch that is on keeps the
+/// selected fill.
 struct RowIconButtonStyle: ButtonStyle {
     /// A capsule highlight, for a label wider than an icon (an icon and a menu chevron).
     var capsule = false
+    /// A switch that is on (Ignore Whitespace, Wrap Lines).
+    var isOn = false
 
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration, capsule: capsule)
+        Highlight(configuration: configuration, capsule: capsule, isOn: isOn)
     }
 
     private struct Highlight: View {
         let configuration: ButtonStyleConfiguration
         let capsule: Bool
+        let isOn: Bool
         @State private var hovered = false
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
-            let fill = configuration.isPressed ? Palette.pressedFill : hovered && isEnabled ? Palette.hoverFill : .clear
+            let fill = configuration.isPressed ? Palette.pressedFill : hovered && isEnabled ? Palette.hoverFill
+                : isOn ? Palette.selectedFill : .clear
             configuration.label
                 .background {
                     if capsule {
