@@ -8,8 +8,8 @@ import Foundation
 
 public enum BranchAttribution {
     /// Each commit's branch (a local branch's short name, or a remote branch's `origin/x`), by hash. `commits` is in
-    /// log order (`git log --topo-order`, children first); `index` is each hash's position in `commits` (built when
-    /// nil). Commits no branch reaches (only under a tag or a stash) are left out.
+    /// log order (children first, in either `LogReader.Order`); `index` is each hash's position in `commits` (built
+    /// when nil). Commits no branch reaches (only under a tag or a stash) are left out.
     public static func map(commits: [Commit], refs: Refs, index: [String: Int]? = nil) -> [String: String] {
         let (names, claims) = claims(commits: commits, refs: refs, index: index)
         var result: [String: String] = [:]

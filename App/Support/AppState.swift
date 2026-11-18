@@ -101,6 +101,10 @@ enum PrefKey: String, CaseIterable {
     case dateFormat
     /// Graph row height: "compact", "regular" or "comfortable".
     case rowDensity
+    /// The graph's commit order: a `LogReader.Order` raw value, "date" (newest committer date first, every commit above
+    /// its parents, so the branches interleave; `git log --date-order`) or "branch" (each line of history listed whole,
+    /// `--topo-order`).
+    case commitOrder
     /// The graph's, sidebar's and file lists' text: a `TextSize` raw value, "small", "regular" or "large".
     case textSize
     /// Commit avatars: "real" (Gravatar / GitHub), "generated" or "initials".
@@ -236,6 +240,7 @@ enum PrefKey: String, CaseIterable {
         switch self {
         case .dateFormat: "MM/dd/yy @ HH:mm"
         case .rowDensity: "regular"
+        case .commitOrder: "date"
         case .textSize: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"

@@ -124,6 +124,8 @@ struct LogReaderTests {
         #expect(LogReader.arguments(hidden: [], solo: []) == LogReader.arguments)
         let hash = String(repeating: "a", count: 40)
         #expect(LogReader.arguments(hidden: [], solo: [], alsoFrom: [hash]) == LogReader.arguments + [hash])
+        #expect(LogReader.arguments(hidden: [], solo: [], order: .date)
+            == LogReader.arguments.map { $0 == "--topo-order" ? "--date-order" : $0 }, "date order reaches git")
     }
 
     @Test("hidden refs, tags too, are excludes after the stash, notes, prefetch and remote HEAD excludes and before --all")
@@ -201,14 +203,15 @@ struct LogReaderTests {
 
     // MARK: Incremental reload
 
-    /// A full history read (`pages`) of `repo`, all pages joined.
-    private func readAll(_ sandbox: Sandbox, _ repo: URL, alsoFrom: [String] = []) async throws -> [Commit] {
+    /// A full history read (`pages`) of `repo` in `order`, all pages joined.
+    private func readAll(
+        _ sandbox: Sandbox, _ repo: URL, alsoFrom: [String] = [], order: LogReader.Order = .branch
+    ) async throws -> [Commit] {
         let env = try await GitInvocation.readEnvironment(
             profile: nil, base: sandbox.base, runner: sandbox.runner, cwd: repo)
         var commits: [Commit] = []
-        for try await page in LogReader.pages(runner: sandbox.runner, cwd: repo, env: env, alsoFrom: alsoFrom) {
-            commits += page
-        }
+        for try await page in LogReader.pages(
+            runner: sandbox.runner, cwd: repo, env: env, alsoFrom: alsoFrom, order: order) { commits += page }
         return commits
     }
 
@@ -220,12 +223,13 @@ struct LogReaderTests {
 
     /// `newCommits` for `repo` with its read environment.
     private func newCommits(
-        _ sandbox: Sandbox, _ repo: URL, previousTips: [String], alsoFrom: [String] = []
+        _ sandbox: Sandbox, _ repo: URL, previousTips: [String], alsoFrom: [String] = [],
+        order: LogReader.Order = .branch
     ) async throws -> [Commit]? {
         let env = try await GitInvocation.readEnvironment(
             profile: nil, base: sandbox.base, runner: sandbox.runner, cwd: repo)
         return try await LogReader.newCommits(
-            runner: sandbox.runner, cwd: repo, env: env, previousTips: previousTips, alsoFrom: alsoFrom)
+            runner: sandbox.runner, cwd: repo, env: env, previousTips: previousTips, alsoFrom: alsoFrom, order: order)
     }
 
     /// `commits`' index of each hash, as the app's log keeps it.
@@ -322,6 +326,63 @@ struct LogReaderTests {
         #expect(delta.count == 3)
         #expect(Set(tips) == Set(fresh), "the merged side tip and the old main tip are gone, other stays")
         #expect(tips.count == fresh.count)
+    }
+
+    @Test(
+        "date order: fetched commits older than the local tip merge where a fresh read puts them; a clock-skewed child stays above its parent")
+    func dateOrderMergesNewCommits() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        let tree = try await sandbox.git(["rev-parse", "HEAD^{tree}"], in: repo)
+        /// A commit of `tree` on `parent`, authored and committed `seconds` after 1970.
+        func commit(_ subject: String, at seconds: Int, parent: String? = nil) async throws -> String {
+            let date = "@\(seconds) +0000"
+            let env = sandbox.base.merging(["GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date]) { $1 }
+            let parents = parent.map { ["-p", $0] } ?? []
+            let result = try await sandbox.runner.run(
+                ["commit-tree"] + parents + ["-m", subject, tree], cwd: repo, env: env, timeout: .seconds(30))
+            return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // main: initial(100) → M1(250) → M2(450), replacing makeRepo's commit dated now.
+        let initial = try await commit("initial", at: 100)
+        let m1 = try await commit("M1", at: 250, parent: initial)
+        let m2 = try await commit("M2", at: 450, parent: m1)
+        try await sandbox.git(["update-ref", "refs/heads/main", m2], in: repo)
+        let old = try await readAll(sandbox, repo, order: .date)
+        #expect(old.map(\.hash) == [m2, m1, initial])
+        // Fetched: R1(200) → R2(300) off initial, both older than the local tip.
+        let r1 = try await commit("R1", at: 200, parent: initial)
+        let r2 = try await commit("R2", at: 300, parent: r1)
+        try await sandbox.git(["update-ref", "refs/remotes/origin/main", r2], in: repo)
+
+        let oldIndex = Self.index(old)
+        let delta = try #require(try await newCommits(
+            sandbox, repo, previousTips: LogReader.tips(of: old, index: oldIndex), order: .date))
+        let merged = LogReader.mergedByDate(delta, into: old, index: oldIndex)
+
+        let expected = [m2, r2, m1, r1, initial]
+        #expect(try await readAll(sandbox, repo, order: .date).map(\.hash) == expected, "a fresh read, by date")
+        #expect(merged.map(\.hash) == expected)
+
+        // S(50), a child of M2 dated before it: still above M2, though a fresh read may list it elsewhere.
+        let skewed = try await commit("S", at: 50, parent: m2)
+        try await sandbox.git(["update-ref", "refs/heads/main", skewed], in: repo)
+        let mergedIndex = Self.index(merged)
+        let next = try #require(try await newCommits(
+            sandbox, repo, previousTips: LogReader.tips(of: merged, index: mergedIndex), order: .date))
+        let again = LogReader.mergedByDate(next, into: merged, index: mergedIndex)
+
+        let fresh = try await readAll(sandbox, repo, order: .date)
+        #expect(Set(again.map(\.hash)) == Set(fresh.map(\.hash)))
+        #expect(again.count == fresh.count)
+        let row = Self.index(again)
+        for (position, commit) in again.enumerated() {
+            for parent in commit.parents {
+                let parentRow = try #require(row[parent], "every parent is listed")
+                #expect(parentRow > position, "\(commit.subject) above its parent")
+            }
+        }
     }
 
     @Test("nothing new gives no commit, not nil")

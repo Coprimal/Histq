@@ -1,5 +1,6 @@
-// Streams the commit history for the graph: every ref but the stash and notes, in topological order, parsed
-// as git writes it and published in pages so the first rows can show before git has finished.
+// Streams the commit history for the graph: every ref but the stash and notes, children before parents (by date or
+// by branch, `LogReader.Order`), parsed as git writes it and published in pages so the first rows can show before git
+// has finished.
 import Foundation
 
 /// One commit of the history. Text fields come from the repo and are untrusted.
@@ -39,6 +40,15 @@ public struct Commit: Sendable, Hashable, Identifiable {
 public enum LogReader {
     public static let defaultPageSize = 500
 
+    /// The order of the log's commits; both list every commit above its parents.
+    public enum Order: String, Sendable {
+        /// `git log --date-order`: newest committer date first, every commit still above its parents, so the
+        /// branches interleave.
+        case date
+        /// `git log --topo-order`: a line of history is listed whole before the next.
+        case branch
+    }
+
     /// `--exclude` must come before `--all` (git applies it to the next `--all`/`--branches`/...), so stash
     /// internals (`stash@{n}` and its index and untracked commits), notes and `git maintenance`'s prefetch refs
     /// (hidden copies of the remotes, as scalar's `log.excludeDecoration` hides them) never become rows. A remote's
@@ -63,12 +73,16 @@ public enum LogReader {
     /// (or a hash) from being read as a path. A ref both hidden and soloed is shown: its `--exclude` is still
     /// passed, but git applies it only to a following `--all`, which solo mode has not. Only full ref names
     /// that git would accept are passed, the rest are dropped: hidden ones under `refs/heads/`, `refs/remotes/`
-    /// or `refs/tags/`, soloed ones under the first two; if no soloed ref is left, every ref is read.
-    public static func arguments(hidden: [String], solo: [String], alsoFrom hashes: [String] = []) -> [String] {
+    /// or `refs/tags/`, soloed ones under the first two; if no soloed ref is left, every ref is read. `order`
+    /// `.date` puts `--date-order` in place of `--topo-order`.
+    public static func arguments(
+        hidden: [String], solo: [String], alsoFrom hashes: [String] = [], order: Order = .branch
+    ) -> [String] {
         let revisions = hashes.filter { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
         let excludes = hidden.filter(isHideableRef).map { "--exclude=\($0)" }
         let solo = solo.filter(isBranchRef)
         var command = arguments
+        if order == .date, let topo = command.firstIndex(of: "--topo-order") { command[topo] = "--date-order" }
         let all = command.firstIndex(of: "--all")!
         if solo.isEmpty {
             command.insert(contentsOf: excludes, at: all)
@@ -115,12 +129,12 @@ public enum LogReader {
     /// `alsoFrom`: commit hashes whose history is read too, e.g. the stashes' bases, so a stash made on a
     /// commit no branch holds any more still has its base in the log, as GitKraken shows it. Anything but a
     /// hex hash is left out, so it can never be read as an option. `hidden` and `solo`: full ref names, see
-    /// `arguments(hidden:solo:alsoFrom:)`.
+    /// `arguments(hidden:solo:alsoFrom:order:)`. `order`: the order of the commits.
     public static func pages(
         runner: GitRunner, cwd: URL, env: [String: String], pageSize: Int = defaultPageSize,
-        alsoFrom hashes: [String] = [], hidden: [String] = [], solo: [String] = []
+        alsoFrom hashes: [String] = [], hidden: [String] = [], solo: [String] = [], order: Order = .branch
     ) -> AsyncThrowingStream<[Commit], Error> {
-        let command = arguments(hidden: hidden, solo: solo, alsoFrom: hashes)
+        let command = arguments(hidden: hidden, solo: solo, alsoFrom: hashes, order: order)
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [Commit].self)
         let task = Task {
             do {
@@ -168,31 +182,63 @@ public enum LogReader {
         return delta.map(\.hash).filter { !parents.contains($0) } + previous.filter { !parents.contains($0) }
     }
 
+    /// The commits of a reload in `--date-order`: `delta` (the commits new since `previous`, `newCommits` in date
+    /// order) merged into `previous` (a read in date order, `index` its position of each hash) by committer date,
+    /// newest first: a new commit comes first when the next old one is not newer (a tie included) or is a parent of a
+    /// new commit not listed yet. O(n). The same commits as a fresh read, and in the same order when committer dates
+    /// are unique and no commit is older than a parent; otherwise (clock skew, equal seconds) every commit is still
+    /// above its parents, but the order may differ from a fresh read until the next full read. No commit of `delta`
+    /// may be in `previous` or be an ancestor of one of its commits (the caller checks).
+    public static func mergedByDate(_ delta: [Commit], into previous: [Commit], index: [String: Int]) -> [Commit] {
+        // Per old commit, how many new commits not listed yet name it as a parent: it waits for them.
+        var children = [Int](repeating: 0, count: previous.count)
+        for commit in delta {
+            for parent in commit.parents {
+                if let position = index[parent] { children[position] += 1 }
+            }
+        }
+        var merged: [Commit] = []
+        merged.reserveCapacity(delta.count + previous.count)
+        var old = 0
+        for commit in delta {
+            while old < previous.count, children[old] == 0, previous[old].committerDate > commit.committerDate {
+                merged.append(previous[old])
+                old += 1
+            }
+            merged.append(commit)
+            for parent in commit.parents {
+                if let position = index[parent] { children[position] -= 1 }
+            }
+        }
+        merged.append(contentsOf: previous[old...])
+        return merged
+    }
+
     /// The commits a history read (`pages`) would list now that are not in a previous read whose tips were
     /// `previousTips` (`tips(of:index:)`), in git's order (children before parents); `[]` when none. Nil when this
     /// cannot be proven to be the whole difference, so the caller reads the whole history again: no previous tip,
     /// a previous tip that is not a hex hash, a replace ref (`git replace` can give an old commit other parents), or a
     /// commit of the previous read that the refs and `alsoFrom` no longer reach (a branch deleted, a reset, a
-    /// force-push, a stash dropped, a ref hidden since). `env`, `alsoFrom` and `hidden` are as in `pages` (the previous
-    /// read must have had the same `hidden`; there is no solo mode here: a soloed log is read whole); anything in
-    /// `alsoFrom` but a hex hash is left out.
+    /// force-push, a stash dropped, a ref hidden since). `env`, `alsoFrom`, `hidden` and `order` are as in `pages` (the
+    /// previous read must have had the same `hidden` and `order`; there is no solo mode here: a soloed log is read
+    /// whole); anything in `alsoFrom` but a hex hash is left out.
     ///
-    /// The new commits followed by the previous ones are exactly the commits a fresh read lists, in a valid
-    /// topological order (a new commit is never an ancestor of an old one), but not always in the order git's
-    /// `--topo-order` gives a fresh read: after a commit on a branch other than the newest one, a fresh read lists
-    /// that branch's whole line first, while here the old commits keep their order and the new ones come on top.
+    /// The new commits and the previous ones are exactly the commits a fresh read lists, children before parents (a
+    /// new commit is never an ancestor of an old one). In branch order the new commits come on top of the old ones,
+    /// which keep their order: not always the order of a fresh read, which after a commit on a branch other than the
+    /// newest one lists that branch's whole line first. In date order they are merged by date (`mergedByDate`).
     /// Not valid across a change of the shallow boundary (a deepened clone gives old commits new parents): the caller
     /// reads the whole history of a shallow repo.
     public static func newCommits(
         runner: GitRunner, cwd: URL, env: [String: String], previousTips: [String], alsoFrom hashes: [String] = [],
-        hidden: [String] = []
+        hidden: [String] = [], order: Order = .branch
     ) async throws -> [Commit]? {
         let isHex = { (text: String) in !text.isEmpty && text.allSatisfy { $0.isASCII && $0.isHexDigit } }
         guard !previousTips.isEmpty, previousTips.allSatisfy(isHex) else { return nil }
         let extra = hashes.filter(isHex)
         // The log's own command, so the delta leaves out what a full read leaves out (stash, notes, prefetch refs, a
         // remote's HEAD, the hidden refs).
-        let command = arguments(hidden: hidden, solo: [], alsoFrom: extra)
+        let command = arguments(hidden: hidden, solo: [], alsoFrom: extra, order: order)
         let excludes = command.filter { $0.hasPrefix("--exclude=") }
         let replaced = try await runner.run(
             ["for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/"], cwd: cwd, env: env)

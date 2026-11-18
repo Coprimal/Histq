@@ -74,8 +74,8 @@ struct LogFilter: Equatable, Sendable {
     var pinned: [String] = []
 }
 
-/// The log of a repo with its graph rows, in `git log --all --topo-order` order (after an incremental reload, the new
-/// commits on top of the previous ones, see `RepoSession.readLogIncrementally`). `rows[i]` is `commits[i]`'s row; the
+/// The log of a repo with its graph rows, in its `order` (git's `--date-order` or `--topo-order`; after an incremental
+/// reload, the new commits merged in, see `RepoSession.readLogIncrementally`). `rows[i]` is `commits[i]`'s row; the
 /// WIP row above the commits is in `syntheticRows`, the other worktrees' and the stash rows in `hung`, each right above
 /// its base (as GitKraken).
 struct LogSnapshot: Sendable {
@@ -111,6 +111,8 @@ struct LogSnapshot: Sendable {
     var generation = 0
     /// The hidden, soloed and pinned branches the log was read and laid out with.
     var filter = LogFilter()
+    /// The order the log was read in (`PrefKey.commitOrder`).
+    var order = LogReader.Order.date
     /// Timing only: the step times of the incremental read that made it (`readLogIncrementally`), for its
     /// `log-reload` line.
     var readSteps = ""
@@ -870,7 +872,9 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var autoFetchTask: Task<Void, Never>?
     /// The interval the timer runs at; 0 = off.
     @ObservationIgnored private var autoFetchMinutes = 0
-    /// Watches `PrefKey.autoFetchMinutes`; dropping it (close, deinit) stops the observation.
+    /// The order the log is read in: `PrefKey.commitOrder`, read in `init` and followed by `followCommitOrder`.
+    @ObservationIgnored private var commitOrder = LogReader.Order.date
+    /// Watches `PrefKey.autoFetchMinutes` and `PrefKey.commitOrder`; dropping it (close, deinit) stops the observation.
     @ObservationIgnored private var preferencesObserver: PreferencesObserver?
 
     /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
@@ -973,8 +977,13 @@ final class RepoSession: Identifiable {
         graphSearch.session = self
         resolveProfile()
         scheduleAutoFetch()
-        // Posted for every key, possibly off the main thread; only a change of the interval restarts the timer.
-        preferencesObserver = PreferencesObserver { [weak self] in self?.scheduleAutoFetch() }
+        followCommitOrder()
+        // Posted for every key, possibly off the main thread; only a change of the interval restarts the timer, only a
+        // change of the commit order reads the log again.
+        preferencesObserver = PreferencesObserver { [weak self] in
+            self?.scheduleAutoFetch()
+            self?.followCommitOrder()
+        }
         #if DEBUG
         // `-HistqOpenTerminal YES`: the drawer opens with the tab and starts its shell, as an explicit open does (QA
         // shots of the terminal).
@@ -1281,6 +1290,17 @@ final class RepoSession: Identifiable {
                 await self?.autoFetch()
             }
         }
+    }
+
+    /// Follows `PrefKey.commitOrder`; any other value (a hand-written default) reads as by date. A change reads the
+    /// whole log again in the new order, unless no load has started yet (`log` is `.idle`): the first one reads it.
+    private func followCommitOrder() {
+        let stored = Preferences.defaults.string(forKey: PrefKey.commitOrder.rawValue)
+        let order = stored.flatMap(LogReader.Order.init(rawValue:)) ?? .date
+        guard order != commitOrder else { return }
+        commitOrder = order
+        if case .idle = log { return }
+        refresh(scope: .log)
     }
 
     /// One automatic fetch: skipped while a user operation runs; a failure is only logged (failure toasts are for
@@ -1851,11 +1871,13 @@ final class RepoSession: Identifiable {
         // The first load starts beside the first refs read: with a saved view and no refs yet, `readLog` reads them.
         let filter: LogFilter? = view == .empty || refs.value != nil ? visibility : nil
         let view = view
-        // A complete log on screen read with the same hidden branches, none soloed: a reload first reads only the commits
-        // that are new since it. Hiding, showing or soloing a branch reads the whole log again (a soloed log always).
+        let order = commitOrder
+        // A complete log on screen read with the same hidden branches, none soloed, in the same order: a reload first
+        // reads only the commits that are new since it. Hiding, showing or soloing a branch, or changing the order,
+        // reads the whole log again (a soloed log always).
         let oldLog = log.value.flatMap { old in
             old.isComplete && filter?.hidden == old.filter.hidden && filter?.solo.isEmpty == true
-                && old.filter.solo.isEmpty ? old : nil
+                && old.filter.solo.isEmpty && old.order == order ? old : nil
         }
         logTask = Task { [weak self] in
             // Keeps App Nap from throttling the load while the app is in the background.
@@ -1870,7 +1892,7 @@ final class RepoSession: Identifiable {
                     do {
                         incremental = try await Self.readLogIncrementally(
                             backend, previous: oldLog, cwd: cwd, generation: generation, worktrees: worktrees,
-                            filter: filter)
+                            filter: filter, order: order)
                     } catch where !Self.isCancellation(error) {
                         Self.logger.error("incremental log reload failed: \(error, privacy: .public)")
                     }
@@ -1880,7 +1902,8 @@ final class RepoSession: Identifiable {
                     snapshot = incremental
                 } else {
                     snapshot = try await Self.readLog(
-                        backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view
+                        backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view,
+                        order: order
                     ) { first in
                         guard isFirstLoad, !Task.isCancelled else { return }
                         await MainActor.run {
@@ -1935,16 +1958,17 @@ final class RepoSession: Identifiable {
 
     /// Parses every page and lays it out, off the main actor, below the WIP and stash rows (the status and the stashes
     /// are read while git walks the history). `firstPage` gets the first page (laid out) as soon as it is ready.
-    /// `filter`: the graph's hidden, soloed and pinned branches; nil = resolve `view` against refs read here.
+    /// `filter`: the graph's hidden, soloed and pinned branches; nil = resolve `view` against refs read here. `order`:
+    /// the order git lists the commits in.
     /// Throws `CancellationError` when cancelled (the stream itself ends without an error then).
     @concurrent
     private nonisolated static func readLog(
         _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo], filter: LogFilter?,
-        view: RepoViewState, firstPage: @Sendable (LogSnapshot) async -> Void
+        view: RepoViewState, order: LogReader.Order, firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
-        var snapshot = LogSnapshot(generation: generation)
+        var snapshot = LogSnapshot(generation: generation, order: order)
         if let filter {
             snapshot.filter = filter
         } else {
@@ -1958,7 +1982,7 @@ final class RepoSession: Identifiable {
         let pages = LogReader.pages(
             runner: backend.runner, cwd: cwd, env: env,
             alsoFrom: filter.solo.isEmpty ? snapshot.stashes.map(\.base) : [],
-            hidden: filter.hidden.sorted(), solo: filter.solo)
+            hidden: filter.hidden.sorted(), solo: filter.solo, order: order)
         snapshot.worktrees = worktrees
         snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
         var (layout, top) = beginLayout(&snapshot)
@@ -2009,20 +2033,22 @@ final class RepoSession: Identifiable {
     /// reachable, a shallow repo, a graft file or a replace ref): the caller reads the whole log. Throws
     /// `CancellationError` when cancelled.
     ///
-    /// It has the same commits as a fresh read, in a valid topological order, but not always in the order of git's
-    /// `--topo-order`: the commits of `previous` keep their order and the new ones come on top, while a fresh read
-    /// after a commit on a branch other than the newest one would list that branch's whole line first.
+    /// `order` is `previous`'s (the caller checks). The result has the same commits as a fresh read, children before
+    /// parents, the commits of `previous` in their order. By branch the new ones come on top, not always where git's
+    /// `--topo-order` puts them: after a commit on a branch other than the newest one, a fresh read would list that
+    /// branch's whole line first. By date they are merged in by committer date (`LogReader.mergedByDate`), where a
+    /// fresh `--date-order` read puts them unless committer dates are skewed (a child older than its parent) or equal.
     @concurrent
     private nonisolated static func readLogIncrementally(
         _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
-        filter: LogFilter
+        filter: LogFilter, order: LogReader.Order
     ) async throws -> LogSnapshot? {
         var steps = UITiming.Steps()
         guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
         steps.lap("env")
-        var snapshot = LogSnapshot(generation: generation)
+        var snapshot = LogSnapshot(generation: generation, order: order)
         snapshot.filter = filter
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
         steps.lap("stashes")
@@ -2030,7 +2056,7 @@ final class RepoSession: Identifiable {
         steps.lap("tips")
         guard let delta = try await LogReader.newCommits(
             runner: backend.runner, cwd: cwd, env: env, previousTips: tips,
-            alsoFrom: snapshot.stashes.map(\.base), hidden: filter.hidden.sorted()),
+            alsoFrom: snapshot.stashes.map(\.base), hidden: filter.hidden.sorted(), order: order),
             !delta.contains(where: { previous.commitIndex[$0.hash] != nil })
         else { return nil }
         steps.lap("delta")
@@ -2046,7 +2072,9 @@ final class RepoSession: Identifiable {
             steps.lap("concat")
             snapshot.commitIndex = previous.commitIndex
         } else {
-            snapshot.commits = delta + previous.commits
+            snapshot.commits = order == .date
+                ? LogReader.mergedByDate(delta, into: previous.commits, index: previous.commitIndex)
+                : delta + previous.commits
             steps.lap("concat")
             snapshot.commitIndex.reserveCapacity(snapshot.commits.count)
             for (index, commit) in snapshot.commits.enumerated() { snapshot.commitIndex[commit.hash] = index }

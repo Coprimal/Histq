@@ -4,6 +4,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+### Added
+- Settings › Appearance › Commit list › Commit order: By date (the new default) lists the graph's commits newest first across branches, each still above its parents; By branch keeps each branch's commits together, as before.
+
 ### Changed
 - Squash and interactive rebase work with uncommitted changes: they are stashed first and put back afterwards (a squash keeps staged changes staged).
 

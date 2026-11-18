@@ -148,7 +148,7 @@ public struct GraphLayout: Sendable {
         for row in synthetic { if let base = row.base { waitingBases.insert(base) } }
     }
 
-    /// Lays out one page of commits (in `--topo-order`, children before parents).
+    /// Lays out one page of commits (children before parents, in either `LogReader.Order`).
     public mutating func append(_ commits: [Commit]) -> [GraphRow] {
         var rows: [GraphRow] = []
         rows.reserveCapacity(commits.count)
