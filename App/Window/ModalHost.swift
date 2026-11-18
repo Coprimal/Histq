@@ -51,6 +51,7 @@ struct ModalHost: View {
         case worktree(RepoSession, WorktreeForm)
         case pullRequest(RepoSession, PullRequestForm)
         case ai(RepoSession, AIRun)
+        case aiBatch(RepoSession, AIBatch)
         case conflictSave(RepoSession)
         case conflictLeave(RepoSession, String)
 
@@ -64,6 +65,7 @@ struct ModalHost: View {
             case .worktree(_, let form): "worktree \(form.id)"
             case .pullRequest(_, let form): "pull request \(form.id)"
             case .ai(_, let run): "ai \(run.id)"
+            case .aiBatch(_, let batch): "ai batch \(batch.id)"
             case .conflictSave: "conflict save"
             case .conflictLeave(_, let name): "conflict leave \(name)"
             }
@@ -88,6 +90,7 @@ struct ModalHost: View {
         if let form = session.worktreeForm { return .worktree(session, form) }
         if let form = session.pullRequestForm { return .pullRequest(session, form) }
         if let run = session.aiRun { return .ai(session, run) }
+        if let batch = session.aiBatch { return .aiBatch(session, batch) }
         if let leave = session.conflictLeave { return .conflictLeave(session, leave.name) }
         if session.conflictSavePrompt { return .conflictSave(session) }
         return nil
@@ -167,6 +170,8 @@ struct ModalHost: View {
             CreatePRView(session: session, form: form) { session.pullRequestForm = nil }
         case .ai(let session, let run):
             AIResultSheet(session: session, run: run) { session.closeAI() }
+        case .aiBatch(let session, let batch):
+            AIBatchSheet(session: session, batch: batch) { session.closeAIBatch() }
         case .conflictSave(let session):
             ConflictSaveModal(session: session)
         case .conflictLeave(let session, let name):
@@ -184,6 +189,7 @@ struct ModalHost: View {
         case .worktree(let session, _): session.worktreeForm = nil
         case .pullRequest(let session, _): session.pullRequestForm = nil
         case .ai(let session, _): session.closeAI()
+        case .aiBatch(let session, _): session.closeAIBatch()
         case .conflictSave(let session): session.cancelConflictSave()
         case .conflictLeave(let session, _): session.cancelConflictLeave()
         }

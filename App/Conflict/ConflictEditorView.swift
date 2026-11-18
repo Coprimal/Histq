@@ -1,8 +1,9 @@
 // A conflicted file in panel2, in place of the graph (GitKraken's layout), each part in its own card: the header (the
 // file, its conflict count, the encoding, "Open in external merge tool", Save, close), then panes A and B side by
 // side in one card (the two sides' whole files, conflict lines tinted with checkboxes) above Output (the merge,
-// editable, with "conflict k of N" and the AI button Suggest Resolution). A binary file or a file deleted on one side
-// gets a chooser card instead. The stages load off the main actor; until then the cards are skeletons.
+// editable, with "conflict k of N", the AI buttons Suggest Resolution and Suggest All, and Undo AI). A binary file or
+// a file deleted on one side gets a chooser card instead. The stages load off the main actor; until then the cards are
+// skeletons.
 import HistqCore
 import SwiftUI
 
@@ -32,6 +33,10 @@ struct ConflictDocument: Sendable {
     var revision = 0
     /// The conflict "conflict k of N" names (0-based).
     var current = 0
+    /// The worktree's `.aiignore` excludes this file, or can't be read (`aiIgnoreUnreadable`, fail closed): Suggest
+    /// Resolution is unavailable. Read with the stages.
+    var isAIIgnored = false
+    var aiIgnoreUnreadable = false
 
     nonisolated init(loadID: Int, source: ConflictSource, aCommit: String?, bCommit: String?) {
         self.loadID = loadID
@@ -307,46 +312,10 @@ private struct ConflictOutputCard: View {
         let current = min(document.current, max(0, count - 1))
         SectionCard(nil, contentPadding: 0) {
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Text("Output")
-                        .font(.body.weight(.semibold))
-                    if merge.hasResolutions {
-                        Button {
-                            session.resetConflict()
-                            sync.jump(toConflict: 0)
-                        } label: {
-                            Label("Reset", systemImage: "arrow.counterclockwise")
-                                .lineLimit(1)
-                        }
-                        .buttonStyle(RowTextButtonStyle())
-                        .fixedSize()
-                        .disabled(session.conflictBusy != nil)
-                        .help("Drop every tick and edit: Output as loaded (the file is not changed)")
-                    }
-                    Spacer(minLength: 8)
-                    if count > 0 {
-                        // AI (task 12.3): replaces only this conflict's Output, as a manual edit, once applied.
-                        AIHookButton(title: "Suggest Resolution", systemImage: "sparkles",
-                                     help: "Suggest a resolution of conflict \(current + 1) with AI",
-                                     unavailable: unavailableReason, seam: "resolve") {
-                            if let target = session.aiResolutionTarget() { session.startAI(.resolution(target)) }
-                        }
-                    }
-                    if count > 0 {
-                        Text("conflict \(current + 1) of \(count)")
-                            .monospacedDigit()
-                            .foregroundStyle(Color(nsColor: Palette.conflictA))
-                        if merge.unresolvedCount > 0 {
-                            Text("\(merge.unresolvedCount) unresolved")
-                                .font(.settingsCaption.monospacedDigit())
-                                .foregroundStyle(Color(nsColor: Palette.conflictUnresolved))
-                        }
-                        navigationButton("chevron.up", help: "Previous conflict", to: current - 1, count: count)
-                        navigationButton("chevron.down", help: "Next conflict", to: current + 1, count: count)
-                    } else {
-                        Text("No conflicts")
-                            .foregroundStyle(.secondary)
-                    }
+                // Never wider than the editor: the AI pair turns icon-only first, then "N unresolved" gives way.
+                ViewThatFits(in: .horizontal) {
+                    header(count: count, current: current, iconOnly: false)
+                    header(count: count, current: current, iconOnly: true)
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 34)
@@ -360,8 +329,92 @@ private struct ConflictOutputCard: View {
         }
     }
 
-    /// Suggest Resolution needs an editable Output and a free editor.
+    /// Output's header line; `iconOnly` draws the AI pair as icons for a narrow panel.
+    @ViewBuilder
+    private func header(count: Int, current: Int, iconOnly: Bool) -> some View {
+        HStack(spacing: 10) {
+            Text("Output")
+                .font(.body.weight(.semibold))
+                .fixedSize()
+            if merge.hasResolutions {
+                Button {
+                    session.resetConflict()
+                    sync.jump(toConflict: 0)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(RowTextButtonStyle())
+                .fixedSize()
+                .disabled(session.conflictBusy != nil)
+                .help("Drop every tick and edit: Output as loaded (the file is not changed)")
+                .accessibilityLabel("Reset")
+            }
+            // Not an AI button: an applied suggestion can be taken back with AI features hidden.
+            if session.canUndoAIResolutions {
+                Button {
+                    session.undoAIResolutions()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(RowTextButtonStyle())
+                .fixedSize()
+                .disabled(session.conflictBusy != nil)
+                .help("Put back the Output as it was before the last AI Apply")
+                .accessibilityLabel("Undo AI")
+            }
+            Spacer(minLength: 0)
+            if count > 0 {
+                // AI (task 12.3): replaces only this conflict's Output, as a manual edit, once applied.
+                AIHookButton(title: "Suggest Resolution", systemImage: "sparkles",
+                             help: "Suggest a resolution of conflict \(current + 1) with AI",
+                             unavailable: unavailableReason, seam: "resolve", small: true, iconOnly: iconOnly) {
+                    if let target = session.aiResolutionTarget() { session.startAI(.resolution(target)) }
+                }
+                let requests = merge.unresolvedCount == 1 ? "1 request" : "\(merge.unresolvedCount) requests"
+                AIHookButton(title: "Suggest All", systemImage: iconOnly ? "wand.and.stars" : nil,
+                             help: "One request per region, \(requests)",
+                             unavailable: merge.unresolvedCount == 0 ? "No conflict is left unresolved"
+                                 : unavailableReason,
+                             seam: "resolve-all", small: true, iconOnly: iconOnly) {
+                    session.startAIBatch()
+                }
+            }
+            if count > 0 {
+                // One line that never widens the editor: "N unresolved" (and its gap) gives way after the AI labels.
+                let counter = Text("conflict \(current + 1) of \(count)")
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                    .foregroundStyle(Color(nsColor: Palette.conflictA))
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        counter
+                        if merge.unresolvedCount > 0 {
+                            Text("\(merge.unresolvedCount) unresolved")
+                                .font(.settingsCaption.monospacedDigit())
+                                .lineLimit(1)
+                                .foregroundStyle(Color(nsColor: Palette.conflictUnresolved))
+                        }
+                    }
+                    counter
+                }
+                .layoutPriority(1)
+                navigationButton("chevron.up", help: "Previous conflict", to: current - 1, count: count)
+                navigationButton("chevron.down", help: "Next conflict", to: current + 1, count: count)
+            } else {
+                Text("No conflicts")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Suggest Resolution and Suggest All need a file `.aiignore` does not exclude, an editable Output and a free
+    /// editor.
     private var unavailableReason: String? {
+        if document.aiIgnoreUnreadable { return "The .aiignore file can't be read" }
+        if document.isAIIgnored { return "This file is excluded by .aiignore" }
         if !document.isUTF8 { return "Output is read-only: the file is not UTF-8" }
         if session.conflictBusy != nil { return "Wait for the save to finish" }
         return nil

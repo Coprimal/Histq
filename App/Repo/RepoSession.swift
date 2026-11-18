@@ -577,6 +577,8 @@ final class RepoSession: Identifiable {
     var pullRequestForm: PullRequestForm?
     /// The AI result card (`AIResultSheet`, task 12.3): the job it shows, running or finished.
     private(set) var aiRun: AIRun?
+    /// The Suggest All card (`AIBatchSheet`): every unresolved conflict region of the open file, asked in turn.
+    private(set) var aiBatch: AIBatch?
     /// The conflict editor's Save asks how to write the conflicts left unresolved (`ConflictSaveModal`).
     var conflictSavePrompt = false
     /// Leaving a conflict editor with unsaved ticks or edits asks first (`ConflictLeaveModal`): the way out waits here.
@@ -584,6 +586,17 @@ final class RepoSession: Identifiable {
     /// The way out the leave prompt's Save took on: applied once the write succeeds, after the save prompt
     /// (`conflictSavePrompt`) when conflicts are left; dropped when that prompt is cancelled.
     private var pendingLeave: ConflictLeave?
+
+    /// The conflict editor before the last AI Apply (Undo AI): valid only while the editor shows the same load of the
+    /// same file. Any other change to the resolution (tick, edit, Reset), a reload, Save or leaving drops it.
+    private var conflictAIUndo: ConflictAIUndo?
+
+    struct ConflictAIUndo {
+        let loadID: Int
+        let path: String
+        let merge: ThreeWayMerge
+        let current: Int
+    }
 
     /// A way out of a dirty conflict editor (another file, graph row, ref, pull request, or its close button): `name`
     /// is the open file's name; `navigate` runs once the editor is closed (Save or Don't Save).
@@ -595,7 +608,7 @@ final class RepoSession: Identifiable {
     /// A form, confirmation, host-key or rebase modal is open (`ModalHost` shows it over the window).
     var hasModal: Bool {
         dialog != nil || confirmation != nil || hostKeyCheck != nil || rebaseRequest != nil || worktreeForm != nil
-            || pullRequestForm != nil || aiRun != nil || conflictSavePrompt || conflictLeave != nil
+            || pullRequestForm != nil || aiRun != nil || aiBatch != nil || conflictSavePrompt || conflictLeave != nil
     }
 
     /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
@@ -2020,6 +2033,7 @@ final class RepoSession: Identifiable {
         openFile = nil
         fileDiff = .idle
         conflict = .idle
+        conflictAIUndo = nil
         conflictBusy = nil
         conflictError = nil
         cancelConflictSave()
@@ -2384,6 +2398,7 @@ final class RepoSession: Identifiable {
     private func loadConflict() {
         guard let target = openFile else { return }
         fileTask?.cancel()
+        conflictAIUndo = nil
         let token = fileToken
         fileLoadCount &+= 1
         let loadID = fileLoadCount
@@ -2425,8 +2440,16 @@ final class RepoSession: Identifiable {
         async let source = ConflictSource.load(path: path, labels: state.labels, runner: runner, cwd: cwd, env: env)
         async let aCommit = shortHash("HEAD", runner: runner, cwd: cwd, env: env)
         async let bCommit = incoming == nil ? nil : shortHash(incoming ?? "", runner: runner, cwd: cwd, env: env)
-        return ConflictDocument(loadID: loadID, source: try await source, aCommit: try await aCommit,
-                                bCommit: try await bCommit)
+        var document = ConflictDocument(loadID: loadID, source: try await source, aCommit: try await aCommit,
+                                        bCommit: try await bCommit)
+        // Suggest Resolution's `.aiignore` check; one that can't be read counts as excluding the file (fail closed).
+        do {
+            document.isAIIgnored = try AIIgnore.load(worktree: backend.directories.worktree)?.matches(path) == true
+        } catch {
+            document.isAIIgnored = true
+            document.aiIgnoreUnreadable = true
+        }
+        return document
     }
 
     /// The short hash of the commit a fixed pseudo-ref (`HEAD`, `MERGE_HEAD`) names; nil when it does not exist.
@@ -2439,9 +2462,11 @@ final class RepoSession: Identifiable {
         return result.exitCode == 0 && !hash.isEmpty ? hash : nil
     }
 
-    /// Changes the loaded conflict's merge and tells the panes (`revision`).
+    /// Changes the loaded conflict's merge and tells the panes (`revision`). Drops Undo AI's snapshot (a tick, an edit,
+    /// Reset, Undo AI itself); the AI Apply takes its own after the change.
     private func updateConflict(_ change: (inout ConflictDocument) -> Void) {
         guard case .loaded(var document) = conflict, document.merge != nil else { return }
+        conflictAIUndo = nil
         change(&document)
         document.revision &+= 1
         conflict = .loaded(document)
@@ -2548,6 +2573,7 @@ final class RepoSession: Identifiable {
         guard let target = openFile, target.isConflict, conflictBusy == nil else { return nil }
         let leave = pendingLeave
         pendingLeave = nil
+        conflictAIUndo = nil
         conflictBusy = title
         conflictError = nil
         let token = fileToken
@@ -2605,6 +2631,12 @@ final class RepoSession: Identifiable {
         let run = AIRun(job: job, provider: setup.provider, model: setup.model(for: setup.provider))
         UITiming.select("ai \(job.logName)")
         aiRun = run
+        run.start(prompt: aiPrompt(for: job))
+    }
+
+    /// What `AIRun.start` runs for `job` (the result card's, or a Suggest All region's): Settings › AI's languages and
+    /// the job's instructions as they are now, then `aiPrompt` off the main actor. Holds the session weakly.
+    func aiPrompt(for job: AIJob) -> @Sendable () async throws -> AIPrompt {
         let url = url
         let languages = Self.aiLanguages()
         let instructionsKey: PrefKey = switch job {
@@ -2614,7 +2646,7 @@ final class RepoSession: Identifiable {
         }
         let instructions = Preferences.defaults.string(forKey: instructionsKey.rawValue) ?? ""
         let branch = currentBranch
-        run.start { [weak self] in
+        return { [weak self] in
             guard let backend = try await self?.backend() else { throw CancellationError() }
             return try await Self.aiPrompt(job, backend: backend, cwd: url, languages: languages,
                                            instructions: instructions, branch: branch)
@@ -2622,10 +2654,30 @@ final class RepoSession: Identifiable {
     }
 
     /// Cancel, Escape, Close, Apply, a tab or page change, closing the tab or window: stops the stream (if any) and
-    /// closes the card.
+    /// closes the card, and the Suggest All card with its batch.
     func closeAI() {
         aiRun?.cancel()
         aiRun = nil
+        closeAIBatch()
+    }
+
+    /// Suggest All's click: the card opens in this call; its regions (`aiResolutionTargets`) are asked one after
+    /// another. Nothing happens when no conflict is left unresolved.
+    func startAIBatch() {
+        let targets = aiResolutionTargets()
+        guard !targets.isEmpty else { return }
+        closeAI()
+        let setup = AISetup.shared
+        let batch = AIBatch(targets: targets, provider: setup.provider, model: setup.model(for: setup.provider))
+        UITiming.select("ai resolve-all")
+        aiBatch = batch
+        batch.start(session: self)
+    }
+
+    /// Suggest All's Cancel, Close or Apply (and `closeAI`): stops the region being asked and closes the card.
+    func closeAIBatch() {
+        aiBatch?.cancel()
+        aiBatch = nil
     }
 
     /// The languages of Settings › AI: explanations, then commit messages (English for a missing or unknown value).
@@ -2640,7 +2692,8 @@ final class RepoSession: Identifiable {
     /// read environment (never a profile), without what the worktree's `.aiignore` and the skip list leave out
     /// (`AIPrompts.filtered`), cut to the prompt's budget. `instructions` are the job's own (Settings › AI); `branch`
     /// (taken at the click) and the last commit subjects go only into a commit message's prompt. A resolution's text
-    /// was taken at the click; it is never translated.
+    /// was taken at the click; it is never translated. Its intent (`resolutionIntent`) is read here, after the
+    /// `.aiignore` check.
     @concurrent
     private nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
@@ -2679,8 +2732,33 @@ final class RepoSession: Identifiable {
         case .resolution(let target):
             if try aiIgnore(worktree: worktree)?.matches(target.path) == true { throw AIJobError.fileIgnored }
             return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b,
+                                               intent: await resolutionIntent(target, backend: backend, cwd: cwd),
                                                instructions: instructions)
         }
+    }
+
+    /// What the operation of a resolution is about (see `AIPrompts.suggestResolution`): the full message of the commit
+    /// being replayed or cherry-picked (the pseudo-ref the B pane reads), or the branches being merged (the pane
+    /// labels). nil for a revert, no operation, or when git can't read the message.
+    private nonisolated static func resolutionIntent(
+        _ target: AIResolutionTarget, backend: Backend, cwd: URL
+    ) async -> (label: String, text: String)? {
+        let (label, ref): (String, String)
+        switch target.operation {
+        case .merge:
+            return ("intent: the branches being merged", "merge \(target.labels.b) into \(target.labels.a)")
+        case .rebase:
+            (label, ref) = ("intent of side B: message of the commit being replayed", "REBASE_HEAD")
+        case .cherryPick:
+            (label, ref) = ("intent of side B: message of the commit being cherry-picked", "CHERRY_PICK_HEAD")
+        case .revert, .none:
+            return nil
+        }
+        guard let env = try? await backend.readEnvironment(cwd: cwd),
+              let output = try? await backend.runner.run(
+                ["log", "-1", "--no-show-signature", "--format=%B", "--end-of-options", ref, "--"], cwd: cwd, env: env)
+        else { return nil }
+        return (label, output.text)
     }
 
     /// `diff` through `AIPrompts.filtered` with the worktree's `.aiignore`; throws `allIgnored` when `.aiignore` left
@@ -2713,10 +2791,22 @@ final class RepoSession: Identifiable {
     /// The open conflict's current region ("conflict k of N") for Suggest Resolution; nil when there is none (not a
     /// text conflict, not UTF-8, so Output is read-only, or not loaded).
     func aiResolutionTarget() -> AIResolutionTarget? {
+        guard let document = conflict.value, let merge = document.merge, merge.conflictCount > 0 else { return nil }
+        return aiResolutionTarget(conflict: min(document.current, merge.conflictCount - 1))
+    }
+
+    /// Suggest All's regions: every unresolved conflict of the open file, in order (none when Output is read-only).
+    func aiResolutionTargets() -> [AIResolutionTarget] {
+        guard let merge = conflict.value?.merge else { return [] }
+        return merge.conflictRegions.indices.filter { merge.regions[merge.conflictRegions[$0]].isUnresolved }
+            .compactMap { aiResolutionTarget(conflict: $0) }
+    }
+
+    /// Conflict `k` (0-based) of the open file as an AI target; nil when it is not a loaded UTF-8 text conflict.
+    private func aiResolutionTarget(conflict k: Int) -> AIResolutionTarget? {
         guard case .loaded(let document) = conflict, document.isUTF8, let merge = document.merge,
-              let path = openFile?.path, merge.conflictCount > 0
+              let path = openFile?.path, merge.conflictRegions.indices.contains(k)
         else { return nil }
-        let k = min(document.current, merge.conflictCount - 1)
         let index = merge.conflictRegions[k]
         let region = merge.regions[index]
         let hasBase = if case .text(let base, _, _) = document.source.content { base != nil } else { false }
@@ -2724,23 +2814,49 @@ final class RepoSession: Identifiable {
             path: path, loadID: document.loadID, conflict: k, region: index,
             base: hasBase ? merge.baseLines[region.base].joined() : nil,
             a: merge.aLines[region.a].joined(), b: merge.bLines[region.b].joined(),
-            lineBreak: merge.lineBreak, needsFinalBreak: merge.needsFinalBreak(region: index))
+            lineBreak: merge.lineBreak, needsFinalBreak: merge.needsFinalBreak(region: index),
+            operation: repoState?.operation ?? .none, labels: repoState?.labels ?? document.source.labels)
     }
 
-    /// Apply of a suggested resolution: replaces only the target region's Output, as a manual edit, with the file's
-    /// line breaks. Never saves or stages (Save does). Returns why it could not, when
-    /// the editor no longer shows that load of that file or that conflict.
-    func applyAIResolution(_ answer: String, to target: AIResolutionTarget) -> String? {
-        guard case .loaded(let document) = conflict, document.loadID == target.loadID, openFile?.path == target.path,
-              let merge = document.merge, merge.conflictRegions.indices.contains(target.conflict),
-              merge.conflictRegions[target.conflict] == target.region
+    /// Apply of suggested resolutions (one region from the result card, the chosen ones from Suggest All): replaces
+    /// only each target region's Output, as a manual edit, with the file's line breaks, in one step that Undo AI takes
+    /// back (`conflictAIUndo`). Never saves or stages (Save does). Writes nothing and returns why, when the editor no
+    /// longer shows that load of that file or one of those conflicts.
+    func applyAIResolutions(_ items: [(AIResolutionTarget, String)]) -> String? {
+        guard let first = items.first else { return nil }
+        guard case .loaded(let document) = conflict, let merge = document.merge, let path = openFile?.path,
+              items.allSatisfy({ target, _ in
+                  document.loadID == target.loadID && path == target.path
+                      && merge.conflictRegions.indices.contains(target.conflict)
+                      && merge.conflictRegions[target.conflict] == target.region
+              })
         else { return "The conflict editor changed since the suggestion was asked for. Ask again." }
+        let undo = ConflictAIUndo(loadID: document.loadID, path: path, merge: merge, current: document.current)
         updateConflict { document in
-            let text = AIPrompts.resolutionText(answer, lineBreak: target.lineBreak, finalBreak: target.needsFinalBreak)
-            document.merge?.setManualText(text, region: target.region)
-            document.current = target.conflict
+            for (target, answer) in items {
+                let text = AIPrompts.resolutionText(answer, lineBreak: target.lineBreak,
+                                                    finalBreak: target.needsFinalBreak)
+                document.merge?.setManualText(text, region: target.region)
+            }
+            document.current = first.0.conflict
         }
+        conflictAIUndo = undo
         return nil
+    }
+
+    /// The editor still shows the load and file the last AI Apply changed (Undo AI's button).
+    var canUndoAIResolutions: Bool {
+        guard let undo = conflictAIUndo, let document = conflict.value else { return false }
+        return document.loadID == undo.loadID && openFile?.path == undo.path
+    }
+
+    /// Undo AI: puts back the resolution as it was before the last AI Apply (ticks, edits, the current conflict).
+    func undoAIResolutions() {
+        guard canUndoAIResolutions, let undo = conflictAIUndo else { return }
+        updateConflict { document in
+            document.merge = undo.merge
+            document.current = undo.current
+        }
     }
 
     /// Writes a resolution into the working tree: atomically (a temporary file renamed over the old one, so a crash

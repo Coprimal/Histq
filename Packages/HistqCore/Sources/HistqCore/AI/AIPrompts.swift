@@ -63,6 +63,8 @@ public struct AIPrompt: Sendable, Equatable {
 
     var beginAnswer: String { "BEGIN ANSWER \(boundary)" }
     var endAnswer: String { "END ANSWER \(boundary)" }
+    var beginReason: String { "BEGIN REASON \(boundary)" }
+    var endReason: String { "END REASON \(boundary)" }
 
     /// The answer's token cap: a commit message is short; a resolution can be as long as both sides.
     public var maxTokens: Int {
@@ -113,10 +115,25 @@ public struct AIPrompt: Sendable, Equatable {
         return String(text.drop { $0.isNewline }.prefix { !$0.isNewline })
     }
 
-    /// The lines between the first begin marker line and the next end marker line, with their line breaks. Nil
-    /// without a begin marker line, or without an end marker line when `requireEnd`.
-    private func answerBlock(in reply: String, requireEnd: Bool) -> String? {
+    /// The text of the first complete reason block of a resolution reply (see `make`), trimmed and cut to 600
+    /// characters; nil without one or when it is blank. Display only, as plain text: it is never part of the answer.
+    public func reason(from reply: String) -> String? {
         let lines = AIPrompts.linesKeepingBreaks(reply)
+        guard let begin = lines.firstIndex(where: { isMarker($0, beginReason) }),
+              let end = lines[(begin + 1)...].firstIndex(where: { isMarker($0, endReason) }) else { return nil }
+        let text = lines[(begin + 1)..<end].joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : String(text.prefix(600))
+    }
+
+    /// The lines between the first begin marker line and the next end marker line, with their line breaks. Nil
+    /// without a begin marker line, or without an end marker line when `requireEnd`. Complete reason blocks, marker
+    /// lines included, are dropped first, so a reason never ends up in the answer, wherever the model put it.
+    private func answerBlock(in reply: String, requireEnd: Bool) -> String? {
+        var lines = AIPrompts.linesKeepingBreaks(reply)
+        while let begin = lines.firstIndex(where: { isMarker($0, beginReason) }),
+              let end = lines[(begin + 1)...].firstIndex(where: { isMarker($0, endReason) }) {
+            lines.removeSubrange(begin...end)
+        }
         guard let begin = lines.firstIndex(where: { isMarker($0, beginAnswer) }) else { return nil }
         let rest = lines[(begin + 1)...]
         if let end = rest.firstIndex(where: { isMarker($0, endAnswer) }) {
@@ -226,12 +243,22 @@ public enum AIPrompts {
     /// A resolution of one conflict region of `path`: A (ours), B (theirs) and their common base (nil for an
     /// add/add conflict, which has none), as in `ThreeWayMerge`. The region is sent whole: a cut region could not be
     /// resolved correctly. `instructions` (Settings › AI) is added after the default rules but never changes the
-    /// answer's form (the region's final text, no conflict markers); blank adds nothing.
+    /// answer's form (the region's final text, no conflict markers); blank adds nothing. `intent`, what the operation
+    /// is about, goes in as a data block right after the file path, its text cut to `maxMessageCharacters`; nil or
+    /// blank adds nothing. Its label stands outside the block, so it is one of these fixed strings, never repo content:
+    /// - `intent of side B: message of the commit being replayed` (rebase)
+    /// - `intent of side B: message of the commit being cherry-picked` (cherry-pick)
+    /// - `intent: the branches being merged` (merge, text `merge <B branch> into <A branch>`)
+    ///
+    /// The reply also holds a short reason before its answer (`AIPrompt.reason(from:)`).
     public static func suggestResolution(
-        path: String, base: String?, a: String, b: String, instructions: String = "",
-        token: () -> String = randomToken
+        path: String, base: String?, a: String, b: String, intent: (label: String, text: String)? = nil,
+        instructions: String = "", token: () -> String = randomToken
     ) -> AIPrompt {
         var data = [("file path", path)]
+        if let intent, !intent.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            data.append((intent.label, String(intent.text.prefix(maxMessageCharacters))))
+        }
         if let base { data.append(("base: the common ancestor", base)) }
         data += [("A: ours, the current branch", a), ("B: theirs, the change being merged", b)]
         return make(
@@ -242,7 +269,7 @@ public enum AIPrompts {
                 - Write the merged text that keeps the intent of both sides; when they truly exclude each other, \
                 prefer the one that keeps the code correct.
                 - Answer with the region's final text only, exactly as it should appear in the file, with the same \
-                indentation and line endings. No explanation, no code fences.
+                indentation and line endings. No explanation inside the answer block, no code fences.
                 - Never write conflict markers (lines starting with <<<<<<<, |||||||, ======= or >>>>>>>).
                 """ + instructionsRule(
                     instructions, for: "conflict resolutions",
@@ -298,6 +325,15 @@ public enum AIPrompts {
             Write your whole answer between a line "BEGIN ANSWER \(boundary)" and a line "END ANSWER \(boundary)", \
             each on its own line. Only the text between these two lines is used; anything outside them is ignored.
             """
+        if kind == .resolution {
+            system += """
+
+
+                Before the answer, write in one or two sentences why you resolved it this way, between a line \
+                "BEGIN REASON \(boundary)" and a line "END REASON \(boundary)", each on its own line. The reason is \
+                only shown to the user; it is never part of the answer.
+                """
+        }
         if let languageRule { system += "\n\n" + languageRule }
         var user = request + "\n"
         for (label, content) in data {

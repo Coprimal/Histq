@@ -101,6 +101,53 @@ struct AIPromptsTests {
         #expect(try prompt.answer(from: "BEGIN ANSWER histq-77\nEND ANSWER histq-77") == "", "empty: delete both sides")
     }
 
+    // MARK: - Conflict intent and reason
+
+    @Test("a resolution's reason never enters the answer, and a reply without one still yields the answer")
+    func reasonNeverEntersTheAnswer() throws {
+        let prompt = AIPrompts.suggestResolution(path: "f", base: nil, a: "a\n", b: "b\n", token: { "histq-77" })
+        #expect(prompt.system.contains("\"BEGIN REASON histq-77\" and a line \"END REASON histq-77\""))
+        let resolution = "\tlet x = 1\nlet y = 2\n"
+        let reason = "BEGIN REASON histq-77\n  Both sides add a line; keep both.  \nEND REASON histq-77\n"
+
+        let before = reason + "BEGIN ANSWER histq-77\n\(resolution)END ANSWER histq-77\n"
+        #expect(try prompt.answer(from: before) == resolution)
+        #expect(prompt.reason(from: before) == "Both sides add a line; keep both.")
+        let inside = "BEGIN ANSWER histq-77\n\tlet x = 1\n\(reason)let y = 2\nEND ANSWER histq-77\n"
+        #expect(try prompt.answer(from: inside) == resolution, "a reason inside the answer block is dropped")
+
+        let noReason = "BEGIN ANSWER histq-77\n\(resolution)END ANSWER histq-77\n"
+        #expect(try prompt.answer(from: noReason) == resolution)
+        #expect(prompt.reason(from: noReason) == nil)
+        let long = "BEGIN REASON histq-77\n\(String(repeating: "x", count: 700))\nEND REASON histq-77\n"
+        #expect(prompt.reason(from: long + noReason)?.count == 600)
+    }
+
+    @Test("the intent text goes only into a data block, right after the file path, cut to the message limit")
+    func intentOnlyInADataBlock() {
+        let label = "intent of side B: message of the commit being replayed"
+        let text = "Add the pangolin cache " + String(repeating: "y", count: 5_000)
+        let prompt = AIPrompts.suggestResolution(
+            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (label, text), token: { "histq-1" })
+
+        var outside = prompt.user
+        while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
+              let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        #expect(prompt.user.contains("BEGIN DATA histq-1 (\(label))\n\(text.prefix(4_000))\nEND DATA histq-1\n"))
+        #expect(!prompt.user.contains(text.prefix(4_001)))
+        #expect(!outside.contains("pangolin") && !prompt.system.contains("pangolin"))
+        #expect(prompt.user.components(separatedBy: "BEGIN DATA histq-1 (").dropFirst().map {
+            String($0.prefix { $0 != ")" })
+        } == ["file path", label, "base: the common ancestor", "A: ours, the current branch",
+              "B: theirs, the change being merged"])
+        let plain = AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", token: { "histq-1" })
+        let blank = AIPrompts.suggestResolution(
+            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (label, " \n"), token: { "histq-1" })
+        #expect(blank == plain, "a blank intent adds nothing")
+    }
+
     // MARK: - Resolution text
 
     /// `answer` applied to the file's only conflict as Apply does: `resolutionText` with the merge's line break and

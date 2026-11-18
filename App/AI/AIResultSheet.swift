@@ -1,10 +1,10 @@
 // The AI actions' result, an in-window `ModalCard` (never a native sheet), opened by the AI buttons: Generate Message
 // (commit box), Explain (commit details, WIP) and Suggest Resolution (conflict editor). A click opens the card in its
 // frame with a skeleton; the diff is read and the prompt built off the main actor, then the answer streams in as a
-// preview (`AIPrompt.preview`). Apply uses only `AIPrompt.answer(from:)`: a commit message fills the commit box, a
-// resolution replaces the current conflict region's Output as a manual edit (never saved or staged). Copy copies the
-// answer; Regenerate runs the same job again in a fresh card; Cancel stops the stream at once and closes the card.
-// Errors show their `description`, never a key.
+// preview (`AIPrompt.preview`), under a resolution's short reason (plain text, never applied). Apply uses only
+// `AIPrompt.answer(from:)`: a commit message fills the commit box, a resolution replaces the current conflict region's
+// Output as a manual edit (never saved or staged). Copy copies the answer; Regenerate runs the same job again in a
+// fresh card; Cancel stops the stream at once and closes the card. Errors show their `description`, never a key.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -66,6 +66,9 @@ struct AIResolutionTarget: Equatable, Sendable {
     /// The region ends with a line break (`ThreeWayMerge.needsFinalBreak(region:)`); `AIPrompts.resolutionText` adds
     /// or drops the answer's final one to match.
     let needsFinalBreak: Bool
+    /// The operation in progress at the click and its pane labels (`RepoState`): what the prompt's intent is read from.
+    let operation: RepoState.Operation
+    let labels: ConflictLabels
 }
 
 /// Why a job could not start; shown in the card.
@@ -109,6 +112,9 @@ final class AIRun: Identifiable {
     private(set) var phase = Phase.preparing
     /// What the card shows of the reply so far (the answer block only).
     private(set) var preview = ""
+    /// A resolution's short reason (`AIPrompt.reason(from:)`), updated with the preview: shown as plain text, never
+    /// applied.
+    private(set) var reason: String?
     private(set) var reply = ""
     /// Not observed, so `deinit` (nonisolated) can cancel it.
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -133,11 +139,14 @@ final class AIRun: Identifiable {
     var isRunning: Bool { phase == .preparing || phase == .streaming }
 
     /// Reads the job's content and streams the answer. `prompt` runs off the main actor (git reads, the diff budget).
-    func start(prompt: @escaping @Sendable () async throws -> AIPrompt) {
+    /// `onFinish` runs once when the job ends, however it ends (answer, failure, cancel, the run dropped): what Suggest
+    /// All awaits before it asks the next region. It is held by the task, never by the run.
+    func start(prompt: @escaping @Sendable () async throws -> AIPrompt, onFinish: (@MainActor () -> Void)? = nil) {
         task?.cancel()
         let provider = provider
         let model = model
         task = Task { [weak self] in
+            defer { onFinish?() }
             do {
                 let prompt = try await prompt()
                 try Task.checkCancellation()
@@ -154,16 +163,21 @@ final class AIRun: Identifiable {
                         // second, but at once while nothing shows (the first words' timing and the cancel seam).
                         guard preview.isEmpty || ContinuousClock.now - shown >= .milliseconds(50) else { continue }
                         preview = prompt.preview(of: reply)
+                        reason = prompt.reason(from: reply)
                         shown = .now
                     }
                 } catch {
                     // A failed stream shows what came with the error: the throttle may have held back the end.
-                    if let self { preview = prompt.preview(of: reply) }
+                    if let self {
+                        preview = prompt.preview(of: reply)
+                        reason = prompt.reason(from: reply)
+                    }
                     throw error
                 }
                 try Task.checkCancellation()
                 guard let self else { return }
                 preview = prompt.preview(of: reply)
+                reason = prompt.reason(from: reply)
                 do {
                     phase = .finished(try prompt.answer(from: reply))
                 } catch {
@@ -265,7 +279,7 @@ struct AIResultSheet: View {
     private var previewBox: some View {
         let text = run.answer ?? run.preview
         Group {
-            if text.isEmpty && error == nil {
+            if text.isEmpty && run.reason == nil && error == nil {
                 VStack(alignment: .leading, spacing: 10) {
                     SkeletonLine(fraction: 0.7, height: 12)
                     SkeletonLine(fraction: 0.9, height: 12)
@@ -283,6 +297,12 @@ struct AIResultSheet: View {
                 ScrollView {
                     // An error shows under what came of the answer, in the same box.
                     VStack(alignment: .leading, spacing: 8) {
+                        // Plain text only: the reason is steered by repo content and is never applied.
+                        if let reason = run.reason {
+                            Text(verbatim: reason)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                         if !text.isEmpty { previewText(text) }
                         ErrorText(message: error)
                     }
@@ -354,7 +374,7 @@ struct AIResultSheet: View {
             session.applyAICommitMessage(answer, summaryOnly: summaryOnly)
             onClose()
         case .resolution(let target):
-            if let error = session.applyAIResolution(answer, to: target) {
+            if let error = session.applyAIResolutions([(target, answer)]) {
                 applyError = error
             } else {
                 onClose()
@@ -370,7 +390,8 @@ struct AIResultSheet: View {
         switch phase {
         case .finished(let answer):
             let firstLine = answer.split(separator: "\n").first.map(String.init) ?? ""
-            AIStub.log("finished \(run.job.logName) chars \(answer.count) first-line \(AIStub.quoted(firstLine))")
+            AIStub.log("finished \(run.job.logName) chars \(answer.count) first-line \(AIStub.quoted(firstLine))"
+                + (run.reason.map { " reason \(AIStub.quoted($0))" } ?? ""))
             if AIStub.takeRegenerate() {
                 regenerate()
                 return
@@ -447,6 +468,8 @@ struct AIHookButton: View {
     var seam: String
     /// In a card header: a step smaller than `RowTextButtonStyle`'s callout.
     var small = false
+    /// A narrow header's fallback: the symbol alone (`sparkles` without one), the title in the tooltip.
+    var iconOnly = false
     let action: () -> Void
     @AppStorage(PrefKey.aiShowFeatures.rawValue, store: Preferences.defaults)
     private var showFeatures = true
@@ -459,27 +482,38 @@ struct AIHookButton: View {
 
     @ViewBuilder
     private var button: some View {
-        let reason = setup.isReady ? unavailable : AISetup.setUpHint
+        let ready = setup.isReady
+        let reason = ready ? unavailable : AISetup.setUpHint
         Button(action: action) {
             HStack(spacing: 4) {
-                if let systemImage {
-                    Image(systemName: systemImage)
+                if iconOnly {
+                    Image(systemName: systemImage ?? "sparkles")
                         .accessibilityHidden(true)
+                } else {
+                    if let systemImage {
+                        Image(systemName: systemImage)
+                            .accessibilityHidden(true)
+                    }
+                    Text(title)
+                        .lineLimit(1)
                 }
-                Text(title)
-                    .lineLimit(1)
             }
             .font(small ? .subheadline.weight(.medium) : .callout.weight(.medium))
         }
         .buttonStyle(RowTextButtonStyle())
         .fixedSize()
         .disabled(reason != nil)
-        .help(reason ?? help)
+        .help(iconOnly ? "\(title): \(reason ?? help)" : reason ?? help)
+        .accessibilityLabel(title)
         .onAppear { setup.loadKeysIfNeeded() }
         #if DEBUG
-        .task(id: reason == nil) {
-            guard reason == nil, AIStub.takeSeam(seam) else { return }
-            action()
+        .task(id: reason) {
+            guard let reason else {
+                if AIStub.takeSeam(seam) { action() }
+                return
+            }
+            // The button's own reason only (never the set-up hint): why a QA launch's hook did not click.
+            if ready { AIStub.logUnavailable(seam, reason: reason) }
         }
         #endif
     }
