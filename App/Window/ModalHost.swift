@@ -194,7 +194,11 @@ struct ModalHost: View {
             } onCancel: {
                 session.confirmation = nil
             } onSecondary: {
-                if let secondary = confirmation.secondary {
+                if case .pull(let mode, _)? = confirmation.secondary?.write {
+                    // The rejected push's Pull: an operation of its own (its title, button and auto-stash question).
+                    session.confirmation = nil
+                    session.pull(mode)
+                } else if let secondary = confirmation.secondary {
                     accept(confirmation, session, write: secondary.write, remember: "never")
                 }
             }

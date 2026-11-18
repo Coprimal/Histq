@@ -172,6 +172,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqOperation continue\|abort\|skip` | Presses the operation banner's button. |
 | `-HistqOpenRebase <rev>` / `-HistqOpenSquash "<rev>,<rev>"` / `-HistqStartRebase` | Opens the interactive rebase or squash sheet; starts it. |
 | `-HistqRewordRow <n>` | With `-HistqOpenRebase`, switches row n (1-based) to Reword once the sheet has loaded. |
+| `-HistqEditMessage open\|save:<summary>` | With `-HistqSelect commit:<sha>`, presses the commit card's Edit button once (HEAD: the inline editor; an older commit: the rebase sheet with that row on Reword); `save:` also sets the summary and presses Update Message. |
 | `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |

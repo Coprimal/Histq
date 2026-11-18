@@ -551,6 +551,8 @@ final class RepoSession: Identifiable {
         case discardAll(includingUntracked: Bool)
         case commit(message: String)
         case amend(message: String)
+        /// The message of HEAD (full id, the commit the editor opened on): only the message changes, not the index.
+        case editMessage(commit: String, message: String)
         /// Selected lines of a diff (`PatchBuilder.patch`): staged, unstaged or discarded with `git apply`.
         case applyPatch(Data, PatchBuilder.Action)
 
@@ -4009,8 +4011,9 @@ final class RepoSession: Identifiable {
     }
 
     /// Opens the rebase sheet at once; it builds the todo off the main actor (`loadRebaseTodo`).
-    func openInteractiveRebase(from commit: String) {
-        rebaseRequest = RebaseRequest(kind: .fromCommit(commit))
+    /// With `reword`, the sheet opens with that commit's row set to reword.
+    func openInteractiveRebase(from commit: String, reword: Bool = false) {
+        rebaseRequest = RebaseRequest(kind: .fromCommit(commit), reword: reword ? commit : nil)
     }
 
     func openSquash(_ commits: [String]) {
@@ -4408,6 +4411,7 @@ final class RepoSession: Identifiable {
         case .discardAll(let includingUntracked): try await ops.discardAll(includingUntracked: includingUntracked)
         case .commit(let message): try await ops.commit(message: message)
         case .amend(let message): try await ops.amend(message: message)
+        case .editMessage(let commit, let message): try await ops.editHeadMessage(commit, message: message)
         case .applyPatch(let patch, let action):
             // `apply` takes the runner's write lane itself, like the operations.
             try await PatchBuilder.apply(patch, action: action, runner: backend.runner, cwd: cwd, env: environment)
@@ -4556,7 +4560,8 @@ final class RepoSession: Identifiable {
                     } else {
                         Self.message(for: error)
                     }
-                    report(OperationFailure(title: title, write: write, error: error, message: message))
+                    let failure = OperationFailure(title: title, write: write, error: error, message: message)
+                    if !offerForcePush(after: failure, key: key) { report(failure) }
                 }
             }
             running.removeAll { $0.id == operation.id }

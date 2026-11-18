@@ -82,6 +82,33 @@ extension RepoSession {
         }
     }
 
+    /// A normal push the remote rejected because its branch has commits this branch lacks: asks Force Push (with
+    /// lease, against the remote-tracking commit) / Pull / Cancel instead of the "Pull first" toast; Pull only for
+    /// the checked-out branch (a pull has no other). Only when the branch is behind that remote-tracking commit;
+    /// never after a lease refusal (a push with a lease), so no loop. True when it asked.
+    func offerForcePush(after failure: OperationFailure, key: ActionBarAction?) -> Bool {
+        guard case .push(let branch, let remote, let remoteBranch, let setUpstream, nil) = failure.write,
+              case .nonFastForward = failure.error as? GitError else { return false }
+        let destination = "\(remote)/\(remoteBranch ?? branch)"
+        guard let refs = refs.value,
+              let lease = refs.remoteBranches.first(where: { $0.name == destination })?.commit,
+              let local = refs.localBranches.first(where: { $0.name == branch }),
+              local.upstream == destination, local.behind > 0 else { return false }
+        self.failure = failure
+        let count = "\(local.behind) \(local.behind == 1 ? "commit" : "commits")"
+        let canPull = branch == currentBranch
+        confirm("Force push \(branch) to \(destination)?",
+                message: (local.ahead > 0 ? "\(branch) and \(destination) have diverged. " : "")
+                    + "\(destination) has \(count) that \(branch) does not have. Force Push (with lease) removes "
+                    + (canPull ? "them from the remote; Pull brings them in first." : "them from the remote."),
+                button: "Force Push (with lease)",
+                write: .push(branch: branch, remote: remote, remoteBranch: remoteBranch, setUpstream: setUpstream,
+                             forceWithLease: lease),
+                operation: "Force push \(branch)", key: key,
+                secondary: canPull ? ("Pull", .pull(RepoSession.preferredPullMode)) : nil)
+        return true
+    }
+
     /// Every pull (the toolbar, the action bar, the Pull menus). With local changes and `PrefKey.autoStash` "ask", asks
     /// first: Stash & Pull (`--autostash`) or Cancel. Untracked files alone count as clean: `--autostash` leaves them
     /// out (`stash create`) and a plain pull already works with them.

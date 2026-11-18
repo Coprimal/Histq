@@ -19,6 +19,8 @@ struct RebaseRequest: Identifiable {
 
     let id = UUID()
     let kind: Kind
+    /// A `.fromCommit` sheet's row (full id) that starts as reword.
+    var reword: String? = nil
 }
 
 struct InteractiveRebaseView: View {
@@ -162,6 +164,9 @@ struct InteractiveRebaseView: View {
             let loaded = try await session.loadRebaseTodo(request.kind)
             items = loaded.items
             message = loaded.items.first?.newMessage ?? ""
+            if !isSquash, let reword = request.reword, let index = items.firstIndex(where: { $0.commit == reword }) {
+                items[index].setAction(.reword)
+            }
             #if DEBUG
             // `-HistqRewordRow <n>` (1-based): that row becomes reword as its action menu would, for the Improve hook.
             if !isSquash, let row = AppState.launchFlag("-HistqRewordRow").flatMap(Int.init),
