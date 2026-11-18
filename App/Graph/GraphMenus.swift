@@ -5,7 +5,7 @@
 // graph), the Local and Remote cards' Hide Stale Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
 // (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, stash one WIP file or
-// folder, apply one file of a stash, and what a double-click checks out.
+// folder, ignore or exclude an untracked one, apply one file of a stash, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -176,8 +176,11 @@ enum RepoMenus {
     }
 
     /// The WIP file and folder menus' entries `WIPPanel` does not build itself, after a separator: "Stash Changes in
-    /// <name>" (a folder: `file.path` is its path). `untracked`: the row's files are all untracked.
-    static func wipExtras(_ file: FileChange, untracked: Bool, session: RepoSession) -> [MenuEntry] {
+    /// <name>" (`isFolder`: a folder row, `file.path` is its path). `untracked`: the row's files are all untracked,
+    /// which adds the Ignore entries (`ignore`).
+    static func wipExtras(_ file: FileChange, untracked: Bool, isFolder: Bool = false, session: RepoSession)
+        -> [MenuEntry]
+    {
         // git cannot stash a path the index deletes (a staged deletion, a staged rename's old path): it saves the
         // stash, then fails. So a rename is stashed by its new path and its old path's deletion stays staged.
         let deletedInIndex = session.status.value?.entries.contains { $0.path == file.path && $0.index == .deleted }
@@ -187,7 +190,27 @@ enum RepoMenus {
             .action("Stash Changes in \(file.name)") {
                 session.run(.stashPaths([file.path]), title: "Stash \(file.name)", key: .stash)
             },
-        ]
+        ] + (untracked ? ignore(file, isFolder: isFolder, session) : [])
+    }
+
+    /// An untracked file's "Ignore <name>", "Ignore All *.<ext>" (when it has one) and "Ignore Folder <dir>" (its
+    /// folder, when not at the top level), a folder row's "Ignore Folder <dir>", each adding a line to `.gitignore`;
+    /// then the same in an "Exclude Locally" submenu, for `.git/info/exclude` (this clone only).
+    private static func ignore(_ file: FileChange, isFolder: Bool, _ session: RepoSession) -> [MenuEntry] {
+        let folder = isFolder ? file.path : file.folder
+        let ext = isFolder ? "" : (file.name as NSString).pathExtension
+        let lines = (isFolder ? [] : [(file.name, GitOperations.ignorePattern(file: file.path))])
+            + (ext.isEmpty ? [] : [("All *.\(ext)", GitOperations.ignorePattern(extension: ext))])
+            + (folder.isEmpty ? [] : [("Folder \(folder)", GitOperations.ignorePattern(folder: folder))])
+        func entries(_ target: GitOperations.IgnoreFile, verb: String) -> [MenuEntry] {
+            lines.map { name, pattern in
+                .action("Ignore \(name)") {
+                    session.run(.ignore(pattern: pattern, in: target), title: "\(verb) \(name)")
+                }
+            }
+        }
+        return [.separator] + entries(.gitignore, verb: "Ignore")
+            + [.submenu("Exclude Locally", entries(.infoExclude, verb: "Exclude"))]
     }
 
     static func stash(_ hash: String, _ session: RepoSession) -> [MenuEntry] {
@@ -554,6 +577,41 @@ enum RepoMenus {
         ]
     }
 
+    // MARK: Repository
+
+    /// The repository's own actions (the toolbar's repo menu, the palette): Show Reflog, Optimize Repository
+    /// (confirmed; disabled while one runs: it is outside the write lane, so a second one would redo the work or fail on
+    /// git's lock).
+    static func repository(_ session: RepoSession) -> [MenuEntry] {
+        let operation = "Optimize repository"
+        return [
+            .action("Show Reflog") { session.selectTool(.reflog) },
+            .action("Optimize Repository…", enabled: !session.running.contains { $0.title == operation }) {
+                session.confirm("Optimize the repository?",
+                                message: "Writes a commit-graph file so history and the graph load faster in big "
+                                    + "repositories. It is safe: no branch, file or change is touched. It can take a "
+                                    + "while on a large repository.",
+                                button: "Optimize", write: .optimizeRepository, operation: operation,
+                                isDestructive: false)
+            },
+        ]
+    }
+
+    /// A reflog entry's menu: its commit, which may be in no branch any more, checked out (detached, confirmed), a branch
+    /// from it, its SHA.
+    static func reflog(_ hash: String, _ session: RepoSession) -> [MenuEntry] {
+        let short = String(hash.prefix(7))
+        let isHead = session.refs.value?.head.commit == hash
+        return [
+            .action("Checkout This Commit (Detached)…", enabled: !(isHead && session.currentBranch == nil)) {
+                confirmDetached(hash, label: short, session)
+            },
+            .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
+            .separator,
+            .action("Copy SHA") { copy(hash) },
+        ]
+    }
+
     /// Why a worktree cannot be removed from this tab; nil when it can.
     private static func removeUnavailableReason(_ info: WorktreeInfo) -> String? {
         if info.worktree.isMain { return "The main worktree cannot be removed." }
@@ -839,8 +897,9 @@ enum RepoMenus {
     /// the other, as a click would (a confirmation is accepted; forms are not supported). `<menu>` is `wip`,
     /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `remotes`, `file:<sha>:<path>`,
     /// `wipfile:<path>` (a WIP file's `wipExtras`), `stashfile:<sha>:<path>` (a tracked file of a stash),
-    /// `drop:<local|remote>:<name>><local|remote>:<name>` or `branches` (the toolbar's branch menu). Each step's
-    /// outcome goes to `operations.txt` in the state folder. For QA on fixture copies only.
+    /// `drop:<local|remote>:<name>><local|remote>:<name>`, `branches` (the toolbar's branch menu), `repo`
+    /// (`repository`, the toolbar's repo menu) or `reflog:<sha>` (a reflog entry's menu). Each step's outcome goes to
+    /// `operations.txt` in the state folder. For QA on fixture copies only.
     static func debugRun(_ spec: String, session: RepoSession) async {
         for step in spec.components(separatedBy: ";;") {
             guard let perform = debugAction(step, session) else {
@@ -896,6 +955,8 @@ enum RepoMenus {
         case "push": return push(session)
         case "branches": return branchPicker(session)
         case "worktrees": return worktrees(session)
+        case "repo": return repository(session)
+        case "reflog": return reflog(value, session)
         case "worktree":
             // By folder name or path.
             let info = session.worktrees.value?.first { $0.name == value || $0.path == value }

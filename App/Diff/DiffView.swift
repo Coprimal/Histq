@@ -339,6 +339,7 @@ private struct DiffHeaderCard: View {
         switch session.returnTool {
         case .fileHistory?: "History"
         case .blame?: "Blame"
+        case .reflog?: "Reflog"
         case nil: "Graph"
         }
     }

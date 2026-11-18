@@ -244,7 +244,8 @@ struct RepoLayoutView: View {
             .accessibilityHidden(true)
     }
 
-    /// What shows in panel 2 instead of the graph: the open file history or blame, pull request or issue, or file.
+    /// What shows in panel 2 instead of the graph: the open file history, blame or reflog, pull request or issue, or
+    /// file.
     @ViewBuilder private var panel2Overlays: some View {
         // A tool stays mounted under the diff opened from it, so Back brings it back as it was (scroll).
         if let tool = session.openTool ?? session.returnTool {
@@ -255,6 +256,8 @@ struct RepoLayoutView: View {
                     FileHistoryView(session: session, tool: tool, path: path, rev: rev, follow: follow)
                 case .blame(let path, let rev):
                     BlameView(session: session, path: path, rev: rev)
+                case .reflog:
+                    ReflogView(session: session)
                 }
             }
             .opacity(toolHidden ? 0 : 1)

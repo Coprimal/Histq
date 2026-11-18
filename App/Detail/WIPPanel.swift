@@ -291,7 +291,7 @@ struct WIPPanel: View {
     /// `RepoMenus.wipExtras` of a folder row, for every change under `folder`.
     private func wipExtras(folder: String, _ files: [FileChange]) -> [MenuEntry] {
         RepoMenus.wipExtras(FileChange(kind: .modified, path: folder),
-                            untracked: files.allSatisfy { $0.kind == .untracked }, session: session)
+                            untracked: files.allSatisfy { $0.kind == .untracked }, isFolder: true, session: session)
     }
 
     /// Stages `files` (a folder's), each showing busy.

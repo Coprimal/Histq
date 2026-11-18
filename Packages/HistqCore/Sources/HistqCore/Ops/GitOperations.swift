@@ -1,8 +1,8 @@
 // Every user-initiated write of a repository (the gk command inventory): checkout, commit, stage, fetch,
 // pull, push, branches, remotes, worktrees, merge/rebase/cherry-pick/revert/reset, stashes, tags, continue/abort/skip,
-// clone and init. Each public operation takes the runner's `mutate` lane exactly once (compound operations
-// run their steps inside that one lane; never call another public operation or `PatchBuilder.apply` from
-// inside it: a nested `mutate` deadlocks).
+// clone and init. Each public operation (but `optimizeRepository`, which git locks itself) takes the runner's `mutate`
+// lane exactly once (compound operations run their steps inside that one lane; never call another public operation or
+// `PatchBuilder.apply` from inside it: a nested `mutate` deadlocks).
 //
 // Safety: a user string never becomes an option. Paths go after `--` with `--literal-pathspecs` (no
 // pathspec magic), revisions after `--end-of-options`, messages through stdin or `--message=`, new
@@ -610,6 +610,100 @@ public struct GitOperations: Sendable {
         try await write(["worktree", "prune"])
     }
 
+    // MARK: - Maintenance
+
+    /// Writes the commit-graph (with changed-path Bloom filters) so the log and the graph read faster in big repos.
+    /// No timeout (a local write has none; a huge repo takes minutes) and not journaled: it changes no ref, index or
+    /// working tree. Outside the lane, so the writes started meanwhile don't wait minutes behind it: git takes its own
+    /// `commit-graph-chain.lock` (as `git maintenance` does when it runs the same write beside other commands).
+    public func optimizeRepository() async throws {
+        try await exec(["commit-graph", "write", "--reachable", "--split", "--changed-paths"])
+    }
+
+    // MARK: - Ignore
+
+    /// Where `ignore(pattern:in:)` adds its line.
+    public enum IgnoreFile: Sendable {
+        /// The `.gitignore` at the worktree's top level (committed, shared).
+        case gitignore
+        /// `info/exclude` in the git dir (`rev-parse --git-path`; a linked worktree uses the main repo's): this clone only.
+        case infoExclude
+    }
+
+    /// Appends `pattern` as one line to `file`, in one lane. The existing bytes stay as they are (a missing final
+    /// newline is added first); the result is written to a temp file and renamed, keeping the file's mode. A
+    /// symlinked file or `info` folder throws `UndoError.unsafePath` (a missing `info` folder is made); an empty
+    /// pattern or one with a line break throws `GitOperationError.unsupported`. Not journaled: undo covers refs, the
+    /// index and HEAD, not this file.
+    public func ignore(pattern: String, in file: IgnoreFile) async throws {
+        guard !pattern.isEmpty, !pattern.contains(where: \.isNewline) else {
+            throw GitOperationError.unsupported("an ignore pattern that is empty or has a line break")
+        }
+        try await lane { ops in
+            let args = switch file {
+            case .gitignore: ["rev-parse", "--show-toplevel"]
+            // Not `--path-format=absolute`: it resolves a symlinked `info` folder, which must be refused instead.
+            case .infoExclude: ["rev-parse", "--git-path", "info/exclude"]
+            }
+            let text = try await ops.exec(args).text
+            let path = text.hasSuffix("\n") ? String(text.dropLast()) : text
+            let target = switch file {
+            case .gitignore: URL(filePath: path, directoryHint: .isDirectory).appending(path: ".gitignore")
+            case .infoExclude:
+                // Relative to cwd as a folder (a cwd URL without a trailing slash would resolve against its parent).
+                URL(filePath: path, relativeTo: URL(filePath: ops.cwd.path, directoryHint: .isDirectory)).absoluteURL
+            }
+            try Self.appendLine(Data((pattern + "\n").utf8), to: target)
+        }
+    }
+
+    /// Appends `line` to `file` (atomic write, mode kept): refuses a symlinked file or parent folder, makes a missing
+    /// parent folder, adds a final newline to content that lacks one.
+    private static func appendLine(_ line: Data, to file: URL) throws {
+        var info = stat()
+        let folder = file.deletingLastPathComponent().path
+        if lstat(folder, &info) != 0 {
+            guard errno == ENOENT, mkdir(folder, 0o755) == 0 else { throw UndoError.unsafePath(file.path) }
+        } else if info.st_mode & S_IFMT != S_IFDIR {
+            throw UndoError.unsafePath(file.path)
+        }
+        var content = Data()
+        var mode: mode_t?
+        if lstat(file.path, &info) == 0 {
+            guard info.st_mode & S_IFMT == S_IFREG else { throw UndoError.unsafePath(file.path) }
+            content = try Data(contentsOf: file)
+            mode = info.st_mode & 0o7777
+        } else if errno != ENOENT {
+            throw UndoError.unsafePath(file.path)
+        }
+        if let last = content.last, last != UInt8(ascii: "\n") { content.append(UInt8(ascii: "\n")) }
+        content.append(line)
+        try content.write(to: file, options: .atomic)
+        if let mode { try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path) }
+    }
+
+    /// The ignore line for one file, anchored at the top level: `/<path>` (`path` relative to the worktree's top
+    /// level, as `git status` gives it).
+    public static func ignorePattern(file path: String) -> String { "/" + ignoreEscaped(path) }
+
+    /// The ignore line for every file ending in `.<ext>`, in any folder: `*.<ext>`.
+    public static func ignorePattern(extension ext: String) -> String { "*." + ignoreEscaped(ext) }
+
+    /// The ignore line for one folder (relative to the top level, no trailing slash), anchored: `/<dir>/`.
+    public static func ignorePattern(folder path: String) -> String { "/" + ignoreEscaped(path) + "/" }
+
+    /// `text` with gitignore's special characters backslash-escaped so it matches only itself: `\ * ? [` anywhere, a
+    /// leading `#` (comment) or `!` (negation), and each trailing space (git trims unescaped ones).
+    private static func ignoreEscaped(_ text: String) -> String {
+        let kept = text.count - text.reversed().prefix { $0 == " " }.count
+        var escaped = ""
+        for (offset, char) in text.enumerated() {
+            if "\\*?[".contains(char) || offset == 0 && "#!".contains(char) || offset >= kept { escaped.append("\\") }
+            escaped.append(char)
+        }
+        return escaped
+    }
+
     // MARK: - Merge, rebase, cherry-pick, revert, reset
 
     /// Merges `revision` into the current branch. A conflict throws `GitError.conflict` and leaves the
@@ -1136,8 +1230,8 @@ public struct GitOperations: Sendable {
         return try await runner.mutate { try await body(ops) }
     }
 
-    /// Runs one command without taking the lane: only call it from inside `lane`. `extraEnv` adds to the
-    /// environment of this one command (the interactive rebase's sequence editor); `environment` replaces it (a
+    /// Runs one command without taking the lane: only call it from inside `lane` (or for `optimizeRepository`).
+    /// `extraEnv` adds to the environment of this one command (the interactive rebase's sequence editor); `environment` replaces it (a
     /// token-carrying command).
     @discardableResult
     func exec(

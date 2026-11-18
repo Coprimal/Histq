@@ -388,26 +388,29 @@ struct OperationFailure: Identifiable {
     let message: String
 }
 
-/// A tool panel2 shows instead of the graph: a file's history (of `rev`, HEAD when nil; across renames with `follow`)
-/// or its blame (at `rev`, the working tree when nil). `path` is root-relative.
+/// A tool panel2 shows instead of the graph: a file's history (of `rev`, HEAD when nil; across renames with `follow`),
+/// its blame (at `rev`, the working tree when nil) or HEAD's reflog. `path` is root-relative.
 enum RepoTool: Equatable, Sendable {
     case fileHistory(path: String, rev: String?, follow: Bool)
     case blame(path: String, rev: String?)
+    case reflog
 
     /// The timing log's detail: `history src/app.swift`, `blame src/app.swift`.
     var timingDetail: String {
         switch self {
         case .fileHistory(let path, _, _): "history \(path)"
         case .blame(let path, _): "blame \(path)"
+        case .reflog: "reflog"
         }
     }
 }
 
-/// What a tool read: the file's commits, newest first, or its blame; a blame refuses a binary file and one over
-/// `RepoSession.fileSizeLimit` (its size in bytes), as the diff does.
+/// What a tool read: the file's commits, newest first, its blame or the reflog; a blame refuses a binary file and one
+/// over `RepoSession.fileSizeLimit` (its size in bytes), as the diff does.
 enum ToolContent: Sendable {
     case history([FileHistoryEntry])
     case blame([BlameGroup])
+    case reflog([ReflogEntry])
     case binary
     case tooLarge(Int)
 }
@@ -513,6 +516,10 @@ final class RepoSession: Identifiable {
         /// A linked worktree by its listed path; `force` loses its changes (only after the user chose that).
         case removeWorktree(String, force: Bool)
         case pruneWorktrees
+        /// `git commit-graph write` (Optimize Repository): no timeout, no undo entry.
+        case optimizeRepository
+        /// One line (a `GitOperations.ignorePattern`) added to `.gitignore` or `.git/info/exclude`: no undo entry.
+        case ignore(pattern: String, in: GitOperations.IgnoreFile)
 
         /// Merges `revision` into the current branch; `checkoutFirst` switches to that branch first.
         case merge(String, checkoutFirst: String?)
@@ -2403,9 +2410,9 @@ final class RepoSession: Identifiable {
     /// The timing log's detail of the open tool (`history src/app.swift`).
     var toolDetail: String { openTool?.timingDetail ?? "" }
 
-    /// Shows a file's history or blame in panel2 now: the open file, pull request or issue closes and `toolState` is
-    /// `.loading` when this returns, so the placeholder shows in the click's frame. Selecting a tool again (another
-    /// `follow`) reads it again.
+    /// Shows a file's history or blame, or the reflog, in panel2 now: the open file, pull request or issue closes and
+    /// `toolState` is `.loading` when this returns, so the placeholder shows in the click's frame. Selecting a tool again
+    /// (another `follow`) reads it again.
     func selectTool(_ tool: RepoTool) {
         if asksBeforeLeavingConflict({ [weak self] in self?.selectTool(tool) }) { return }
         UITiming.select(tool.timingDetail)
@@ -2436,8 +2443,8 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// A file's history or blame with the read environment (no textconv, no external diff, the repo's filters
-    /// blanked: a working tree blame of a filtered file fails instead of running the filter), off the main actor.
+    /// A file's history or blame, or the reflog, with the read environment (no textconv, no external diff, the repo's
+    /// filters blanked: a working tree blame of a filtered file fails instead of running the filter), off the main actor.
     @concurrent
     private nonisolated static func readTool(_ backend: Backend, cwd: URL, tool: RepoTool) async throws -> ToolContent {
         let env = try await backend.readEnvironment(cwd: cwd)
@@ -2459,6 +2466,8 @@ final class RepoSession: Identifiable {
             }
             if data?.prefix(8000).contains(0) == true { return .binary }
             return .blame(try await BlameReader.read(path, revision: rev, runner: backend.runner, cwd: cwd, env: env))
+        case .reflog:
+            return .reflog(try await ReflogReader.read(runner: backend.runner, cwd: cwd, env: env))
         }
     }
 
@@ -3709,7 +3718,11 @@ final class RepoSession: Identifiable {
             await refreshAfterWrite()
             throw error
         }
-        if lastNotUndoable != write.notUndoable { lastNotUndoable = write.notUndoable }
+        if case .optimizeRepository = write {
+            // Outside the write lane, it may end after later writes; it changes nothing undo covers.
+        } else if lastNotUndoable != write.notUndoable {
+            lastNotUndoable = write.notUndoable
+        }
         await refreshAfterWrite()
         return outcome
     }
@@ -3788,6 +3801,8 @@ final class RepoSession: Identifiable {
             try await ops.addWorktree(at: path, from: source, newBranch: newBranch)
         case .removeWorktree(let path, let force): try await ops.removeWorktree(path, force: force)
         case .pruneWorktrees: try await ops.pruneWorktrees()
+        case .optimizeRepository: try await ops.optimizeRepository()
+        case .ignore(let pattern, let file): try await ops.ignore(pattern: pattern, in: file)
 
         case .merge(let revision, let checkoutFirst):
             if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
@@ -3869,10 +3884,16 @@ final class RepoSession: Identifiable {
                     postToast(.warning(title, detail: stash.applied
                         ? "Applied, but this apply cannot be undone."
                         : "Applied with conflicts: this apply cannot be undone." + (pop ? " The stash is kept." : "")))
+                } else if case .optimizeRepository = write {
+                    // Before `stopped`: a merge or rebase may stop on conflicts while it runs (it is outside the lane).
+                    postToast(.success(title, detail: "Repository optimized: history and the graph load faster."))
                 } else if stopped {
                     postToast(.stopped(title))
                 } else if case .applyPatch = write {
                     // Lines staged, unstaged or discarded from a diff: no success toast, as the WIP panel's files.
+                } else if case .ignore(let pattern, let file) = write {
+                    let name = switch file { case .gitignore: ".gitignore"; case .infoExclude: ".git/info/exclude" }
+                    postToast(.success(title, detail: "Added \(pattern) to \(name)."))
                 } else {
                     postToast(.success(title, detail: OperationToast.outcome(of: write, before: refsBefore,
                                                                              after: refs.value)))
@@ -3882,8 +3903,13 @@ final class RepoSession: Identifiable {
                 postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))
             } catch {
                 if !(error is CancellationError) {
-                    let failure = OperationFailure(title: title, write: write, error: error,
-                                                   message: Self.message(for: error))
+                    // `ignore` refuses to write through a symlink or into something that is not a plain file.
+                    let message = if case .ignore = write, case UndoError.unsafePath = error {
+                        "The ignore file or its folder is a symlink or not a plain file; Histq won't write through it."
+                    } else {
+                        Self.message(for: error)
+                    }
+                    let failure = OperationFailure(title: title, write: write, error: error, message: message)
                     self.failure = failure
                     postToast(.failure(title, error: error, message: failure.message,
                                        hint: ActionErrorBanner.hint(for: failure).text))

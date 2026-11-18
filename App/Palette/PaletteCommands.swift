@@ -106,6 +106,8 @@ enum PaletteCommands {
                      systemImage: ToolbarAction.pull.systemImage)
         snapshot.add(RepoMenus.push(session), detail: "Push ▾", section: .repository,
                      systemImage: ToolbarAction.push.systemImage)
+        snapshot.add(RepoMenus.repository(session), detail: "Repository", section: .repository,
+                     systemImage: "gauge.with.needle")
         snapshot.add("Show All Branches", detail: "Graph", section: .repository, systemImage: "eye",
                      enabled: session.hiddenCount > 0 || session.isSoloActive) { session.showAll() }
         let hideStale = session.view.hideStale
