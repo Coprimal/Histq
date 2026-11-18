@@ -136,6 +136,10 @@ enum PrefKey: String, CaseIterable {
     case stackedSplit
     /// The preset leaving Focus returns to: "classic" or "stacked" (never "focus"), set when Focus turns on. Global.
     case presetBeforeFocus
+    /// A repo tab shows its sidebar (panel 1) and its detail (panel 3): the toolbar's Sidebar and Detail toggles.
+    /// Global, like `layoutPreset`; Focus hides both whatever they are.
+    case showSidebar
+    case showDetail
     /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
     case graphColumnWidths
     /// The graph's Commit message, Author and Time columns show (Branch / Tag and Graph always do).
@@ -216,6 +220,7 @@ enum PrefKey: String, CaseIterable {
         case .layoutPreset: "classic"
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
+        case .showSidebar, .showDetail: true
         case .graphColumnWidths: ""
         case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
         case .terminalFontName: ""
@@ -278,9 +283,9 @@ enum LayoutPreset: String {
         defaults.set(next.rawValue, forKey: PrefKey.layoutPreset.rawValue)
     }
 
-    /// View › Reset Layout: the default panel widths and Stacked split, and Classic.
+    /// View › Reset Layout: the default panel widths and Stacked split, both side panels shown, and Classic.
     static func reset() {
-        for key in [PrefKey.panelWidths, .stackedSplit, .layoutPreset, .presetBeforeFocus] {
+        for key in [PrefKey.panelWidths, .stackedSplit, .layoutPreset, .presetBeforeFocus, .showSidebar, .showDetail] {
             Preferences.defaults.removeObject(forKey: key.rawValue)
         }
     }
