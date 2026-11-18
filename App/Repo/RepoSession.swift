@@ -569,6 +569,9 @@ final class RepoSession: Identifiable {
         case fetchAll(prune: Bool)
         /// `autostash`: `--autostash` (git stashes the local changes and puts them back after the pull).
         case pull(GitOperations.PullMode, autostash: Bool = false)
+        /// A branch that is not checked out, fast-forwarded to `remoteBranch` of `remote` (its upstream) by a fetch
+        /// straight into it; git refuses anything but a fast-forward.
+        case pullBranch(String, remote: String, remoteBranch: String)
         case push(branch: String, remote: String, remoteBranch: String?, setUpstream: Bool, forceWithLease: String?)
         case pushTag(String, remote: String)
         case pushMirror(remote: String)
@@ -646,7 +649,8 @@ final class RepoSession: Identifiable {
         var remote: String? {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
-                 .deleteRemoteBranch(_, let remote), .deleteRemoteTag(_, let remote), .checkoutPullRequest(_, let remote):
+                 .deleteRemoteBranch(_, let remote), .deleteRemoteTag(_, let remote), .checkoutPullRequest(_, let remote),
+                 .pullBranch(_, let remote, _):
                 remote
             default:
                 nil
@@ -658,7 +662,7 @@ final class RepoSession: Identifiable {
             switch self {
             case .push, .pushMirror: .push
             case .fetchAll: .fetch
-            case .pull: .pull
+            case .pull, .pullBranch: .pull
             case .deleteRemoteBranch: .deleteRemoteBranch
             case .deleteRemoteTag: .deleteRemoteTag
             case .pushTag: .pushTag
@@ -669,7 +673,7 @@ final class RepoSession: Identifiable {
         /// The writes that talk to a remote: the only ones that read the profile's GitHub token.
         var isNetwork: Bool {
             switch self {
-            case .fetchAll, .pull, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag,
+            case .fetchAll, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag,
                  .checkoutPullRequest:
                 true
             default: false
@@ -4472,6 +4476,8 @@ final class RepoSession: Identifiable {
             try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
+        case .pullBranch(let branch, let remote, let remoteBranch):
+            try await ops.fetchRefspec(remote: remote, refspec: "heads/\(remoteBranch):\(branch)")
         case .pull(let mode, let autostash):
             if try await ops.pull(mode, autostash: autostash) == .autostashPending { outcome = .autostashPending }
         case .push(let branch, let remote, let remoteBranch, let setUpstream, let lease):

@@ -382,8 +382,9 @@ enum RepoMenus {
             ]
         }
         let pullReason = createPullRequestUnavailableReason(head: .local(name), base: nil, session)
+        entries.append(.separator)
+        entries += pull(name, isCurrent: isCurrent, upstream: upstream, session)
         entries += [
-            .separator,
             .action("Push \(name)", enabled: session.pushTarget(of: name) != nil) { session.push(branch: name) },
             .action("Create Pull Request…", enabled: pullReason == nil, toolTip: pullReason) {
                 openCreatePullRequest(head: .local(name), base: nil, session)
@@ -412,6 +413,27 @@ enum RepoMenus {
         entries += visibility(ref, canHide: !isCurrent, session)
         entries += [.separator, .action("Copy Branch Name") { copy(name) }]
         return entries
+    }
+
+    /// A local branch's pull: the checked-out branch gets each pull mode; another branch can only be fast-forwarded
+    /// to its upstream (fetched straight into the branch, no checkout). Greyed without an upstream.
+    private static func pull(_ name: String, isCurrent: Bool, upstream: RemoteBranch?,
+                             _ session: RepoSession) -> [MenuEntry] {
+        guard let upstream else {
+            return [.action("Pull \(name)", enabled: false, toolTip: "\(name) has no upstream.") {}]
+        }
+        if isCurrent {
+            return [
+                .action("Pull (fast-forward if possible)") { session.pull(.fastForward) },
+                .action("Pull (fast-forward only)") { session.pull(.fastForwardOnly) },
+                .action("Pull (rebase)") { session.pull(.rebase) },
+            ]
+        }
+        let remoteBranch = String(upstream.name.dropFirst(upstream.remote.count + 1))
+        return [.action("Fast-forward \(name) to \(upstream.name)") {
+            session.run(.pullBranch(name, remote: upstream.remote, remoteBranch: remoteBranch),
+                        title: "Fast-forward \(name) to \(upstream.name)")
+        }]
     }
 
     private static func remote(_ name: String, _ session: RepoSession) -> [MenuEntry] {
