@@ -116,6 +116,38 @@ struct PatchBuilderTests {
         #expect(try await DiffReader.unstaged(runner: fx.copy.runner, cwd: fx.repo, env: fx.readEnv, paths: [path]).isEmpty)
     }
 
+    @Test("reverting a commit's hunk undoes its lines in the working tree, and never deletes a file the commit added")
+    func revertCommitHunk() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        let name = "revert.txt"
+        let url = fx.repo.appending(path: name)
+        let original = (1...12).map { "line \($0)\n" }.joined()
+        try Data(original.utf8).write(to: url)
+        try await fx.copy.git(["add", "--", name], in: fx.repo)
+        try await fx.copy.git(["commit", "-q", "-m", "add", "--", name], in: fx.repo)
+        let edited = original.replacing("line 3\n", with: "line 3 edited\n").replacing("line 11\n", with: "line 11 edited\n")
+        try Data(edited.utf8).write(to: url)
+        try await fx.copy.git(["commit", "-q", "-am", "edit"], in: fx.repo)
+        let commit = { (revision: String) async throws -> FileDiff in
+            try #require(try await DiffReader.commit(
+                revision, runner: fx.copy.runner, cwd: fx.repo, env: fx.readEnv, paths: [name], context: 1).first)
+        }
+
+        // The edit's second hunk alone: line 11 comes back, line 3 keeps its edit.
+        let edit = try await commit("HEAD")
+        try #require(edit.hunks.count == 2)
+        try await fx.apply(edit, edit.changedLineIDs(inHunk: 1), .revert)
+        #expect(try String(contentsOf: url, encoding: .utf8) == edited.replacing("line 11 edited\n", with: "line 11\n"))
+
+        // The commit that added the file: its one hunk empties the file, which stays (a plain modification patch).
+        try await fx.copy.git(["checkout", "-q", "HEAD~1", "--", name], in: fx.repo)
+        let added = try await commit("HEAD~1")
+        try await fx.apply(added, added.changedLineIDs, .revert)
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+        #expect(try Data(contentsOf: url).isEmpty)
+    }
+
     @Test("a path with a tab, a quote, a space and non-ASCII bytes round-trips through the diff and a partial patch")
     func unusualPathRoundTrips() async throws {
         let fx = try await Repo()

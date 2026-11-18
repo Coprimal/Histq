@@ -130,6 +130,8 @@ enum PrefKey: String, CaseIterable {
     case nativeTabsOnTop
     /// Repo layout panel widths, encoded by `RepoLayoutView`; empty = the layout's defaults.
     case panelWidths
+    /// The file history's commit list (panel 1 while a file history shows), in points; 0 = the layout's default.
+    case historyPanelWidth
     /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked" or "focus". Global, like `panelWidths`.
     case layoutPreset
     /// Stacked's split: the graph's share of panel 2's height above the bottom pane, 0...1. Global.
@@ -217,6 +219,7 @@ enum PrefKey: String, CaseIterable {
         case .tabGroupNames: [String: String]()
         case .nativeTabsOnTop: false
         case .panelWidths: ""
+        case .historyPanelWidth: 0.0
         case .layoutPreset: "classic"
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
@@ -283,9 +286,10 @@ enum LayoutPreset: String {
         defaults.set(next.rawValue, forKey: PrefKey.layoutPreset.rawValue)
     }
 
-    /// View › Reset Layout: the default panel widths and Stacked split, both side panels shown, and Classic.
+    /// View › Reset Layout: the default panel widths (the file history's too) and Stacked split, both side panels shown, and Classic.
     static func reset() {
-        for key in [PrefKey.panelWidths, .stackedSplit, .layoutPreset, .presetBeforeFocus, .showSidebar, .showDetail] {
+        for key in [PrefKey.panelWidths, .historyPanelWidth, .stackedSplit, .layoutPreset, .presetBeforeFocus,
+                    .showSidebar, .showDetail] {
             Preferences.defaults.removeObject(forKey: key.rawValue)
         }
     }
@@ -296,7 +300,7 @@ enum LayoutPreset: String {
 struct SelectRequest: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
         case tab, wip, commit, commits, branch, branchclick, worktree, openworktree, file, conflict, commitfile,
-            settings, sidebar, pr, issue, prbadge
+            history, settings, sidebar, pr, issue, prbadge
     }
 
     let kind: Kind

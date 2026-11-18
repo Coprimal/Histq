@@ -825,11 +825,18 @@ final class RepoSession: Identifiable {
     private(set) var openHosted: HostedItem?
     /// Changes with every PR or issue select: its placeholder logs a line per select.
     private(set) var hostedToken = 0
-    /// The file history or blame panel2 shows instead of the graph; nil shows the graph, the open file or the open pull
-    /// request or issue. Never set with them: a diff opened from a tool keeps the tool in `returnTool`.
+    /// The blame or reflog panel2 shows instead of the graph, or the file history panel 1 shows instead of the sidebar;
+    /// nil shows the graph, the open file or the open pull request or issue. Never set with them: a diff opened from a tool keeps the tool in `returnTool`.
     private(set) var openTool: RepoTool?
-    /// The tool the open diff was opened from (a history row): closing the diff (Back, Esc) shows it again, as it was.
+    /// The tool the open diff was opened from (a history row): its read stays, and a file history keeps panel 1.
     private(set) var returnTool: RepoTool?
+    /// The file history while it shows: panel 1 lists its commits instead of the sidebar, panel 2 the file's diff at the
+    /// selected one. The open tool, or the tool the open diff was opened from.
+    var historyTool: RepoTool? {
+        let tool = openTool ?? (openFile != nil ? returnTool : nil)
+        if case .fileHistory? = tool { return tool }
+        return nil
+    }
     /// The last selected tool's read: `.loading` in the same call as the click, then its content. Kept while the tool
     /// is closed, so a diff opened from it returns to it as it was; the next `selectTool` replaces it.
     private(set) var toolState: Loadable<ToolContent> = .idle
@@ -2491,8 +2498,23 @@ final class RepoSession: Identifiable {
     /// Shows `target`'s diff in panel2 instead of the graph now: `fileDiff` is `.loading` when this returns, so the
     /// placeholder shows in the click's frame. The diff loads in a task that a newer select cancels.
     /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`). A diff opened from a
-    /// tool (a history row) passes it as `returnTool`: closing the diff shows the tool again instead of the graph.
+    /// tool (a history row) passes it as `returnTool`: a file history keeps panel 1 while the diff shows.
+    /// While a file history shows, a commit's file (panel 3) shows that file's history instead, at the same commit; while
+    /// a blame shows, a file of panel 3 shows its blame.
     func selectFile(_ target: FileTarget, returnTool: RepoTool? = nil) {
+        // While a blame shows, a file of panel 3 shows its blame instead, at the file's revision. A file blame can't
+        // read (untracked, deleted, an image, a conflict) opens its diff.
+        if returnTool == nil, case .blame? = openTool, !target.isConflict, !target.isImage,
+           target.file.kind != .untracked, target.file.kind != .deleted
+        {
+            let blame = RepoTool.blame(path: target.path, rev: Self.blameRev(of: target.source))
+            if blame != openTool { selectTool(blame) }
+            return
+        }
+        var returnTool = returnTool
+        if returnTool == nil, case .commit = target.source, case .fileHistory(_, let rev, let follow)? = historyTool {
+            returnTool = .fileHistory(path: target.path, rev: rev, follow: follow)
+        }
         if isConflictDirty {
             // The open conflict's row again keeps its ticks (a reload would drop them).
             if target == openFile { return }
@@ -2509,6 +2531,17 @@ final class RepoSession: Identifiable {
         openFile = target
         fileIgnoresSizeLimit = false
         startFileLoad()
+        // Another file's history: panel 1 reads it while panel 2 loads the diff.
+        if let returnTool, returnTool != loadedTool { loadTool(returnTool) }
+    }
+
+    /// A file history's row (or its newest, when the history loads): selects the commit as a graph click does (panel 3
+    /// switches at once) and opens the file's diff at that commit in panel 2; panel 1 keeps the history.
+    func openHistoryEntry(_ entry: FileHistoryEntry, of tool: RepoTool) {
+        let hash = entry.commit.hash
+        selectGraph([.commit(hash)])
+        let file = FileChange(letter: entry.status ?? "M", path: entry.path, originalPath: entry.oldPath)
+        selectFile(FileTarget(source: .commit(hash), file: file), returnTool: tool)
     }
 
     /// Opens a WIP file by its path (DEBUG `-HistqSelect file:<path>`) as its row in the WIP panel would: an
@@ -2526,7 +2559,8 @@ final class RepoSession: Identifiable {
 
     /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
     /// The conflict editor's unsaved ticks and edits go with it. An open pull request, issue or tool closes too. A diff
-    /// opened from a tool (`returnTool`) shows that tool again instead, with its read (read again only if replaced).
+    /// opened from a blame or the reflog (`returnTool`) shows that tool again instead, with its read (read again only if
+    /// replaced); one opened from a file history closes it.
     func closeFile() {
         if openHosted != nil {
             openHosted = nil
@@ -2534,7 +2568,9 @@ final class RepoSession: Identifiable {
             issueDetail.close()
         }
         openTool = nil
-        let back = openFile != nil ? returnTool : nil
+        var back = openFile != nil ? returnTool : nil
+        // A file history lists its commits in panel 1 beside the diff: closing the diff closes the history too.
+        if case .fileHistory? = back { back = nil }
         returnTool = nil
         guard openFile != nil else { return }
         fileTask?.cancel()
@@ -2629,6 +2665,22 @@ final class RepoSession: Identifiable {
     /// The timing log's detail of the open tool (`history src/app.swift`).
     var toolDetail: String { openTool?.timingDetail ?? "" }
 
+    /// The path of the blame panel2 shows when it is a file of `source` (panel 3 draws its row as selected).
+    func blamePath(in source: FileTarget.Source) -> String? {
+        guard case .blame(let path, let rev)? = openTool, rev == Self.blameRev(of: source) else { return nil }
+        return path
+    }
+
+    /// The revision a file of `source` is blamed at: a commit's, a compare's head; nil (the working tree) for a WIP
+    /// file or a compare with the working tree.
+    private static func blameRev(of source: FileTarget.Source) -> String? {
+        switch source {
+        case .wip: nil
+        case .commit(let hash): hash
+        case .compare(_, let head): head
+        }
+    }
+
     /// Shows a file's history or blame, or the reflog, in panel2 now: the open file, pull request or issue closes and
     /// `toolState` is `.loading` when this returns, so the placeholder shows in the click's frame. Selecting a tool again
     /// (another `follow`) reads it again.
@@ -2655,6 +2707,10 @@ final class RepoSession: Identifiable {
                 try Task.checkCancellation()
                 guard token == toolToken else { return }
                 toolState = .loaded(content)
+                // A file history opens its newest commit, unless a diff already shows (a file of panel 3).
+                if case .history(let entries) = content, openTool == tool, openFile == nil, let newest = entries.first {
+                    openHistoryEntry(newest, of: tool)
+                }
             } catch {
                 guard token == toolToken, !Self.isCancellation(error) else { return }
                 toolState = .failed(Self.message(for: error))
@@ -2716,8 +2772,8 @@ final class RepoSession: Identifiable {
         startFileLoad()
     }
 
-    /// Stages, unstages or discards `lines` of `file` (the diff a table shows, so the patch matches what the user
-    /// selected) through the write path. Discarding asks first: the working tree loses those lines.
+    /// Stages, unstages, discards or reverts `lines` of `file` (the diff a table shows, so the patch matches what the
+    /// user selected) through the write path. Discarding and reverting ask first: they change the working tree.
     func apply(_ action: PatchBuilder.Action, lines: Set<DiffLineID>, of file: FileDiff) {
         let patch: Data
         do {
@@ -2740,6 +2796,11 @@ final class RepoSession: Identifiable {
         case .discard:
             confirm("Discard \(what) of \(name)?", message: "This cannot be undone.", button: "Discard",
                     write: .applyPatch(patch, .discard), operation: "Discard \(what) of \(name)")
+        case .revert:
+            confirm("Revert \(what) of \(name)?",
+                    message: "The working tree gets these lines back as they were before the commit.",
+                    button: "Revert", write: .applyPatch(patch, .revert), operation: "Revert \(what) of \(name)",
+                    isDestructive: false)
         }
     }
 

@@ -1,7 +1,7 @@
 // The lines of one side of a file's diff: an NSTableView with fixed-height rows that never wrap. Each line row has the
 // old and new line numbers, a `+`/`−` gutter, a green or red band, a stronger mark on the changed part of a replaced
-// line, and syntax colors; each hunk starts with a header row whose buttons stage, unstage or discard the hunk, or only
-// its selected lines. ⌘C copies the selected lines whole; Esc goes back to the graph.
+// line, and syntax colors; each hunk starts with a header row whose buttons stage, unstage, discard or revert the hunk,
+// or only its selected lines. ⌘C copies the selected lines whole; Esc goes back to the graph.
 //
 // The rows (with their tokens) are built off the main actor when the diff loads: the table only draws the rows on
 // screen, so its cost does not grow with the file.
@@ -266,6 +266,8 @@ struct DiffLineTable: NSViewRepresentable {
     let section: DiffSection
     let mode: DiffMode
     let loadID: Int
+    /// A commit's diff in the file history: its hunks (or selected lines) can be reverted in the working tree.
+    var reverts = false
     var onApply: @MainActor (PatchBuilder.Action, Set<DiffLineID>, FileDiff) -> Void = { _, _, _ in }
     var onClose: @MainActor () -> Void = {}
 
@@ -516,19 +518,27 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     }
 
     /// The header's buttons: "Stage Hunk", or "Stage 2 Lines" while lines of that hunk are selected. None for a
-    /// read-only diff (a commit, a merge's combined diff, an untracked file).
+    /// read-only diff (a commit outside the file history, a merge's combined diff, an untracked file).
     private func buttons(forHunk hunk: Int) -> [(PatchBuilder.Action, String)] {
         guard let view, let file = view.section.file(view.mode), !file.isCombined else { return [] }
         let count = selectedLines(inHunk: hunk).count
         let what = count == 0 ? "Hunk" : count == 1 ? "1 Line" : "\(count) Lines"
-        return view.section.side.actions.map { action in
+        return actions(view).map { action in
             let verb = switch action {
             case .stage: "Stage"
             case .unstage: "Unstage"
             case .discard: "Discard"
+            case .revert: "Revert"
             }
             return (action, "\(verb) \(what)")
         }
+    }
+
+    /// The side's actions, and Revert for a commit's diff in the file history. Not in Full file: its one hunk has
+    /// the whole file as context, which no longer applies once the file changed after the commit.
+    private func actions(_ view: DiffLineTable) -> [PatchBuilder.Action] {
+        guard view.reverts, view.section.side == .commit else { return view.section.side.actions }
+        return view.mode == .diff ? [.revert] : []
     }
 
     private func refreshHunkButtons() {
@@ -581,12 +591,14 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         if let file = view.section.file(view.mode), !file.isCombined, !lines.isEmpty {
             let what = lines.count == 1 ? "1 Line" : "\(lines.count) Lines"
             entries.append(.separator)
-            for action in view.section.side.actions {
+            for action in actions(view) {
                 switch action {
                 case .stage: entries.append(.action("Stage \(what)") { view.onApply(.stage, lines, file) })
                 case .unstage: entries.append(.action("Unstage \(what)") { view.onApply(.unstage, lines, file) })
                 case .discard:
                     entries.append(.action("Discard \(what)…", destructive: true) { view.onApply(.discard, lines, file) })
+                case .revert:
+                    entries.append(.action("Revert \(what)…") { view.onApply(.revert, lines, file) })
                 }
             }
         }
@@ -798,7 +810,7 @@ final class DiffHunkCellView: NSView {
             let fill: NSColor? = switch action {
             case .stage: Palette.diffAddedSign.withAlphaComponent(0.5)
             case .discard: Palette.diffRemovedSign.withAlphaComponent(0.3)
-            case .unstage: nil
+            case .unstage, .revert: nil
             }
             let button = fill.map { TintedCapsuleButton(title: title, fill: $0) } ?? NSButton(title: title, target: nil, action: nil)
             button.target = self

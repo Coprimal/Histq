@@ -950,6 +950,13 @@ final class WindowModel {
                 }
                 session?.selectGraph(value.split(separator: ",").map { $0 == "wip" ? .wip : .commit(String($0)) })
             }
+        case .history:
+            // `history:<path>`: the file's history, as its File History menu item opens it.
+            guard let session = selectedSession, let path = request.value else {
+                Self.logger.error("-HistqSelect history: no repo tab or no path")
+                return
+            }
+            session.selectTool(.fileHistory(path: path, rev: nil, follow: false))
         case .file:
             guard let session = selectedSession, let path = request.value else {
                 Self.logger.error("-HistqSelect file: no repo tab or no path")

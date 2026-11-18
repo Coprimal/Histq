@@ -425,10 +425,11 @@ private struct DiffFileHeader: View {
         session.returnTool == nil && LayoutPreset.resolved(storedPreset) == .stacked
     }
 
-    /// Where close (and Esc) returns: the tool the diff was opened from, else the graph.
+    /// Where close (and Esc) returns: the tool the diff was opened from, else the graph (a file history closes with
+    /// its diff).
     private var backName: String {
         switch session.returnTool {
-        case .fileHistory?: "History"
+        case .fileHistory?: "Graph"
         case .blame?: "Blame"
         case .reflog?: "Reflog"
         case nil: "Graph"
@@ -542,6 +543,7 @@ private struct DiffContent: View {
         } else {
             DiffLineTable(
                 section: section, mode: session.diffMode, loadID: detail.loadID,
+                reverts: session.historyTool != nil,
                 onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
                 onClose: { [session] in session.closeFile() })
                 .frame(maxHeight: .infinity)
@@ -719,7 +721,7 @@ extension DiffNoticeCard where Action == EmptyView {
 }
 
 /// The diff's skeleton, under the file's row: a hunk header bar and line rows (number gutters and text capsules).
-private struct DiffPlaceholder: View {
+struct DiffPlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
 
     var body: some View {
