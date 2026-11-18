@@ -1,7 +1,8 @@
 // The repo's context menus, built once as `MenuEntry` lists and shown both by the graph (an `NSMenu`) and by the sidebar
 // and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset,
 // interactive rebase from here, squash the selected commits, copy),
-// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…), the Remote card's menus,
+// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…), a graph badge's menu (its
+// ref's menu, then its commit's), the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
 // (open in a tab, add, remove, prune), checkout file from a commit, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
@@ -259,6 +260,24 @@ enum RepoMenus {
     }
 
     // MARK: Refs
+
+    /// The menu of a graph badge: its ref's menu, then its commit's, without what the ref's part already has (its own
+    /// checkout and its submenu).
+    static func badge(_ ref: SidebarItem, on item: GraphItem, session: RepoSession) -> [MenuEntry] {
+        let refEntries = self.ref(ref, session)
+        guard case .commit(let hash) = item else { return refEntries }
+        let actionTitles = Set(refEntries.compactMap { entry -> String? in
+            if case .action = entry.kind { entry.title } else { nil }
+        })
+        let commitEntries = commit(hash, session).filter { entry in
+            switch entry.kind {
+            case .action: !actionTitles.contains(entry.title)
+            case .submenu: entry.title != ref.menuTitle
+            case .separator: true
+            }
+        }
+        return refEntries + [.separator] + commitEntries
+    }
 
     static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
         let entries: [MenuEntry] = switch item {
@@ -723,7 +742,8 @@ enum RepoMenus {
     #if DEBUG
     /// DEBUG `-HistqRun "<menu>|<title>[|<title>…][;;<next>…]"`: picks menu items by title and runs them, one step after
     /// the other, as a click would (a confirmation is accepted; forms are not supported). `<menu>` is `wip`,
-    /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `remotes`, `file:<sha>:<path>`,
+    /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `badge:<local|remote|tag>:<name>`
+    /// (a graph badge), `remotes`, `file:<sha>:<path>`,
     /// `drop:<local|remote>:<name>><local|remote>:<name>` or `branches` (the toolbar's branch menu). Each step's
     /// outcome goes to `operations.txt` in the state folder. For QA on fixture copies only.
     static func debugRun(_ spec: String, session: RepoSession) async {
@@ -776,6 +796,18 @@ enum RepoMenus {
         case "local": return ref(.local(value), session)
         case "remote": return ref(.remote(value), session)
         case "tag": return ref(.tag(value), session)
+        case "badge":
+            // `badge:<local|remote|tag>:<name>`: the graph badge's menu, on the ref's commit.
+            let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let refs = session.refs.value else { return [] }
+            let name = parts[1]
+            let (item, hash): (SidebarItem, String?) = switch parts[0] {
+            case "local": (.local(name), refs.localBranches.first { $0.name == name }?.commit)
+            case "remote": (.remote(name), refs.remoteBranches.first { $0.name == name }?.commit)
+            default: (.tag(name), refs.tags.first { $0.name == name }.map { $0.commit ?? $0.target })
+            }
+            guard let hash else { return [] }
+            return badge(item, on: .commit(hash), session: session)
         case "remotes": return remotes(session)
         case "pull": return pull(session)
         case "push": return push(session)

@@ -235,7 +235,8 @@ private struct CommitListPanel: View {
                     .accessibilityLabel("Loading")
             case .loaded(let log):
                 // A click selects through the session (the detail switches in the same frame); a double-click
-                // checks out; a right-click opens the row's or the badge's menu; a badge dropped on another opens
+                // checks out; a right-click opens the row's menu, or on a badge the badge's ref menu followed by its
+                // commit's; a badge dropped on another opens
                 // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
                 // pull request in the same frame.
                 GraphView(log: log, refs: session.visibleRefs, status: session.status.value,
@@ -243,7 +244,7 @@ private struct CommitListPanel: View {
                           onSelect: { [session] items in session.selectGraph(items) },
                           onActivate: { [session] item in RepoMenus.activate(item, session: session) },
                           menuEntries: { [session] item, badge in
-                              if let ref = badge?.sidebarItem { return RepoMenus.ref(ref, session) }
+                              if let ref = badge?.sidebarItem { return RepoMenus.badge(ref, on: item, session: session) }
                               return RepoMenus.entries(for: item, session: session)
                           },
                           dropEntries: { [session] source, target in
