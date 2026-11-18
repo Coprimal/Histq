@@ -555,6 +555,9 @@ final class RepoSession: Identifiable {
     /// Shows an operation's outcome as a toast in the tab's window (`ToastHost`). Set by `WindowModel` when it makes
     /// the session.
     @ObservationIgnored var postToast: @MainActor (OperationToast) -> Void = { _ in }
+    /// Closes the tabs of a worktree this tab just removed (its folder is gone). Set by `WindowModel` when it makes the
+    /// session.
+    @ObservationIgnored var worktreeRemoved: @MainActor (String) -> Void = { _ in }
 
     /// The repo's remotes and their fetch URLs (`git remote -v`), read with the refs: a remote with no fetched branch
     /// shows too.
@@ -3663,6 +3666,7 @@ final class RepoSession: Identifiable {
             let refsBefore = refs.value
             do {
                 try await perform(write)
+                if case .removeWorktree(let path, _) = write { worktreeRemoved(path) }
                 // Started one (a rebase at an `edit` step), or Continue / Skip went on to the next stop.
                 let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }
                 let stopped = repoState?.isOperationInProgress == true && (!wasInProgress || resumes)

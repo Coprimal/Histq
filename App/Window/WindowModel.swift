@@ -258,6 +258,7 @@ final class WindowModel {
             self?.selectedSession?.showWorkingState()
         }
         session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
+        session.worktreeRemoved = { [weak self] path in self?.closeRemovedWorktreeTabs(path) }
         let saved = restored.removeValue(forKey: id)
         if let saved {
             if let profile = saved.profile { session.restoreProfile(profile.profileID) }
@@ -513,6 +514,21 @@ final class WindowModel {
         while let index = tabs.firstIndex(where: { closes($0.id) }) {
             remove(at: index)
         }
+    }
+
+    /// A worktree removed from another tab (its sidebar or graph menu): its tabs in this window close, and ⇧⌘T forgets
+    /// them, as its folder is gone. The window's last tab stays (it shows "Repo not found").
+    private func closeRemovedWorktreeTabs(_ path: String) {
+        // The folder is gone: its parent's symlinks are resolved (git's `/private/tmp/…` is a tab's `/tmp/…`).
+        func key(_ url: URL) -> String {
+            let url = url.standardizedFileURL
+            return url.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: url.lastPathComponent).path
+        }
+        let removed = key(URL(filePath: path, directoryHint: .isDirectory))
+        for tab in tabs where tab.repoURL.map(key) == removed && tabs.count > 1 {
+            _ = closeTab(id: tab.id)
+        }
+        closedTabs.removeAll { $0.saved.path.map { key(URL(filePath: $0)) } == removed }
     }
 
     /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens.
