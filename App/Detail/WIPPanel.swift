@@ -750,12 +750,14 @@ private struct FilesScroll<Content: View>: View {
 
 private struct EmptyFilesText: View {
     let text: String
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         Text(text)
+            .font(textSize.body)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 6)
-            .frame(height: FileListView<EmptyView>.rowHeight)
+            .frame(height: FileListView<EmptyView>.rowHeight(textSize))
     }
 }
 

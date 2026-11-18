@@ -173,6 +173,8 @@ struct RepoLayoutView: View {
     @AppStorage(PrefKey.showDetail.rawValue, store: Preferences.defaults) private var detailShown = true
     /// Columns' widths, apart from `storedWidths`.
     @AppStorage(PrefKey.columnsWidths.rawValue, store: Preferences.defaults) private var storedColumnsWidths = ""
+    /// The app-wide text size, for the layout's panels (`EnvironmentValues.textSize`).
+    @AppStorage(PrefKey.textSize.rawValue, store: Preferences.defaults) private var textSize = TextSize.regular
     /// Columns: the widths while a divider is dragged, written to `storedColumnsWidths` when the drag ends.
     @State private var columnsDrag: ColumnsWidths?
     /// Columns: the widths when that drag began.
@@ -231,6 +233,7 @@ struct RepoLayoutView: View {
             }
             .padding(RepoLayoutMetrics.inset)
         }
+        .environment(\.textSize, textSize)
         // The tab's GitHub lists, for the PRs tab and the graph's PR badges.
         .background(GitHubDriver(session: session))
     }
@@ -542,6 +545,7 @@ private struct CommitListPanel: View {
     let session: RepoSession
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
+    @AppStorage(PrefKey.textSize.rawValue, store: Preferences.defaults) private var textSize = TextSize.regular
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
@@ -580,7 +584,8 @@ private struct CommitListPanel: View {
                 // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
                 // pull request in the same frame.
                 GraphView(log: log, refs: session.visibleRefs, status: session.status.value,
-                          dateFormat: dateFormat, rowDensity: rowDensity, selection: session.graphSelection,
+                          dateFormat: dateFormat, rowDensity: rowDensity, textSize: textSize,
+                          selection: session.graphSelection,
                           onSelect: { [session] items in session.selectGraph(items) },
                           onActivate: { [session] item in RepoMenus.activate(item, session: session) },
                           menuEntries: { [session] item, badge in

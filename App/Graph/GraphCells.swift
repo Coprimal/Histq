@@ -132,6 +132,10 @@ final class RefBadgeCellView: NSView {
         var lineEnd: CGFloat
     }
 
+    /// The name's and the counts' attributes at the metrics' text size.
+    private var textAttributes: [NSAttributedString.Key: Any] { Style.text[metrics.textSize] ?? [:] }
+    private var countAttributes: [NSAttributedString.Key: Any] { Style.count[metrics.textSize] ?? [:] }
+
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
 
@@ -146,20 +150,22 @@ final class RefBadgeCellView: NSView {
         /// much white over its fill.
         static let faintFill: CGFloat = 0.5
         static let litFill: CGFloat = 0.22
-        // Normal weight, a size up from the message text (user, 2026-11-13, as GitKraken's labels).
-        static let font = NSFont.systemFont(ofSize: 13)
-        static let countFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         static let paragraph: NSParagraphStyle = {
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byTruncatingTail
             return style
         }()
-        static let text: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: Palette.graphBadgeText, .paragraphStyle: paragraph,
-        ]
-        static let count: [NSAttributedString.Key: Any] = [
-            .font: countFont, .foregroundColor: Palette.graphBadgeText,
-        ]
+        /// The name's attributes by text size: normal weight, a size up from the message text (user, 2026-11-13), the
+        /// body text (13 pt at Regular).
+        static let text: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
+            uniqueKeysWithValues: TextSize.allCases.map {
+                ($0, [.font: $0.bodyNSFont, .foregroundColor: Palette.graphBadgeText, .paragraphStyle: paragraph])
+            })
+        /// ↑↓, "#N" and "+N" by text size: the counts' font (11 pt at Regular).
+        static let count: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
+            uniqueKeysWithValues: TextSize.allCases.map {
+                ($0, [.font: $0.countNSFont, .foregroundColor: Palette.graphBadgeText])
+            })
         static let leading: CGFloat = 6
         static let padding: CGFloat = 7
         static let gap: CGFloat = 4
@@ -242,9 +248,9 @@ final class RefBadgeCellView: NSView {
     }
 
     /// The pull request chip's width: its icon and "#N".
-    private static func pullChipWidth(_ pull: PullRequestChip) -> CGFloat {
+    private func pullChipWidth(_ pull: PullRequestChip) -> CGFloat {
         2 * Style.chipPadding + Style.icon + Style.iconGap
-            + ceil((pull.text as NSString).size(withAttributes: Style.count).width)
+            + ceil((pull.text as NSString).size(withAttributes: countAttributes).width)
     }
 
     /// The pull request icon, in the chip and, on a badge drawn without it, at the badge's right end.
@@ -290,15 +296,15 @@ final class RefBadgeCellView: NSView {
 
     /// The badge's level and width in `room` points of a row whose badges are `height` high; nil when not even its
     /// icons fit.
-    private static func fit(_ badge: RefBadge, room: CGFloat, height: CGFloat) -> (level: Level, width: CGFloat)? {
+    private func fit(_ badge: RefBadge, room: CGFloat, height: CGFloat) -> (level: Level, width: CGFloat)? {
         let size = widths(badge)
         if size.chrome + size.name <= room { return (.full, size.chrome + size.name) }
-        let (leading, trailing) = refIcons(badge)
-        let chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
+        let (leading, trailing) = Self.refIcons(badge)
+        let chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + Self.iconWidth($1) + Style.iconGap }
         if chrome + minimumName(badge) <= room { return (.name, min(room, chrome + size.name)) }
         // As much room around the icons as a single one has in its square.
-        for level in [Level.icon, .check] where level == .icon || leading.contains(headIcon) {
-            let width = iconsWidth(iconsAlone(badge, at: level)) + height - Style.refIcon
+        for level in [Level.icon, .check] where level == .icon || leading.contains(Self.headIcon) {
+            let width = Self.iconsWidth(Self.iconsAlone(badge, at: level)) + height - Style.refIcon
             if width <= room { return (level, width) }
         }
         return nil
@@ -306,26 +312,26 @@ final class RefBadgeCellView: NSView {
 
     /// The least of a name shown: its first 3 characters and "…" (with a point to spare, so AppKit keeps 3), or all
     /// of a shorter name.
-    private static func minimumName(_ badge: RefBadge) -> CGFloat {
-        let name = ceil((badge.shownName as NSString).size(withAttributes: Style.text).width)
+    private func minimumName(_ badge: RefBadge) -> CGFloat {
+        let name = ceil((badge.shownName as NSString).size(withAttributes: textAttributes).width)
         guard badge.shownName.count > 3 else { return name }
-        let cut = ceil((String(badge.shownName.prefix(3)) + "…" as NSString).size(withAttributes: Style.text).width)
-            + 1
+        let cut = ceil((String(badge.shownName.prefix(3)) + "…" as NSString)
+            .size(withAttributes: textAttributes).width) + 1
         return min(name, cut)
     }
 
     /// The badge's width without its name, and its name's width. A pull request chip takes the place of the badge's
     /// right padding, `chipInset` from its edge.
-    private static func widths(_ badge: RefBadge) -> (chrome: CGFloat, name: CGFloat) {
-        let (leading, trailing) = icons(badge)
-        var chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
-        if let counts = aheadBehind(badge) {
-            chrome += Style.iconGap + ceil((counts as NSString).size(withAttributes: Style.count).width)
+    private func widths(_ badge: RefBadge) -> (chrome: CGFloat, name: CGFloat) {
+        let (leading, trailing) = Self.icons(badge)
+        var chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + Self.iconWidth($1) + Style.iconGap }
+        if let counts = Self.aheadBehind(badge) {
+            chrome += Style.iconGap + ceil((counts as NSString).size(withAttributes: countAttributes).width)
         }
         if let pull = badge.pullRequest.map(PullRequestChip.init) {
             chrome += Style.iconGap + pullChipWidth(pull) + Style.chipInset - Style.padding
         }
-        let name = ceil((badge.shownName as NSString).size(withAttributes: Style.text).width)
+        let name = ceil((badge.shownName as NSString).size(withAttributes: textAttributes).width)
         return (chrome, name)
     }
 
@@ -354,7 +360,7 @@ final class RefBadgeCellView: NSView {
     }
 
     private var stackWidth: CGFloat {
-        badges.map { let size = Self.widths($0); return size.chrome + size.name }.max() ?? 0
+        badges.map { let size = widths($0); return size.chrome + size.name }.max() ?? 0
     }
 
     /// Every badge whole and as wide as the widest, one under the other from the hovered row (or above it, upward).
@@ -394,7 +400,7 @@ final class RefBadgeCellView: NSView {
         guard !isCovered, let layout = layout() else { return nil }
         // Only a chip that is drawn: a square or a cut name has none.
         for (index, rect, level) in layout.badges where level == .full {
-            guard let pull = badges[index].pullRequest, Self.chipRect(PullRequestChip(pull), in: rect).contains(point)
+            guard let pull = badges[index].pullRequest, chipRect(PullRequestChip(pull), in: rect).contains(point)
             else { continue }
             return pull
         }
@@ -402,7 +408,7 @@ final class RefBadgeCellView: NSView {
     }
 
     /// The chip's frame inside its badge's: at the trailing end, `chipInset` from the badge's edges.
-    private static func chipRect(_ pull: PullRequestChip, in rect: CGRect) -> CGRect {
+    private func chipRect(_ pull: PullRequestChip, in rect: CGRect) -> CGRect {
         let width = min(pullChipWidth(pull), rect.width - 2 * Style.chipInset)
         return CGRect(x: rect.maxX - Style.chipInset - width, y: rect.minY + Style.chipInset,
                       width: max(0, width), height: max(0, rect.height - 2 * Style.chipInset))
@@ -464,7 +470,7 @@ final class RefBadgeCellView: NSView {
         let height = min(Style.height, bounds.height - 2 * metrics.bandInset)
         let y = (bounds.height - height) / 2
         let available = bounds.width - Style.leading - Style.trailing
-        let sizes = badges.map(Self.widths)
+        let sizes = badges.map(widths)
 
         // How many badges fit whole, keeping room for "+N" when some are left out.
         var shown = badges.count
@@ -485,7 +491,7 @@ final class RefBadgeCellView: NSView {
             // Only the first badge is shown, and not whole: it steps down in the room "+N" leaves it (user,
             // 2026-11-16: "+N" always stays, only the name gives way). When not even its square fits, "+N" counts it.
             let chip = showsChip ? chipWidth(badges.count - 1) + Style.gap : 0
-            if let fit = Self.fit(badges[0], room: available - chip, height: height) {
+            if let fit = fit(badges[0], room: available - chip, height: height) {
                 place(0, fit.level, fit.width)
                 shown = 1
             } else {
@@ -507,7 +513,7 @@ final class RefBadgeCellView: NSView {
 
     /// An image of `badge` alone, for its drag.
     func dragImage(of badge: RefBadge, scale: CGFloat) -> NSImage {
-        let size = Self.widths(badge)
+        let size = widths(badge)
         let rect = CGRect(x: 0, y: 0, width: size.chrome + size.name, height: Style.height)
         let image = NSImage(size: rect.size)
         guard let bitmap = NSBitmapImageRep(
@@ -536,16 +542,16 @@ final class RefBadgeCellView: NSView {
     }
 
     private func chipWidth(_ count: Int) -> CGFloat {
-        2 * Style.padding + ceil(("+\(count)" as NSString).size(withAttributes: Style.count).width)
+        2 * Style.padding + ceil(("+\(count)" as NSString).size(withAttributes: countAttributes).width)
     }
 
     private func drawChip(_ text: String, in rect: CGRect, context: CGContext) {
         Palette.graphTagFill.setFill()
         context.addPath(CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil))
         context.fillPath()
-        let size = (text as NSString).size(withAttributes: Style.count)
+        let size = (text as NSString).size(withAttributes: countAttributes)
         (text as NSString).draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
-                                withAttributes: Style.count)
+                                withAttributes: countAttributes)
     }
 
     /// A badge's fill: as it is, fainter (the stack's badges under the row's own), or lit (the hovered one).
@@ -608,7 +614,7 @@ final class RefBadgeCellView: NSView {
         }
         var trailingX = rect.maxX - Style.padding
         if level == .full, let pull = badge.pullRequest.map(PullRequestChip.init) {
-            let chip = Self.chipRect(pull, in: rect)
+            let chip = chipRect(pull, in: rect)
             drawPullRequestChip(pull, in: chip, context: context)
             trailingX = chip.minX - Style.iconGap
         }
@@ -618,18 +624,18 @@ final class RefBadgeCellView: NSView {
             trailingX -= Style.iconGap
         }
         if level == .full, let counts = Self.aheadBehind(badge) {
-            let size = (counts as NSString).size(withAttributes: Style.count)
+            let size = (counts as NSString).size(withAttributes: countAttributes)
             trailingX -= ceil(size.width)
             (counts as NSString).draw(at: CGPoint(x: trailingX, y: rect.midY - size.height / 2),
-                                      withAttributes: Style.count)
+                                      withAttributes: countAttributes)
             trailingX -= Style.iconGap
         }
-        let lineHeight = ceil(Style.font.ascender - Style.font.descender + Style.font.leading)
+        let lineHeight = metrics.textSize.lineHeight
         let textRect = CGRect(x: x, y: rect.midY - lineHeight / 2, width: max(0, trailingX - x), height: lineHeight)
         guard textRect.width > 0 else { return }
         context.clip(to: textRect)
         (badge.shownName as NSString).draw(
-            with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: Style.text)
+            with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: textAttributes)
     }
 
     /// The pull icon and "#N" on GitHub's open green (or draft grey).
@@ -642,9 +648,9 @@ final class RefBadgeCellView: NSView {
         context.clip(to: rect)
         let x = rect.minX + Style.chipPadding
         drawIcon(Self.pullIcon, x: x, midY: rect.midY, slot: Style.icon)
-        let size = (pull.text as NSString).size(withAttributes: Style.count)
+        let size = (pull.text as NSString).size(withAttributes: countAttributes)
         (pull.text as NSString).draw(at: CGPoint(x: x + Style.icon + Style.iconGap, y: rect.midY - size.height / 2),
-                                     withAttributes: Style.count)
+                                     withAttributes: countAttributes)
         context.restoreGState()
     }
 
@@ -699,6 +705,8 @@ final class GraphTextCellView: NSView {
     var changes: WorktreeChanges? { didSet { refreshAccessibilityLabel(); refreshToolTip() } }
     var tone = Tone.primary
     var isItalic = false { didSet { refreshToolTip() } }
+    /// The fonts' size (`GraphMetrics.textSize`): set before `text`, whose tooltip measures it.
+    var textSize = TextSize.regular { didSet { if textSize != oldValue { refreshToolTip() } } }
     /// The author column's avatar: drawn instead of the text while the column is too narrow for `compactTitle` (its
     /// header's title, which shows an icon then).
     var avatar: NSImage? { didSet { refreshToolTip() } }
@@ -719,34 +727,54 @@ final class GraphTextCellView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// The fonts, attributes and glyphs of one text size (12 pt text at Regular), built once per size
+    /// (`Style.bySize`).
     @MainActor
-    private enum Style {
-        static let font = NSFont.systemFont(ofSize: 12)
-        static let italic = NSFontManager.shared.convert(NSFont.systemFont(ofSize: 12), toHaveTrait: .italicFontMask)
+    private struct Style {
+        let font: NSFont
+        let italic: NSFont
+        let primary: [NSAttributedString.Key: Any]
+        let secondary: [NSAttributedString.Key: Any]
+        let primaryItalic: [NSAttributedString.Key: Any]
+        let secondaryItalic: [NSAttributedString.Key: Any]
+        // `FileChange`'s glyphs and colors, so the row matches the file lists.
+        let edited: NSTextAttachment
+        let added: NSTextAttachment
+        let deleted: NSTextAttachment
+        /// One line of the text, for its rect.
+        let lineHeight: CGFloat
+
+        init(_ size: TextSize) {
+            font = NSFont.systemFont(ofSize: size.scaled(12))
+            italic = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+            primary = Self.attributes(.primary, font: font)
+            secondary = Self.attributes(.secondary, font: font)
+            primaryItalic = Self.attributes(.primary, font: italic)
+            secondaryItalic = Self.attributes(.secondary, font: italic)
+            let glyphSize = size.scaled(11)
+            edited = Self.glyph("pencil", Palette.graphLanes[1], size: glyphSize, font: font)
+            added = Self.glyph("plus", Palette.graphLanes[2], size: glyphSize, font: font)
+            deleted = Self.glyph("minus", Palette.graphLanes[7], size: glyphSize, font: font)
+            lineHeight = ceil(font.ascender - font.descender + font.leading)
+        }
+
+        static let bySize = Dictionary(uniqueKeysWithValues: TextSize.allCases.map { ($0, Style($0)) })
         static let paragraph: NSParagraphStyle = {
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byTruncatingTail
             return style
         }()
-        static func attributes(_ tone: Tone, italic: Bool) -> [NSAttributedString.Key: Any] {
-            [.font: italic ? Style.italic : Style.font, .paragraphStyle: paragraph,
+        private static func attributes(_ tone: Tone, font: NSFont) -> [NSAttributedString.Key: Any] {
+            [.font: font, .paragraphStyle: paragraph,
              .foregroundColor: tone == .primary ? NSColor.labelColor : NSColor.secondaryLabelColor]
         }
-        static let primary = attributes(.primary, italic: false)
-        static let secondary = attributes(.secondary, italic: false)
-        static let primaryItalic = attributes(.primary, italic: true)
-        static let secondaryItalic = attributes(.secondary, italic: true)
         static let padding: CGFloat = 8
         static let dimmedAlpha: CGFloat = 0.35
-        // `FileChange`'s glyphs and colors, so the row matches the file lists.
-        static let edited = glyph("pencil", Palette.graphLanes[1])
-        static let added = glyph("plus", Palette.graphLanes[2])
-        static let deleted = glyph("minus", Palette.graphLanes[7])
 
         /// A symbol with its color baked in (an attachment does not take the text's color), centered on the capitals.
-        private static func glyph(_ name: String, _ color: NSColor) -> NSTextAttachment {
+        private static func glyph(_ name: String, _ color: NSColor, size: CGFloat, font: NSFont) -> NSTextAttachment {
             let attachment = NSTextAttachment()
-            let configuration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+            let configuration = NSImage.SymbolConfiguration(pointSize: size, weight: .semibold)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
             guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
                 .withSymbolConfiguration(configuration)
@@ -765,23 +793,33 @@ final class GraphTextCellView: NSView {
 
     private var showsAvatar: Bool {
         guard avatar != nil, let compactTitle else { return false }
-        return !GraphHeaderCell.fits(compactTitle, width: bounds.width)
+        return !GraphHeaderCell.fits(compactTitle, width: bounds.width, textSize: textSize)
     }
 
     private var textWidth: CGFloat { max(0, bounds.width - 2 * Style.padding) }
 
+    /// The fonts of `textSize`.
+    private var style: Style { Style.bySize[textSize] ?? Style(textSize) }
+
+    /// The width a cell needs to show `text` whole at `textSize`: the text and its padding.
+    static func fittingWidth(_ text: String, textSize: TextSize) -> CGFloat {
+        let font = (Style.bySize[textSize] ?? Style(textSize)).font
+        return ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2 * Style.padding
+    }
+
     private var attributedText: NSAttributedString {
+        let style = style
         let attributes = switch (tone, isItalic) {
-        case (.primary, false): Style.primary
-        case (.secondary, false): Style.secondary
-        case (.primary, true): Style.primaryItalic
-        case (.secondary, true): Style.secondaryItalic
+        case (.primary, false): style.primary
+        case (.secondary, false): style.secondary
+        case (.primary, true): style.primaryItalic
+        case (.secondary, true): style.secondaryItalic
         }
         guard let changes else { return NSAttributedString(string: text, attributes: attributes) }
         let combined = NSMutableAttributedString(string: text, attributes: attributes)
-        let counts = tone == .primary ? Style.primary : Style.secondary
-        for (count, glyph) in [(changes.edited, Style.edited), (changes.added, Style.added),
-                               (changes.deleted, Style.deleted)] where count > 0 {
+        let counts = tone == .primary ? style.primary : style.secondary
+        for (count, glyph) in [(changes.edited, style.edited), (changes.added, style.added),
+                               (changes.deleted, style.deleted)] where count > 0 {
             combined.append(NSAttributedString(string: "   ", attributes: counts))
             combined.append(NSAttributedString(attachment: glyph))
             combined.append(NSAttributedString(string: " \(count)", attributes: counts))
@@ -830,7 +868,7 @@ final class GraphTextCellView: NSView {
             context?.restoreGState()
             return
         }
-        let lineHeight = ceil(Style.font.ascender - Style.font.descender + Style.font.leading)
+        let lineHeight = style.lineHeight
         let rect = CGRect(x: Style.padding, y: (bounds.height - lineHeight) / 2, width: textWidth, height: lineHeight)
         attributedText.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
@@ -892,18 +930,22 @@ final class GraphHeaderView: NSTableHeaderView {
 }
 
 final class GraphHeaderCell: NSTableHeaderCell {
-    @MainActor private static let attributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
-        .foregroundColor: NSColor.secondaryLabelColor,
-        .kern: 0.6,
-    ]
+    /// The title's attributes by text size: 10.5 pt semibold at Regular.
+    @MainActor private static let attributes: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
+        uniqueKeysWithValues: TextSize.allCases.map {
+            ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(10.5), weight: .semibold),
+                  .foregroundColor: NSColor.secondaryLabelColor, .kern: 0.6])
+        })
 
     /// The SF Symbol drawn instead of the title when the column is too narrow for the whole title.
     var symbolName: String?
+    /// The title's size (`GraphMetrics.textSize`).
+    var textSize = TextSize.regular
 
-    /// Whether `title` fits whole in a column `width` wide (the author cells show avatars when the author's does not).
-    @MainActor static func fits(_ title: String, width: CGFloat) -> Bool {
-        (title.uppercased() as NSString).size(withAttributes: attributes).width <= width - 12
+    /// Whether `title` fits whole in a column `width` wide at `textSize` (the author cells show avatars when the
+    /// author's does not).
+    @MainActor static func fits(_ title: String, width: CGFloat, textSize: TextSize) -> Bool {
+        (title.uppercased() as NSString).size(withAttributes: attributes[textSize] ?? [:]).width <= width - 12
     }
 
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
@@ -911,7 +953,7 @@ final class GraphHeaderCell: NSTableHeaderCell {
     }
 
     override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
-        if let symbolName, !Self.fits(stringValue, width: cellFrame.width),
+        if let symbolName, !Self.fits(stringValue, width: cellFrame.width, textSize: textSize),
            let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: stringValue)?
                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
                    .applying(NSImage.SymbolConfiguration(paletteColors: [.secondaryLabelColor]))) {
@@ -921,11 +963,12 @@ final class GraphHeaderCell: NSTableHeaderCell {
                         from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         } else {
             let title = stringValue.uppercased() as NSString
-            let size = title.size(withAttributes: Self.attributes)
+            let attributes = Self.attributes[textSize] ?? [:]
+            let size = title.size(withAttributes: attributes)
             let rect = NSRect(x: cellFrame.minX + 8, y: cellFrame.midY - size.height / 2,
                               width: max(0, cellFrame.width - 12), height: size.height)
             title.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                       attributes: Self.attributes)
+                       attributes: attributes)
         }
         // A hairline between columns, like the resize handle's place.
         NSColor.separatorColor.setFill()

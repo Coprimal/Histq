@@ -1,6 +1,6 @@
 // Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the sidebar's sections
-// (shown, and their order in each tab), the commit graph's avatars, date format, row height and text columns, the file
-// lists' layout and file sizes, the WIP panel's order, and the diffs' default view and whitespace.
+// (shown, and their order in each tab), the commit graph's avatars, date format, row height and text columns, the
+// text size, the file lists' layout and file sizes, the WIP panel's order, and the diffs' default view and whitespace.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -13,6 +13,7 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.avatarMode.rawValue, store: Preferences.defaults) private var avatarMode = "generated"
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
+    @AppStorage(PrefKey.textSize.rawValue, store: Preferences.defaults) private var textSize = TextSize.regular.rawValue
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
@@ -154,6 +155,15 @@ struct AppearanceSettings: View {
                 } label: {
                     Text("Row height")
                     SettingsHint("Compact fits more commits on screen.")
+                }
+                SettingsDivider()
+                LabeledContent {
+                    CapsuleTabs(selection: $textSize, tabs: TextSize.allCases.map(\.rawValue),
+                                title: { Text($0.capitalized) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Text size")
+                    SettingsHint("The graph, sidebar and file lists. Separate from row height.")
                 }
             }
             SettingsGroup("Graph columns", description: "Branch / Tag and Graph always show.") {

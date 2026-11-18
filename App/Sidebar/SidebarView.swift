@@ -104,6 +104,12 @@ enum SidebarMetrics {
     static let branchImage = "lucide-git-branch"
     /// The Worktrees card and each worktree's row: a folder, as GitKraken draws them.
     static let worktreeImage = "folder"
+
+    /// A row's height at the text size: `SidebarItemStyle.height` (28) unless a line of text and 5 pt above and below
+    /// need more. Not `SidebarItemStyle.height` itself, which the Settings sidebar shares.
+    static func rowHeight(_ textSize: TextSize) -> CGFloat {
+        max(SidebarItemStyle.height, textSize.lineHeight + 10)
+    }
 }
 
 /// The sidebar of a repo tab: the tab picker across its width (icon and short name; the full name is the tooltip),
@@ -114,6 +120,7 @@ struct SidebarView: View {
     @Bindable var session: RepoSession
     @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
     @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
+    @Environment(\.textSize) private var textSize
 
     /// The sections the user shows, in their order (`SidebarSections`).
     private var layout: SidebarSections { SidebarSections(order: sectionOrder, hidden: hiddenSections) }
@@ -199,6 +206,7 @@ struct SidebarView: View {
             }
         case (_, .failed(let message)):
             Label(message, systemImage: "exclamationmark.triangle")
+                .font(textSize.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(SidebarMetrics.cardPadding + 4)
@@ -336,14 +344,15 @@ private struct BranchSections: View {
 /// The Branches tab with Local, Remote and Worktrees all hidden: says so, with the button to Settings › Appearance.
 private struct HiddenSectionsCard: View {
     @Environment(WindowModel.self) private var model
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         SectionCard("Branches", systemImage: SidebarTab.branches.systemImage) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("All sections are hidden")
-                    .font(.body.weight(.medium))
+                    .font(textSize.bodyMedium)
                 Text("Local, Remote and Worktrees are hidden in Settings › Appearance.")
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Show Sections…") { model.selectSettings(.appearance) }
@@ -408,6 +417,7 @@ private struct WorktreeRow: View {
     let session: RepoSession
     let info: WorktreeInfo
     @State private var hovered = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         HStack(spacing: SidebarMetrics.iconGap) {
@@ -416,6 +426,7 @@ private struct WorktreeRow: View {
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(info.name)
+                    .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
@@ -425,7 +436,7 @@ private struct WorktreeRow: View {
                         .help("Uncommitted changes: \(changes)")
                 }
                 Text(info.worktree.isPrunable ? "missing" : info.headLabel)
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -433,7 +444,7 @@ private struct WorktreeRow: View {
         .foregroundStyle(.secondary)
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(hovered ? Palette.hoverFill : .clear))
         .contentShape(Capsule())
@@ -619,13 +630,15 @@ struct CardSearchField: View {
 /// The text of an empty section.
 struct EmptyRow: View {
     let text: String
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         Text(text)
+            .font(textSize.body)
             .foregroundStyle(.secondary)
             .padding(.leading, SidebarMetrics.rowLeading)
             .padding(.trailing, 10)
-            .frame(height: SidebarItemStyle.height)
+            .frame(height: SidebarMetrics.rowHeight(textSize))
     }
 }
 
@@ -637,6 +650,7 @@ private struct RemoteRow: View {
     let url: String?
     @State private var ownerAvatar: NSImage?
     @Environment(\.displayScale) private var scale
+    @Environment(\.textSize) private var textSize
     private static let avatarSide: CGFloat = 16
 
     var body: some View {
@@ -654,14 +668,14 @@ private struct RemoteRow: View {
             }
             .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             Text(name)
-                .font(.body.weight(.medium))
+                .font(textSize.bodyMedium)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
         .foregroundStyle(.secondary)
         .padding(.leading, SidebarMetrics.rowLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .help(name)
@@ -699,6 +713,7 @@ private struct BranchRow<Trailing: View>: View {
     var indent: CGFloat = 0
     @ViewBuilder let trailing: () -> Trailing
     @State private var hovered = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         let selected = session.sidebarSelection == item
@@ -715,6 +730,7 @@ private struct BranchRow<Trailing: View>: View {
                 .opacity(dimmed)
             HStack(spacing: 4) {
                 Text(name)
+                    .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .opacity(dimmed)
@@ -729,7 +745,7 @@ private struct BranchRow<Trailing: View>: View {
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
@@ -761,6 +777,7 @@ private struct BranchRow<Trailing: View>: View {
 /// `↑2 ↓1` against the upstream; "gone" when the upstream was deleted. Nothing when in sync or without upstream.
 private struct AheadBehind: View {
     let branch: LocalBranch
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         HStack(spacing: 4) {
@@ -771,7 +788,7 @@ private struct AheadBehind: View {
                 if branch.behind > 0 { Text("\(Image(systemName: "arrow.down"))\(branch.behind)") }
             }
         }
-        .font(.settingsCaption)
+        .font(textSize.caption)
         .monospacedDigit()
         .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
@@ -789,6 +806,7 @@ private struct AheadBehind: View {
 /// row).
 struct SkeletonRows: View {
     let fractions: [CGFloat]
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         ForEach(fractions.indices, id: \.self) { index in
@@ -799,7 +817,7 @@ struct SkeletonRows: View {
             }
             .padding(.leading, SidebarMetrics.rowLeading)
             .padding(.trailing, 10)
-            .frame(height: SidebarItemStyle.height)
+            .frame(height: SidebarMetrics.rowHeight(textSize))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

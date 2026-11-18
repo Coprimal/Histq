@@ -63,6 +63,7 @@ struct PullRequestSections: View {
     let session: RepoSession
     @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
     @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         let store = session.github
@@ -83,9 +84,9 @@ struct PullRequestSections: View {
                 SectionCard("GitHub", systemImage: "exclamationmark.triangle") {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("No GitHub remote")
-                            .font(.body.weight(.medium))
+                            .font(textSize.bodyMedium)
                         Text("None of this repository's remotes is on \(host), the host of this tab's GitHub account.")
-                            .font(.settingsCaption)
+                            .font(textSize.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -163,16 +164,17 @@ private struct ListCard: View {
 private struct ListErrorRow: View {
     let error: GitHubStore.ListError
     @Environment(WindowModel.self) private var model
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(error.message, systemImage: "exclamationmark.triangle")
-                .font(.settingsCaption)
+                .font(textSize.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if error.reconnect {
                 Text("Reconnect in Settings › Integrations.")
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Reconnect…") { model.selectSettings(.integrations) }
@@ -191,14 +193,15 @@ private struct ConnectGitHubCard: View {
     /// Set when the profile has an account whose token is not in the Keychain.
     let account: Profile.GitHubAccount?
     @Environment(WindowModel.self) private var model
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         SectionCard("GitHub", systemImage: "person.crop.circle.badge.plus") {
             VStack(alignment: .leading, spacing: 8) {
                 Text(account == nil ? "Connect GitHub" : "Reconnect GitHub")
-                    .font(.body.weight(.medium))
+                    .font(textSize.bodyMedium)
                 Text(detail)
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button(account == nil ? "Connect GitHub…" : "Reconnect…") { model.selectSettings(.integrations) }
@@ -227,6 +230,7 @@ private struct HostedRowView: View {
     /// Bumped when `AvatarStore` has a new image for this author (or the avatar mode changed).
     @State private var avatarRevision = 0
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.textSize) private var textSize
 
     private static let avatarSize: CGFloat = 16
 
@@ -238,18 +242,19 @@ private struct HostedRowView: View {
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text("#\(row.number)")
-                    .font(.settingsCaption)
+                    .font(textSize.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                 Text(row.title)
+                    .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 4)
                 if row.isDraft {
                     Text("Draft")
-                        .font(.settingsCaption)
+                        .font(textSize.caption)
                         .padding(.horizontal, 6)
-                        .frame(height: 16)
+                        .frame(height: textSize.scaled(16))
                         .background(Capsule().fill(Palette.tabFill))
                 }
                 if let checks { ChecksIcon(state: checks) }
@@ -259,7 +264,7 @@ private struct HostedRowView: View {
         // `BranchRow`'s look: a neutral capsule when selected, a hover capsule otherwise.
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
-        .frame(minHeight: SidebarItemStyle.height)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
@@ -314,10 +319,11 @@ private struct HostedRowView: View {
 /// The checks state as a small icon: green check, red cross, or a yellow dotted circle while runs are unfinished.
 private struct ChecksIcon: View {
     let state: ChecksState
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         Image(systemName: symbol)
-            .font(.settingsCaption)
+            .font(textSize.caption)
             // The diff's added/removed signs and the conflict editor's B color: the palette's green, red and yellow.
             .foregroundStyle(Color(nsColor: color))
             .help(Self.text(state))

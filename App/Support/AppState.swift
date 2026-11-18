@@ -101,6 +101,8 @@ enum PrefKey: String, CaseIterable {
     case dateFormat
     /// Graph row height: "compact", "regular" or "comfortable".
     case rowDensity
+    /// The graph's, sidebar's and file lists' text: a `TextSize` raw value, "small", "regular" or "large".
+    case textSize
     /// Commit avatars: "real" (Gravatar / GitHub), "generated" or "initials".
     case avatarMode
     /// Pull button: a `GitOperations.PullMode` case name, "fastForward" (merge if needed), "fastForwardOnly" or "rebase".
@@ -230,6 +232,7 @@ enum PrefKey: String, CaseIterable {
         switch self {
         case .dateFormat: "MM/dd/yy @ HH:mm"
         case .rowDensity: "regular"
+        case .textSize: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"
         case .autoStash: "ask"

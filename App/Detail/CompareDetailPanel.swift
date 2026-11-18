@@ -13,6 +13,7 @@ struct CompareDetailPanel: View {
     /// The select this detail answers and its timing detail (see `CommitDetailPanel`).
     let token: Int
     let timingDetail: String
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
@@ -56,9 +57,10 @@ struct CompareDetailPanel: View {
             let shown = FileSearch.filter(files, query: query)
             if shown.isEmpty {
                 Text(files.isEmpty ? "No differences" : "No matching files")
+                    .font(textSize.body)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
-                    .frame(height: FileListView<EmptyView>.rowHeight)
+                    .frame(height: FileListView<EmptyView>.rowHeight(textSize))
             } else {
                 CardScrollView {
                     FileListView(files: shown, repoURL: session.url, card: .commit)
