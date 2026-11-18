@@ -45,6 +45,15 @@ struct RefBadge: Hashable {
     /// The name drawn in the badge.
     var shownName: String { label ?? name }
 
+    /// The checked-out branch, or a detached HEAD.
+    var isHead: Bool {
+        switch kind {
+        case .branch(_, _, let isHead): isHead
+        case .head: true
+        case .tag, .worktree: false
+        }
+    }
+
     /// The badges of every labeled commit, in row order: HEAD's branch (or a detached HEAD) first, then local
     /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read (and per
     /// change of `pullRequests`, the store's `branchPullRequests`: a remote branch's pull request by its name, which a
@@ -132,8 +141,10 @@ final class RefBadgeCellView: NSView {
         var lineEnd: CGFloat
     }
 
-    /// The name's and the counts' attributes at the metrics' text size.
-    private var textAttributes: [NSAttributedString.Key: Any] { Style.text[metrics.textSize] ?? [:] }
+    /// A badge's name attributes at the metrics' text size, and the counts' attributes.
+    private func textAttributes(_ badge: RefBadge) -> [NSAttributedString.Key: Any] {
+        (badge.isHead ? Style.headText : Style.text)[metrics.textSize] ?? [:]
+    }
     private var countAttributes: [NSAttributedString.Key: Any] { Style.count[metrics.textSize] ?? [:] }
 
     override var isFlipped: Bool { true }
@@ -155,9 +166,16 @@ final class RefBadgeCellView: NSView {
             style.lineBreakMode = .byTruncatingTail
             return style
         }()
-        /// The name's attributes by text size: normal weight, a size up from the message text (user, 2026-11-13), the
-        /// body text (13 pt at Regular).
+        /// The name's attributes by text size: normal weight, 12 pt at Regular (user, 2026-11-18: a bit smaller than
+        /// the body text), in the muted badge text color.
         static let text: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
+            uniqueKeysWithValues: TextSize.allCases.map {
+                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12)), .foregroundColor: Palette.graphBadgeTextMuted,
+                      .paragraphStyle: paragraph])
+            })
+        /// The checked-out branch's name: the body text (13 pt at Regular) in pure white, so it stands out from the
+        /// others without a border (user, 2026-11-18).
+        static let headText: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
             uniqueKeysWithValues: TextSize.allCases.map {
                 ($0, [.font: $0.bodyNSFont, .foregroundColor: Palette.graphBadgeText, .paragraphStyle: paragraph])
             })
@@ -177,8 +195,6 @@ final class RefBadgeCellView: NSView {
         static let refIcon: CGFloat = 15
         static let headIcon: CGFloat = 16
         static let radius: CGFloat = 5
-        /// The border of the checked-out branch's badge.
-        static let headBorder: CGFloat = 1.5
         /// A badge's height, less in a row too short for it (compact).
         static let height: CGFloat = 22
         /// Room kept for the line to the node.
@@ -197,33 +213,36 @@ final class RefBadgeCellView: NSView {
     /// The check of the branch checked out (or of a detached HEAD): always drawn, in front of the name.
     private static let headIcon = "checkmark.circle.fill"
 
-    /// SF Symbols in the badge text color, drawn at a size that fills their slot (the cloud and tag are 16 pt wide at
-    /// 12 pt, scaled down to 15; at 10.5 pt they stayed 14). A Lucide icon (24 pt) is tinted the same color.
-    @MainActor private static func symbol(_ name: String) -> NSImage? {
-        if let cached = symbols[name] { return cached }
+    /// SF Symbols in the badge text color (pure white when `bright`: the checked-out branch's badge and the pull
+    /// request chip; else muted), drawn at a size that fills their slot (the cloud and tag are 16 pt wide at 12 pt,
+    /// scaled down to 15; at 10.5 pt they stayed 14). A Lucide icon (24 pt) is tinted the same color.
+    @MainActor private static func symbol(_ name: String, bright: Bool) -> NSImage? {
+        let key = "\(name)|\(bright)"
+        if let cached = symbols[key] { return cached }
+        let text = bright ? Palette.graphBadgeText : Palette.graphBadgeTextMuted
         if name.hasPrefix("lucide-") {
-            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map(tinted)
-            symbols[name] = image
+            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map { tinted($0, text) }
+            symbols[key] = image
             return image
         }
         let isCheck = name == headIcon
         // HEAD's check stands out: a solid white disc with a bold check in the graph's dark surface.
-        let colors = isCheck ? [Palette.graphSurface, Palette.graphBadgeText] : [Palette.graphBadgeText]
+        let colors = isCheck ? [Palette.graphSurface, text] : [text]
         let configuration = NSImage.SymbolConfiguration(pointSize: isCheck ? 13.5 : 12, weight: isCheck ? .bold : .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: colors))
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration)
-        symbols[name] = image
+        symbols[key] = image
         return image
     }
 
     @MainActor private static var symbols: [String: NSImage?] = [:]
 
-    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color: it would draw black.
-    private static func tinted(_ template: NSImage) -> NSImage {
+    /// A template image (Lucide, or a monochrome symbol) filled with a badge text color: it would draw black.
+    private static func tinted(_ template: NSImage, _ color: NSColor) -> NSImage {
         NSImage(size: template.size, flipped: false) { rect in
             template.draw(in: rect)
-            Palette.graphBadgeText.setFill()
+            color.setFill()
             rect.fill(using: .sourceAtop)
             return true
         }
@@ -313,10 +332,11 @@ final class RefBadgeCellView: NSView {
     /// The least of a name shown: its first 3 characters and "…" (with a point to spare, so AppKit keeps 3), or all
     /// of a shorter name.
     private func minimumName(_ badge: RefBadge) -> CGFloat {
-        let name = ceil((badge.shownName as NSString).size(withAttributes: textAttributes).width)
+        let attributes = textAttributes(badge)
+        let name = ceil((badge.shownName as NSString).size(withAttributes: attributes).width)
         guard badge.shownName.count > 3 else { return name }
         let cut = ceil((String(badge.shownName.prefix(3)) + "…" as NSString)
-            .size(withAttributes: textAttributes).width) + 1
+            .size(withAttributes: attributes).width) + 1
         return min(name, cut)
     }
 
@@ -331,7 +351,7 @@ final class RefBadgeCellView: NSView {
         if let pull = badge.pullRequest.map(PullRequestChip.init) {
             chrome += Style.iconGap + pullChipWidth(pull) + Style.chipInset - Style.padding
         }
-        let name = ceil((badge.shownName as NSString).size(withAttributes: textAttributes).width)
+        let name = ceil((badge.shownName as NSString).size(withAttributes: textAttributes(badge)).width)
         return (chrome, name)
     }
 
@@ -564,11 +584,7 @@ final class RefBadgeCellView: NSView {
                            context: CGContext)
     {
         let path = CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil)
-        let isHead = switch badge.kind {
-        case .branch(_, _, let isHead): isHead
-        case .head: true
-        case .tag, .worktree: false
-        }
+        let isHead = badge.isHead
         let lane = self.color % Palette.graphLanes.count
         let color: NSColor = if case .tag = badge.kind {
             Palette.graphTagFill
@@ -578,16 +594,6 @@ final class RefBadgeCellView: NSView {
         (fill == .faint ? color.withAlphaComponent(color.alphaComponent * Style.faintFill) : color).setFill()
         context.addPath(path)
         context.fillPath()
-        // The checked-out branch (or detached HEAD) stands out from the others (user, 2026-11-17): a brighter fill and
-        // a bright white border.
-        if isHead {
-            Palette.graphBadgeText.setStroke()
-            context.setLineWidth(Style.headBorder)
-            let inset = rect.insetBy(dx: Style.headBorder / 2, dy: Style.headBorder / 2)
-            context.addPath(CGPath(roundedRect: inset, cornerWidth: Style.radius - Style.headBorder / 2,
-                                   cornerHeight: Style.radius - Style.headBorder / 2, transform: nil))
-            context.strokePath()
-        }
         if fill == .lit {
             NSColor.white.withAlphaComponent(Style.litFill).setFill()
             context.addPath(path)
@@ -630,12 +636,14 @@ final class RefBadgeCellView: NSView {
                                       withAttributes: countAttributes)
             trailingX -= Style.iconGap
         }
-        let lineHeight = metrics.textSize.lineHeight
+        let attributes = textAttributes(badge)
+        let font = attributes[.font] as? NSFont ?? metrics.textSize.bodyNSFont
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
         let textRect = CGRect(x: x, y: rect.midY - lineHeight / 2, width: max(0, trailingX - x), height: lineHeight)
         guard textRect.width > 0 else { return }
         context.clip(to: textRect)
         (badge.shownName as NSString).draw(
-            with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: textAttributes)
+            with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attributes)
     }
 
     /// The pull icon and "#N" on GitHub's open green (or draft grey).
@@ -654,14 +662,14 @@ final class RefBadgeCellView: NSView {
         context.restoreGState()
     }
 
-    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat) {
-        drawIcon(name, x: x, midY: midY, slot: Self.iconWidth(name))
+    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, bright: Bool) {
+        drawIcon(name, x: x, midY: midY, slot: Self.iconWidth(name), bright: bright)
     }
 
     /// `badge`'s icon `name`; the cloud gives way to the logo of its remote's owner once loaded (`remoteAvatars`).
     private func drawIcon(_ name: String, of badge: RefBadge, x: CGFloat, midY: CGFloat) {
         guard name == "cloud", let image = badge.remote.flatMap({ remoteAvatars[$0] }) else {
-            return drawIcon(name, x: x, midY: midY)
+            return drawIcon(name, x: x, midY: midY, bright: badge.isHead)
         }
         let side = Style.refIcon
         let rect = CGRect(x: x, y: (midY - side / 2).rounded(), width: side, height: side)
@@ -672,8 +680,8 @@ final class RefBadgeCellView: NSView {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, slot: CGFloat) {
-        guard let image = Self.symbol(name) else { return }
+    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, slot: CGFloat, bright: Bool = true) {
+        guard let image = Self.symbol(name, bright: bright) else { return }
         let size = image.size
         let scale = min(1, slot / max(size.width, size.height))
         let width = size.width * scale

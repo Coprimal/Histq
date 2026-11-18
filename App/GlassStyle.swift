@@ -124,10 +124,13 @@ enum Palette {
     static let graphStashBand = graphStash.withAlphaComponent(0.16)
     /// A branch badge's fill: its row's lane color at 0.38.
     static let graphBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.38) }
-    /// The checked-out branch's badge: brighter, its lane color at 0.6 (with a white border).
+    /// The checked-out branch's badge: brighter, its lane color at 0.6.
     static let graphHeadBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.6) }
     /// Text and icons on a badge: pure white, so they read on the dark fills (user, 2026-11-17). White
     static let graphBadgeText = NSColor.white
+    /// Text and icons on every badge but the checked-out branch's, which keeps pure white to stand out (user,
+    /// 2026-11-18). White 0.82
+    static let graphBadgeTextMuted = NSColor.white.withAlphaComponent(0.82)
     /// A tag badge's neutral fill. White 0.14
     static let graphTagFill = NSColor.white.withAlphaComponent(0.14)
     /// A branch badge's pull request chip: GitHub's open green, or its draft grey, solid so it reads on any lane fill.
