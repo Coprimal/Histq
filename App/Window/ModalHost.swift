@@ -422,6 +422,8 @@ private struct SettingsLayer: View {
             SettingsModal { model.closeSettings() }
                 .padding(ModalMetrics.margin)
         }
+        // The window's toasts while it is open (Settings › AI › Save's too), over the card, not under the scrim.
+        .overlay(alignment: .bottomTrailing) { ToastHost(model: model, overSettings: true) }
         .modifier(RestoresFocus())
         .onExitCommand { model.closeSettings() }
         // Behind a modal it opened, like the window content behind any modal.

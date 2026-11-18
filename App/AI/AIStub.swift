@@ -19,6 +19,8 @@
 // `pr-resolve-ai` (a conflicting pull request's merge box, Resolve with AI: merges the base into the head branch, then
 // starts Suggest All in the first conflicted file that both sides still have, UU or AA),
 // `resolve` (conflict editor), `test` (Settings › AI, Test Connection), `load-models` (Settings › AI, Load models),
+// `save-key` (Settings › AI, `-HistqKeychain memory` only: removes the key, then saves the fake one; logs `key saved`
+// or `key not saved: <why>`),
 // `resolve-all` (conflict editor, Suggest All: logs `batch finished ok=<n> failed=<m>` once every region ended; with
 // `apply` it clicks Apply N and logs
 // `apply-batch regions [...]`, and with `undo` it then does Undo AI and logs `unresolved <a>-><b>`); `apply` applies

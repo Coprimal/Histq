@@ -150,16 +150,23 @@ struct ToastHost: View {
     static let limit = 3
 
     let model: WindowModel
+    /// The host in Settings' layer, over Settings; the window's is under every modal. Only the one that matches
+    /// `isSettingsOpen` draws the toasts, so they never show twice.
+    var overSettings = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            ForEach(model.toasts) { toast in
-                ToastCard(toast: toast) { model.dismissToast(toast.id) }
-                    .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+            if model.isSettingsOpen == overSettings {
+                ForEach(model.toasts) { toast in
+                    ToastCard(toast: toast) { model.dismissToast(toast.id) }
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                }
             }
         }
         .onHover { model.holdToasts($0) }
+        // Settings closing under the pointer removes its host without a hover end: the timers must not stay held.
+        .onDisappear { model.holdToasts(false) }
         .padding(16)
         .animation(reduceMotion ? Motion.exit : Motion.standard, value: model.toasts.map(\.id))
     }

@@ -1,7 +1,9 @@
 // Settings › AI: the provider the AI buttons use (Generate Message, Explain, Suggest Resolution), its API key, model
 // and, for a custom OpenAI-compatible server, its base URL, plus "Test connection". The key goes only into the login
-// Keychain (account `ai.<provider>`, `AIKeys`): the field is cleared once saved and the page then shows "••• saved",
-// never the key. Nothing is sent to a provider until the user clicks Test connection or an AI button.
+// Keychain (account `ai.<provider>`, `AIKeys`), once the provider accepted it: Save lists the provider's models with
+// it, and a key it refuses (another provider's, revoked, mistyped) is not saved and shows in a failure toast. The field
+// is cleared once saved and the page then shows "••• saved", never the key. Nothing is sent to a provider until the
+// user clicks Save, Test connection or an AI button.
 import HistqCore
 import SwiftUI
 import os
@@ -150,11 +152,17 @@ final class AISetup {
         }
     }
 
-    /// Checks and saves a key typed for `provider`. Throws `AIClientError.invalidAPIKey` for a key with spaces or
-    /// other characters a key never has, `KeychainError` when the save failed.
+    /// Checks and saves a key typed for `provider`. A built-in provider must accept it first: one model list (a GET
+    /// to its own host, no diff); a custom server's key is optional and many such servers list no models, so only its
+    /// characters are checked. Throws `AIClientError` (`invalidAPIKey` for spaces or other characters a key never has,
+    /// the provider's refusal, or why it could not be reached: the key is not saved unchecked), `KeychainError` when
+    /// the save failed. Nothing is saved when it throws.
     func saveKey(_ raw: String, for provider: AIProvider) async throws {
         let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard AIChatClient.isUsableAPIKey(key) else { throw AIClientError.invalidAPIKey }
+        if provider.requiresAPIKey {
+            _ = try await AIChatClient(provider: provider, apiKey: key, session: clientSession).listModels()
+        }
         try await AIKeys.save(key, for: provider)
         keyStored[provider] = true
     }
@@ -173,16 +181,20 @@ final class AISetup {
         return URLSession(configuration: configuration)
     }()
 
+    /// `session`, or in a DEBUG `-HistqAIStub` run the stub's, which never reaches the network.
+    private var clientSession: URLSession {
+        #if DEBUG
+        AIStub.isEnabled ? AIStub.session : Self.session
+        #else
+        Self.session
+        #endif
+    }
+
     /// The client of `provider` with its key (read off the main thread here, never kept), its fixed base URL or the
-    /// custom one. In a DEBUG `-HistqAIStub` run its session is the stub's, which never reaches the network.
+    /// custom one, over `clientSession`.
     func makeClient(for provider: AIProvider) async throws -> AIChatClient {
         let key = try await AIKeys.key(for: provider)
-        #if DEBUG
-        let session = AIStub.isEnabled ? AIStub.session : Self.session
-        #else
-        let session = Self.session
-        #endif
-        return try AIChatClient(provider: provider, apiKey: key, customBaseURL: customBaseURL, session: session)
+        return try AIChatClient(provider: provider, apiKey: key, customBaseURL: customBaseURL, session: clientSession)
     }
 }
 
@@ -271,14 +283,20 @@ struct AISettings: View {
             keyDraft = ""
         }
         #if DEBUG
-        // `-HistqAI test` / `load-models` (stub runs only): clicks Test Connection or Load models once the keys are
-        // read.
+        // `-HistqAI test` / `load-models` / `save-key` (stub runs only): clicks Test Connection or Load models once the
+        // keys are read; `save-key` removes the seeded key, types the fake one and clicks Save.
         .task(id: setup.keysLoaded) {
             guard setup.keysLoaded else { return }
             if setup.isReady, AIStub.takeSeam("test") {
                 runTest(setup.provider)
             } else if canLoadModels(setup.provider), AIStub.takeSeam("load-models") {
                 loadModels(setup.provider)
+            } else if setup.provider.requiresAPIKey, KeychainStore.shared.isInMemory, AIStub.takeSeam("save-key") {
+                // The in-memory Keychain only: the seam never removes a real key.
+                let provider = setup.provider
+                try? await setup.removeKey(for: provider)
+                keyDraft = AIStub.fakeKey
+                saveKey(provider)
             }
         }
         #endif
@@ -618,8 +636,16 @@ struct AISettings: View {
         Task {
             do {
                 try await setup.saveKey(draft, for: provider)
+                #if DEBUG
+                AIStub.log("key saved \(provider.rawValue)")
+                #endif
             } catch {
-                keyError = "The key was not saved: \(String(describing: error))"
+                // Only in its toast, not on the row too.
+                model.showToast(OperationToast(kind: .failure, title: "\(provider.displayName) API key not saved",
+                                               detail: String(describing: error)))
+                #if DEBUG
+                AIStub.log("key not saved \(provider.rawValue): \(String(describing: error))")
+                #endif
             }
             keyBusy = false
         }
