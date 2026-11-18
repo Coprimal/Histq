@@ -308,7 +308,8 @@ struct DiffLineTable: NSViewRepresentable {
 }
 
 /// Fonts and column positions of a table's rows. The gutters fit the largest line number; the content width fits the
-/// longest line, so the table scrolls sideways instead of wrapping.
+/// longest line, so the table scrolls sideways instead of wrapping. A file's own lines (untracked, or unchanged) have
+/// one number each, so they get one gutter.
 struct DiffLayout {
     @MainActor static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     @MainActor static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
@@ -321,12 +322,13 @@ struct DiffLayout {
 
     let numberWidth: CGFloat
     let contentWidth: CGFloat
+    let oneGutter: Bool
 
-    var newNumberX: CGFloat { numberWidth }
-    var signX: CGFloat { 2 * numberWidth }
+    var newNumberX: CGFloat { oneGutter ? 0 : numberWidth }
+    var signX: CGFloat { newNumberX + numberWidth }
     var textX: CGFloat { signX + Self.signWidth }
 
-    @MainActor init(rows: [DiffRow]) {
+    @MainActor init(rows: [DiffRow], oneGutter: Bool) {
         var largest = 0
         var longest = 0
         for row in rows where row.isLine {
@@ -336,12 +338,14 @@ struct DiffLayout {
         }
         let digits = max(3, String(largest).count)
         numberWidth = CGFloat(digits) * Self.charWidth + 14
-        contentWidth = 2 * numberWidth + Self.signWidth + CGFloat(longest) * Self.charWidth + 24
+        self.oneGutter = oneGutter
+        contentWidth = (oneGutter ? 1 : 2) * numberWidth + Self.signWidth + CGFloat(longest) * Self.charWidth + 24
     }
 
     init() {
         numberWidth = 40
         contentWidth = 0
+        oneGutter = false
     }
 }
 
@@ -423,7 +427,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         let modeChanged = shown.map { $0.mode != key.mode } ?? false
         shown = key
         rows = view.section.rows(view.mode)
-        layout = DiffLayout(rows: rows)
+        layout = DiffLayout(rows: rows, oneGutter: [.untracked, .file].contains(view.section.side))
         // A reload after a stage keeps the scroll offset; the selection goes (its lines may be gone).
         // `reloadData` keeps the selected row indexes, which would now point at other lines, so clear them.
         table.reloadData()
@@ -703,7 +707,7 @@ final class DiffLineCellView: NSView {
             break
         }
         let numberY = (height - DiffLayout.numberFont.boundingRectForFont.height) / 2
-        if let old = row.oldLine {
+        if !layout.oneGutter, let old = row.oldLine {
             NSString(string: "\(old)").draw(
                 in: NSRect(x: 0, y: numberY, width: layout.numberWidth - 8, height: height), withAttributes: Style.number)
         }
