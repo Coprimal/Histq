@@ -1,5 +1,5 @@
-// The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge a capsule
-// of Sidebar / Detail (show or hide a repo tab's side panels), then the repo menu (the window's repo tabs, recent
+// The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the repo
+// menu (the window's repo tabs, recent
 // repos, Open…), the branch menu (checks out the picked branch),
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
 // Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed. Settings is a modal over
@@ -50,10 +50,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let terminalItem = NSToolbarItem(itemIdentifier: ID.terminal)
     private let searchItem = NSToolbarItem(itemIdentifier: ID.search)
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
-    private let sidebarItem = NSToolbarItem(itemIdentifier: ID.sidebar)
-    private let detailItem = NSToolbarItem(itemIdentifier: ID.detail)
-    /// Sidebar and Detail read `PrefKey.showSidebar`, `.showDetail` and `.layoutPreset`, which no observation tracks.
-    private nonisolated(unsafe) var defaultsObserver: NSObjectProtocol?
     private var groups: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     /// On macOS 26, the button showing each plain button item (`hoverButton`), by the item.
     private var hoverButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
@@ -81,9 +77,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         static let terminal = NSToolbarItem.Identifier("terminal")
         static let search = NSToolbarItem.Identifier("search")
         static let settings = NSToolbarItem.Identifier("settings")
-        static let sidebar = NSToolbarItem.Identifier("sidebar")
-        static let detail = NSToolbarItem.Identifier("detail")
-        static let panelsGroup = NSToolbarItem.Identifier("panelsGroup")
         static let historyGroup = NSToolbarItem.Identifier("historyGroup")
         static let syncGroup = NSToolbarItem.Identifier("syncGroup")
         static let branchGroup = NSToolbarItem.Identifier("branchGroup")
@@ -101,15 +94,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // The standard domain is the user's real one, whatever the run: a QA run keeps the default set.
         toolbar.autosavesConfiguration = !AppState.isStateDirMode
         observe()
-        defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: Preferences.defaults, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyPanels() }
-        }
-    }
-
-    deinit {
-        if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
     }
 
     // MARK: Items
@@ -146,12 +130,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
         configureButton(settingsItem, label: "Settings", systemImage: "gearshape")
         settingsItem.action = #selector(toggleSettings(_:))
-        // Show or hide the repo layout's side panels; enabled and named in `applyPanels`.
-        configureButton(sidebarItem, label: "Sidebar", systemImage: "sidebar.left")
-        sidebarItem.action = #selector(toggleSidebar(_:))
-        configureButton(detailItem, label: "Detail", systemImage: "sidebar.right")
-        detailItem.action = #selector(toggleDetail(_:))
-        for item in [sidebarItem, detailItem] { item.isEnabled = false }
 
         if PlatformFeatures.liquidGlass {
             // On macOS 26 the buttons draw their own hover (`ToolbarHoverButton`), Pull and Push with an arrow beside
@@ -168,8 +146,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
                 form.submenu = makeMenu()
                 item.menuFormRepresentation = form
             }
-            // Sidebar and Detail closer together than the other rows' buttons.
-            groups[ID.panelsGroup] = row(ID.panelsGroup, title: "Panels", [sidebarItem, detailItem], spacing: -4)
             groups[ID.historyGroup] = row(ID.historyGroup, title: "History", [undoItem, redoItem])
             // Pull, Push and Fetch as items of their own, each in its own capsule (`toolbarDefaultItemIdentifiers`):
             // a group of view items shares one.
@@ -177,7 +153,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             groups[ID.branchGroup] = row(ID.branchGroup, title: "Branch", [createBranchItem, stashItem, popItem])
             groups[ID.toolsGroup] = row(ID.toolsGroup, title: "Tools", [terminalItem, searchItem, settingsItem])
         } else {
-            groups[ID.panelsGroup] = group(ID.panelsGroup, [sidebarItem, detailItem])
             groups[ID.historyGroup] = group(ID.historyGroup, [undoItem, redoItem])
             groups[ID.syncGroup] = group(ID.syncGroup, [pullItem, pushItem, fetchItem])
             groups[ID.branchGroup] = group(ID.branchGroup, [createBranchItem, stashItem, popItem])
@@ -265,7 +240,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // On macOS 26 a fixed space starts a new capsule; before, there are no capsules to separate.
         let gap: [NSToolbarItem.Identifier] = PlatformFeatures.liquidGlass ? [.space] : []
         let sync = PlatformFeatures.liquidGlass ? [ID.pull] + gap + [ID.push] + gap + [ID.fetch] : [ID.syncGroup]
-        return [ID.panelsGroup] + gap + [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.historyGroup] + gap + sync + gap + [ID.branchGroup]
+        return [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.historyGroup] + gap + sync + gap + [ID.branchGroup]
             + gap + [ID.toolsGroup]
     }
 
@@ -290,7 +265,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Each item's name and icon in the customization palette.
     private static let palette: [NSToolbarItem.Identifier: (label: String, image: String)] = [
-        ID.panelsGroup: ("Panels", "sidebar.left"),
         ID.repo: ("Repository", "book.closed"),
         ID.branch: ("Branch", "lucide-git-branch"),
         ID.profile: ("Profile", "person.crop.circle"),
@@ -316,8 +290,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
     /// selected tab's title, its session's refs, running operations, status, stashes, remotes, profile, undo status,
-    /// operation in progress, terminal drawer and open pull request, the profile store, the page and the Settings modal
-    /// are read, so other tabs and the content's own state never wake the toolbar.
+    /// operation in progress and terminal drawer, the profile store, the page and the Settings modal are read, so
+    /// other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -393,25 +367,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
         let isSettings = model.isSettingsOpen
         set(settingsItem, systemImage: isSettings ? "gearshape.fill" : "gearshape", label: "Settings")
-        applyPanels()
         #if DEBUG
         logItemFrames()
         #endif
-    }
-
-    /// Sidebar and Detail: each is off while its panel is hidden whatever it says (`RepoLayoutView`): without a repo
-    /// tab, in Focus, and (Detail) while a pull request is open outside Stacked. Called from `apply` (the session's
-    /// open pull request) and on a preferences change (the toggles, the layout preset).
-    private func applyPanels() {
-        let session = model.actionSession
-        let preset = LayoutPreset.current
-        let defaults = Preferences.defaults
-        let sidebarShown = defaults.bool(forKey: PrefKey.showSidebar.rawValue)
-        let detailShown = defaults.bool(forKey: PrefKey.showDetail.rawValue)
-        set(sidebarItem, enabled: session != nil && preset != .focus)
-        set(detailItem, enabled: session.map { !RepoLayoutView.hidesDetail(session: $0, preset: preset) } ?? false)
-        set(sidebarItem, toolTip: sidebarShown ? "Hide Sidebar" : "Show Sidebar")
-        set(detailItem, toolTip: detailShown ? "Hide Detail" : "Show Detail")
     }
 
     // Each setter writes only a changed value: an unchanged write still relayouts the toolbar.
@@ -537,19 +495,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     @objc private func togglePalette(_ sender: Any?) {
         model.togglePalette()
-    }
-
-    @objc private func toggleSidebar(_ sender: Any?) {
-        Self.toggle(.showSidebar)
-    }
-
-    @objc private func toggleDetail(_ sender: Any?) {
-        Self.toggle(.showDetail)
-    }
-
-    /// Flips a Bool preference; every window's layout and toolbar follow it.
-    private static func toggle(_ key: PrefKey) {
-        Preferences.defaults.set(!Preferences.defaults.bool(forKey: key.rawValue), forKey: key.rawValue)
     }
 
     // MARK: Menus

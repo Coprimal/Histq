@@ -1,6 +1,6 @@
 // The main window: the toolbar in the traffic-light row (`HeaderToolbar`), the tab strip under it (or the vertical
-// tabs, panel 0, left of the page), then the selected page, over the window glass. Settings is a modal over it
-// (`ModalHost`).
+// tabs, panel 0, left of the page), then the selected page, then the footer (`WindowFooter`), over the window glass.
+// Settings is a modal over it (`ModalHost`).
 import AppKit
 import SwiftUI
 
@@ -68,7 +68,7 @@ struct MainView: View {
                 if tabsOnLeft {
                     // No gap after it: its selected row joins the sheet's left edge.
                     VerticalTabsPanel()
-                        .padding([.leading, .bottom], HeaderMetrics.tabStripInset)
+                        .padding(.leading, HeaderMetrics.tabStripInset)
                 }
                 // Rendered from `shownPage`, so the leaving page keeps its content while it slides out. All of it on
                 // one sheet (`Palette.sheet`, the selected tab's fill), its cards a step darker.
@@ -84,8 +84,10 @@ struct MainView: View {
                 .environment(\.cardExtraVerticalPadding, PageSheetMetrics.cardExtraVerticalPadding)
                 .background(Palette.sheet)
                 .clipShape(RoundedRectangle(cornerRadius: PageSheetMetrics.cornerRadius, style: .continuous))
-                .padding(tabsOnLeft ? [.trailing, .bottom] : [.horizontal, .bottom], HeaderMetrics.tabStripInset)
+                .padding(tabsOnLeft ? .trailing : .horizontal, HeaderMetrics.tabStripInset)
             }
+            // Its height is the gap under the sheet.
+            WindowFooter(model: model)
         }
         // Blurred and disabled behind a modal or the palette; its own view reads that, so this body never reruns.
         .modifier(WindowBackdrop(model: model))
@@ -110,8 +112,8 @@ struct MainView: View {
             }
             .allowsHitTesting(false)
         }
-        // The operations' outcomes at the bottom right, under the palette and the modals.
-        .overlay(alignment: .bottomTrailing) { ToastHost(model: model) }
+        // The operations' outcomes at the bottom right, above the footer, under the palette and the modals.
+        .overlay(alignment: .bottomTrailing) { ToastHost(model: model).padding(.bottom, WindowFooter.height) }
         // ⌘K / the toolbar's Search: over the tabs and the page, under the toolbar.
         .overlay { CommandPaletteOverlay(model: model) }
         // Settings, the forms, confirmations and rebase cards, drawn like the palette (same place in the window).
@@ -119,19 +121,15 @@ struct MainView: View {
         .modifier(HardTopScrollEdge())
     }
 
-    /// The tab strip, full width under the toolbar, then the menus' running operation, on the window glass: no
-    /// container, the selected tab joins the page's sheet under it. Empty space in the row drags the window, like the
-    /// toolbar's.
+    /// The tab strip, full width under the toolbar, on the window glass: no container, the selected tab joins the
+    /// page's sheet under it. Empty space in the row drags the window, like the toolbar's.
     private var tabRow: some View {
-        HStack(spacing: 0) {
-            TabStrip()
-            TabRowStatus(model: model)
-        }
-        .padding(.top, HeaderMetrics.tabRowTop)
-        .padding(.leading, HeaderMetrics.tabRowLeading)
-        .padding(.trailing, HeaderMetrics.tabRowTrailing)
-        .background(WindowDragArea())
-        .padding(.horizontal, HeaderMetrics.tabStripInset)
+        TabStrip()
+            .padding(.top, HeaderMetrics.tabRowTop)
+            .padding(.leading, HeaderMetrics.tabRowLeading)
+            .padding(.trailing, HeaderMetrics.tabRowTrailing)
+            .background(WindowDragArea())
+            .padding(.horizontal, HeaderMetrics.tabStripInset)
     }
 
     /// Pages slide a little in their order; the leaving page fades out faster, so the two never show through each
@@ -176,16 +174,45 @@ private struct TabContent: View {
     }
 }
 
-/// The selected repo's operations started from a menu (a merge, a rebase…), which have no toolbar button to show
-/// their progress on.
-private struct TabRowStatus: View {
+/// The row under the page, on the window glass: Sidebar and the selected repo's running operation (one started from a
+/// menu or the automatic fetch, which has no toolbar button to show its progress on) at the leading edge, Histq's
+/// version and Detail at the trailing edge. A fixed height, so a status coming and going never moves the page.
+struct WindowFooter: View {
     let model: WindowModel
+    static let height: CGFloat = 28
+    @AppStorage(PrefKey.showSidebar.rawValue, store: Preferences.defaults) private var sidebarShown = true
+    @AppStorage(PrefKey.showDetail.rawValue, store: Preferences.defaults) private var detailShown = true
+    @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var storedPreset = "classic"
+
+    private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
 
     var body: some View {
-        if let session = model.selectedSession {
-            RunningStatus(session: session)
-                .frame(maxWidth: 240, alignment: .trailing)
-                .padding(.trailing, 8)
+        // Each toggle is off while its panel is hidden whatever it says (`RepoLayoutView`): without a repo tab, in
+        // Focus, and (Detail) while a pull request is open outside Stacked.
+        let session = model.actionSession
+        let preset = LayoutPreset.resolved(storedPreset)
+        HStack(spacing: 12) {
+            toggle("Sidebar", systemImage: "sidebar.left", shown: $sidebarShown)
+                .disabled(session == nil || preset == .focus)
+            if let session { RunningStatus(session: session) }
+            Spacer(minLength: 0)
+            Text("Histq \(Self.version)")
+                .font(.settingsCaption)
+                .foregroundStyle(.tertiary)
+            toggle("Detail", systemImage: "sidebar.right", shown: $detailShown)
+                .disabled(session.map { RepoLayoutView.hidesDetail(session: $0, preset: preset) } ?? true)
         }
+        .padding(.horizontal, PageSheetMetrics.cornerRadius)
+        .frame(height: Self.height)
+    }
+
+    private func toggle(_ name: String, systemImage: String, shown: Binding<Bool>) -> some View {
+        let help = (shown.wrappedValue ? "Hide " : "Show ") + name
+        return Button { shown.wrappedValue.toggle() } label: {
+            Label(help, systemImage: systemImage).labelStyle(.iconOnly)
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .foregroundStyle(.secondary)
+        .help(help)
     }
 }
