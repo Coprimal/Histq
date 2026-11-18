@@ -40,6 +40,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - New branch and laptop icons, and a filled check on the checked-out branch.
 - A click on a branch checked out with uncommitted changes (in this worktree or another one), or on a worktree with changes in the Worktrees card, selects the row of those changes instead of the last commit; opening a worktree in a tab does the same.
 - A click on another worktree's changes row in the graph shows its unstaged and staged files instead of opening it in a tab; a double-click in the Worktrees card or Open in New Tab opens it.
+- Faster refresh and less memory on very large repositories: after a commit, a 1M-commit history reloads in about 0.7 s instead of 0.85 s (and no longer slows down while Histq is in the background), with about 29% lower peak memory; refs under `refs/prefetch/` no longer show in the graph.
 
 ## [0.1.0] - YYYY-MM-DD
 

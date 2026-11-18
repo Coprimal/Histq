@@ -70,9 +70,10 @@ public enum LogReader {
             do {
                 var page: [Commit] = []
                 page.reserveCapacity(pageSize)
+                var names: [Substring: String] = [:]
                 let lines = await runner.stream(command, cwd: cwd, env: env, delimiter: 0)
                 for try await line in lines where line.source == .stdout {
-                    guard let commit = LogParser.parse(Substring(line.text)) else { continue }
+                    guard let commit = LogParser.parse(Substring(line.text), names: &names) else { continue }
                     page.append(commit)
                     if page.count >= pageSize {
                         continuation.yield(page)
@@ -145,11 +146,12 @@ public enum LogReader {
         let count = check.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard count == "0" else { return nil }
         var commits: [Commit] = []
+        var names: [Substring: String] = [:]
         let lines = await runner.stream(
             arguments + extra + ["--stdin"], cwd: cwd, env: env,
             stdin: Data(previousTips.map { "^" + $0 + "\n" }.joined().utf8), delimiter: 0)
         for try await line in lines where line.source == .stdout {
-            guard let commit = LogParser.parse(Substring(line.text)) else { continue }
+            guard let commit = LogParser.parse(Substring(line.text), names: &names) else { continue }
             commits.append(commit)
         }
         try Task.checkCancellation()
@@ -160,8 +162,9 @@ public enum LogReader {
 /// Turns NUL-terminated records into commits, one record each.
 enum LogParser {
     /// A record needs a hash, parents and both dates, or it is no commit. The body takes everything after
-    /// the ninth `\x1f`, so a stray `\x1f` in a name, email or subject only misplaces text.
-    static func parse(_ record: Substring) -> Commit? {
+    /// the ninth `\x1f`, so a stray `\x1f` in a name, email or subject only misplaces text. `names` is the
+    /// stream's cache of names and emails (`intern`), so the commits of one author share one String.
+    static func parse(_ record: Substring, names: inout [Substring: String]) -> Commit? {
         let fields = record.split(separator: "\u{1F}", maxSplits: 9, omittingEmptySubsequences: false)
         guard fields.count >= 4, isHash(fields[0]),
               let authorTime = TimeInterval(fields[2]), let commitTime = TimeInterval(fields[3])
@@ -172,10 +175,22 @@ enum LogParser {
         var body = text(9)
         while body.last == "\n" { body.removeLast() }
         return Commit(
-            hash: String(fields[0]), parents: parents.map(String.init), authorName: String(text(4)),
-            authorEmail: String(text(5)), authorDate: Date(timeIntervalSince1970: authorTime),
+            hash: String(fields[0]), parents: parents.map(String.init), authorName: intern(text(4), &names),
+            authorEmail: intern(text(5), &names), authorDate: Date(timeIntervalSince1970: authorTime),
             committerDate: Date(timeIntervalSince1970: commitTime), subject: String(text(8)), body: String(body),
-            committerName: String(text(6)), committerEmail: String(text(7)))
+            committerName: intern(text(6), &names), committerEmail: intern(text(7), &names))
+    }
+
+    /// `field` as the String `names` already holds for it, so equal names and emails share one storage. Up to
+    /// 15 UTF-8 bytes a String is stored inline and is not cached; `names` stops growing at 10,000 entries. Each
+    /// key is a slice of its own value, never of the record, so the cache keeps no record alive. Strings compare
+    /// by canonical equivalence, so an NFD spelling seen after an equal NFC one gets the NFC bytes (same `==`).
+    static func intern(_ field: Substring, _ names: inout [Substring: String]) -> String {
+        guard field.utf8.count > 15 else { return String(field) }
+        if let known = names[field] { return known }
+        let value = String(field)
+        if names.count < 10_000 { names[value[...]] = value }
+        return value
     }
 
     /// A full SHA-1 (40) or SHA-256 (64) object name in lowercase hex.

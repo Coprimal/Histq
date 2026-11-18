@@ -121,6 +121,8 @@ public struct GraphLayout: Sendable {
     public private(set) var hung: [GraphHungRow] = []
     /// Commits laid out so far.
     private var placed = 0
+    /// The last row's bottom half, which equal halves of the next row reuse (one shared buffer).
+    private var lastBottom: [GraphSegment] = []
 
     public init() {}
 
@@ -239,9 +241,13 @@ public struct GraphLayout: Sendable {
         return segments
     }
 
-    private func makeRow(
+    private mutating func makeRow(
         _ node: GraphRow.Node, lane: Int, color: Int, top: [GraphSegment], bottom: [GraphSegment]
     ) -> GraphRow {
+        // On a straight stretch both halves equal the last row's bottom: keep one buffer for all of them.
+        let top = top == lastBottom ? lastBottom : top
+        let bottom = bottom == top ? top : bottom
+        lastBottom = bottom
         var highest = lane
         for segment in top { highest = max(highest, segment.from, segment.to) }
         for segment in bottom { highest = max(highest, segment.from, segment.to) }
