@@ -1,5 +1,6 @@
 // The window's operation toasts, at its bottom right: a user operation's outcome (a push, a pull, a fetch, a commit,
-// a menu's or a dialog's write) as a short card that closes by itself after a few seconds, or at once with its x.
+// a menu's or a dialog's write) as a short card that closes by itself after a few seconds, or at once with its x. A
+// failure with an action ("Delete Anyway…") stays until its action or its x.
 // The pointer over the cards holds their timers until it leaves. Settings › General › Notifications picks whether the
 // successes show (`ToastLevel`); a failure always shows, as the only place it is reported: its hint, the hint's
 // action (`FailureHints`) and a button that copies git's whole message. The automatic fetch never shows one.
@@ -113,8 +114,9 @@ struct OperationToast: Identifiable, Equatable {
         OperationToast(kind: .warning, title: title, detail: detail)
     }
 
-    /// How long it stays: long enough to read, an error or a warning a bit longer.
-    var duration: Duration { kind == .success ? .seconds(3) : .seconds(6) }
+    /// How long it stays: long enough to read, an error or a warning a bit longer; nil with an action, which stays
+    /// until it is used or closed.
+    var duration: Duration? { action != nil ? nil : kind == .success ? .seconds(3) : .seconds(6) }
 }
 
 /// Settings › General › Notifications (`PrefKey.toastLevel`). There is no "off": a failure shows only in its toast.

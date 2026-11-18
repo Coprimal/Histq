@@ -104,7 +104,7 @@ final class WindowModel {
 
     /// Shows an operation's outcome from the tab `tabID` when Settings' level shows its kind, naming the tab when it is
     /// not the one on screen. Its action first selects that tab, where it shows its dialog. Past `ToastHost.limit` the
-    /// oldest closes.
+    /// oldest closes, one without an action first. A toast with an action has no timer.
     func showToast(_ toast: OperationToast, from tabID: Tab.ID) {
         guard ToastLevel.current.shows(toast.kind) else { return }
         var toast = toast
@@ -119,7 +119,8 @@ final class WindowModel {
         RepoMenus.debugLog("toast \(toast.title): \(toast.detail ?? "")")
         #endif
         toasts.append(toast)
-        while toasts.count > ToastHost.limit { dismissToast(toasts[0].id) }
+        // A toast with an action stays until it is used or closed: the oldest toast without one goes first.
+        while toasts.count > ToastHost.limit { dismissToast((toasts.first { $0.action == nil } ?? toasts[0]).id) }
         toastRemaining[toast.id] = toast.duration
         if !toastsHeld { startToastTimer(toast.id) }
     }
