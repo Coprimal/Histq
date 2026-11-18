@@ -16,7 +16,7 @@ Open http://localhost:8080.
 - `tokens.css`: design tokens (OKLCH colors, Geist fonts, spacing). `styles.css`: layout and components.
 - `site.js`: theme toggle, docs scroll-spy, header version, screenshot lightbox.
 - The app version in each page header (`.version-badge`) is read at runtime from the latest GitHub release of `Coprimal/Histq` by `site.js`; the static `v0.1.0` in each page is only a fallback, so no hand edit is needed on release.
-- `logo.png`, `poster.png`: images. `CNAME`: custom domain. `.nojekyll`: disables Jekyll. `llms.txt`: summary for LLM crawlers.
+- `logo.png`, `poster.png`, `screenshots/`: images. The screenshot strip under the poster shows two rows of thumbnails; the last one says "+N" and the rest open in the lightbox carousel. `CNAME`: custom domain. `.nojekyll`: disables Jekyll. `llms.txt`: summary for LLM crawlers.
 
 ## Deploy
 
