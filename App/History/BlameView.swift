@@ -189,6 +189,7 @@ private struct BlameLines: View {
 /// The blame's skeleton under its header: rows of gutter bars, a line number and a text bar.
 private struct BlamePlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private var fontSize = 12.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -202,7 +203,7 @@ private struct BlamePlaceholder: View {
                     SkeletonLine(fraction: Self.widths[index], height: 10)
                 }
                 .padding(.horizontal, 10)
-                .frame(height: DiffLayout.lineHeight)
+                .frame(height: DiffLayout.Metrics.of(fontSize).lineHeight)
             }
         }
         .padding(.bottom, 8)
@@ -277,6 +278,8 @@ private struct BlameTable: NSViewRepresentable {
     let wrapLines: Bool
     let onSelect: @MainActor (String) -> Void
     let onClose: @MainActor () -> Void
+    /// The code font size: a new one lays the rows out again at it.
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
 
     func makeCoordinator() -> BlameTableController { BlameTableController() }
 
@@ -319,8 +322,10 @@ private struct BlameTable: NSViewRepresentable {
 /// Column positions of the blame's rows: the gutter (sha, message, author, date), the line number, then the text. The
 /// content width fits the longest line, so the table scrolls sideways unless lines wrap.
 private struct BlameLayout {
+    /// The gutter's fonts keep their size whatever the code font size.
     @MainActor static let shaFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
     @MainActor static let authorFont = NSFont.systemFont(ofSize: 11)
+    @MainActor static let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     static let padding: CGFloat = 8
     static let messageWidth: CGFloat = 170
     static let authorWidth: CGFloat = 72
@@ -348,7 +353,7 @@ private struct BlameLayout {
         // The widest date of the format: month names and unpadded fields change its width.
         let calendar = Calendar(identifier: .gregorian)
         dateWidth = (1...12).compactMap { calendar.date(from: DateComponents(year: 2028, month: $0, day: 28, hour: 22)) }
-            .map { (formatter.string(from: $0) as NSString).size(withAttributes: [.font: DiffLayout.numberFont]).width }
+            .map { (formatter.string(from: $0) as NSString).size(withAttributes: [.font: Self.dateFont]).width }
             .max()?.rounded(.up) ?? 0
         let digits = max(3, String(blame.largestLine).count)
         numberWidth = CGFloat(digits) * DiffLayout.charWidth + 14
@@ -453,6 +458,7 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
         let dateFormat: String
         let selectedHash: String?
         let wrapLines: Bool
+        let fontSize: Double
     }
 
     private var shown: Shown?
@@ -475,9 +481,11 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
         self.view = view
         guard let table else { return }
         let key = Shown(token: view.blame.token, dateFormat: view.dateFormat, selectedHash: view.selectedHash,
-                        wrapLines: view.wrapLines)
+                        wrapLines: view.wrapLines, fontSize: view.fontSize)
+        DiffLayout.use(view.fontSize)
         guard key != shown else { return }
-        if shown?.token != key.token || shown?.dateFormat != key.dateFormat {
+        if shown?.token != key.token || shown?.dateFormat != key.dateFormat || shown?.fontSize != key.fontSize {
+            table.rowHeight = DiffLayout.lineHeight
             blame = view.blame
             formatter.dateFormat = view.dateFormat
             layout = BlameLayout(blame: view.blame, formatter: formatter)
@@ -536,7 +544,7 @@ private final class BlameTableController: NSObject, NSTableViewDataSource, NSTab
         let data = blame.rows[row]
         let textWidth = layout.wrapWidth(column: width)
         if CGFloat(data.columns) * DiffLayout.charWidth <= textWidth { return DiffLayout.lineHeight }
-        let size = NSAttributedString(string: data.text, attributes: BlameLineCellView.wrappedText)
+        let size = NSAttributedString(string: data.text, attributes: BlameLineCellView.Style.current.wrappedText)
             .boundingRect(with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
                           options: [.usesLineFragmentOrigin])
         return max(DiffLayout.lineHeight, size.height.rounded(.up))
@@ -565,20 +573,6 @@ private final class BlameLineCellView: NSView {
     /// The text wraps at the cell's width.
     var wrapLines = false
 
-    /// A wrapped line's text: each line `DiffLayout.lineHeight` tall, the glyphs centered in it as an unwrapped line's
-    /// (`BlameTableController` measures the rows' heights with it too).
-    @MainActor static let wrappedText: [NSAttributedString.Key: Any] = {
-        let style = NSMutableParagraphStyle()
-        style.tabStops = []
-        style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-        style.lineBreakMode = .byWordWrapping
-        style.minimumLineHeight = DiffLayout.lineHeight
-        style.maximumLineHeight = DiffLayout.lineHeight
-        let natural = NSLayoutManager().defaultLineHeight(for: DiffLayout.font)
-        return [.font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: style,
-                .baselineOffset: (DiffLayout.lineHeight - natural) / 2]
-    }()
-
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
 
@@ -591,23 +585,44 @@ private final class BlameLineCellView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// The code's attributes at one code font size (the gutter's do not change with it).
     @MainActor
-    private enum Style {
-        static let paragraph: NSParagraphStyle = {
-            let style = NSMutableParagraphStyle()
-            style.tabStops = []
-            style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-            style.lineBreakMode = .byClipping
+    struct Style {
+        let text: [NSAttributedString.Key: Any]
+        /// A wrapped line's text: each line `DiffLayout.lineHeight` tall, the glyphs centered in it as an unwrapped
+        /// line's (`BlameTableController` measures the rows' heights with it too).
+        let wrappedText: [NSAttributedString.Key: Any]
+        let number: [NSAttributedString.Key: Any]
+
+        private static var styles: [CGFloat: Style] = [:]
+
+        /// The attributes at the current code font size, made once per size.
+        static var current: Style {
+            let metrics = DiffLayout.metrics
+            if let style = styles[metrics.size] { return style }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.tabStops = []
+            paragraph.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * metrics.charWidth
+            paragraph.lineBreakMode = .byClipping
+            let wrapped = NSMutableParagraphStyle()
+            wrapped.tabStops = []
+            wrapped.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * metrics.charWidth
+            wrapped.lineBreakMode = .byWordWrapping
+            wrapped.minimumLineHeight = metrics.lineHeight
+            wrapped.maximumLineHeight = metrics.lineHeight
+            let natural = NSLayoutManager().defaultLineHeight(for: metrics.font)
+            let numberParagraph = NSMutableParagraphStyle()
+            numberParagraph.alignment = .right
+            let style = Style(
+                text: [.font: metrics.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph],
+                wrappedText: [.font: metrics.font, .foregroundColor: Palette.diffText, .paragraphStyle: wrapped,
+                              .baselineOffset: (metrics.lineHeight - natural) / 2],
+                number: [.font: metrics.numberFont, .foregroundColor: Palette.diffLineNumber,
+                         .paragraphStyle: numberParagraph])
+            styles[metrics.size] = style
             return style
-        }()
-        static let text: [NSAttributedString.Key: Any] = [
-            .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph,
-        ]
-        static let number: [NSAttributedString.Key: Any] = {
-            let style = NSMutableParagraphStyle()
-            style.alignment = .right
-            return [.font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style]
-        }()
+        }
+
         static let sha: [NSAttributedString.Key: Any] = [
             .font: BlameLayout.shaFont, .foregroundColor: Palette.diffLineNumber,
         ]
@@ -623,7 +638,7 @@ private final class BlameLineCellView: NSView {
                     .paragraphStyle: style]
         }()
         static let date: [NSAttributedString.Key: Any] = [
-            .font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber,
+            .font: BlameLayout.dateFont, .foregroundColor: Palette.diffLineNumber,
         ]
         static let notCommitted: [NSAttributedString.Key: Any] = [
             .font: BlameLayout.authorFont, .foregroundColor: Palette.conflictA,
@@ -661,7 +676,9 @@ private final class BlameLineCellView: NSView {
             Style.separator.setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill(using: .sourceOver)
         }
-        let smallY = (lineHeight - DiffLayout.numberFont.boundingRectForFont.height) / 2
+        let style = Style.current
+        // The gutter's text and the number, each centered on the first line.
+        let smallY = (lineHeight - BlameLayout.dateFont.boundingRectForFont.height) / 2
         if row.isFirst {
             if group.isCommitted {
                 NSString(string: String(group.hash.prefix(7)))
@@ -682,10 +699,11 @@ private final class BlameLineCellView: NSView {
             }
         }
         NSString(string: "\(row.line)").draw(
-            in: NSRect(x: layout.gutterWidth, y: smallY, width: layout.numberWidth - 8, height: lineHeight),
-            withAttributes: Style.number)
+            in: NSRect(x: layout.gutterWidth, y: (lineHeight - DiffLayout.numberFont.boundingRectForFont.height) / 2,
+                       width: layout.numberWidth - 8, height: lineHeight),
+            withAttributes: style.number)
 
-        let text = NSMutableAttributedString(string: row.text, attributes: wrapLines ? Self.wrappedText : Style.text)
+        let text = NSMutableAttributedString(string: row.text, attributes: wrapLines ? style.wrappedText : style.text)
         let length = text.length
         for token in row.tokens where NSMaxRange(token.range) <= length {
             text.addAttribute(.foregroundColor, value: Style.color(token.kind), range: token.range)

@@ -199,6 +199,8 @@ enum PrefKey: String, CaseIterable {
     case diffDefaultMode
     /// The blame wraps long lines instead of scrolling sideways; its header switches it.
     case blameWrapLines
+    /// The code's font size in points (the diffs, the blame and the conflict editor): 11, 12, 13, 14 or 16.
+    case codeFontSize
     /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
     case aiShowFeatures
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
@@ -272,6 +274,7 @@ enum PrefKey: String, CaseIterable {
         case .diffIgnoreWhitespace, .diffWrapLines: false
         case .diffDefaultMode: "diff"
         case .blameWrapLines: false
+        case .codeFontSize: 12.0
         case .aiShowFeatures: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()

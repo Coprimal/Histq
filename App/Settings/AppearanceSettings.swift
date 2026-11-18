@@ -27,6 +27,8 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.diffDefaultMode.rawValue, store: Preferences.defaults) private var diffDefaultMode =
         DiffMode.diff.rawValue
     @AppStorage(PrefKey.diffIgnoreWhitespace.rawValue, store: Preferences.defaults) private var ignoresWhitespace = false
+    @AppStorage(PrefKey.diffWrapLines.rawValue, store: Preferences.defaults) private var wrapsLines = false
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private var codeFontSize = 12.0
 
     /// The date formats offered, the shortest (the default, 24 h) first; a format set by hand (`defaults write`) is
     /// listed too.
@@ -227,6 +229,20 @@ struct AppearanceSettings: View {
                 SettingsSwitchRow(title: "Ignore whitespace",
                                   hint: "Line staging is off while whitespace is ignored.",
                                   isOn: $ignoresWhitespace)
+                SettingsDivider()
+                LabeledContent {
+                    CapsuleMenuPicker(label: "Code font size", selection: $codeFontSize,
+                                      title: Text("\(Int(codeFontSize)) pt")) {
+                        ForEach([11.0, 12, 13, 14, 16], id: \.self) { size in
+                            Text("\(Int(size)) pt").tag(size)
+                        }
+                    }
+                } label: {
+                    Text("Code font size")
+                    SettingsHint("The diff, Blame and the conflict editor.")
+                }
+                SettingsDivider()
+                SettingsSwitchRow(title: "Wrap long lines", isOn: $wrapsLines)
             }
         } skeleton: {
             EmptyView()

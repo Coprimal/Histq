@@ -835,15 +835,17 @@ extension DiffNoticeCard where Action == EmptyView {
 /// The diff's skeleton, under the file's row: a hunk header bar and line rows (number gutters and text capsules).
 struct DiffPlaceholder: View {
     private static let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.62, 0.5, 0.75, 0.35, 0.6, 0.45, 0.66, 0.52, 0.3]
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private var fontSize = 12.0
 
     var body: some View {
+        let metrics = DiffLayout.Metrics.of(fontSize)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 SkeletonLine(fraction: 0.35, height: 10)
                 SkeletonLine(width: 72, height: 18)
             }
             .padding(.horizontal, 10)
-            .frame(height: DiffLayout.hunkHeight)
+            .frame(height: metrics.hunkHeight)
             ForEach(Self.widths.indices, id: \.self) { index in
                 HStack(spacing: 10) {
                     SkeletonLine(width: 20, height: 9)
@@ -851,7 +853,7 @@ struct DiffPlaceholder: View {
                     SkeletonLine(fraction: Self.widths[index], height: 10)
                 }
                 .padding(.horizontal, 10)
-                .frame(height: DiffLayout.lineHeight)
+                .frame(height: metrics.lineHeight)
             }
         }
         .padding(.bottom, 8)

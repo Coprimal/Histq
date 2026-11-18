@@ -1,4 +1,5 @@
-// Pane A or B of the conflict editor: that side's whole file in an NSTableView with fixed 18 pt rows that never wrap.
+// Pane A or B of the conflict editor: that side's whole file in an NSTableView with fixed rows (18 pt at the default code
+// font size) that never wrap.
 // Lines inside a conflict get one checkbox in the gutter (the pane's header checkbox takes the whole side) and, right of
 // it as in GitKraken, an edge bar and a band over the number and the text (A blue, B gold; stronger once ticked). ⌘C copies the selected lines whole.
 import AppKit
@@ -7,14 +8,14 @@ import SwiftUI
 
 /// Sizes shared by the three panes: one line height everywhere, so a scroll offset maps to a line in each pane.
 enum ConflictLayout {
-    static let lineHeight: CGFloat = DiffLayout.lineHeight
+    @MainActor static var lineHeight: CGFloat { DiffLayout.lineHeight }
     /// The line checkbox's column, never tinted: a conflict line's edge bar starts right after it.
     static let checkboxWidth: CGFloat = 20
     static let barWidth: CGFloat = 3
 }
 
 /// One side's lines and checkboxes. `revision` changes with every tick or edit (the rows redraw); `loadID` with every
-/// load (the rows reload).
+/// load (the rows reload), as a new code font size does.
 struct ConflictLinePane: NSViewRepresentable {
     let side: ThreeWayMerge.Side
     /// The side's lines without their line breaks.
@@ -24,6 +25,7 @@ struct ConflictLinePane: NSViewRepresentable {
     let loadID: Int
     let sync: ScrollSync
     var onTickLines: @MainActor (Bool, [Int]) -> Void = { _, _ in }
+    @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
 
     func makeCoordinator() -> ConflictPaneController { ConflictPaneController() }
 
@@ -96,7 +98,7 @@ struct ConflictLineState: Equatable {
 final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private weak var table: ConflictTableView?
     private var view: ConflictLinePane?
-    private var shown: (loadID: Int, revision: Int)?
+    private var shown: (loadID: Int, revision: Int, fontSize: Double)?
     /// The conflict index of each region that is a conflict.
     private var conflictOfRegion: [Int: Int] = [:]
     private var numberWidth: CGFloat = 40
@@ -114,8 +116,10 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
     func update(_ view: ConflictLinePane) {
         self.view = view
         guard let table else { return }
-        if shown?.loadID != view.loadID {
-            shown = (view.loadID, view.revision)
+        DiffLayout.use(view.fontSize)
+        if shown?.loadID != view.loadID || shown?.fontSize != view.fontSize {
+            shown = (view.loadID, view.revision, view.fontSize)
+            table.rowHeight = ConflictLayout.lineHeight
             conflictOfRegion = Dictionary(
                 uniqueKeysWithValues: view.merge.conflictRegions.enumerated().map { ($0.element, $0.offset) })
             let digits = max(3, String(view.lines.count).count)
@@ -126,7 +130,7 @@ final class ConflictPaneController: NSObject, NSTableViewDataSource, NSTableView
             table.reloadData()
             table.contentWidth = textX + CGFloat(longest) * DiffLayout.charWidth + 24
         } else if shown?.revision != view.revision {
-            shown = (view.loadID, view.revision)
+            shown = (view.loadID, view.revision, view.fontSize)
             let visible = table.rows(in: table.visibleRect)
             guard visible.length > 0 else { return }
             table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<NSMaxRange(visible)),
@@ -252,23 +256,31 @@ final class ConflictLineCellView: NSView {
 
     @objc private func linePressed() { onToggle?() }
 
+    /// The attributes at one code font size.
     @MainActor
-    private enum Style {
-        static let paragraph: NSParagraphStyle = {
-            let style = NSMutableParagraphStyle()
-            style.tabStops = []
-            style.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * DiffLayout.charWidth
-            style.lineBreakMode = .byClipping
+    private struct Style {
+        let text: [NSAttributedString.Key: Any]
+        let number: [NSAttributedString.Key: Any]
+
+        private static var styles: [CGFloat: Style] = [:]
+
+        /// The attributes at the current code font size, made once per size.
+        static var current: Style {
+            let metrics = DiffLayout.metrics
+            if let style = styles[metrics.size] { return style }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.tabStops = []
+            paragraph.defaultTabInterval = CGFloat(DiffLayout.tabWidth) * metrics.charWidth
+            paragraph.lineBreakMode = .byClipping
+            let numberParagraph = NSMutableParagraphStyle()
+            numberParagraph.alignment = .right
+            let style = Style(
+                text: [.font: metrics.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph],
+                number: [.font: metrics.numberFont, .foregroundColor: Palette.diffLineNumber,
+                         .paragraphStyle: numberParagraph])
+            styles[metrics.size] = style
             return style
-        }()
-        static let text: [NSAttributedString.Key: Any] = [
-            .font: DiffLayout.font, .foregroundColor: Palette.diffText, .paragraphStyle: paragraph,
-        ]
-        static let number: [NSAttributedString.Key: Any] = {
-            let style = NSMutableParagraphStyle()
-            style.alignment = .right
-            return [.font: DiffLayout.numberFont, .foregroundColor: Palette.diffLineNumber, .paragraphStyle: style]
-        }()
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -284,11 +296,12 @@ final class ConflictLineCellView: NSView {
             (isA ? Palette.conflictA : Palette.conflictB).setFill()
             NSRect(x: x, y: 0, width: ConflictLayout.barWidth, height: height).fill()
         }
+        let style = Style.current
         let numberX = ConflictLayout.checkboxWidth + 4
         let numberY = (height - DiffLayout.numberFont.boundingRectForFont.height) / 2
         NSString(string: "\(number)").draw(
-            in: NSRect(x: numberX, y: numberY, width: numberWidth - 6, height: height), withAttributes: Style.number)
+            in: NSRect(x: numberX, y: numberY, width: numberWidth - 6, height: height), withAttributes: style.number)
         let textY = (height - (DiffLayout.font.ascender - DiffLayout.font.descender)) / 2
-        NSAttributedString(string: text, attributes: Style.text).draw(at: NSPoint(x: textX, y: textY))
+        NSAttributedString(string: text, attributes: style.text).draw(at: NSPoint(x: textX, y: textY))
     }
 }
