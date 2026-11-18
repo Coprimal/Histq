@@ -2,8 +2,13 @@
 // of Sidebar / Detail (show or hide a repo tab's side panels), then the repo menu (the window's repo tabs, recent
 // repos, Open…), the branch menu (checks out the picked branch),
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
-// Terminal / Search / Settings. The set of items never changes: on a Welcome tab the repo actions are
-// disabled, not removed. Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it.
+// Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed. Settings is a modal over
+// the tab (task 9.7), so the repo items stay as they are under it.
+//
+// The user can customize it (right-click › Customize Toolbar…): remove, re-add or move whole capsules, and add spaces.
+// AppKit saves the layout in the standard defaults domain, under "NSToolbar Configuration HeaderToolbar"
+// (`defaults read com.math2it.histq "NSToolbar Configuration HeaderToolbar"`), and keeps every window's toolbar in step
+// (all share the identifier). A state-dir QA run (`-HistqStateDir`) neither reads nor saves it.
 //
 // An AppKit `NSToolbar`, not a SwiftUI `.toolbar`: a bridged SwiftUI toolbar takes part in every SwiftUI update pass of
 // the window (about 10 ms per tab select with these items, see docs/later), even when its items depend on nothing.
@@ -91,7 +96,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         configureItems()
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
-        toolbar.allowsUserCustomization = false
+        toolbar.allowsUserCustomization = true
+        toolbar.allowsDisplayModeCustomization = false
+        // The standard domain is the user's real one, whatever the run: a QA run keeps the default set.
+        toolbar.autosavesConfiguration = !AppState.isStateDirMode
         observe()
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: Preferences.defaults, queue: .main
@@ -174,6 +182,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             groups[ID.branchGroup] = group(ID.branchGroup, [createBranchItem, stashItem, popItem])
             groups[ID.toolsGroup] = group(ID.toolsGroup, [terminalItem, searchItem, settingsItem])
         }
+        for (id, item) in groups { if let palette = Self.palette[id] { item.paletteLabel = palette.label } }
     }
 
     /// A menu whose items are built when it opens (`menuNeedsUpdate`), never on a model change.
@@ -257,19 +266,47 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             + gap + [ID.toolsGroup]
     }
 
+    /// Each default item once, then the spaces (the default set repeats `.space`).
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
+        let items = toolbarDefaultItemIdentifiers(toolbar).filter { $0 != .space && $0 != .flexibleSpace }
+        return items.reduce(into: []) { if !$0.contains($1) { $0.append($1) } } + [.space, .flexibleSpace]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem?
     {
-        switch itemIdentifier {
+        // The customization palette's sample: a new item, as the live one's view would leave the window's toolbar.
+        guard flag else { return Self.paletteItem(itemIdentifier) }
+        return switch itemIdentifier {
         case ID.repo: repoItem.item
         case ID.branch: branchItem.item
         case ID.profile: profileItem.item
         default: groups[itemIdentifier]
         }
+    }
+
+    /// Each item's name and icon in the customization palette.
+    private static let palette: [NSToolbarItem.Identifier: (label: String, image: String)] = [
+        ID.panelsGroup: ("Panels", "sidebar.left"),
+        ID.repo: ("Repository", "book.closed"),
+        ID.branch: ("Branch", "lucide-git-branch"),
+        ID.profile: ("Profile", "person.crop.circle"),
+        ID.historyGroup: ("Undo / Redo", undoSymbol),
+        ID.syncGroup: ("Sync", ToolbarAction.fetch.systemImage),
+        ID.pull: ("Pull", ToolbarAction.pull.systemImage),
+        ID.push: ("Push", ToolbarAction.push.systemImage),
+        ID.fetch: ("Fetch", ToolbarAction.fetch.systemImage),
+        ID.branchGroup: ("Branch Actions", ToolbarAction.stash.systemImage),
+        ID.toolsGroup: ("Tools", "terminal"),
+    ]
+
+    private static func paletteItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem? {
+        guard let palette = palette[id] else { return nil }
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.label = palette.label
+        item.paletteLabel = palette.label
+        item.image = NSImage.icon(palette.image, accessibilityDescription: palette.label, size: 20)
+        return item
     }
 
     // MARK: State
@@ -431,8 +468,11 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private func logItemFrames() {
         guard AppState.launchToolbarFrames else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self, repoItem.button.window != nil else { return }
-            let frames = [("repo", repoItem), ("branch", branchItem)].map { name, dropdown in
+            guard let self else { return }
+            // A dropdown the user removed from the toolbar has no window, so no frame.
+            let shown = [("repo", repoItem), ("branch", branchItem)].filter { $0.1.button.window != nil }
+            guard !shown.isEmpty else { return }
+            let frames = shown.map { name, dropdown in
                 let frame = dropdown.button.convert(dropdown.button.bounds, to: nil)
                 return "\(name)=\(Int(frame.minX.rounded())),\(Int(frame.width.rounded()))"
             }

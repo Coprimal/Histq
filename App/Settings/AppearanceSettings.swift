@@ -88,12 +88,13 @@ struct AppearanceSettings: View {
                     // back to.
                     CapsuleTabs(selection: Binding(get: { LayoutPreset.resolved(layoutPreset) },
                                                    set: { if $0 != LayoutPreset.current { LayoutPreset.choose($0) } }),
-                                tabs: [LayoutPreset.classic, .stacked, .focus],
+                                tabs: [LayoutPreset.classic, .stacked, .columns, .focus],
                                 title: { Text($0.rawValue.capitalized) }, compact: true)
                         .fixedSize()
                 } label: {
                     Text("Layout")
-                    SettingsHint("Stacked: a file opens under the graph. Focus (⌥⌘F): the sidebar and detail panel hide.")
+                    SettingsHint("Stacked: a file opens under the graph. Columns: a file opens in a 4th column. "
+                        + "Focus (⌥⌘F): the sidebar and detail panel hide.")
                 }
             }
             SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {

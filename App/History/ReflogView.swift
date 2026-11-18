@@ -41,8 +41,10 @@ struct ReflogView: View {
     private var header: some View {
         SectionCard(nil, contentPadding: 8) {
             HStack(spacing: 8) {
+                // Closes the reflog, and a diff opened from it (Columns shows both). Esc goes to that diff's close
+                // first.
                 Button {
-                    session.closeFile()
+                    session.closePanel2()
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 16, weight: .semibold))
@@ -50,7 +52,7 @@ struct ReflogView: View {
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(RowIconButtonStyle())
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut(session.openFile == nil ? .cancelAction : nil)
                 .help("Back to the Graph (Esc)")
                 .accessibilityLabel("Back to the graph")
                 .padding(.leading, 4)

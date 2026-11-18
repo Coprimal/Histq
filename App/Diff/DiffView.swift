@@ -500,8 +500,10 @@ struct DiffControlsCard: View {
         }
         .buttonStyle(RowIconButtonStyle())
         .keyboardShortcut(.cancelAction)
-        .help(closesPane ? "Close the diff (Esc)" : "Back to the \(backName) (Esc)")
-        .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
+        .help(closesPane ? "Close the diff (Esc)"
+            : closesHistory ? "Close the File History (Esc)" : "Back to the \(backName) (Esc)")
+        .accessibilityLabel(closesPane ? "Close the diff"
+            : closesHistory ? "Close the file history" : "Back to the \(backName.lowercased())")
     }
 
     /// An icon button (a tool, a jump, a switch shown on with the selected fill and the accent color), the close
@@ -531,8 +533,20 @@ struct DiffControlsCard: View {
     }
 
     /// Stacked, not opened from a tool: close (and Esc) hides the bottom pane under the graph, which stays in view.
+    /// Columns: close empties column 4 beside the graph (a blame or reflog it was opened from stays over panel 2, a
+    /// file history in panel 1).
     private var closesPane: Bool {
-        target != nil && session.returnTool == nil && LayoutPreset.resolved(storedPreset) == .stacked
+        switch LayoutPreset.resolved(storedPreset) {
+        case .stacked: target != nil && session.returnTool == nil
+        case .columns: target != nil
+        case .classic, .focus: false
+        }
+    }
+
+    /// Columns, a file history with no diff open (column 4's controls card): close ends the history; the graph is
+    /// already in view.
+    private var closesHistory: Bool {
+        target == nil && LayoutPreset.resolved(storedPreset) == .columns
     }
 
     /// Where close (and Esc) returns: the tool the diff was opened from, else the graph (a file history closes with

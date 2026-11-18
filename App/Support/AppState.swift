@@ -132,12 +132,17 @@ enum PrefKey: String, CaseIterable {
     case panelWidths
     /// The file history's commit list (panel 1 while a file history shows), in points; 0 = the layout's default.
     case historyPanelWidth
-    /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked" or "focus". Global, like `panelWidths`.
+    /// Repo layout preset: a `LayoutPreset` raw value, "classic", "stacked", "focus" or "columns". Global, like
+    /// `panelWidths`.
     case layoutPreset
     /// Stacked's split: the graph's share of panel 2's height above the bottom pane, 0...1. Global.
     case stackedSplit
-    /// The preset leaving Focus returns to: "classic" or "stacked" (never "focus"), set when Focus turns on. Global.
+    /// The preset leaving Focus returns to: "classic", "stacked" or "columns" (never "focus"), set when Focus turns
+    /// on. Global.
     case presetBeforeFocus
+    /// Columns' panel widths, "sidebar,detail,diff" in points; empty = the layout's defaults. Global, kept apart
+    /// from `panelWidths` (Classic, Stacked and Focus).
+    case columnsWidths
     /// A repo tab shows its sidebar (panel 1) and its detail (panel 3): the toolbar's Sidebar and Detail toggles.
     /// Global, like `layoutPreset`; Focus hides both whatever they are.
     case showSidebar
@@ -243,6 +248,7 @@ enum PrefKey: String, CaseIterable {
         case .layoutPreset: "classic"
         case .stackedSplit: 0.45
         case .presetBeforeFocus: "classic"
+        case .columnsWidths: ""
         case .showSidebar, .showDetail: true
         case .sidebarSectionOrder, .hiddenSidebarSections: ""
         case .graphColumnWidths: ""
@@ -279,12 +285,12 @@ enum PrefKey: String, CaseIterable {
 
 /// How a repo tab lays out its panels (`PrefKey.layoutPreset`). Classic: sidebar | graph | detail, a file opens over
 /// the graph. Stacked: a file opens in a pane under the graph. Focus: sidebar and detail collapse, panel 2 goes full
-/// width.
+/// width. Columns: a file opens in a 4th column next to the detail, the graph stays visible.
 enum LayoutPreset: String {
-    case classic, stacked, focus
+    case classic, stacked, focus, columns
 
-    /// DEBUG `-HistqLayout classic|stacked|focus`, read once. It wins over the preference (as `-HistqTabPosition`
-    /// does) and is never written to it.
+    /// DEBUG `-HistqLayout classic|stacked|focus|columns`, read once. It wins over the preference (as
+    /// `-HistqTabPosition` does) and is never written to it.
     private static let launchOverride = AppState.launchFlag("-HistqLayout").flatMap(LayoutPreset.init(rawValue:))
 
     /// The preset for a stored `PrefKey.layoutPreset` value; anything unknown reads as classic.
@@ -312,10 +318,10 @@ enum LayoutPreset: String {
         defaults.set(next.rawValue, forKey: PrefKey.layoutPreset.rawValue)
     }
 
-    /// View › Reset Layout: the default panel widths (the file history's too) and Stacked split, both side panels shown, and Classic.
+    /// View › Reset Layout: the default panel widths (the file history's and Columns' too) and Stacked split, both
+    /// side panels shown. The preset stays, and so does the one Focus returns to.
     static func reset() {
-        for key in [PrefKey.panelWidths, .historyPanelWidth, .stackedSplit, .layoutPreset, .presetBeforeFocus,
-                    .showSidebar, .showDetail] {
+        for key in [PrefKey.panelWidths, .historyPanelWidth, .stackedSplit, .columnsWidths, .showSidebar, .showDetail] {
             Preferences.defaults.removeObject(forKey: key.rawValue)
         }
     }

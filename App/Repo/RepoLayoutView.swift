@@ -2,7 +2,8 @@
 // history's commits, in its own wider width),
 // the commit graph (or the open file's diff, or a conflicted file's conflict editor) under the operation banner while
 // a merge, rebase, cherry-pick or revert is in progress, with the tab's terminal drawer under it when open, and the
-// detail. The two gaps are draggable dividers; the side panels' widths are saved in `PrefKey.panelWidths`.
+// detail. The two gaps are draggable dividers; the side panels' widths are saved in `PrefKey.panelWidths`. Columns adds
+// a 4th column after the detail for the open file's diff, its widths saved apart in `PrefKey.columnsWidths`.
 import HistqCore
 import SwiftUI
 
@@ -26,15 +27,20 @@ enum RepoLayoutMetrics {
     /// panel 2 has about 407 pt; with the terminal drawer at its minimum (130 + its 8 pt handle), the graph, the 8 pt
     /// divider and the bottom pane take 248 of the 269 left.
     static let bottomPaneMin: CGFloat = 120
-    /// The panels' row in the sheet: both insets and both gaps.
+    /// Columns: column 4, the open file's diff, keeps its controls row and some code. No maximum: it takes what the
+    /// graph's minimum leaves.
+    static let diffColumnMin: CGFloat = 400
+    /// The panels' row in the sheet: both insets and both gaps (Columns adds a third gap before column 4).
     static let chrome: CGFloat = 2 * inset + 2 * gap
     /// 200 + 360 + 320 + 32, and the sheet's 16 from the window's edges = 928 wide; with the vertical tabs, their 150
     /// and their own leading inset (the sheet's inset is the gap after them): 1086. 520 tall: the header row and about
-    /// 15 list rows. The same for every preset: Stacked's panes fit in 520 (`bottomPaneMin`), and Focus keeps the
-    /// side panels' room so leaving it never grows the window.
+    /// 15 list rows. The same for Classic, Stacked and Focus: Stacked's panes fit in 520 (`bottomPaneMin`), and Focus
+    /// keeps the side panels' room so leaving it for Classic or Stacked never grows the window. Columns adds column 4
+    /// and its gap: 1336, or 1494 with the vertical tabs (leaving Focus for Columns can grow the window).
     static func minimumWindowSize(tabPosition: TabPosition, preset: LayoutPreset) -> CGSize {
         let tabs = tabPosition == .left ? VerticalTabsMetrics.width + inset : 0
-        return CGSize(width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome + 2 * inset + tabs,
+        let diffColumn = preset == .columns ? gap + diffColumnMin : 0
+        return CGSize(width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome + 2 * inset + tabs + diffColumn,
                       height: 520)
     }
     /// The sidebar's default keeps its tab picker's titles beside the icons.
@@ -82,6 +88,59 @@ private struct PanelWidths: Equatable {
     }
 }
 
+/// Columns' widths, stored as "sidebar,detail,diff" in `PrefKey.columnsWidths`, apart from the other presets'
+/// `PanelWidths`. A diff of 0 (the default) shares the width the side panels leave half and half with the graph.
+private struct ColumnsWidths: Equatable {
+    var sidebar: CGFloat
+    var detail: CGFloat
+    var diff: CGFloat
+
+    init(sidebar: CGFloat, detail: CGFloat, diff: CGFloat) {
+        self.sidebar = sidebar
+        self.detail = detail
+        self.diff = diff
+    }
+
+    /// Decodes the stored value; the defaults when empty or malformed.
+    init(encoded: String) {
+        let values = encoded.split(separator: ",").compactMap { Double($0) }
+        self = values.count == 3
+            ? ColumnsWidths(sidebar: values[0], detail: values[1], diff: values[2])
+            : ColumnsWidths(sidebar: RepoLayoutMetrics.defaults.sidebar, detail: RepoLayoutMetrics.defaults.detail,
+                            diff: 0)
+    }
+
+    var encoded: String { "\(Int(sidebar.rounded())),\(Int(detail.rounded())),\(Int(diff.rounded()))" }
+
+    /// The sidebar's and the detail's widths, for the panels Columns shares with Classic.
+    var panels: PanelWidths { PanelWidths(sidebar: sidebar, detail: detail) }
+
+    /// As `PanelWidths.fitted(in:sidebarRange:)`, with column 4: `available` is the width of the four columns, the
+    /// graph keeps `graphMin`, and the other three give up their width above their minimums in proportion to it.
+    func fitted(in available: CGFloat, sidebarRange: ClosedRange<CGFloat> = RepoLayoutMetrics.sidebar) -> ColumnsWidths {
+        let sidebar = sidebar.clamped(to: sidebarRange)
+        let detail = detail.clamped(to: RepoLayoutMetrics.detail)
+        let diffMin = RepoLayoutMetrics.diffColumnMin
+        let diff = Swift.max(diff > 0 ? diff : (available - sidebar - detail) / 2, diffMin)
+        let overflow = sidebar + detail + diff + RepoLayoutMetrics.graphMin - available
+        guard overflow > 0 else { return ColumnsWidths(sidebar: sidebar, detail: detail, diff: diff) }
+        let sidebarSpare = sidebar - sidebarRange.lowerBound
+        let detailSpare = detail - RepoLayoutMetrics.detail.lowerBound
+        let diffSpare = diff - diffMin
+        let spare = sidebarSpare + detailSpare + diffSpare
+        if overflow <= spare {
+            return ColumnsWidths(sidebar: sidebar - overflow * sidebarSpare / spare,
+                                 detail: detail - overflow * detailSpare / spare,
+                                 diff: diff - overflow * diffSpare / spare)
+        }
+        let minimums = sidebarRange.lowerBound + RepoLayoutMetrics.detail.lowerBound + diffMin
+            + RepoLayoutMetrics.graphMin
+        let scale = Swift.max(available, 0) / minimums
+        return ColumnsWidths(sidebar: sidebarRange.lowerBound * scale,
+                             detail: RepoLayoutMetrics.detail.lowerBound * scale, diff: diffMin * scale)
+    }
+}
+
 private extension CGFloat {
     func clamped(to range: ClosedRange<CGFloat>) -> CGFloat { Swift.min(Swift.max(self, range.lowerBound), range.upperBound) }
 }
@@ -112,18 +171,37 @@ struct RepoLayoutView: View {
     /// The toolbar's sidebar and detail toggles (`HeaderToolbar`).
     @AppStorage(PrefKey.showSidebar.rawValue, store: Preferences.defaults) private var sidebarShown = true
     @AppStorage(PrefKey.showDetail.rawValue, store: Preferences.defaults) private var detailShown = true
+    /// Columns' widths, apart from `storedWidths`.
+    @AppStorage(PrefKey.columnsWidths.rawValue, store: Preferences.defaults) private var storedColumnsWidths = ""
+    /// Columns: the widths while a divider is dragged, written to `storedColumnsWidths` when the drag ends.
+    @State private var columnsDrag: ColumnsWidths?
+    /// Columns: the widths when that drag began.
+    @State private var columnsDragStart: ColumnsWidths?
 
-    private enum DividerSide { case sidebar, detail }
+    private enum DividerSide { case sidebar, detail, diff }
 
     private var isStacked: Bool { LayoutPreset.resolved(storedPreset) == .stacked }
+
+    /// Columns: the open file's diff shows in column 4 after the detail, and the graph stays in view.
+    private var isColumns: Bool { LayoutPreset.resolved(storedPreset) == .columns }
+
+    /// Columns: the tool panel 2 shows over the graph: the open blame or reflog, or the one the diff in column 4 was
+    /// opened from (it stays in view beside its diff). A file history lists its commits in panel 1 and shows its diff,
+    /// or the diff's skeleton, in column 4, so it leaves the graph in view.
+    private var columnsTool: RepoTool? {
+        switch session.openTool ?? session.returnTool {
+        case .fileHistory?, nil: nil
+        case let tool?: tool
+        }
+    }
 
     /// Focus: the sidebar and the detail (with their dividers) leave the tree and panel 2 takes the whole row. The
     /// stored widths are neither used nor written, so leaving Focus shows the panels as they were.
     private var isFocus: Bool { LayoutPreset.resolved(storedPreset) == .focus }
 
-    /// An open pull request over the graph (Classic, Focus) hides the detail and its divider: the pull request page
-    /// has its own side column, and the detail of a commit no longer in view only takes its room. Stacked keeps the
-    /// detail, since the graph stays on top there.
+    /// An open pull request over the graph (Classic, Focus, Columns) hides the detail and its divider (Columns: column
+    /// 4 too): the pull request page has its own side column, and the detail of a commit no longer in view only takes
+    /// its room. Stacked keeps the detail, since the graph stays on top there.
     private var showsDetail: Bool {
         detailShown && !Self.hidesDetail(session: session, preset: LayoutPreset.resolved(storedPreset))
     }
@@ -144,10 +222,12 @@ struct RepoLayoutView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let available = proxy.size.width - RepoLayoutMetrics.chrome
-            let widths = (dragWidths ?? savedWidths).fitted(in: available, sidebarRange: panel1Range)
+            let available = proxy.size.width - RepoLayoutMetrics.chrome - (isColumns ? RepoLayoutMetrics.gap : 0)
+            let columns = isColumns
+                ? (columnsDrag ?? savedColumnsWidths).fitted(in: available, sidebarRange: panel1Range) : nil
+            let widths = columns?.panels ?? (dragWidths ?? savedWidths).fitted(in: available, sidebarRange: panel1Range)
             VStack(spacing: SectionCardMetrics.spacing) {
-                panels(widths: widths, available: available, height: proxy.size.height)
+                panels(widths: widths, columns: columns, available: available, height: proxy.size.height)
             }
             .padding(RepoLayoutMetrics.inset)
         }
@@ -169,14 +249,24 @@ struct RepoLayoutView: View {
         return widths
     }
 
+    /// Columns' saved widths; panel 1's is the file history's own while one shows, as in `savedWidths`.
+    private var savedColumnsWidths: ColumnsWidths {
+        var widths = ColumnsWidths(encoded: storedColumnsWidths)
+        if session.historyTool != nil {
+            widths.sidebar = historyWidth > 0 ? historyWidth : RepoLayoutMetrics.historyDefault
+        }
+        return widths
+    }
+
     /// The three panels and their dividers (Focus: panel 2 alone; an open pull request: no detail; the toolbar's
-    /// toggles hide the sidebar or the detail). A file history takes panel 1 with its commits, whatever the preset
-    /// and the sidebar toggle say. `height`: the layout's, which bounds the terminal drawer until panel 2's own height
-    /// is measured.
-    private func panels(widths: PanelWidths, available: CGFloat, height: CGFloat) -> some View {
+    /// toggles hide the sidebar or the detail), and Columns' column 4 (`columns`: its widths; nil in the other
+    /// presets). A file history takes panel 1 with its commits, whatever the preset and the sidebar toggle say.
+    /// `height`: the layout's, which bounds the terminal drawer until panel 2's own height is measured.
+    private func panels(widths: PanelWidths, columns: ColumnsWidths?, available: CGFloat, height: CGFloat) -> some View {
         let history = session.historyTool
-        // A blame leaves panel 1 out so its lines get the width (user, 2026-11-18).
-        let blameOpen = if case .blame? = session.openTool { true } else { false }
+        // A blame leaves panel 1 out so its lines get the width (user, 2026-11-18); in Columns also while a diff opened
+        // from it shows in column 4, the blame still in view.
+        let blameOpen = if case .blame? = (isColumns ? columnsTool : session.openTool) { true } else { false }
         let sidebarVisible = !isFocus && sidebarShown && !blameOpen
         return HStack(spacing: 0) {
             // The panels' cards sit right on the page's sheet (MainView), a level between the window glass and
@@ -195,7 +285,7 @@ struct RepoLayoutView: View {
                     }
                 }
                 .frame(width: widths.sidebar)
-                divider(.sidebar, widths: widths, available: available)
+                divider(.sidebar, widths: widths, columns: columns, available: available)
             }
             VStack(spacing: SectionCardMetrics.spacing) {
                 // Reads the operation itself, so a status read redraws the banner and not the panels.
@@ -214,10 +304,29 @@ struct RepoLayoutView: View {
             }
             .frame(maxWidth: .infinity)
             if showsDetail {
-                divider(.detail, widths: widths, available: available)
+                divider(.detail, widths: widths, columns: columns, available: available)
                 DetailPanel(session: session)
                     .frame(width: widths.detail)
             }
+            // Column 4 shows whatever the detail toggle says, so a diff always has its place; an open pull request
+            // hides it with the detail.
+            if let columns, !Self.hidesDetail(session: session, preset: .columns) {
+                divider(.diff, widths: widths, columns: columns, available: available)
+                diffColumn
+                    .frame(width: columns.diff)
+            }
+        }
+    }
+
+    /// Columns' column 4: the open file's diff (a conflict opens its editor over panel 2), a file history's diff
+    /// skeleton until its first diff opens, else an empty card, so opening a file never shifts the layout.
+    @ViewBuilder private var diffColumn: some View {
+        if let target = session.openFile, !target.isConflict {
+            DiffView(session: session, target: target)
+        } else if case .fileHistory(let path, _, _)? = session.openTool {
+            FileHistoryDiffPlaceholder(session: session, path: path)
+        } else {
+            DiffNoticeCard(title: "Diff", systemImage: "doc.text", message: "Select a file to see its changes")
         }
     }
 
@@ -236,7 +345,10 @@ struct RepoLayoutView: View {
         ZStack {
             // The graph stays mounted under an open file, so Esc brings it back as it was (scroll, selection)
             // and opening a file costs no teardown in the click's frame.
-            let fileOpen = session.openFile != nil || session.openHosted != nil || session.openTool != nil
+            // Columns: the plain diff and a file history show in column 4, beside the graph.
+            let fileOpen = isColumns
+                ? session.openFile?.isConflict == true || session.openHosted != nil || columnsTool != nil
+                : session.openFile != nil || session.openHosted != nil || session.openTool != nil
             CommitListPanel(session: session)
                 .opacity(fileOpen ? 0 : 1)
                 .allowsHitTesting(!fileOpen)
@@ -300,11 +412,12 @@ struct RepoLayoutView: View {
     }
 
     /// What shows in panel 2 instead of the graph: the open blame or reflog (a file history's skeleton until its diff
-    /// opens), pull request or issue, or file.
+    /// opens), pull request or issue, or file. Columns leaves out the plain diff and the file history (column 4), and
+    /// keeps a blame or reflog in view beside the diff opened from it.
     @ViewBuilder private var panel2Overlays: some View {
         // A tool stays mounted under the diff opened from it, so Back brings it back as it was (scroll).
         if let tool = session.openTool ?? session.returnTool {
-            let toolHidden = session.openTool == nil
+            let toolHidden = isColumns ? columnsTool == nil : session.openTool == nil
             Group {
                 switch tool {
                 case .fileHistory(let path, _, _):
@@ -329,14 +442,16 @@ struct RepoLayoutView: View {
         } else if let target = session.openFile {
             if target.isConflict {
                 ConflictEditorView(session: session, target: target)
-            } else {
+            } else if !isColumns {
                 DiffView(session: session, target: target)
             }
         }
     }
 
-    /// The gap between two panels: drag it to resize the side panel next to it.
-    private func divider(_ side: DividerSide, widths: PanelWidths, available: CGFloat) -> some View {
+    /// The gap between two panels: drag it to resize the side panel next to it. Columns (`columns` set) resizes and
+    /// saves its own widths (`dragColumns`), never `storedWidths`.
+    private func divider(_ side: DividerSide, widths: PanelWidths, columns: ColumnsWidths?,
+                         available: CGFloat) -> some View {
         Color.clear
             .frame(width: RepoLayoutMetrics.gap)
             .frame(maxHeight: .infinity)
@@ -345,6 +460,10 @@ struct RepoLayoutView: View {
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { drag in
+                        if let columns {
+                            dragColumns(side, from: columns, by: drag.translation.width, available: available)
+                            return
+                        }
                         let start = dragStart ?? widths
                         if dragStart == nil { dragStart = widths }
                         var next = start
@@ -357,10 +476,13 @@ struct RepoLayoutView: View {
                             let limit = available - start.sidebar - RepoLayoutMetrics.graphMin
                             next.detail = min(start.detail - drag.translation.width, limit)
                                 .clamped(to: RepoLayoutMetrics.detail)
+                        case .diff:
+                            break
                         }
                         dragWidths = next
                     }
                     .onEnded { _ in
+                        if let columnsDrag { saveColumns(columnsDrag) }
                         if let dragWidths {
                             // A file history keeps its own panel 1 width; the sidebar's stays as it was.
                             if session.historyTool != nil {
@@ -373,8 +495,41 @@ struct RepoLayoutView: View {
                         }
                         dragWidths = nil
                         dragStart = nil
+                        columnsDrag = nil
+                        columnsDragStart = nil
                     })
             .accessibilityHidden(true)
+    }
+
+    /// Columns: the widths while `side`'s divider is dragged `dx` from where it began; the graph keeps `graphMin`, and
+    /// column 4 has no maximum (left widens it).
+    private func dragColumns(_ side: DividerSide, from columns: ColumnsWidths, by dx: CGFloat, available: CGFloat) {
+        let start = columnsDragStart ?? columns
+        if columnsDragStart == nil { columnsDragStart = columns }
+        let graphMin = RepoLayoutMetrics.graphMin
+        var next = start
+        switch side {
+        case .sidebar:
+            next.sidebar = min(start.sidebar + dx, available - start.detail - start.diff - graphMin)
+                .clamped(to: panel1Range)
+        case .detail:
+            next.detail = min(start.detail - dx, available - start.sidebar - start.diff - graphMin)
+                .clamped(to: RepoLayoutMetrics.detail)
+        case .diff:
+            next.diff = max(min(start.diff - dx, available - start.sidebar - start.detail - graphMin),
+                            RepoLayoutMetrics.diffColumnMin)
+        }
+        columnsDrag = next
+    }
+
+    /// Columns: a drag's widths into `storedColumnsWidths`. A file history keeps its own panel 1 width, as in Classic.
+    private func saveColumns(_ widths: ColumnsWidths) {
+        var stored = widths
+        if session.historyTool != nil {
+            historyWidth = widths.sidebar
+            stored.sidebar = ColumnsWidths(encoded: storedColumnsWidths).sidebar
+        }
+        storedColumnsWidths = stored.encoded
     }
 }
 

@@ -1296,10 +1296,10 @@ final class RepoSession: Identifiable {
     }
 
     /// Selects graph rows: the path a click in the graph takes (and `-HistqSelect wip|commit:<sha>`, a parent
-    /// jump). One row shows its detail, several a count; none keeps the detail as it is. `keepsPanel2` (Stacked, where
-    /// the graph stays clickable above the bottom pane): the pane keeps what it shows until a file of the new row
-    /// swaps in it.
-    func selectGraph(_ items: [GraphItem], keepsPanel2: Bool = LayoutPreset.current == .stacked) {
+    /// jump). One row shows its detail, several a count; none keeps the detail as it is. `keepsPanel2` (nil:
+    /// `keepsPanel2OnSelect`): the pane keeps what it shows until a file of the new row swaps in it.
+    func selectGraph(_ items: [GraphItem], keepsPanel2: Bool? = nil) {
+        let keepsPanel2 = keepsPanel2 ?? keepsPanel2OnSelect
         if !keepsPanel2, asksBeforeLeavingConflict({ [weak self] in self?.selectGraph(items, keepsPanel2: false) }) {
             return
         }
@@ -1321,6 +1321,22 @@ final class RepoSession: Identifiable {
         }
         UITiming.select(timingDetail(selection))
         select(selection, keepsPanel2: keepsPanel2)
+    }
+
+    /// A graph row's default: Stacked keeps its bottom pane (the graph stays clickable above it), Columns its diff
+    /// column (the open file or file history) while the graph shows in panel 2; a blame, reflog, pull request, issue or
+    /// conflict editor over the graph closes as in Classic and Focus.
+    private var keepsPanel2OnSelect: Bool {
+        switch LayoutPreset.current {
+        case .stacked: return true
+        case .columns:
+            if openHosted != nil || openFile?.isConflict == true { return false }
+            switch openTool ?? returnTool {
+            case .blame?, .reflog?: return false
+            case .fileHistory?, nil: return true
+            }
+        case .classic, .focus: return false
+        }
     }
 
     /// Compares `base` with `head` (nil: the working tree) now, in the click's frame: the detail shows its placeholder
@@ -2569,7 +2585,8 @@ final class RepoSession: Identifiable {
     /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
     /// The conflict editor's unsaved ticks and edits go with it. An open pull request, issue or tool closes too. A diff
     /// opened from a blame or the reflog (`returnTool`) shows that tool again instead, with its read (read again only if
-    /// replaced); one opened from a file history closes it.
+    /// replaced); one opened from a file history closes it, except in Columns (the history stays in panel 1, its diff
+    /// column empty).
     func closeFile() {
         if openHosted != nil {
             openHosted = nil
@@ -2578,8 +2595,9 @@ final class RepoSession: Identifiable {
         }
         openTool = nil
         var back = openFile != nil ? returnTool : nil
-        // A file history lists its commits in panel 1 beside the diff: closing the diff closes the history too.
-        if case .fileHistory? = back { back = nil }
+        // A file history lists its commits in panel 1 beside the diff: closing the diff closes the history too
+        // (Columns keeps it: its diff has a column of its own, beside the graph).
+        if case .fileHistory? = back, LayoutPreset.current != .columns { back = nil }
         returnTool = nil
         guard openFile != nil else { return }
         fileTask?.cancel()
@@ -2598,9 +2616,9 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// Shows the graph whatever panel2 shows (another graph row, ref, pull request or tool): a diff opened from a tool
-    /// closes with it instead of going back to it.
-    private func closePanel2() {
+    /// Shows the graph whatever panel2 shows (another graph row, ref, pull request or tool, a blame's or the reflog's
+    /// close): a diff opened from a tool closes with it instead of going back to it.
+    func closePanel2() {
         returnTool = nil
         closeFile()
     }

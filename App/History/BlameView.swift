@@ -142,8 +142,9 @@ private struct BlameHeader: View {
             .help(wrapLines ? "Don't Wrap Lines" : "Wrap Lines")
             .accessibilityLabel("Wrap lines")
             .accessibilityValue(wrapLines ? "On" : "Off")
+            // Closes the blame, and a diff opened from it (Columns shows both). Esc goes to that diff's close first.
             Button {
-                session.closeFile()
+                session.closePanel2()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 14, weight: .semibold))
@@ -151,7 +152,7 @@ private struct BlameHeader: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(RowIconButtonStyle())
-            .keyboardShortcut(.cancelAction)
+            .keyboardShortcut(session.openFile == nil ? .cancelAction : nil)
             .help("Close the Blame (Esc)")
             .accessibilityLabel("Close the blame")
         }

@@ -58,8 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private var entries: [Entry] = []
-    /// The tab position the windows' minimum sizes were last set for.
+    /// The tab position and layout preset the windows' minimum sizes were last set for.
     private var tabPosition = TabPosition.current
+    private var layoutPreset = LayoutPreset.current
     /// Sparkle; stays off (menu item disabled) while `SUPublicEDKey` is empty.
     private let updater = Updater()
 
@@ -67,8 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Histq is dark mode only, whatever the system's appearance.
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = makeMainMenu()
-        // General › Tab position moves the tabs into panel 0, which the minimum width counts. Posted for every key,
-        // possibly off the main thread; only a change of the position re-clamps.
+        // General › Tab position moves the tabs into panel 0, and Columns adds a 4th column, which the minimum width
+        // counts. Posted for every key, possibly off the main thread; only a change of the position or preset
+        // re-clamps.
         NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: Preferences.defaults, queue: .main
         ) { [weak self] _ in
@@ -77,9 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func preferencesChanged() {
-        let position = TabPosition.current
-        guard position != tabPosition else { return }
+        let position = TabPosition.current, preset = LayoutPreset.current
+        guard position != tabPosition || preset != layoutPreset else { return }
         tabPosition = position
+        layoutPreset = preset
         for entry in entries { WindowSizing.clampMinimum(of: entry.window) }
     }
 
@@ -585,14 +588,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Preferences.defaults.set(next.rawValue, forKey: PrefKey.tabPosition.rawValue)
     }
 
-    /// View › Classic / Stacked / Focus (the item's `representedObject`): Focus again (⌥⌘F) leaves Focus. The windows
-    /// follow it live.
+    /// View › Classic / Stacked / Columns / Focus (the item's `representedObject`): Focus again (⌥⌘F) leaves Focus.
+    /// The windows follow it live, and their minimum size (Columns' is wider).
     @objc func chooseLayout(_ sender: NSMenuItem) {
         guard let preset = (sender.representedObject as? String).flatMap(LayoutPreset.init(rawValue:)) else { return }
         LayoutPreset.choose(preset)
     }
 
-    /// View › Reset Layout: default panel widths and Stacked split, and Classic.
+    /// View › Reset Layout: default panel widths and Stacked split; the layout preset stays.
     @objc func resetLayout(_ sender: Any?) {
         LayoutPreset.reset()
     }
@@ -743,7 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .target = self
         viewMenu.addItem(.separator())
         // ⌥⌘F: ⌃⌘F is AppKit's Enter Full Screen.
-        for preset in [LayoutPreset.classic, .stacked, .focus] {
+        for preset in [LayoutPreset.classic, .stacked, .columns, .focus] {
             let item = viewMenu.addItem(withTitle: preset.rawValue.capitalized, action: #selector(chooseLayout(_:)),
                                         keyEquivalent: preset == .focus ? "f" : "")
             item.keyEquivalentModifierMask = [.command, .option]
@@ -751,6 +754,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             item.target = self
         }
         viewMenu.addItem(withTitle: "Reset Layout", action: #selector(resetLayout(_:)), keyEquivalent: "").target = self
+        viewMenu.addItem(.separator())
+        // Target nil: AppKit enables it only when the key window has a customizable toolbar.
+        viewMenu.addItem(withTitle: "Customize Toolbar…",
+                         action: #selector(NSWindow.runToolbarCustomizationPalette(_:)), keyEquivalent: "")
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
