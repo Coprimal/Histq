@@ -1,28 +1,40 @@
 // The AI actions' result, an in-window `ModalCard` (never a native sheet), opened by the AI buttons: Generate Message
 // (commit box), Explain (commit details, WIP) and Suggest Resolution (conflict editor). A click opens the card in its
 // frame with a skeleton; the diff is read and the prompt built off the main actor, then the answer streams in as a
-// preview (`AIPrompt.preview`). Apply uses only `AIPrompt.answer(from:)`: a commit message fills the commit box, a
-// resolution replaces the current conflict region's Output as a manual edit (never saved or staged). Copy copies the
-// answer; Cancel stops the stream at once and closes the card. Errors show their `description`, never a key.
+// preview (`AIPrompt.preview`), under a resolution's short reason (plain text, never applied). Apply uses only
+// `AIPrompt.answer(from:)`: a commit message fills the commit box, a resolution replaces the current conflict region's
+// Output as a manual edit (never saved or staged). Copy copies the answer; Regenerate runs the same job again in a
+// fresh card; Cancel stops the stream at once and closes the card. Errors show their `description`, never a key.
 import AppKit
 import HistqCore
 import SwiftUI
 
 /// What an AI button asks for.
 enum AIJob: Equatable, Sendable {
-    /// `summaryOnly`: Settings › AI › Summary only, taken at the click (Apply then keeps the description).
-    case commitMessage(summaryOnly: Bool)
+    /// `summaryOnly`: Settings › AI › Summary only, taken at the click (Apply then keeps the description). `amend`:
+    /// Amend was on, so the message describes the whole amended commit; `currentMessage` is the commit box's message
+    /// at the click (the one being amended; sent only with `amend`).
+    case commitMessage(summaryOnly: Bool, amend: Bool, currentMessage: String)
     /// `message`: the commit's subject and body.
     case explainCommit(hash: String, message: String)
     case explainWorkingChanges
+    /// A reword row's Improve (interactive rebase): `message` is the row's message at the click; Apply (the row's
+    /// `onApply`) replaces it with the whole answer.
+    case improveMessage(hash: String, message: String)
     case resolution(AIResolutionTarget)
+    /// The Create Pull Request form's Generate: `base` and `head` are the remote-tracking refs GitHub compares (full
+    /// refs); the template is read at `templateRef` (the default branch's, else the base). Apply (the form's
+    /// `onApply`) fills the title and the description.
+    case pullRequest(base: String, head: String, templateRef: String)
 
     var title: String {
         switch self {
         case .commitMessage: "Commit message"
         case .explainCommit(let hash, _): "Explain commit \(hash.prefix(7))"
         case .explainWorkingChanges: "Explain the uncommitted changes"
+        case .improveMessage: "Improve message"
         case .resolution(let target): "Resolve conflict \(target.conflict + 1) of \(target.path)"
+        case .pullRequest: "Pull request description"
         }
     }
 
@@ -32,14 +44,16 @@ enum AIJob: Equatable, Sendable {
         case .commitMessage: "commit-message"
         case .explainCommit: "explain-commit"
         case .explainWorkingChanges: "explain-wip"
+        case .improveMessage: "improve-message"
         case .resolution: "resolution"
+        case .pullRequest: "pull-request"
         }
     }
 
     /// Whether the answer can be applied (an explanation is only shown and copied).
     var canApply: Bool {
         switch self {
-        case .commitMessage, .resolution: true
+        case .commitMessage, .resolution, .improveMessage, .pullRequest: true
         case .explainCommit, .explainWorkingChanges: false
         }
     }
@@ -63,17 +77,29 @@ struct AIResolutionTarget: Equatable, Sendable {
     /// The region ends with a line break (`ThreeWayMerge.needsFinalBreak(region:)`); `AIPrompts.resolutionText` adds
     /// or drops the answer's final one to match.
     let needsFinalBreak: Bool
+    /// The operation in progress at the click and its pane labels (`RepoState`): what the prompt's intent is read from.
+    let operation: RepoState.Operation
+    let labels: ConflictLabels
 }
 
 /// Why a job could not start; shown in the card.
 enum AIJobError: Error, CustomStringConvertible {
     case nothingStaged
     case noChanges
+    case allIgnored
+    case fileIgnored
+    case aiIgnoreUnreadable
+    case noCommits
 
     var description: String {
         switch self {
         case .nothingStaged: "Nothing is staged. Stage the changes the message should describe."
         case .noChanges: "There are no changes to explain (new untracked files are not included)."
+        case .allIgnored: "Every changed file is excluded by .aiignore; nothing was sent."
+        case .fileIgnored: "This file is excluded by .aiignore; nothing was sent."
+        case .aiIgnoreUnreadable:
+            "The .aiignore file can't be read (symlink, not a file, or over 64 KB); nothing was sent."
+        case .noCommits: "The head branch has no commits past the base."
         }
     }
 }
@@ -96,17 +122,23 @@ final class AIRun: Identifiable {
     let job: AIJob
     let provider: AIProvider
     let model: String
+    /// A form's AI button: Apply hands it the answer (then closes the card) instead of the job's own apply.
+    let onApply: (@MainActor (String) -> Void)?
     private(set) var phase = Phase.preparing
     /// What the card shows of the reply so far (the answer block only).
     private(set) var preview = ""
+    /// A resolution's short reason (`AIPrompt.reason(from:)`), updated with the preview: shown as plain text, never
+    /// applied.
+    private(set) var reason: String?
     private(set) var reply = ""
     /// Not observed, so `deinit` (nonisolated) can cancel it.
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    init(job: AIJob, provider: AIProvider, model: String) {
+    init(job: AIJob, provider: AIProvider, model: String, onApply: (@MainActor (String) -> Void)? = nil) {
         self.job = job
         self.provider = provider
         self.model = model
+        self.onApply = onApply
     }
 
     deinit {
@@ -123,11 +155,14 @@ final class AIRun: Identifiable {
     var isRunning: Bool { phase == .preparing || phase == .streaming }
 
     /// Reads the job's content and streams the answer. `prompt` runs off the main actor (git reads, the diff budget).
-    func start(prompt: @escaping @Sendable () async throws -> AIPrompt) {
+    /// `onFinish` runs once when the job ends, however it ends (answer, failure, cancel, the run dropped): what Suggest
+    /// All awaits before it asks the next region. It is held by the task, never by the run.
+    func start(prompt: @escaping @Sendable () async throws -> AIPrompt, onFinish: (@MainActor () -> Void)? = nil) {
         task?.cancel()
         let provider = provider
         let model = model
         task = Task { [weak self] in
+            defer { onFinish?() }
             do {
                 let prompt = try await prompt()
                 try Task.checkCancellation()
@@ -144,16 +179,21 @@ final class AIRun: Identifiable {
                         // second, but at once while nothing shows (the first words' timing and the cancel seam).
                         guard preview.isEmpty || ContinuousClock.now - shown >= .milliseconds(50) else { continue }
                         preview = prompt.preview(of: reply)
+                        reason = prompt.reason(from: reply)
                         shown = .now
                     }
                 } catch {
                     // A failed stream shows what came with the error: the throttle may have held back the end.
-                    if let self { preview = prompt.preview(of: reply) }
+                    if let self {
+                        preview = prompt.preview(of: reply)
+                        reason = prompt.reason(from: reply)
+                    }
                     throw error
                 }
                 try Task.checkCancellation()
                 guard let self else { return }
                 preview = prompt.preview(of: reply)
+                reason = prompt.reason(from: reply)
                 do {
                     phase = .finished(try prompt.answer(from: reply))
                 } catch {
@@ -201,6 +241,11 @@ struct AIResultSheet: View {
             Button(copied ? "Copied" : "Copy", action: copy)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
                 .disabled(run.answer == nil)
+            if !run.isRunning {
+                Button("Regenerate", action: regenerate)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .help("Ask again for a new answer")
+            }
             if run.job.canApply {
                 Button("Apply", action: apply)
                     .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
@@ -231,9 +276,11 @@ struct AIResultSheet: View {
 
     private var applyHelp: String {
         switch run.job {
-        case .commitMessage(let summaryOnly):
+        case .commitMessage(let summaryOnly, _, _):
             summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
+        case .improveMessage: "Replace the row's new message"
+        case .pullRequest: "Fill the pull request's title and description"
         default: ""
         }
     }
@@ -250,7 +297,7 @@ struct AIResultSheet: View {
     private var previewBox: some View {
         let text = run.answer ?? run.preview
         Group {
-            if text.isEmpty && error == nil {
+            if text.isEmpty && run.reason == nil && error == nil {
                 VStack(alignment: .leading, spacing: 10) {
                     SkeletonLine(fraction: 0.7, height: 12)
                     SkeletonLine(fraction: 0.9, height: 12)
@@ -268,6 +315,12 @@ struct AIResultSheet: View {
                 ScrollView {
                     // An error shows under what came of the answer, in the same box.
                     VStack(alignment: .leading, spacing: 8) {
+                        // Plain text only: the reason is steered by repo content and is never applied.
+                        if let reason = run.reason {
+                            Text(verbatim: reason)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                         if !text.isEmpty { previewText(text) }
                         ErrorText(message: error)
                     }
@@ -294,7 +347,7 @@ struct AIResultSheet: View {
         case .explainCommit, .explainWorkingChanges:
             Text(Self.markdown(text))
                 .textSelection(.enabled)
-        case .commitMessage:
+        case .commitMessage, .improveMessage, .pullRequest:
             Text(verbatim: text)
                 .textSelection(.enabled)
         }
@@ -327,19 +380,29 @@ struct AIResultSheet: View {
         copied = true
     }
 
+    /// The same job again in a new `AIRun`, so the card starts fresh.
+    private func regenerate() {
+        session.startAI(run.job, onApply: run.onApply)
+    }
+
     private func apply() {
         guard let answer = run.answer else { return }
+        if let onApply = run.onApply {
+            onApply(answer)
+            onClose()
+            return
+        }
         switch run.job {
-        case .commitMessage(let summaryOnly):
+        case .commitMessage(let summaryOnly, _, _):
             session.applyAICommitMessage(answer, summaryOnly: summaryOnly)
             onClose()
         case .resolution(let target):
-            if let error = session.applyAIResolution(answer, to: target) {
+            if let error = session.applyAIResolutions([(target, answer)]) {
                 applyError = error
             } else {
                 onClose()
             }
-        case .explainCommit, .explainWorkingChanges:
+        case .explainCommit, .explainWorkingChanges, .improveMessage, .pullRequest:
             break
         }
     }
@@ -350,11 +413,17 @@ struct AIResultSheet: View {
         switch phase {
         case .finished(let answer):
             let firstLine = answer.split(separator: "\n").first.map(String.init) ?? ""
-            AIStub.log("finished \(run.job.logName) chars \(answer.count) first-line \(AIStub.quoted(firstLine))")
+            AIStub.log("finished \(run.job.logName) chars \(answer.count) first-line \(AIStub.quoted(firstLine))"
+                + (run.reason.map { " reason \(AIStub.quoted($0))" } ?? ""))
+            if AIStub.takeRegenerate() {
+                regenerate()
+                return
+            }
             guard AIStub.seamOptions.contains("apply") else { return }
             let before = session.conflict.value?.merge
             apply()
             AIStub.log("apply \(run.job.logName) error \(applyError ?? "none") card-open \(session.aiRun != nil)")
+            AIStub.log("form-open \(run.job.logName) \(session.rebaseRequest != nil || session.pullRequestForm != nil)")
             switch run.job {
             case .commitMessage:
                 let draft = session.commitDraft
@@ -371,7 +440,7 @@ struct AIResultSheet: View {
                 AIStub.log("resolution conflict \(target.conflict) region \(target.region) manual-regions \(manual) "
                     + "changed-regions \(changed) unresolved \(before.unresolvedCount)->\(after.unresolvedCount) "
                     + "line-break \(AIStub.quoted(target.lineBreak)) output \(AIStub.quoted(after.outputLines[region.output].joined()))")
-            case .explainCommit, .explainWorkingChanges:
+            case .explainCommit, .explainWorkingChanges, .improveMessage, .pullRequest:
                 break
             }
         case .failed(let message):
@@ -413,7 +482,7 @@ enum AIResultMetrics {
 
 /// An AI button of a card: disabled, with a tooltip saying where to set one up, while the active provider is not set
 /// up; `unavailable` disables it for a reason of its own (nothing staged). A click only opens the result card: nothing
-/// is sent before it.
+/// is sent before it. Draws nothing while Settings › AI › Show AI features is off.
 struct AIHookButton: View {
     let title: String
     var systemImage: String?
@@ -423,32 +492,52 @@ struct AIHookButton: View {
     var seam: String
     /// In a card header: a step smaller than `RowTextButtonStyle`'s callout.
     var small = false
+    /// A narrow header's fallback: the symbol alone (`sparkles` without one), the title in the tooltip.
+    var iconOnly = false
     let action: () -> Void
+    @AppStorage(PrefKey.aiShowFeatures.rawValue, store: Preferences.defaults)
+    private var showFeatures = true
 
     private var setup: AISetup { .shared }
 
     var body: some View {
-        let reason = setup.isReady ? unavailable : AISetup.setUpHint
+        if showFeatures { button }
+    }
+
+    @ViewBuilder
+    private var button: some View {
+        let ready = setup.isReady
+        let reason = ready ? unavailable : AISetup.setUpHint
         Button(action: action) {
             HStack(spacing: 4) {
-                if let systemImage {
-                    Image(systemName: systemImage)
+                if iconOnly {
+                    Image(systemName: systemImage ?? "sparkles")
                         .accessibilityHidden(true)
+                } else {
+                    if let systemImage {
+                        Image(systemName: systemImage)
+                            .accessibilityHidden(true)
+                    }
+                    Text(title)
+                        .lineLimit(1)
                 }
-                Text(title)
-                    .lineLimit(1)
             }
             .font(small ? .subheadline.weight(.medium) : .callout.weight(.medium))
         }
         .buttonStyle(RowTextButtonStyle())
         .fixedSize()
         .disabled(reason != nil)
-        .help(reason ?? help)
+        .help(iconOnly ? "\(title): \(reason ?? help)" : reason ?? help)
+        .accessibilityLabel(title)
         .onAppear { setup.loadKeysIfNeeded() }
         #if DEBUG
-        .task(id: reason == nil) {
-            guard reason == nil, AIStub.takeSeam(seam) else { return }
-            action()
+        .task(id: reason) {
+            guard let reason else {
+                if AIStub.takeSeam(seam) { action() }
+                return
+            }
+            // The button's own reason only (never the set-up hint): why a QA launch's hook did not click.
+            if ready { AIStub.logUnavailable(seam, reason: reason) }
         }
         #endif
     }

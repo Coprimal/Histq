@@ -195,6 +195,8 @@ struct AISettings: View {
     @State private var testTask: Task<Void, Never>?
     @State private var modelList: ModelListState = .idle
     @State private var modelListTask: Task<Void, Never>?
+    @AppStorage(PrefKey.aiShowFeatures.rawValue, store: Preferences.defaults)
+    private var showFeatures = true
     @AppStorage(PrefKey.aiResponseLanguage.rawValue, store: Preferences.defaults)
     private var responseLanguage = "english"
     @AppStorage(PrefKey.aiCommitLanguage.rawValue, store: Preferences.defaults)
@@ -203,6 +205,12 @@ struct AISettings: View {
     private var commitSummaryOnly = false
     @AppStorage(PrefKey.aiCommitInstructions.rawValue, store: Preferences.defaults)
     private var commitInstructions = ""
+    @AppStorage(PrefKey.aiExplainInstructions.rawValue, store: Preferences.defaults)
+    private var explainInstructions = ""
+    @AppStorage(PrefKey.aiConflictInstructions.rawValue, store: Preferences.defaults)
+    private var conflictInstructions = ""
+    @AppStorage(PrefKey.aiPullRequestInstructions.rawValue, store: Preferences.defaults)
+    private var pullRequestInstructions = ""
 
     private enum TestState: Equatable {
         case idle
@@ -223,13 +231,25 @@ struct AISettings: View {
 
     var body: some View {
         SettingsPageGate(section: .ai, isLoaded: setup.keysLoaded) {
+            SettingsGroup(nil) {
+                SettingsSwitchRow(title: "Show AI features",
+                                  hint: "Off hides every AI button. Nothing is sent until you click one.",
+                                  isOn: $showFeatures)
+            }
             languageGroup
             commitMessageGroup
+            explanationsGroup
+            conflictResolutionGroup
+            pullRequestGroup
             providerGroup
             providerDetailsGroup
         } skeleton: {
+            SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 2)
+            SettingsSkeletonGroup(rows: 1)
+            SettingsSkeletonGroup(rows: 1)
+            SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 4)
         }
@@ -508,27 +528,69 @@ struct AISettings: View {
                               hint: "Generate Message writes the summary line only and keeps your description.",
                               isOn: $commitSummaryOnly)
             SettingsDivider()
-            VStack(alignment: .leading, spacing: 8) {
+            instructionsEditor($commitInstructions,
+                               hint: "Added to Histq's prompt for Generate Message and followed over its default "
+                                   + "style. Sent to the provider with the staged diff.",
+                               placeholder: "Use Conventional Commits: type(scope): summary")
+        }
+    }
+
+    // MARK: Explanations, conflict resolution and pull requests
+
+    private var explanationsGroup: some View {
+        SettingsGroup("Explanations") {
+            instructionsEditor($explainInstructions,
+                               hint: "Added to Histq's prompt for Explain, for a commit and for your changes. "
+                                   + "Sent to the provider with the diff.",
+                               placeholder: "Point out changes to the public API first")
+        }
+    }
+
+    private var conflictResolutionGroup: some View {
+        SettingsGroup("Conflict resolution") {
+            instructionsEditor($conflictInstructions,
+                               hint: "Added to Histq's prompt for Suggest Resolution. "
+                                   + "Sent to the provider with the conflict region.",
+                               placeholder: "Prefer the current branch's naming")
+        }
+    }
+
+    private var pullRequestGroup: some View {
+        SettingsGroup("Pull requests") {
+            instructionsEditor($pullRequestInstructions,
+                               hint: "Added to Histq's prompt for Generate in Create Pull Request. "
+                                   + "Sent to the provider with the branch's commits, diff and template.",
+                               placeholder: "Keep the description to a few short bullet points")
+        }
+    }
+
+    /// A "Custom instructions" box (one per AI action) with Reset to Default, which empties it (Histq's prompt alone).
+    private func instructionsEditor(_ text: Binding<String>, hint: String, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Custom instructions")
-                    SettingsHint("Added to Histq's prompt for Generate Message and followed over its default style. "
-                        + "Sent to the provider with the staged diff.")
+                    SettingsHint(hint)
                 }
-                TextEditor(text: $commitInstructions)
-                    .font(.body)
-                    .settingsTextEditor()
-                    .frame(height: 88)
-                    .overlay(alignment: .topLeading) {
-                        if commitInstructions.isEmpty {
-                            Text(verbatim: "Use Conventional Commits: type(scope): summary")
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 8)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .accessibilityLabel("Custom instructions")
+                Spacer()
+                Button("Reset to Default") { text.wrappedValue = "" }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .disabled(text.wrappedValue.isEmpty)
             }
+            TextEditor(text: text)
+                .font(.body)
+                .settingsTextEditor()
+                .frame(height: 88)
+                .overlay(alignment: .topLeading) {
+                    if text.wrappedValue.isEmpty {
+                        Text(verbatim: placeholder)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .accessibilityLabel("Custom instructions")
         }
     }
 

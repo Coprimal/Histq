@@ -52,6 +52,20 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Optimize Repository, from the toolbar's repository menu or the command palette: writes a commit-graph so history and the graph load faster in big repositories.
 - Show Reflog: where HEAD has been, with Checkout, Create Branch Here and Copy SHA on each entry, and the commit's details even when it is no longer in the graph.
 - Ignore an untracked file, all files with its extension or its folder from the WIP file and folder menus, in `.gitignore` or, with Exclude Locally, in `.git/info/exclude` (this clone only).
+- AI commit messages follow the branch name and the style of up to 5 recent commit subjects.
+- AI requests keep only the header of lock and generated files (lockfiles, minified files, source maps, generated code).
+- A `.aiignore` file at the repository root (gitignore-style patterns: `#` comments, `*`, `?`, `**`, `[...]`, `\` escapes, a leading or trailing `/`; case-insensitive; no `!` lines) keeps matching files out of every AI request.
+- Generate Message works with Amend on: it covers the whole amended commit and improves the current message.
+- Settings › AI › Explanations and Conflict resolution: Custom instructions, as for commit messages, and Reset to Default in each instructions box to clear it.
+- Settings › AI › Show AI features: off hides every AI button.
+- Regenerate in the AI card asks the provider again for a new answer.
+- Conflict editor: Suggest Resolution sends the intent of the change (the message of the commit being replayed or cherry-picked, or the names of the branches being merged) and shows a short reason above the suggestion.
+- Conflict editor: Suggest All suggests every unresolved conflict of a file, one request per conflict, each kept or skipped with its Use switch before Apply.
+- Conflict editor: Undo AI puts the conflict editor back as it was before Apply from Suggest Resolution or Suggest All, in one step.
+- Suggest Resolution and Suggest All are unavailable, with the reason, for a file matched by `.aiignore` or when `.aiignore` can't be read.
+- Interactive rebase: Improve next to a reworded commit's message asks AI for a better message from the commit's diff and its current message; Apply puts it in the row.
+- Create Pull Request: Generate next to Description writes the title and description with AI from the branch's commit messages, its diff against the base and the repository's pull request template; Apply fills the form.
+- Settings › AI › Pull requests: Custom instructions, as for commit messages, with Reset to Default.
 
 ### Changed
 - Commit details appear as soon as you click a commit, and their cards keep their place while the files load.

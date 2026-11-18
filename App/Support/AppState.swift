@@ -155,13 +155,15 @@ enum PrefKey: String, CaseIterable {
     /// The Welcome page's recent repositories: folder paths, most recent first (`RecentRepos`).
     case recentRepos
     /// The detail panel's file lists: "tree" (rows under their folders) or "path" (one row per file). Settings ›
-    /// Appearance and each files card's header switch it.
+    /// Appearance sets it for every card; each files card keeps its own (`FileListCard.key`), switched from its header.
     case fileListMode
     /// A commit's Files card lists every file of the commit's tree, the unchanged ones dimmed (GitKraken's "View all
     /// files"); its header switches it.
     case commitShowsAllFiles
     /// The Unstaged card shows each file's size (and a folder's total in the tree).
     case showFileSizes
+    /// The AI buttons (Explain, Generate Message, Suggest Resolution) are shown; off hides them all.
+    case aiShowFeatures
     /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
     case aiProvider
     /// The model of each AI provider, by `AIProvider` raw value; a missing or empty one = the provider's default.
@@ -176,6 +178,12 @@ enum PrefKey: String, CaseIterable {
     case aiCommitSummaryOnly
     /// The user's own instructions added to the Generate Message prompt (empty: none).
     case aiCommitInstructions
+    /// The user's own instructions added to the Explain prompts, for a commit and for the changes (empty: none).
+    case aiExplainInstructions
+    /// The user's own instructions added to the Suggest Resolution prompt (empty: none).
+    case aiConflictInstructions
+    /// The user's own instructions added to the pull request Generate prompt (empty: none).
+    case aiPullRequestInstructions
     /// The operation toasts shown: a `ToastLevel` raw value, "all", "errors" or "off".
     case toastLevel
     /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
@@ -217,13 +225,14 @@ enum PrefKey: String, CaseIterable {
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
+        case .aiShowFeatures: true
         case .aiProvider: "openAI"
         case .aiModels: [String: String]()
         case .aiCustomBaseURL: ""
         case .aiResponseLanguage: "english"
         case .aiCommitLanguage: "english"
         case .aiCommitSummaryOnly: false
-        case .aiCommitInstructions: ""
+        case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
         case .toastLevel: "all"
         case .hiddenRefs: [String: [String]]()
         }

@@ -67,7 +67,7 @@ struct WIPPanel: View {
                 EmptyFilesText(text: "No conflicts left")
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: session.url) { file in
+                    FileListView(files: files, repoURL: session.url, card: .conflicted) { file in
                         rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
                             run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
                         }
@@ -93,7 +93,7 @@ struct WIPPanel: View {
             }
             ErrorText(message: errors[.conflicted])
         } accessory: {
-            FileListModeToggle()
+            FileListModeToggle(card: .conflicted)
         }
     }
 
@@ -103,7 +103,7 @@ struct WIPPanel: View {
                 EmptyFilesText(text: "No unstaged changes")
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: session.url) { file in
+                    FileListView(files: files, repoURL: session.url, card: .unstaged) { file in
                         HStack(spacing: 10) {
                             rowButton("arrow.uturn.backward",
                                       help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
@@ -149,8 +149,8 @@ struct WIPPanel: View {
             ErrorText(message: errors[.unstaged])
         } accessory: {
             HStack(spacing: 10) {
-                FileListModeToggle()
-                headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty) {
+                FileListModeToggle(card: .unstaged)
+                headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty, fill: Palette.stageAllFill) {
                     run(.stageAll, busy: .stageAll, part: .unstaged)
                 }
             }
@@ -167,7 +167,7 @@ struct WIPPanel: View {
                 EmptyFilesText(text: "No staged changes")
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: session.url) { file in
+                    FileListView(files: files, repoURL: session.url, card: .staged) { file in
                         rowButton("minus.circle", help: "Unstage File", busy: .unstage(file.path)) {
                             run(.unstage(Self.unstagePaths(file)), busy: .unstage(file.path), part: .staged)
                         }
@@ -194,8 +194,9 @@ struct WIPPanel: View {
             ErrorText(message: errors[.staged])
         } accessory: {
             HStack(spacing: 10) {
-                FileListModeToggle()
-                headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty) {
+                FileListModeToggle(card: .staged)
+                headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty,
+                             fill: Palette.unstageAllFill) {
                     run(.unstageAll, busy: .unstageAll, part: .staged)
                 }
             }
@@ -229,8 +230,8 @@ struct WIPPanel: View {
         .frame(width: 16, height: 16)
     }
 
-    private func headerButton(_ title: String, busy key: Busy, disabled: Bool, action: @escaping () -> Void)
-        -> some View
+    private func headerButton(_ title: String, busy key: Busy, disabled: Bool, fill: Color,
+                              action: @escaping () -> Void) -> some View
     {
         Button(action: action) {
             HStack(spacing: 4) {
@@ -238,7 +239,7 @@ struct WIPPanel: View {
                 Text(title)
             }
         }
-        .buttonStyle(RowTextButtonStyle())
+        .buttonStyle(RowTextButtonStyle(fill: fill))
         .disabled(disabled || busy.contains(key))
     }
 
@@ -398,18 +399,21 @@ struct WorktreeChangesPanel: View {
         VStack(spacing: SectionCardMetrics.spacing) {
             WorktreeHeaderCard(path: path, branch: status.branch.name)
             if !conflicted.isEmpty {
-                filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder)
+                filesCard("Conflicted", systemImage: "exclamationmark.triangle", conflicted, empty: "", folder: folder,
+                          card: .conflicted)
             }
             filesCard("Unstaged", systemImage: "doc.badge.ellipsis", unstaged, empty: "No unstaged changes",
-                      folder: folder)
-            filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder)
+                      folder: folder, card: .unstaged)
+            filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder,
+                      card: .staged)
             if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
         }
     }
 
-    private func filesCard(_ title: String, systemImage: String, _ files: [FileChange], empty: String, folder: URL)
+    private func filesCard(_ title: String, systemImage: String, _ files: [FileChange], empty: String, folder: URL,
+                           card: FileListCard)
         -> some View
     {
         SectionCard(title, systemImage: systemImage, count: files.count, contentPadding: 6) {
@@ -417,11 +421,11 @@ struct WorktreeChangesPanel: View {
                 EmptyFilesText(text: empty)
             } else {
                 FilesScroll {
-                    FileListView(files: files, repoURL: folder)
+                    FileListView(files: files, repoURL: folder, card: card)
                 }
             }
         } accessory: {
-            FileListModeToggle()
+            FileListModeToggle(card: card)
         }
     }
 }
@@ -579,13 +583,38 @@ private struct CommitBox: View {
                 }
                 AIHookButton(title: "Generate Message", systemImage: "sparkles",
                              help: "Write a commit message for the staged changes with AI",
-                             unavailable: stagedCount == 0 ? "Stage changes first" : nil, seam: "generate",
-                             small: true) {
+                             unavailable: generateUnavailable, seam: "generate", small: true) {
                     let summaryOnly = Preferences.defaults.bool(forKey: PrefKey.aiCommitSummaryOnly.rawValue)
-                    session.startAI(.commitMessage(summaryOnly: summaryOnly))
+                    session.startAI(.commitMessage(summaryOnly: summaryOnly, amend: session.commitDraft.amend,
+                                                   currentMessage: message))
                 }
             }
         }
+        #if DEBUG
+        .task {
+            // `-HistqAI generate,amend`: Amend on as the toggle does, so the last message loads before the click.
+            guard AIStub.seamHook == "generate", AIStub.seamOptions.contains("amend"), !session.commitDraft.amend
+            else { return }
+            AIStub.log("amend on")
+            amendBinding.wrappedValue = true
+        }
+        #endif
+    }
+
+    /// Why Generate Message cannot run: nothing staged (Amend covers the last commit), or the amended message still
+    /// loading, so a click never takes a stale one.
+    private var generateUnavailable: String? {
+        let draft = session.commitDraft
+        if busy.contains(.amendMessage) { return "Loading the last commit message" }
+        if stagedCount == 0 && !draft.amend { return "Stage changes first" }
+        #if DEBUG
+        // `-HistqAI generate[,amend]`: the seam clicks once the branch is read and, with `amend`, the message is in.
+        if AIStub.seamHook == "generate" {
+            if session.refs.value == nil { return "Reading the branches" }
+            if AIStub.seamOptions.contains("amend") && !draft.amend { return "Turning Amend on" }
+        }
+        #endif
+        return nil
     }
 
     private var commitTitle: String {

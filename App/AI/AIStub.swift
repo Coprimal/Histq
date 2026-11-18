@@ -4,17 +4,28 @@
 // to the network: a canned SSE stream in the request's wire format (Anthropic Messages for `/messages`, chat
 // completions otherwise), sent in small chunks over about a second so the preview streams and Cancel can stop it. The
 // answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, an
-// explanation, or for a resolution side A's text then side B's with LF line breaks; a request without one (Test
-// connection) gets "OK". A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`.
-// `error` answers HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`).
+// explanation, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
+// prompt asks for one; a request without one (Test connection) gets "OK". A `GET …/models` (Load models) gets two
+// model ids, `stub-model-a` and `models/stub-model-b`. `error` answers HTTP 401 instead. Each chat request logs its
+// prompt's language rule (`language <name|default>`) and its data blocks' labels (`blocks [<label>, ...]`, never
+// their content).
 // With `-HistqKeychain memory`, every built-in provider gets a fake key in the in-memory Keychain, so the AI buttons
 // are enabled.
 //
-// `-HistqAI <hook>[,apply][,cancel]` (stub runs only) clicks one AI button once it can run: `generate` (commit box),
-// `explain-wip` (commit box), `explain` (commit details), `resolve` (conflict editor), `test` (Settings › AI, Test
-// Connection), `load-models` (Settings › AI, Load models); `apply` applies the finished answer, `cancel` cancels as
+// `-HistqAI <hook>[,apply][,cancel][,regenerate][,undo]` (stub runs only) clicks one AI button once it can run:
+// `generate` (commit box), `explain-wip` (commit box), `explain` (commit details), `improve-message` (a reword row
+// of the rebase sheet, with `-HistqRewordRow <n>`; its prompt is a commit message's, so it gets the same answer),
+// `pr-describe` (Create Pull Request form, Generate; a title line, a blank line and a short Markdown body),
+// `resolve` (conflict editor), `test` (Settings › AI, Test Connection), `load-models` (Settings › AI, Load models),
+// `resolve-all` (conflict editor, Suggest All: logs `batch finished ok=<n> failed=<m>` once every region ended; with
+// `apply` it clicks Apply N and logs
+// `apply-batch regions [...]`, and with `undo` it then does Undo AI and logs `unresolved <a>-><b>`); `apply` applies
+// the finished answer, `regenerate` clicks Regenerate once on the first finish (once per launch), `cancel` cancels as
 // soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
-// reads its content. Evidence goes to `<stateDir>/ai.log` (never a key).
+// reads its content (Suggest All: while the batch runs);
+// `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
+// `generate` waits until the refs are read (the branch name). A hook whose button is disabled for a reason of its own
+// (AI set up) logs `unavailable <hook>: <reason>` once per reason. Evidence goes to `<stateDir>/ai.log` (never a key).
 import Foundation
 import HistqCore
 import os
@@ -59,6 +70,8 @@ enum AIStub {
     private static let seamParts: [String] = isEnabled
         ? (AppState.launchFlag("-HistqAI") ?? "").split(separator: ",").map(String.init) : []
     static var seamOptions: Set<String> { Set(seamParts.dropFirst()) }
+    /// The hook `-HistqAI` names (`generate`, `explain`, …); nil without one.
+    static var seamHook: String? { seamParts.first }
 
     @MainActor private static var seamTaken = false
 
@@ -68,6 +81,26 @@ enum AIStub {
         guard !seamTaken, seamParts.first == hook else { return false }
         seamTaken = true
         log("click \(hook)")
+        return true
+    }
+
+    @MainActor private static var unavailableLogged: Set<String> = []
+
+    /// The hook `-HistqAI` names is disabled for a reason of its own: logged once per distinct reason.
+    @MainActor
+    static func logUnavailable(_ hook: String, reason: String) {
+        guard seamParts.first == hook, unavailableLogged.insert(reason).inserted else { return }
+        log("unavailable \(hook): \(reason)")
+    }
+
+    @MainActor private static var regenerateTaken = false
+
+    /// `-HistqAI <hook>,regenerate`: true once per launch, on the first finish (the card is re-created per run).
+    @MainActor
+    static func takeRegenerate() -> Bool {
+        guard !regenerateTaken, seamOptions.contains("regenerate") else { return false }
+        regenerateTaken = true
+        log("regenerate")
         return true
     }
 
@@ -119,14 +152,14 @@ enum AIStub {
     static func replyText(body: Data) -> String {
         guard let parts = prompt(body: body) else { return "OK" }
         let (system, user) = (parts.system, parts.user)
-        guard let range = system.range(of: "BEGIN ANSWER histq-[0-9a-f]+", options: .regularExpression) else {
-            return "OK"
-        }
-        let token = String(system[range].dropFirst("BEGIN ANSWER ".count))
+        guard let token = boundary(system: system) else { return "OK" }
         let answer: String
         if system.contains("Write a git commit message") {
             answer = "Add a canned change from the AI stub\n\nWritten by the DEBUG AI stub (-HistqAIStub); no "
                 + "provider was called.\n"
+        } else if system.contains("Write a pull request title") {
+            answer = "Add a canned pull request from the AI stub\n\n## Summary\n\nWritten by the **DEBUG AI stub** "
+                + "(-HistqAIStub); no provider was called.\n\n- The prompt held \(user.utf8.count) bytes.\n"
         } else if system.contains("Resolve one git merge conflict") {
             // LF only, as models usually answer: Apply must convert it to a CRLF file's line breaks.
             answer = (terminated(block(in: user, token: token, label: "A: ours"))
@@ -136,7 +169,27 @@ enum AIStub {
             answer = "This change was explained by the **DEBUG AI stub**.\n\n- No provider was called.\n- The "
                 + "prompt held \(user.utf8.count) bytes.\n"
         }
-        return "Here is the answer.\nBEGIN ANSWER \(token)\n\(terminated(answer))END ANSWER \(token)\n"
+        let reason = system.contains("BEGIN REASON")
+            ? "BEGIN REASON \(token)\nThe stub keeps side A, then side B.\nEND REASON \(token)\n" : ""
+        return "Here is the answer.\n\(reason)BEGIN ANSWER \(token)\n\(terminated(answer))END ANSWER \(token)\n"
+    }
+
+    /// The prompt's boundary token, from its system prompt's answer rule.
+    private static func boundary(system: String) -> String? {
+        guard let range = system.range(of: "BEGIN ANSWER histq-[0-9a-f]+", options: .regularExpression) else {
+            return nil
+        }
+        return String(system[range].dropFirst("BEGIN ANSWER ".count))
+    }
+
+    /// The labels of a request's data blocks, in order: only lines that open a block with the prompt's own boundary,
+    /// so a look-alike line inside a diff is never logged.
+    static func blockLabels(body: Data) -> [String] {
+        guard let parts = prompt(body: body), let token = boundary(system: parts.system) else { return [] }
+        let opening = "BEGIN DATA \(token) ("
+        return parts.user.split(separator: "\n").compactMap { line in
+            line.hasPrefix(opening) && line.hasSuffix(")") ? String(line.dropFirst(opening.count).dropLast()) : nil
+        }
     }
 
     private static func terminated(_ text: String) -> String {
@@ -209,6 +262,7 @@ final class AIStubProtocol: URLProtocol, @unchecked Sendable {
             AIStub.log("list models \(url.host() ?? "")")
         } else {
             AIStub.log("language \(AIStub.languageName(body: body))")
+            AIStub.log("blocks [\(AIStub.blockLabels(body: body).joined(separator: ", "))]")
         }
         if AIStub.mode == "error" {
             respond(url, status: 401, type: "application/json")

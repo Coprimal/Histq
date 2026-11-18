@@ -71,7 +71,7 @@ struct CommitDetailPanel: View {
                     .frame(height: FileListView<EmptyView>.rowHeight)
             } else {
                 CardScrollView {
-                    FileListView(files: files, repoURL: session.url)
+                    FileListView(files: files, repoURL: session.url, card: .commit)
                         .fileMenu { [session, commit] file in
                             // A stash's file is applied, not checked out.
                             if !commit.isStash {
@@ -180,7 +180,7 @@ struct CommitFilesCard<Content: View>: View {
                 .help(isSearching ? "Close Search" : "Search Files")
                 .accessibilityLabel(isSearching ? "Close search" : "Search files")
                 if allFilesButton { AllFilesToggle() }
-                FileListModeToggle()
+                FileListModeToggle(card: .commit)
             }
         }
         .modifier(FilesLayoutLog(token: token, detail: detail, state: state))

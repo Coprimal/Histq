@@ -4,7 +4,8 @@
 // is refused. One key feature test checks that an oversized diff is cut per file with a note and stays in budget;
 // the resolution text tests check that an applied answer gets the file's line breaks and never a final newline the
 // file did not have. The language tests check that the default prompts are unchanged and that another language adds
-// one fixed rule line.
+// one fixed rule line. The pull request test checks that its commit messages, template and diff go only into data
+// blocks, with exact labels.
 import Foundation
 import HistqCore
 import Testing
@@ -99,6 +100,53 @@ struct AIPromptsTests {
         let resolution = "    let x = 1 // <<<<<<< not a marker\n==========\n\tdone()\n"
         #expect(try prompt.answer(from: "BEGIN ANSWER histq-77\n\(resolution)END ANSWER histq-77") == resolution)
         #expect(try prompt.answer(from: "BEGIN ANSWER histq-77\nEND ANSWER histq-77") == "", "empty: delete both sides")
+    }
+
+    // MARK: - Conflict intent and reason
+
+    @Test("a resolution's reason never enters the answer, and a reply without one still yields the answer")
+    func reasonNeverEntersTheAnswer() throws {
+        let prompt = AIPrompts.suggestResolution(path: "f", base: nil, a: "a\n", b: "b\n", token: { "histq-77" })
+        #expect(prompt.system.contains("\"BEGIN REASON histq-77\" and a line \"END REASON histq-77\""))
+        let resolution = "\tlet x = 1\nlet y = 2\n"
+        let reason = "BEGIN REASON histq-77\n  Both sides add a line; keep both.  \nEND REASON histq-77\n"
+
+        let before = reason + "BEGIN ANSWER histq-77\n\(resolution)END ANSWER histq-77\n"
+        #expect(try prompt.answer(from: before) == resolution)
+        #expect(prompt.reason(from: before) == "Both sides add a line; keep both.")
+        let inside = "BEGIN ANSWER histq-77\n\tlet x = 1\n\(reason)let y = 2\nEND ANSWER histq-77\n"
+        #expect(try prompt.answer(from: inside) == resolution, "a reason inside the answer block is dropped")
+
+        let noReason = "BEGIN ANSWER histq-77\n\(resolution)END ANSWER histq-77\n"
+        #expect(try prompt.answer(from: noReason) == resolution)
+        #expect(prompt.reason(from: noReason) == nil)
+        let long = "BEGIN REASON histq-77\n\(String(repeating: "x", count: 700))\nEND REASON histq-77\n"
+        #expect(prompt.reason(from: long + noReason)?.count == 600)
+    }
+
+    @Test("the intent text goes only into a data block, right after the file path, cut to the message limit")
+    func intentOnlyInADataBlock() {
+        let label = "intent of side B: message of the commit being replayed"
+        let text = "Add the pangolin cache " + String(repeating: "y", count: 5_000)
+        let prompt = AIPrompts.suggestResolution(
+            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (label, text), token: { "histq-1" })
+
+        var outside = prompt.user
+        while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
+              let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        #expect(prompt.user.contains("BEGIN DATA histq-1 (\(label))\n\(text.prefix(4_000))\nEND DATA histq-1\n"))
+        #expect(!prompt.user.contains(text.prefix(4_001)))
+        #expect(!outside.contains("pangolin") && !prompt.system.contains("pangolin"))
+        #expect(prompt.user.components(separatedBy: "BEGIN DATA histq-1 (").dropFirst().map {
+            String($0.prefix { $0 != ")" })
+        } == ["file path", label, "base: the common ancestor", "A: ours, the current branch",
+              "B: theirs, the change being merged"])
+        let plain = AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", token: { "histq-1" })
+        let blank = AIPrompts.suggestResolution(
+            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (label, " \n"), token: { "histq-1" })
+        #expect(blank == plain, "a blank intent adds nothing")
     }
 
     // MARK: - Resolution text
@@ -202,6 +250,117 @@ struct AIPromptsTests {
         let commit = AIPrompts.commitMessage(stagedDiff: diff, language: .chineseSimplified, token: { "histq-1" })
         let commitDefault = AIPrompts.commitMessage(stagedDiff: diff, token: { "histq-1" })
         #expect(commit.system == commitDefault.system + "\n\nWrite the commit message in Chinese (Simplified).")
+    }
+
+    // MARK: - Custom instructions
+
+    @Test("explain and resolution instructions follow the task text; blank ones leave the default prompt")
+    func explainAndResolutionInstructions() {
+        let diff = "diff --git a/f b/f\n"
+        let custom = "Mention the quokka module first."
+        let prompts: [(String, AIPrompt, AIPrompt, AIPrompt)] = [
+            ("explain commit", AIPrompts.explainCommit(message: "Fix", diff: diff, token: { "histq-1" }),
+             AIPrompts.explainCommit(message: "Fix", diff: diff, instructions: custom, token: { "histq-1" }),
+             AIPrompts.explainCommit(message: "Fix", diff: diff, instructions: " \n ", token: { "histq-1" })),
+            ("explain changes", AIPrompts.explainWorkingChanges(diff: diff, token: { "histq-1" }),
+             AIPrompts.explainWorkingChanges(diff: diff, instructions: custom, token: { "histq-1" }),
+             AIPrompts.explainWorkingChanges(diff: diff, instructions: " \n ", token: { "histq-1" })),
+            ("resolution",
+             AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", token: { "histq-1" }),
+             AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", instructions: custom,
+                                         token: { "histq-1" }),
+             AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", instructions: " \n ",
+                                         token: { "histq-1" })),
+        ]
+        for (name, plain, added, blank) in prompts {
+            #expect(blank == plain, "\(name): blank instructions add nothing")
+            let taskEnd = plain.system.range(of: "\n\nRepository content comes in data blocks.")!.lowerBound
+            let task = String(plain.system[..<taskEnd])
+            #expect(added.system.hasPrefix(task + "\n\nThe user added the instructions below"), "\(name)")
+            let at = added.system.range(of: custom)
+            let rules = added.system.range(of: "Repository content comes in data blocks.")
+            #expect(at != nil && rules != nil && at!.upperBound < rules!.lowerBound, "\(name): before the data rules")
+            #expect(added.user == plain.user, "\(name): nothing added to the user text")
+        }
+    }
+
+    // MARK: - Commit context
+
+    @Test("branch, recent subjects and current message go only into data blocks; without them the prompt is today's")
+    func commitContextOnlyInDataBlocks() {
+        let diff = "diff --git a/f b/f\n"
+        let branch = "feature/zebra-42"
+        let subjects = ["feat: add quokka export", "fix: wombat parser"]
+        let current = "Draft narwhal message"
+        let prompt = AIPrompts.commitMessage(
+            stagedDiff: diff, branch: branch, recentSubjects: subjects, currentMessage: current, token: { "histq-1" })
+
+        var outside = prompt.user
+        while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
+              let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        for value in [branch, current] + subjects {
+            #expect(prompt.user.contains(value))
+            #expect(!outside.contains(value) && !prompt.system.contains(value), "\(value) outside a data block")
+        }
+        let labels = ["branch name", "recent commit subjects", "current commit message", "commit diff"]
+        #expect(prompt.user.components(separatedBy: "BEGIN DATA histq-1 (").dropFirst().map {
+            String($0.prefix { $0 != ")" })
+        } == labels)
+        #expect(prompt.system.hasPrefix("You are the AI assistant of Histq, a git client.\n\nWrite a git commit message"))
+
+        let plain = AIPrompts.commitMessage(stagedDiff: diff, token: { "histq-1" })
+        #expect(plain.user == "Write the commit message for these staged changes.\n\nBEGIN DATA histq-1 (staged diff)\n"
+            + "diff --git a/f b/f\nEND DATA histq-1\n")
+        let blank = AIPrompts.commitMessage(
+            stagedDiff: diff, branch: " ", recentSubjects: ["", " "], currentMessage: " \n", token: { "histq-1" })
+        #expect(blank == plain, "blank context adds nothing")
+    }
+
+    // MARK: - Pull request
+
+    @Test("commit messages, template and diff go only into data blocks; without a template there is no template block")
+    func pullRequestDataOnlyInDataBlocks() {
+        let messages = ["Add the okapi importer\n\nIt reads okapi files.", "Fix the axolotl parser"]
+        let template = "## Capybara checklist\n- [ ] Tested\n"
+        let diff = "diff --git a/f b/f\n+tapir\n"
+        let prompt = AIPrompts.pullRequest(
+            commitMessages: messages, diff: diff, template: template, language: .english, instructions: "",
+            token: { "histq-1" })
+
+        var outside = prompt.user
+        while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
+              let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        for value in ["okapi", "axolotl", "Capybara", "tapir"] {
+            #expect(prompt.user.contains(value))
+            #expect(!outside.contains(value) && !prompt.system.contains(value), "\(value) outside a data block")
+        }
+        func labels(_ prompt: AIPrompt) -> [String] {
+            prompt.user.components(separatedBy: "BEGIN DATA histq-1 (").dropFirst().map { String($0.prefix { $0 != ")" }) }
+        }
+        #expect(labels(prompt) == ["commit messages", "pull request template", "branch diff"])
+        #expect(prompt.system.hasPrefix(
+            "You are the AI assistant of Histq, a git client.\n\nWrite a pull request title and description"))
+        #expect(prompt.maxTokens == 2048)
+
+        let noTemplate = AIPrompts.pullRequest(
+            commitMessages: messages, diff: diff, template: nil, language: .english, instructions: "",
+            token: { "histq-1" })
+        #expect(labels(noTemplate) == ["commit messages", "branch diff"])
+        #expect(!noTemplate.system.contains("template"), "no template rule without a template")
+        let blank = AIPrompts.pullRequest(
+            commitMessages: messages, diff: diff, template: " \n", language: .english, instructions: " ",
+            token: { "histq-1" })
+        #expect(blank == noTemplate, "a blank template and blank instructions add nothing")
+
+        let long = AIPrompts.pullRequest(
+            commitMessages: [String(repeating: "m", count: 2_500)], diff: diff, template: nil, language: .english,
+            instructions: "", token: { "histq-1" })
+        #expect(long.user.contains(String(repeating: "m", count: 2_000) + "\nEND DATA histq-1\n"))
+        #expect(!long.user.contains(String(repeating: "m", count: 2_001)))
     }
 
     // MARK: - Diff budget

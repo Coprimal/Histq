@@ -167,14 +167,15 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqResolve A1,B2,AB3[,<step>]` | Ticks sides of conflicts 1, 2, 3...; steps: `save`, `save-output`, `save-chunks`, `reset`, `keep`, `delete`, `leave-save`, `leave-save-output`, `dontsave`, `cancel`. |
 | `-HistqOperation continue\|abort\|skip` | Presses the operation banner's button. |
 | `-HistqOpenRebase <rev>` / `-HistqOpenSquash "<rev>,<rev>"` / `-HistqStartRebase` | Opens the interactive rebase or squash sheet; starts it. |
+| `-HistqRewordRow <n>` | With `-HistqOpenRebase`, switches row n (1-based) to Reword once the sheet has loaded. |
 | `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqPRTab commits\|files\|checks` | The tab a pull request opens on. |
 | `-HistqPRAction <action>` / `-HistqIssueAction <action>` | Runs a pull request or issue action once, without confirmation. Stub only. |
 | `-HistqOpenCreatePR <branch>` / `-HistqCreatePRSubmit YES` | Opens the Create Pull Request form; fills and submits it. Stub only. |
 | `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |
-| `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network. |
-| `-HistqAI <hook>[,apply\|,cancel]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `test` or `load-models`. Stub only. |
+| `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network; logs each request's data block labels as `blocks [<label>, ...]` in `ai.log` (labels only, never content). |
+| `-HistqAI <hook>[,amend][,apply\|,cancel][,regenerate][,undo][,close-tab\|,close-window]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `resolve-all`, `improve-message`, `pr-describe`, `test` or `load-models`. `improve-message` clicks Improve on the reword row (see `-HistqRewordRow`). `pr-describe` clicks Generate in the Create Pull Request form (needs `-HistqOpenCreatePR` and `-HistqGitHubStub YES`). `generate,amend` turns Amend on and clicks Generate Message once the last message has loaded. `regenerate` clicks Regenerate once after the first answer and logs `regenerate` in `ai.log`. `resolve-all` (Suggest All) logs `batch finished ok=<n> failed=<m>` once the batch ends; with `apply` it clicks Apply N and logs `apply-batch regions [...]`, and `undo` then does Undo AI and logs `unresolved <a>-><b>`. `close-tab` (another tab must stay open) or `close-window` closes the card's tab or window as soon as the card opens, while the job still reads its content (`resolve-all`: while the batch runs), as Cmd-W would, and logs a `close-tab …` or `close-window …` line; no stub request may follow. When AI is set up but the named hook's button is unavailable, `ai.log` gets `unavailable <hook>: <reason>` once per reason. Each single-card `apply` also logs `form-open <logName> <true\|false>` (whether the rebase or pull request form is still shown). Stub only. |
 
 ## Project layout
 

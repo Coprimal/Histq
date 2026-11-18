@@ -8,6 +8,7 @@
 // Reviewers, assignees and labels come from the API off the main actor; a list the token may not read (403, 404) only
 // leaves its picker out. Create opens the pull request, then asks for the reviewers, labels and assignees; the new
 // pull request's detail opens in panel2 even when one of those follow-ups fails (the failure shows above its tabs).
+// Generate (AI) opens its card over the form; its Apply fills the title and the description.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -168,6 +169,9 @@ struct CreatePRView: View {
                         .font(.settingsCaption)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
+                    AIHookButton(title: "Generate", systemImage: "sparkles",
+                                 help: "Write the title and description with AI", unavailable: generateUnavailable,
+                                 seam: "pr-describe", small: true, action: generate)
                     CapsuleTabs(selection: $bodyTab, tabs: BodyTab.allCases, title: { Text($0.title) }, compact: true)
                         .fixedSize()
                 }
@@ -346,6 +350,33 @@ struct CreatePRView: View {
         return words.prefix(1).uppercased() + words.dropFirst()
     }
 
+    // MARK: AI
+
+    /// Why Generate can't run now; nil when it can.
+    private var generateUnavailable: String? {
+        if head.isEmpty || base.isEmpty { return "Pick a head and a base branch." }
+        if head == base { return "The head and the base are the same branch." }
+        return nil
+    }
+
+    /// Generate's click: the AI card opens over the form at once. Its Apply puts the answer's first line in the title
+    /// and the rest (after the blank line) in the description, as plain text.
+    private func generate() {
+        guard generateUnavailable == nil, let remote = session.github.api?.remote else { return }
+        let baseRef = "refs/remotes/\(remote)/\(base)"
+        let templateRef = choices.defaultBranch.map { "refs/remotes/\(remote)/\($0)" } ?? baseRef
+        let job = AIJob.pullRequest(base: baseRef, head: "refs/remotes/\(remote)/\(head)", templateRef: templateRef)
+        session.startAI(job) { answer in
+            var lines = answer.split(separator: "\n", omittingEmptySubsequences: false).map {
+                $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            }
+            title = lines.isEmpty ? "" : lines.removeFirst().trimmingCharacters(in: .whitespaces)
+            while lines.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeFirst() }
+            bodyText = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            bodyTab = .write
+        }
+    }
+
     // MARK: Loading
 
     /// The default branch, the collaborators (reviewers, without the token's own user), the assignable users and the
@@ -412,9 +443,10 @@ struct CreatePRView: View {
     }
 
     /// Creates the pull request off the main actor, then its reviewers, labels and assignees; opens it once created.
-    /// A refused create stays in the form (GitHub's reason, e.g. one already exists).
+    /// A refused create stays in the form (GitHub's reason, e.g. one already exists). Never while the AI card is over
+    /// the form: Return in a field that kept the focus must not create the pull request.
     private func submit() {
-        guard canSubmit, !creating, let api = session.github.api else { return }
+        guard session.aiRun == nil, canSubmit, !creating, let api = session.github.api else { return }
         error = nil
         creating = true
         let body = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)

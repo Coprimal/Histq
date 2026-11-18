@@ -25,7 +25,7 @@ work as they are.
 - Worktrees, tabs and a command palette (Cmd-K)
 - Per-tab profiles: identity, commit signing, SSH key, GitHub account
 - GitHub pull requests and issues
-- Optional AI help with your own provider key
+- Optional AI help with your own provider key; a `.aiignore` file (gitignore-style patterns: `#` comments, `*`, `?`, `**`, `[...]`, `\` escapes, a leading or trailing `/`; case-insensitive; no `!` lines) keeps files out of it; Settings › AI can hide every AI button
 - A terminal drawer per tab
 
 More in the [docs](https://histq.coprimal.dev/docs.html).

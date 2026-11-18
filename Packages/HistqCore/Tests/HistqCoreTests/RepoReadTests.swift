@@ -236,4 +236,34 @@ struct RepoReadTests {
         let paths = Set(worktree.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
         #expect(paths.contains("README.md") && !paths.contains("untracked.txt"))
     }
+
+    @Test("the amend patch holds the last commit's changes and the staged ones (the root commit's files on a root)")
+    func stagedAgainstParentCoversLastCommit() async throws {
+        let graph = try await Graph()
+        defer { graph.copy.remove() }
+        /// A new repo with one commit per file, then `staged.txt` staged.
+        func makeRepo(_ name: String, commits: [String]) async throws -> URL {
+            let repo = graph.copy.repo(name)
+            try await graph.copy.git(["init", "-q", "-b", "main", repo.path], in: graph.copy.root)
+            try await graph.copy.git(["config", "user.name", "Histq Test"], in: repo)
+            try await graph.copy.git(["config", "user.email", "test@histq.invalid"], in: repo)
+            for file in commits + ["staged.txt"] {
+                try Data("\(file)\n".utf8).write(to: repo.appending(path: file))
+                try await graph.copy.git(["add", file], in: repo)
+                if file != "staged.txt" { try await graph.copy.git(["commit", "-q", "-m", file], in: repo) }
+            }
+            return repo
+        }
+        func amendPatch(_ repo: URL) async throws -> String {
+            try await DiffReader.patchText(
+                .stagedAgainstParent, runner: graph.runner, cwd: repo, env: try await graph.readEnvironment(for: repo))
+        }
+
+        let two = try await amendPatch(try await makeRepo("amend-two", commits: ["first.txt", "second.txt"]))
+        #expect(two.contains("+++ b/second.txt") && two.contains("+++ b/staged.txt"))
+        #expect(!two.contains("first.txt"), "the parent's own files are no change")
+
+        let root = try await amendPatch(try await makeRepo("amend-root", commits: ["first.txt"]))
+        #expect(root.contains("+++ b/first.txt") && root.contains("+++ b/staged.txt"))
+    }
 }

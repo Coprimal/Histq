@@ -61,7 +61,7 @@ struct CompareDetailPanel: View {
                     .frame(height: FileListView<EmptyView>.rowHeight)
             } else {
                 CardScrollView {
-                    FileListView(files: shown, repoURL: session.url)
+                    FileListView(files: shown, repoURL: session.url, card: .commit)
                         .fileMenu { [session, head] file in
                             // Untracked files are not in a compare; a deleted file has only its history.
                             file.kind == .untracked ? []
