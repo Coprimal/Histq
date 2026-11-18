@@ -6,11 +6,11 @@
 
 **A native macOS git client that drives the git you already have.**
 
-[![Latest release](https://img.shields.io/github/v/release/dinhanhthi/Histq)](https://github.com/dinhanhthi/Histq/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/Coprimal/Histq)](https://github.com/Coprimal/Histq/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
 
-[Website](https://histq.coprimal.dev) · [Docs](https://histq.coprimal.dev/docs.html) · [Download](https://github.com/dinhanhthi/Histq/releases/latest) · [Changelog](CHANGELOG.md)
+[Website](https://histq.coprimal.dev) · [Docs](https://histq.coprimal.dev/docs.html) · [Download](https://github.com/Coprimal/Histq/releases/latest) · [Changelog](CHANGELOG.md)
 
 <img src="assets/screenshot.png" alt="Histq window: commit graph, branch, remote and worktree sidebar, and the selected commit's details and changed files">
 
@@ -32,7 +32,7 @@ More in the [docs](https://histq.coprimal.dev/docs.html).
 
 ## Install
 
-Download the `.dmg` from [Releases](https://github.com/dinhanhthi/Histq/releases/latest) and drag Histq to
+Download the `.dmg` from [Releases](https://github.com/Coprimal/Histq/releases/latest) and drag Histq to
 `/Applications`. It updates itself with [Sparkle](https://sparkle-project.org).
 
 Needs macOS 15 or later on Apple silicon, and git 2.36 or later (the Command Line Tools git or Homebrew's).

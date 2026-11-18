@@ -15,7 +15,7 @@
 #   - notarytool credential profile (default "apple-notary")
 #   - Sparkle EdDSA key (generate_keys --account Histq) + SUPublicEDKey in App/Info.plist
 #   - Xcode 27+ selected and xcodegen installed
-#   - gh CLI authenticated, origin = github.com/<GH_REPO> (default dinhanhthi/Histq)
+#   - gh CLI authenticated, origin = github.com/<GH_REPO> (default Coprimal/Histq)
 #
 # Usage:
 #   scripts/ship.sh
@@ -27,7 +27,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-GH_REPO="${GH_REPO:-dinhanhthi/Histq}"
+GH_REPO="${GH_REPO:-Coprimal/Histq}"
 export GH_REPO
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -106,5 +106,5 @@ echo
 echo "========================================"
 echo "  Histq v$VERSION shipped!"
 echo "  GitHub : https://github.com/$GH_REPO/releases/tag/v$VERSION"
-echo "  Appcast: https://raw.githubusercontent.com/$GH_REPO/main/appcast.xml"
+echo "  Appcast: https://histq.coprimal.dev/appcast.xml (served by pages.yml)"
 echo "========================================"

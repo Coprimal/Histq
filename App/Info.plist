@@ -6,7 +6,7 @@
 	<key>HistqGitHubClientID</key>
 	<string>$(HISTQ_GITHUB_CLIENT_ID)</string>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/dinhanhthi/Histq/main/appcast.xml</string>
+	<string>https://histq.coprimal.dev/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>mtFSMNMbgmIhck1LAIiRmgVWyH/iMJ/9nP5Xhc3X/+M=</string>
 	<key>SUEnableAutomaticChecks</key>

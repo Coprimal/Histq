@@ -1,13 +1,18 @@
 name: Deploy website
 
-# Publishes the landing site (website/) to GitHub Pages.
+# Publishes the landing site (website/) and the Sparkle feed (root appcast.xml) to GitHub Pages
+# at https://histq.coprimal.dev, so the app's SUFeedURL is https://histq.coprimal.dev/appcast.xml.
+# A deploy replaces the whole site, so both are staged together on every run.
 # Requires Settings > Pages > Source = "GitHub Actions".
+# scripts/publish-appcast.sh pushes the new appcast.xml to main, which triggers this workflow.
+# Note: thi-create-website's render.py rewrites this file; re-apply the appcast lines after a re-render.
 
 on:
   push:
     branches: [main]
     paths:
       - 'website/**'
+      - 'appcast.xml'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -35,6 +40,8 @@ jobs:
         run: |
           mkdir -p _site
           cp -R website/. _site/
+          # appcast.xml exists from the first release on; before it the site deploys alone.
+          if [ -f appcast.xml ]; then cp appcast.xml _site/appcast.xml; fi
           for f in _site/index.html; do
             [ -f "$f" ] || { echo "::error::$f is missing"; exit 1; }
           done

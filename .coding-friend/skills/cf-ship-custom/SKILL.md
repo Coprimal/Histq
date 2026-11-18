@@ -8,8 +8,9 @@ user's own messages direct the flow.
 This is a **version bump + changelog + ship** workflow for Histq. The release runs
 **entirely on this machine** (`docs/RELEASING.md`): `xcodegen generate` → archive → Developer ID
 sign → Sparkle helper re-sign → notarize + staple → zip + DMG → GitHub Release → Sparkle appcast.
-There is no CI. The appcast is `appcast.xml` committed on `main` and read by the app from
-`https://raw.githubusercontent.com/dinhanhthi/Histq/main/appcast.xml` (`SUFeedURL`). The app
+There is no CI. The appcast is `appcast.xml` committed on `main`, deployed by
+`.github/workflows/pages.yml` to GitHub Pages and read by the app from
+`https://histq.coprimal.dev/appcast.xml` (`SUFeedURL`). The app
 runs on macOS 15.0 and later on Apple silicon (release builds are arm64 only); releases are built
 with Xcode 27+ (the project is generated for Xcode 27).
 
@@ -58,7 +59,7 @@ xcrun notarytool history --keychain-profile "${NOTARY_PROFILE:-apple-notary}"
 gh auth status
 
 # 6. Repo visibility
-gh repo view dinhanhthi/Histq --json visibility --jq .visibility
+gh repo view Coprimal/Histq --json visibility --jq .visibility
 ```
 
 - Check 1, branch: not on `main` → stop ("switch to main: `git switch main`"). Never switch
@@ -102,10 +103,10 @@ gh repo view dinhanhthi/Histq --json visibility --jq .visibility
   must be on the same command line as every script call that uses it, e.g.
   `NOTARY_PROFILE=<name> scripts/ship.sh` (a separate `export` is lost). Check such a profile with
   `xcrun notarytool history --keychain-profile <name>`.
-- Check 5: not authenticated → `gh auth login`. There is no Pages check: the appcast is served
-  from raw.githubusercontent.com straight off `main`.
-- Check 6: must print `PUBLIC` (the app reads the appcast from raw.githubusercontent.com and
-  downloads the release assets without auth). Anything else → stop: "make the repo public first".
+- Check 5: not authenticated → `gh auth login`. The Pages deploy of the appcast is checked after
+  `publish-appcast.sh` (Step A2).
+- Check 6: must print `PUBLIC` (the app downloads the release assets from
+  GitHub without auth). Anything else → stop: "make the repo public first".
   Never change the repository's visibility yourself.
 
 ### Resume (check right after B0)
@@ -135,15 +136,15 @@ gh repo view dinhanhthi/Histq --json visibility --jq .visibility
     build. Delete the release (if any) and the tag (docs/RELEASING.md §3 rollback) and run
     /cf-ship again."
   - List the release assets:
-    `gh release view vX.Y.Z --repo dinhanhthi/Histq --json assets --jq '.assets[].name'`.
+    `gh release view vX.Y.Z --repo Coprimal/Histq --json assets --jq '.assets[].name'`.
   - Release missing (the command fails) → if `release/export/Histq-X.Y.Z.zip` exists, write
     the notes file from the `## [X.Y.Z]` section of `CHANGELOG.md`:
     `awk '/^## \[X\.Y\.Z\]/{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > release/export/Histq-X.Y.Z.md`,
-    then `gh release create vX.Y.Z release/export/Histq-X.Y.Z.zip --repo dinhanhthi/Histq --title "Histq X.Y.Z" --notes-file release/export/Histq-X.Y.Z.md`
+    then `gh release create vX.Y.Z release/export/Histq-X.Y.Z.zip --repo Coprimal/Histq --title "Histq X.Y.Z" --notes-file release/export/Histq-X.Y.Z.md`
     and, if `release/export/Histq-X.Y.Z.dmg` exists,
-    `gh release upload vX.Y.Z release/export/Histq-X.Y.Z.dmg --repo dinhanhthi/Histq`.
+    `gh release upload vX.Y.Z release/export/Histq-X.Y.Z.dmg --repo Coprimal/Histq`.
   - Release exists but `Histq-X.Y.Z.zip` or `Histq-X.Y.Z.dmg` is missing →
-    `gh release upload vX.Y.Z release/export/<missing file> --repo dinhanhthi/Histq`.
+    `gh release upload vX.Y.Z release/export/<missing file> --repo Coprimal/Histq`.
   - A local file needed above, or `release/export/Histq-X.Y.Z.zip` itself, is missing →
     STOP: "The notarized build of vX.Y.Z is gone. Delete the release (if any) and the tag (docs/RELEASING.md
     §3 rollback) and run /cf-ship again." Never sign a downloaded zip in its place.
@@ -152,15 +153,15 @@ gh repo view dinhanhthi/Histq --json visibility --jq .visibility
     compare the sha256 hashes, in one command:
 
     ```bash
-    T=$(mktemp -d) && gh release download vX.Y.Z --repo dinhanhthi/Histq --pattern 'Histq-X.Y.Z.zip' --dir "$T" && { [ "$(shasum -a 256 < release/export/Histq-X.Y.Z.zip)" = "$(shasum -a 256 < "$T/Histq-X.Y.Z.zip")" ] && echo MATCH || echo MISMATCH; }; rm -rf "$T"
+    T=$(mktemp -d) && gh release download vX.Y.Z --repo Coprimal/Histq --pattern 'Histq-X.Y.Z.zip' --dir "$T" && { [ "$(shasum -a 256 < release/export/Histq-X.Y.Z.zip)" = "$(shasum -a 256 < "$T/Histq-X.Y.Z.zip")" ] && echo MATCH || echo MISMATCH; }; rm -rf "$T"
     ```
 
     It must print exactly `MATCH`. Anything else (`MISMATCH`, a download error, nothing) → STOP,
     do not run `publish-appcast.sh`: "The vX.Y.Z release asset differs from the local notarized build.
     Check the release by hand, or roll it back (docs/RELEASING.md §3) and run /cf-ship again."
   - Then run `scripts/publish-appcast.sh release/export/Histq-X.Y.Z.zip` on the **local**
-    zip (it commits `chore(release): appcast vX.Y.Z` and pushes to `main`), print the summary
-    (Step A2) and stop.
+    zip (it commits `chore(release): appcast vX.Y.Z` and pushes to `main`), check the feed and
+    print the summary (Step A2) and stop.
 - **(d)** Otherwise (no tag for `X.Y.Z` on origin and `HEAD` is not its release commit, or the
   tag exists and the appcast already has it) → normal flow from Step B1.
 
@@ -328,15 +329,25 @@ tag `vX.Y.Z` (use Resume). Then it chains:
 
 If Keychain prompts appear (codesign, notarytool, generate_appcast), the user clicks **Always Allow**.
 
-### Step A2: Print summary
+### Step A2: Check the feed, print summary
+
+After `publish-appcast.sh`, wait for the `pages.yml` run its push started:
+`gh run list -R Coprimal/Histq --workflow pages.yml --commit "$(git rev-parse HEAD)" --json databaseId --jq '.[0].databaseId // empty'`.
+Repeat it every 10 s until it prints a numeric id (give up after 2 minutes: STOP and report "no pages.yml run"),
+then `gh run watch <run id> -R Coprimal/Histq --exit-status`.
+Then check the live feed:
+`curl -fsSL https://histq.coprimal.dev/appcast.xml | grep -F '/vX.Y.Z/'`.
+A failed run, or no `/vX.Y.Z/` item in the feed → STOP and report it; do not print the summary.
+The appcast commit is already on `main`, so a later `/cf-ship` will not redeploy it: the stop
+message names the fix, `gh run rerun <run id> -R Coprimal/Histq` (or
+`gh workflow run pages.yml -R Coprimal/Histq` when no run started), then the same curl check.
 
 ```
 Shipped (local flow):
   Histq vX.Y.Z — notarized + stapled Histq-X.Y.Z.zip (Sparkle update) and
                       Histq-X.Y.Z.dmg (manual download), in release/export/
-  GitHub Release: https://github.com/dinhanhthi/Histq/releases/tag/vX.Y.Z
-  Appcast: https://raw.githubusercontent.com/dinhanhthi/Histq/main/appcast.xml
-           (raw.githubusercontent.com may cache it for ~5 min)
+  GitHub Release: https://github.com/Coprimal/Histq/releases/tag/vX.Y.Z
+  Appcast: https://histq.coprimal.dev/appcast.xml (served by pages.yml)
 ```
 
 ---

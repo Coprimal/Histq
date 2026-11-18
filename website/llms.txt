@@ -14,5 +14,5 @@ Histq works with your existing repositories, git config, SSH keys and hooks. It 
 
 - [Source code](https://github.com/Coprimal/Histq)
 - [Releases](https://github.com/Coprimal/Histq/releases)
-- [Changelog](https://github.com/dinhanhthi/Histq/blob/main/CHANGELOG.md)
+- [Changelog](https://github.com/Coprimal/Histq/blob/main/CHANGELOG.md)
 

@@ -209,6 +209,14 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 One-line conventional commits: `<type>(<scope>): <summary>`, for example `fix(graph): keep the selection on refresh`.
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`. No body.
 
+## Update feed
+
+- **Feed:** `SUFeedURL` is `https://histq.coprimal.dev/appcast.xml`, served by GitHub Pages through `.github/workflows/pages.yml` (Settings > Pages > Source = "GitHub Actions") and a Cloudflare CNAME `histq` → `coprimal.github.io` (DNS only). Its source is the root `appcast.xml` on `main`; the workflow deploys it with `website/` on every push that changes either.
+- **Old address:** `histq.dinhanhthi.com` (the site's first host) answers with a 301 to the same path on `histq.coprimal.dev`, through a Cloudflare redirect rule and a proxied `histq` record in the `dinhanhthi.com` zone. Keep both.
+- **Never:** move or rename the root `appcast.xml`, change the Pages source, remove the custom domain, or create or fork a repo named `dinhanhthi/Histq` (it would take over the old GitHub redirects).
+- **Website re-render:** the site generator (`render.py`) rewrites `.github/workflows/pages.yml` from its template, which has no appcast lines while the site's version source is `github`. After a re-render, put back the `appcast.xml` path trigger and the `cp appcast.xml _site/appcast.xml` step (`git diff .github/workflows/pages.yml`), or the next deploy drops the feed.
+- **Feed check:** `curl -sI https://histq.coprimal.dev/appcast.xml` shows HTTP 200 without `location`, and `curl -s https://histq.coprimal.dev/appcast.xml | cmp - appcast.xml` prints nothing.
+
 ## Releasing
 
 Releases are maintainer-only: built, signed, notarized and published from the maintainer's Mac with `scripts/`.
