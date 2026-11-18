@@ -365,8 +365,8 @@ struct DiffControlsCard: View {
                 row { actions(checkoutAsIcon: true) }
                 row { actionsMenu }
             }
-            .frame(height: 32)
-            .padding(.horizontal, 4)
+            .frame(height: 26)
+            .padding(.leading, 4)
         }
     }
 
