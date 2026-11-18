@@ -31,7 +31,7 @@ enum GraphColumn: String, CaseIterable {
         case .graph: "Graph"
         case .message: "Commit message"
         case .author: "Author"
-        case .date: "Commit date / time"
+        case .date: "Time"
         }
     }
 
