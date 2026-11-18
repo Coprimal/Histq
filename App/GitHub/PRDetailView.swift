@@ -797,7 +797,7 @@ private struct PRComposerCard: View {
             }
         } accessory: {
             CapsuleTabs(selection: $model.composer, tabs: PullRequestDetailModel.Composer.allCases,
-                        title: { Text($0.title) }, compact: true)
+                        title: { Text($0.title) }, compact: true, small: true)
                 .fixedSize()
         }
     }

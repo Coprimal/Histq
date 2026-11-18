@@ -166,7 +166,7 @@ struct DiffView: View {
 }
 
 /// A card of the open file. The first one's header is the file's row (`DiffFileHeader`), at a titled `SectionCard`
-/// header's height and insets; a later one (`header` nil) has its side's title and `accessory` instead. The body keeps
+/// header's insets and a little taller (`DiffFileHeader.height`), so the mode switch clears its edges; a later one (`header` nil) has its side's title and `accessory` instead. The body keeps
 /// one place in the view tree either way, so a side that becomes the first card or stops being it (a quiet reload after
 /// a stage or an unstage) keeps its line table and the table's scroll offset.
 private struct DiffCard<Content: View, Accessory: View>: View {
@@ -243,6 +243,8 @@ private struct DiffFileHeader: View {
     private static let folderMinWidth: CGFloat = 40
     /// Between the buttons, the counts and the mode switch: wider than the title's gaps, so the icons don't crowd.
     private static let controlSpacing: CGFloat = 12
+    /// Taller than a `SectionCard` header (32), so the small mode switch (30) has room above and below it.
+    static let height: CGFloat = 40
 
     var body: some View {
         @Bindable var session = session
@@ -258,7 +260,7 @@ private struct DiffFileHeader: View {
             // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
             if !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true {
                 CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
-                            compact: true)
+                            compact: true, small: true)
                     .fixedSize()
             }
             Button {
@@ -275,7 +277,7 @@ private struct DiffFileHeader: View {
             .accessibilityLabel(closesPane ? "Close the diff" : "Back to the \(backName.lowercased())")
         }
         .padding(.horizontal, SettingsMetrics.cardPadding + extraPadding)
-        .frame(height: SectionCardMetrics.headerHeight)
+        .frame(height: Self.height)
         .padding(.top, extraVerticalPadding * 2 / 3)
     }
 

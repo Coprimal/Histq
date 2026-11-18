@@ -76,7 +76,8 @@ enum Palette {
     static let sheetCardOpaque = srgb(0x252527)
     /// Controls on a card, a step above `surface`. #3A3A3C
     static let inputSurface = color(srgb(0x3A3A3C))
-    /// The field of a single-input modal (`.textFieldStyle(.modal)`): darker than the modal's `bgCard`, set into it. #1A1A1C
+    /// The field of a single-input modal (`.textFieldStyle(.modal)`): darker than the modal's `bgCard`, set into it; also
+    /// the track of `CapsuleTabs(compact:)` on a card, so it does not blend into the card's fill. #1A1A1C
     static let modalInput = color(srgb(0x1A1A1C))
     /// The 1 pt edge of cards and panels.
     static let surfaceBorder = color(.white.withAlphaComponent(0.08))
@@ -301,7 +302,7 @@ struct RaisedButtonStyle: ButtonStyle {
 extension EnvironmentValues {
     /// Inside a `ModalCard`'s footer: its `formRow` buttons take the footer's larger size (`ModalFooterMetrics`).
     @Entry var isModalFooter = false
-    /// The fill of the cards (`GlassCard`) and capsule tracks: `Palette.sheetCard` on the page's sheet, `surface` in
+    /// The fill of the cards (`GlassCard`) and the sidebar's tab track: `Palette.sheetCard` on the page's sheet, `surface` in
     /// the modals and the vertical tabs.
     @Entry var cardSurface = Palette.surface
     /// Added to a `SectionCard`'s padding around its header and its body (not to a body without padding, such as the
@@ -633,11 +634,16 @@ struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
 /// gets its label's width plus an equal share of the rest (`ContentWidthRow`), inset `fillInset` from its edge so the
 /// pill floats inside it; with `systemImage`, each tab shows its icon and title, or its icon alone when the title
 /// does not fit (never truncated). Every shape is a true capsule (`.circular`: radius = half the height), so the pill and the track are concentric.
+/// A compact track on a card is `Palette.modalInput`, set into the card (its fill is the card's own, so it blended in);
+/// the sidebar's `fillsWidth` track keeps `cardSurface`, a step darker than the panel it sits on. `small`: a compact
+/// track a little lower, for a card header (the open file's Diff / Full file, a PR's Comment / Review), so it clears
+/// the header's edges.
 struct CapsuleTabs<Tab: Hashable>: View {
     @Binding var selection: Tab
     let tabs: [Tab]
     let title: (Tab) -> Text
     var compact = false
+    var small = false
     /// A tab's tooltip (and its accessibility label when it has an icon).
     var help: ((Tab) -> String)?
     var fillsWidth = false
@@ -651,7 +657,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
         layout {
             ForEach(tabs, id: \.self) { tab in
                 Item(tab: tab, title: title(tab), help: help?(tab), systemImage: systemImage?(tab),
-                     selected: tab == selection, compact: compact, fillsWidth: fillsWidth, namespace: namespace) {
+                     selected: tab == selection, compact: compact, small: small, fillsWidth: fillsWidth,
+                     namespace: namespace) {
                     withAnimation(animation) { selection = tab }
                 }
             }
@@ -664,7 +671,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
         }
         // Also animates a selection set from code (menus, shortcuts).
         .animation(animation, value: selection)
-        .modifier(SurfaceTrack(compact: compact, fillsWidth: fillsWidth))
+        .modifier(SurfaceTrack(compact: compact, small: small, fillsWidth: fillsWidth))
     }
 
     /// The gap between a `fillsWidth` (or `compact`) track's edge and its tabs, on every side.
@@ -706,6 +713,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
     /// Before macOS 26 the toolbar draws no capsule around its items; a form never does.
     private struct SurfaceTrack: ViewModifier {
         let compact: Bool
+        let small: Bool
         let fillsWidth: Bool
         @Environment(\.cardSurface) private var surface
 
@@ -714,8 +722,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
                 content
             } else {
                 content
-                    .padding(fillsWidth || compact ? CapsuleTabs.fillInset : 3)
-                    .background(Capsule(style: .circular).fill(surface))
+                    .padding(small ? 4 : fillsWidth || compact ? CapsuleTabs.fillInset : 3)
+                    .background(Capsule(style: .circular).fill(compact && !fillsWidth ? Palette.modalInput : surface))
                     .overlay(Capsule(style: .circular).strokeBorder(Palette.surfaceBorder, lineWidth: 1)
                         .allowsHitTesting(false))
             }
@@ -729,12 +737,13 @@ struct CapsuleTabs<Tab: Hashable>: View {
         let systemImage: String?
         let selected: Bool
         let compact: Bool
+        let small: Bool
         let fillsWidth: Bool
         let namespace: Namespace.ID
         let action: () -> Void
         @State private var hovered = false
         /// A toolbar button's highlight; a form row's control when compact.
-        private var height: CGFloat { compact ? 24 : 28 }
+        private var height: CGFloat { small ? 22 : compact ? 24 : 28 }
 
         var body: some View {
             Button(action: action) {
