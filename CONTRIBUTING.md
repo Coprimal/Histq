@@ -186,6 +186,8 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqRewordRow <n>` | With `-HistqOpenRebase`, switches row n (1-based) to Reword once the sheet has loaded. |
 | `-HistqEditMessage open\|save:<summary>` | With `-HistqSelect commit:<sha>`, presses the commit card's Edit button once (HEAD: the inline editor; an older commit: the rebase sheet with that row on Reword); `save:` also sets the summary and presses Update Message. |
 | `-HistqUndo <n>` / `-HistqRedo <n>` / `-HistqLogUndo` | Runs n undos, then n redos; logs the Undo button's state. |
+| `-HistqFakeUpdate` | Shows the toolbar's Update button (version 9.9.9) without Sparkle; a click does nothing. |
+| `-HistqSparkle` | Starts Sparkle in a Debug build (off by default: Debug and Release share the bundle id, so a Debug build would download the release). Not with `-HistqStateDir` or `-HistqBackground YES`, which keep it off. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqGitHubFakeTokens YES` | With `-HistqKeychain memory`: a fake token for every profile that has a GitHub account in `profiles.json`, on its own host, so Settings › Integrations shows each one connected. |
 | `-HistqAIStubAnswer <file.json>` | With `-HistqAIStub YES`: every AI answer is `{"answer": "…", "reason": "…"}` from the file (reason optional) instead of the canned text; for website screenshots. |

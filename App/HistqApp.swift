@@ -61,7 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// The tab position and layout preset the windows' minimum sizes were last set for.
     private var tabPosition = TabPosition.current
     private var layoutPreset = LayoutPreset.current
-    /// Sparkle; stays off (menu item disabled) while `SUPublicEDKey` is empty.
+    /// Sparkle; stays off (menu item disabled) while `SUPublicEDKey` is empty. Each window's toolbar shows its Update
+    /// button.
     private let updater = Updater()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -89,6 +90,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Tooltips (`.help`) after 0.25 s instead of the system's 1.5 s, as in EchoDiar.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250])
+        updater.hasUpdateButton = { [unowned self] in
+            entries.contains { $0.window.isVisible && $0.toolbar.hasUpdateItem }
+        }
         updater.start()
         // Folders given at launch (`open -a Histq <repo>`) arrive in `application(_:open:)` first and already made
         // the window: they are what this launch shows. Without any, the last session comes back once read.
@@ -245,7 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // The window's toolbar is AppKit's (`HeaderToolbar`): SwiftUI bridges none, so content updates never touch it.
         hosting.sceneBridgingOptions = []
         let window = NSWindow(contentViewController: hosting)
-        let toolbar = HeaderToolbar(model: model)
+        let toolbar = HeaderToolbar(model: model, updater: updater)
         window.toolbar = toolbar.toolbar
         window.title = "Histq"
         window.titleVisibility = .hidden
@@ -660,8 +664,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return entry(for: NSApp.keyWindow)?.model.canReopenClosedTab ?? false
         }
         if menuItem.action == #selector(checkForUpdates(_:)) {
-            // Disabled while the updater is off (no update signing key in this build yet).
-            menuItem.toolTip = updater.canCheckForUpdates ? nil : "Updates are off: this build has no update signing key."
+            // Disabled while the updater is off (no update signing key in this build, or a Debug build).
+            menuItem.title = updater.menuTitle
+            menuItem.toolTip = updater.canCheckForUpdates ? nil : "Updates are off in this build."
             return updater.canCheckForUpdates
         }
         if menuItem.action == #selector(findCommits(_:)) {

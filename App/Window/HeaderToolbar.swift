@@ -1,7 +1,8 @@
 // The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the repo
 // menu (the window's repo tabs, recent
 // repos, Open…), the branch menu (checks out the picked branch),
-// and the tab's profile chip (`ProfilePicker`); at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
+// and the tab's profile chip (`ProfilePicker`); at the trailing edge the green Update button while Sparkle has an update
+// (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
 // Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed. Settings is a modal over
 // the tab (task 9.7), so the repo items stay as they are under it.
 //
@@ -24,6 +25,7 @@ import Observation
 final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     let toolbar = NSToolbar(identifier: "HeaderToolbar")
     private let model: WindowModel
+    private let updater: Updater
 
     // Fixed widths, so the items after them never move between tabs or branches (titles cut with "…"). Each keeps
     // the title's room it had before the icon's gap (`ToolbarDropdown.iconGap`) was added.
@@ -50,6 +52,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let terminalItem = NSToolbarItem(itemIdentifier: ID.terminal)
     private let searchItem = NSToolbarItem(itemIdentifier: ID.search)
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
+    /// Its own capsule, green, first of the trailing ones, shown only while Sparkle has an update (as EchoDiar's).
+    private let updateItem = NSToolbarItem(itemIdentifier: ID.update)
     private var groups: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     /// On macOS 26, the button showing each plain button item (`hoverButton`), by the item.
     private var hoverButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
@@ -77,14 +81,16 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         static let terminal = NSToolbarItem.Identifier("terminal")
         static let search = NSToolbarItem.Identifier("search")
         static let settings = NSToolbarItem.Identifier("settings")
+        static let update = NSToolbarItem.Identifier("update")
         static let historyGroup = NSToolbarItem.Identifier("historyGroup")
         static let syncGroup = NSToolbarItem.Identifier("syncGroup")
         static let branchGroup = NSToolbarItem.Identifier("branchGroup")
         static let toolsGroup = NSToolbarItem.Identifier("toolsGroup")
     }
 
-    init(model: WindowModel) {
+    init(model: WindowModel, updater: Updater) {
         self.model = model
+        self.updater = updater
         super.init()
         configureItems()
         toolbar.delegate = self
@@ -131,6 +137,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         configureButton(settingsItem, label: "Settings", systemImage: "gearshape")
         settingsItem.action = #selector(toggleSettings(_:))
 
+        configureButton(updateItem, label: "Update", systemImage: Self.updateSymbol)
+        updateItem.action = #selector(installUpdate(_:))
+        updateItem.visibilityPriority = .high
+        updateItem.isHidden = true
+        groups[ID.update] = updateItem
+
         if PlatformFeatures.liquidGlass {
             // On macOS 26 the buttons draw their own hover (`ToolbarHoverButton`), Pull and Push with an arrow beside
             // them (`splitButton`). A capsule of several buttons is one item whose view is the row of them, never a
@@ -138,6 +150,13 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             let fetch = hoverButton(fetchItem)
             fetchItem.view = ToolbarHoverButton.capsule([fetch])
             fetchItem.menuFormRepresentation = fetch.menuForm
+            // A bigger icon than the other buttons', so it stands out.
+            let update = hoverButton(updateItem)
+            update.iconColor = .systemGreen
+            update.symbolConfiguration = NSImage.SymbolConfiguration(textStyle: .title2, scale: .large)
+            update.image = updateItem.image
+            updateItem.view = ToolbarHoverButton.capsule([update])
+            updateItem.menuFormRepresentation = update.menuForm
             for item in [pullItem, pushItem] {
                 item.view = splitButton(item)
                 // In the overflow menu, the item's menu as a submenu, as AppKit's own menu item shows it.
@@ -153,6 +172,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             groups[ID.branchGroup] = row(ID.branchGroup, title: "Branch", [createBranchItem, stashItem, popItem])
             groups[ID.toolsGroup] = row(ID.toolsGroup, title: "Tools", [terminalItem, searchItem, settingsItem])
         } else {
+            updateItem.image = updateItem.image?.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(paletteColors: [.systemGreen]))
             groups[ID.historyGroup] = group(ID.historyGroup, [undoItem, redoItem])
             groups[ID.syncGroup] = group(ID.syncGroup, [pullItem, pushItem, fetchItem])
             groups[ID.branchGroup] = group(ID.branchGroup, [createBranchItem, stashItem, popItem])
@@ -240,7 +261,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // On macOS 26 a fixed space starts a new capsule; before, there are no capsules to separate.
         let gap: [NSToolbarItem.Identifier] = PlatformFeatures.liquidGlass ? [.space] : []
         let sync = PlatformFeatures.liquidGlass ? [ID.pull] + gap + [ID.push] + gap + [ID.fetch] : [ID.syncGroup]
-        return [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.historyGroup] + gap + sync + gap + [ID.branchGroup]
+        // The Update button right after the flexible space: hidden, it and its gap only widen the empty middle.
+        return [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.update] + gap + [ID.historyGroup] + gap + sync + gap + [ID.branchGroup]
             + gap + [ID.toolsGroup]
     }
 
@@ -275,6 +297,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         ID.fetch: ("Fetch", ToolbarAction.fetch.systemImage),
         ID.branchGroup: ("Branch Actions", ToolbarAction.stash.systemImage),
         ID.toolsGroup: ("Tools", "terminal"),
+        ID.update: ("Update", updateSymbol),
     ]
 
     private static func paletteItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem? {
@@ -286,11 +309,17 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         return item
     }
 
+    /// Whether this toolbar shows and has the Update slot (the user may have removed it in Customize Toolbar).
+    var hasUpdateItem: Bool {
+        toolbar.isVisible && toolbar.items.contains { $0.itemIdentifier == ID.update }
+    }
+
     // MARK: State
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
     /// selected tab's title, its session's refs, running operations, status, stashes, remotes, profile, undo status,
-    /// operation in progress and terminal drawer, the profile store, the page and the Settings modal are read, so
+    /// operation in progress and terminal drawer, the profile store, the page, the Settings modal and whether Sparkle
+    /// has an update are read, so
     /// other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
@@ -367,6 +396,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
         let isSettings = model.isSettingsOpen
         set(settingsItem, systemImage: isSettings ? "gearshape.fill" : "gearshape", label: "Settings")
+
+        set(updateItem, hidden: !updater.updateAvailable)
+        if let version = updater.availableUpdateVersion { set(updateItem, toolTip: "Install Histq \(version)") }
         #if DEBUG
         logItemFrames()
         #endif
@@ -410,6 +442,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private static let busySymbol = "progress.indicator"
     private static let undoSymbol = "arrow.uturn.backward"
     private static let redoSymbol = "arrow.uturn.forward"
+    private static let updateSymbol = "arrow.down.circle.fill"
 
     #if DEBUG
     private var loggedUndoItem: String?
@@ -495,6 +528,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     @objc private func togglePalette(_ sender: Any?) {
         model.togglePalette()
+    }
+
+    @objc private func installUpdate(_ sender: Any?) {
+        updater.checkForUpdates()
     }
 
     // MARK: Menus
@@ -842,9 +879,14 @@ private final class ToolbarHoverButton: NSView {
     var image: NSImage? {
         get { button.image }
         set {
-            button.image = newValue.map { $0.withSymbolConfiguration(Self.symbolConfiguration) ?? $0 }
+            button.image = newValue.map { $0.withSymbolConfiguration(symbolConfiguration) ?? $0 }
             menuForm.image = newValue
         }
+    }
+
+    /// The icon's color (the Update button's green); the label color when nil.
+    var iconColor: NSColor? {
+        didSet { updateHighlight() }
     }
 
     var isEnabled: Bool {
@@ -870,8 +912,8 @@ private final class ToolbarHoverButton: NSView {
         dropdownMenu?.popUp(positioning: nil, at: NSPoint(x: 0, y: -6), in: self)
     }
 
-    /// The scale AppKit draws a bordered toolbar item's symbol at.
-    private static let symbolConfiguration = NSImage.SymbolConfiguration(scale: .large)
+    /// The scale AppKit draws a bordered toolbar item's symbol at; set before `image`.
+    var symbolConfiguration = NSImage.SymbolConfiguration(scale: .large)
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -898,7 +940,7 @@ private final class ToolbarHoverButton: NSView {
         highlight.layer?.backgroundColor = color?.cgColor
         // A borderless button draws its template image in a secondary gray; the toolbar's icons are the label color,
         // dimmed in an inactive window as AppKit's buttons beside it (and the dropdowns' `ToolbarChevron`).
-        button.contentTintColor = button.isEnabled ? .labelColor : .tertiaryLabelColor
+        button.contentTintColor = button.isEnabled ? iconColor ?? .labelColor : .tertiaryLabelColor
         button.alphaValue = !button.isEnabled || isMainState(window) ? 1 : ToolbarChevron.dimmedAlpha
     }
 }

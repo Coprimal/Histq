@@ -11,6 +11,9 @@
 	<string>mtFSMNMbgmIhck1LAIiRmgVWyH/iMJ/9nP5Xhc3X/+M=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<!-- Background checks download the update silently; the toolbar's Update button then installs it. -->
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
 </dict>

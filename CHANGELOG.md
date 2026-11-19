@@ -4,6 +4,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+### Added
+- When an update is available, it downloads in the background and a green Update button shows in the toolbar: one click installs it and relaunches Histq. The app menu's item then reads "Install Update and Relaunch".
+
 ## [0.2.0] - 2026-11-18
 
 ### Added
