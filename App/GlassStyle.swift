@@ -1469,7 +1469,7 @@ struct ModalCard<Content: View, Actions: View>: View {
                     .truncationMode(.middle)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.settingsCaption)
+                        .font(.body)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

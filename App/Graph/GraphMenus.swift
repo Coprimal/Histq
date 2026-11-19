@@ -294,7 +294,7 @@ enum RepoMenus {
             .action("Checkout \(branch.name)", enabled: branch.name != current) { checkout(.local(branch.name), session) }
         }
         entries.append(.action("Checkout This Commit (Detached)…", enabled: !(isHead && current == nil)) {
-            confirmDetached(hash, label: short, session)
+            confirmDetached(hash, session)
         })
         entries.append(.separator)
         entries += compareSelection(.commit(hash), session)
@@ -934,7 +934,7 @@ enum RepoMenus {
         let isHead = session.refs.value?.head.commit == hash
         return [
             .action("Checkout This Commit (Detached)…", enabled: !(isHead && session.currentBranch == nil)) {
-                confirmDetached(hash, label: short, session)
+                confirmDetached(hash, session)
             },
             .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
             .separator,
@@ -1065,7 +1065,7 @@ enum RepoMenus {
         if local.count == 1 {
             checkout(.local(local[0].name), session)
         } else if session.refs.value?.head != .detached(commit: hash) {
-            confirmDetached(hash, label: String(hash.prefix(7)), session)
+            confirmDetached(hash, session)
         }
     }
 
@@ -1092,7 +1092,7 @@ enum RepoMenus {
             }
         case .tag(let name):
             guard let tag = refs?.tags.first(where: { $0.name == name }) else { return }
-            confirmDetached(tag.commit ?? tag.target, label: name, session)
+            confirmDetached(tag.commit ?? tag.target, tag: name, session)
         }
     }
 
@@ -1157,11 +1157,19 @@ enum RepoMenus {
         ]
     }
 
-    private static func confirmDetached(_ hash: String, label: String, _ session: RepoSession) {
-        session.confirm("Check out \(label) as a detached HEAD?",
-                        message: "No branch will be checked out; commits made there belong to no branch until you create one.",
-                        button: "Checkout", write: .checkoutCommit(hash), operation: "Checkout \(label)",
-                        key: .checkout, isDestructive: false)
+    /// Confirms a detached checkout of `hash`: a tag by its name (`tag`), a bare commit by its short hash with its
+    /// subject in the message, since a hash alone does not say which commit it is.
+    private static func confirmDetached(_ hash: String, tag: String? = nil, _ session: RepoSession) {
+        let label = tag ?? String(hash.prefix(7))
+        var message = "No branch will be checked out; commits made there belong to no branch until you create one."
+        if tag == nil, let log = session.log.value, let index = log.commitIndex[hash],
+           log.commits.indices.contains(index)
+        {
+            message = "\"\(log.commits[index].subject)\"\n\n" + message
+        }
+        session.confirm("Check out \(tag == nil ? "commit" : "tag") \(label) as a detached HEAD?",
+                        message: message, button: "Checkout", write: .checkoutCommit(hash),
+                        operation: "Checkout \(label)", key: .checkout, isDestructive: false)
     }
 
     /// "Checkout File from This Commit" in a commit's file list (confirmed when the file has local changes), then its

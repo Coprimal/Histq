@@ -579,7 +579,7 @@ private struct CommitListPanel: View {
                     .accessibilityLabel("Loading")
             case .loaded(let log):
                 // A click selects through the session (the detail switches in the same frame); a double-click
-                // checks out; a right-click opens the row's menu, or on a badge the badge's ref menu followed by its
+                // checks out (on a badge, that badge's ref); a right-click opens the row's menu, or on a badge the badge's ref menu followed by its
                 // commit's; a badge dropped on another opens
                 // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
                 // pull request in the same frame.
@@ -587,7 +587,10 @@ private struct CommitListPanel: View {
                           dateFormat: dateFormat, rowDensity: rowDensity, textSize: textSize,
                           selection: session.graphSelection,
                           onSelect: { [session] items in session.selectGraph(items) },
-                          onActivate: { [session] item in RepoMenus.activate(item, session: session) },
+                          onActivate: { [session] item, badge in
+                              if let ref = badge?.sidebarItem { return RepoMenus.checkout(ref, session) }
+                              RepoMenus.activate(item, session: session)
+                          },
                           menuEntries: { [session] item, badge in
                               if let ref = badge?.sidebarItem { return RepoMenus.badge(ref, on: item, session: session) }
                               return RepoMenus.entries(for: item, session: session)

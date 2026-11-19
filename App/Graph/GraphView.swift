@@ -118,7 +118,8 @@ struct GraphView: NSViewRepresentable {
     var textSize = TextSize.regular
     var selection: [GraphItem] = []
     var onSelect: @MainActor ([GraphItem]) -> Void = { _ in }
-    var onActivate: @MainActor (GraphItem) -> Void = { _ in }
+    /// A double-clicked row; `badge` is the ref badge under the pointer, if any.
+    var onActivate: @MainActor (GraphItem, RefBadge?) -> Void = { _, _ in }
     /// The context menu of a row; `badge` is the ref badge under the pointer, if any.
     var menuEntries: @MainActor (GraphItem, RefBadge?) -> [MenuEntry] = { _, _ in [] }
     /// The menu of a branch badge dropped on another (source, target).
@@ -1223,7 +1224,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// already selected it.
     @objc func doubleClicked(_ sender: Any?) {
         guard let item = item(at: clickedRow) else { return }
-        view?.onActivate(item)
+        view?.onActivate(item, (table as? GraphTableView)?.mouseDownPoint.flatMap { badge(at: $0) })
     }
 
     /// Selects the rows of `selection` when the table shows another selection (a parent jump, the default selection,
