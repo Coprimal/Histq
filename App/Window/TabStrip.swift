@@ -41,6 +41,8 @@ enum TabStripMetrics {
     static let groupChipMaxWidth: CGFloat = 120
     static let groupChipPadding: CGFloat = 8
     static var groupChipFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
+    /// The archived tab popped out beside the archive button (`ArchiveCluster`): one fixed width, outside the track.
+    static let archivedTabWidth: CGFloat = 160
 
     /// A group's chip width for its name.
     static func groupChipWidth(_ name: String) -> CGFloat {
@@ -49,7 +51,8 @@ enum TabStripMetrics {
     }
 }
 
-/// A tab group's color (`Palette.graphLanes`, by its repo) and its chip's fill (the graph badges' fill).
+/// A tab group's color (`Palette.graphLanes`, by its repo) and its chip's fill (the graph badges' fill), and the
+/// archive's fixed pair.
 enum TabGroupColors {
     static func line(_ key: String) -> Color {
         Color(nsColor: Palette.graphLanes[RepoGroupKey.colorIndex(of: key, count: Palette.graphLanes.count)])
@@ -58,16 +61,29 @@ enum TabGroupColors {
     static func chip(_ key: String) -> Color {
         Color(nsColor: Palette.graphBadgeFills[RepoGroupKey.colorIndex(of: key, count: Palette.graphLanes.count)])
     }
+
+    /// The archive's lane: index 1, the orange (#FC9F30), whatever the repos' groups take.
+    private static let archiveLane = 1
+
+    /// The archive's line, under the archive button and the popped-out archived tab, and that tab's outline.
+    static let archiveLine = Color(nsColor: Palette.graphLanes[archiveLane])
+    /// The archive button's fill.
+    static let archiveChip = Color(nsColor: Palette.graphBadgeFills[archiveLane])
 }
 
-/// The window's tabs, then New Tab and the tab list. A press on a tab selects it at once (on mouse-down); a drag past a
-/// few points reorders it.
+/// The archive button with the popped-out archived tab (once the window has an archive), the window's tabs, then New
+/// Tab and the tab list. A press on a tab selects it at once (on mouse-down); a drag past a few points reorders it.
 struct TabStrip: View {
     @Environment(WindowModel.self) private var model
+    /// Shared by the track and the archive's popped-out tab, so the selected tab's shape slides between them.
+    @Namespace private var namespace
 
     var body: some View {
         HStack(spacing: 12) {
-            TabTrack(model: model)
+            if !model.archivedTabs.isEmpty || model.archivedOut != nil {
+                ArchiveCluster(model: model, namespace: namespace)
+            }
+            TabTrack(model: model, namespace: namespace)
             TabStripButtons(model: model, popoverEdge: .bottom, buttonHeight: TabStripMetrics.buttonHeight)
         }
     }
@@ -108,10 +124,12 @@ struct TabStripButtons: View {
 /// equal widths; no fill (a subtle one on hover), and the selected tab's sheet-colored shape that slides to the next
 /// selection. A tab group (a repo's worktrees, `WindowModel.tabGroups`) has its name chip
 /// before its first tab, its color as one line under the chip and its tabs (`TabGroupLine`, open where the selected
-/// tab stands, live during a drag), and as the selected tab's outline.
+/// tab stands, live during a drag), and as the selected tab's outline. The popped-out archived tab is not here: it
+/// stands beside the archive button (`ArchiveCluster`); last in `tabs`, it takes no room, so no other tab moves.
 private struct TabTrack: View {
     let model: WindowModel
-    @Namespace private var namespace
+    /// The strip's, shared with `ArchiveCluster`.
+    let namespace: Namespace.ID
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The tab under the current mouse press, so a press selects once.
     @State private var pressedID: WindowModel.Tab.ID?
@@ -128,7 +146,7 @@ private struct TabTrack: View {
             let groups = model.tabGroups
             // A collapsed group's tabs take no room.
             let hidden = Set(groups.filter { model.collapsedGroups.contains($0.key) }.flatMap(\.range))
-            let shown = model.tabs.indices.filter { !hidden.contains($0) }
+            let shown = model.tabs.indices.filter { !hidden.contains($0) && !model.tabs[$0].archived }
             let pinned = CGFloat(shown.filter { model.tabs[$0].pinned }.count)
             let count = shown.count
             let unpinned = CGFloat(count) - pinned
@@ -146,7 +164,8 @@ private struct TabTrack: View {
                     row(layout: TabGroupLayout(tabs: model.tabs, groups: groups,
                                                collapsed: model.collapsedGroups, tabExtent: tabWidth,
                                                gap: TabStripMetrics.gap,
-                                               extent: { model.tabs[$0].pinned ? TabStripMetrics.pinnedTabWidth
+                                               extent: { model.tabs[$0].archived ? 0
+                                                   : model.tabs[$0].pinned ? TabStripMetrics.pinnedTabWidth
                                                    : tabWidth },
                                                headerExtent: { TabStripMetrics.groupChipWidth($0.name) }))
                 }
@@ -173,15 +192,16 @@ private struct TabTrack: View {
             : TabGroupLayout.moved(model.tabs.count, dragFrom, dragTarget)
         let target = draggedID == nil ? current : layout.positions(order: order)
         // The selected tab's start as drawn: it follows the pointer while dragged (the dragged tab is the selected one,
-        // a press selects it), so each group's line opens right under it.
-        let selected = model.selectedIndex
+        // a press selects it), so each group's line opens right under it. None while the popped-out archived tab is
+        // selected: it stands beside the archive button, not at its zero-width place here.
+        let selected = model.selectedIndex.flatMap { model.tabs[$0].archived ? nil : $0 }
         let selectedX = selected.map { index in
             (current.tabs[index] ?? 0) + (model.tabs[index].id == draggedID ? dragOffset : 0)
         }
         // Each item carries its flares' room on both sides (overlapping its neighbors' by the negative spacing), so
         // scrolling to a tab at an edge keeps its flares in view; the items still sit `gap` apart.
         return HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
-            ForEach(layout.items) { item in
+            ForEach(layout.items.filter(isShown)) { item in
                 switch item {
                 case .header(let group):
                     let chipX = target.headers[group.key] ?? 0
@@ -205,6 +225,12 @@ private struct TabTrack: View {
         .padding(.top, TabStripMetrics.rowInset)
         // The selected tab's shape slides, also for a selection made elsewhere (a menu, the tab list).
         .animation(animation, value: model.selectedTabID)
+    }
+
+    /// Every item but the popped-out archived tab, which `ArchiveCluster` draws.
+    private func isShown(_ item: TabGroupLayout.Item) -> Bool {
+        if case .tab(_, let tab) = item { return !tab.archived }
+        return true
     }
 
     private func tabView(index: Int, tab: WindowModel.Tab, layout: TabGroupLayout, current: TabGroupLayout.Positions,
@@ -283,11 +309,97 @@ private struct TabTrack: View {
     }
 }
 
+/// The strip's far left, before the pinned tabs: the archive button and the archived tab popped out beside it
+/// (`WindowModel.archivedOut`), one group marked by the archive's line under both (`TabGroupLine`), open under the
+/// popped tab while it is selected, as a group's line is. With nothing popped out, the button alone, with no line. A
+/// press selects the popped tab at once (on mouse-down); it never reorders.
+private struct ArchiveCluster: View {
+    let model: WindowModel
+    /// The strip's, shared with `TabTrack`, so the selected tab's shape slides between them.
+    let namespace: Namespace.ID
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The popped tab under the current mouse press, so a press selects once.
+    @State private var pressedID: WindowModel.Tab.ID?
+
+    var body: some View {
+        let buttonWidth = ArchiveButton.width(height: TabStripMetrics.groupChipHeight)
+        // Each item carries its flares' room on both sides, as the track's do; the two still sit `gap` apart.
+        HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
+            ArchiveButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.groupChipHeight)
+                .frame(height: TabStripMetrics.tabHeight)
+                .overlay(alignment: .bottomLeading) {
+                    if let tab = model.archivedOut {
+                        line(tabStart: buttonWidth + TabStripMetrics.gap,
+                             selected: tab.id == model.selectedTabID)
+                    }
+                }
+                .padding(.horizontal, TabStripMetrics.flare)
+            if let tab = model.archivedOut {
+                tabView(tab)
+            }
+        }
+        .padding(.top, TabStripMetrics.rowInset)
+        // The selected tab's shape slides, also for a selection made elsewhere (the archive's list, the tab list).
+        .animation(reduceMotion ? nil : Motion.standard, value: model.selectedTabID)
+        .frame(height: TabStripMetrics.tabHeight + TabStripMetrics.rowInset)
+    }
+
+    /// The archive's line from the button's start to the popped tab's end (`tabStart` from the button's start), open
+    /// under the tab, flares included, while it is selected.
+    private func line(tabStart: CGFloat, selected: Bool) -> some View {
+        let opening = selected ? tabStart - TabStripMetrics.flare : -.greatestFiniteMagnitude
+        return TabGroupLine(opening: opening,
+                            openingEnd: opening + TabStripMetrics.archivedTabWidth + 2 * TabStripMetrics.flare)
+            .fill(TabGroupColors.archiveLine)
+            .frame(width: tabStart + TabStripMetrics.archivedTabWidth, height: TabStripMetrics.groupLine)
+            .allowsHitTesting(false)
+    }
+
+    /// The popped-out tab, as the track draws a tab, in the archive's color (its outline meets the archive's line).
+    private func tabView(_ tab: WindowModel.Tab) -> some View {
+        let selected = tab.id == model.selectedTabID
+        let profile = model.profile(of: tab)
+        return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji,
+                       symbol: TabIcon.symbol(of: tab), pinned: false, iconColor: tab.iconColor,
+                       profileColor: profile?.color, profileName: profile?.name, groupName: nil,
+                       groupColor: TabGroupColors.archiveLine,
+                       selected: selected, dragged: false, namespace: namespace,
+                       onSelect: { model.selectTab(id: tab.id) },
+                       onClose: { TabMenu.close(tab.id, model) })
+            .frame(width: TabStripMetrics.archivedTabWidth, height: TabStripMetrics.tabHeight)
+            // The tab itself, not its flares' room. Its own blocker: one around the whole cluster would let the window
+            // move again once the pointer leaves the button's (each blocker's exit makes the window movable).
+            .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
+            .background(WindowDragBlocker())
+            .padding(.horizontal, TabStripMetrics.flare)
+            // The selected tab's flares lie over the button's edge.
+            .zIndex(selected ? 1 : 0)
+            .gesture(press(tab.id))
+            .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: false)) }
+            .id(tab.id)
+    }
+
+    /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); no drag reorder.
+    private func press(_ id: WindowModel.Tab.ID) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { _ in
+                // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this tab.
+                if pressedID != id {
+                    pressedID = id
+                    model.selectTab(id: id)
+                }
+            }
+            .onEnded { _ in pressedID = nil }
+    }
+}
+
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
-/// Tabs to the Right (Below), each off when it has no tab to close, then Copy Path (off for a Welcome tab), Reveal in
-/// Finder (the tab's repo or worktree folder; off for a Welcome tab or a missing folder), Set Alias…, Set Emoji…, Icon Color (the book's) and Pin Tab /
-/// Unpin Tab (Pin Group / Unpin Group for a tab of a worktree group, which pins with it), these four off for a Welcome
-/// tab.
+/// Tabs to the Right (Below), each off when it has no tab to close (they never close the popped-out archived tab), then
+/// Copy Path (off for a Welcome tab), Reveal in Finder (the tab's repo or worktree folder; off for a Welcome tab or a
+/// missing folder), Set Alias…, Set Emoji…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Group / Unpin Group for
+/// a tab of a worktree group, which pins with it) and Archive This Tab, these five off for a Welcome tab. On the
+/// popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the Right (Below)
+/// are off.
 @MainActor
 enum TabMenu {
     static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
@@ -297,11 +409,15 @@ enum TabMenu {
         let revealable = isRepo && !tab.isMissing
         let grouped = model.tabGroups.contains { $0.range.contains(index) }
         let pinTitle = (tab.pinned ? "Unpin " : "Pin ") + (grouped ? "Group" : "Tab")
+        // The normal tabs: the popped-out archived tab, last, is never closed with others.
+        let normalCount = model.tabs.count - (model.archivedOut == nil ? 0 : 1)
         return [
             .action("Close Tab") { close(id, model) },
-            .action("Close Other Tabs", enabled: model.tabs.count > 1) { model.closeOtherTabs(id) },
+            .action("Close Other Tabs", enabled: normalCount - (tab.archived ? 0 : 1) > 0) {
+                model.closeOtherTabs(id)
+            },
             .action(vertical ? "Close Tabs Below" : "Close Tabs to the Right",
-                    enabled: index < model.tabs.count - 1) { model.closeTabs(after: id) },
+                    enabled: !tab.archived && index < normalCount - 1) { model.closeTabs(after: id) },
             .separator,
             .action("Copy Path", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository.") {
                 if let url = tab.repoURL { RepoMenus.copy(url.path(percentEncoded: false)) }
@@ -319,10 +435,24 @@ enum TabMenu {
             },
             isRepo ? .submenu("Icon Color", iconColors(id, tab, model))
                 : .action("Icon Color", enabled: false, toolTip: "A new tab has no repository to mark.") {},
-            .action(pinTitle, enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to pin.") {
+            .action(pinTitle, enabled: isRepo && !tab.archived,
+                    toolTip: tab.archived ? "Unarchive the tab to pin it."
+                        : isRepo ? nil : "A new tab has no repository to pin.") {
                 model.setPinned(!tab.pinned, for: id)
             },
+            archive(id, tab, isRepo, model),
         ] + profile(id, tab, revealable, model)
+    }
+
+    /// Archive This Tab (off for a Welcome tab), or Unarchive Tab on the popped-out archived tab.
+    private static func archive(_ id: WindowModel.Tab.ID, _ tab: WindowModel.Tab, _ isRepo: Bool,
+                                _ model: WindowModel) -> MenuEntry
+    {
+        if tab.archived { return .action("Unarchive Tab") { [weak model] in model?.unarchiveTab(id) } }
+        return .action("Archive This Tab", enabled: isRepo,
+                       toolTip: isRepo ? nil : "A new tab has no repository to archive.") {
+            [weak model] in model?.archiveTab(id)
+        }
     }
 
     /// A tab group's name's right-click menu (the top tabs' chip, the vertical tabs' header): Rename Group….
@@ -412,8 +542,8 @@ private struct TabGroupChip: View {
 
 /// A group's line along the strip's bottom, open from `opening` to `openingEnd` (its own x), where the selected tab's
 /// outline takes over: its ends meet the outline's flares, with no spur. Animatable, so the opening slides with the
-/// selected tab's shape when the selection changes.
-private struct TabGroupLine: Shape {
+/// selected tab's shape when the selection changes. The archive's line (`ArchiveCluster`) is one too.
+struct TabGroupLine: Shape {
     var opening: CGFloat
     var openingEnd: CGFloat
 
@@ -453,7 +583,7 @@ struct TabItem: View {
     let profileColor: String?
     let profileName: String?
     /// The tab's group (`WindowModel.tabGroups`): its name and color (the selected tab's outline); nil outside a
-    /// group.
+    /// group. The popped-out archived tab has no name but the archive's color (`TabGroupColors.archiveLine`).
     let groupName: String?
     let groupColor: Color?
     let selected: Bool
@@ -740,6 +870,137 @@ private struct TabListPopover: View {
         guard !text.isEmpty else { return model.tabs }
         return model.tabs.filter {
             $0.title.localizedStandardContains(text) || ($0.repoURL?.path.localizedStandardContains(text) ?? false)
+        }
+    }
+}
+
+/// The archive button: a capsule in the archive's color with its `archivebox` icon, shown once the window has an
+/// archive (`WindowModel.archivedTabs`, or a tab popped out). A click opens the archived tabs' list
+/// (`ArchiveListPopover`). The tab strip shows it at its far left, the vertical tabs in their bottom row.
+struct ArchiveButton: View {
+    let model: WindowModel
+    /// Where the list's popover opens from the button.
+    let popoverEdge: Edge
+    /// The capsule's height: a group chip's in the tab strip, a row's in the vertical tabs' bottom row.
+    let height: CGFloat
+    @State private var showingList = false
+    @State private var hovered = false
+
+    /// The button's width for its `height`: a short capsule around the icon.
+    static func width(height: CGFloat) -> CGFloat {
+        height + 2 * TabStripMetrics.groupChipPadding
+    }
+
+    var body: some View {
+        Button { showingList.toggle() } label: {
+            Image(systemName: "archivebox")
+                .font(.system(size: height * 0.55, weight: .semibold))
+                .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+                .frame(width: Self.width(height: height), height: height)
+                .background(Capsule().fill(TabGroupColors.archiveChip))
+                .overlay(Capsule().fill(hovered ? Palette.hoverFill : .clear))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(Motion.hover, value: hovered)
+        .onHover { hovered = $0 }
+        .help("Archived tabs (\(model.archivedTabs.count + (model.archivedOut == nil ? 0 : 1)))")
+        .accessibilityLabel("Archived Tabs")
+        .popover(isPresented: $showingList, arrowEdge: popoverEdge) {
+            ArchiveListPopover(model: model, isPresented: $showingList)
+        }
+        .background(WindowDragBlocker())
+    }
+}
+
+/// The archive button's popover: a search field and the stowed archived tabs that match it, most recently archived
+/// first. A click pops the tab out at once (`WindowModel.openArchived(at:)`) and closes the popover; a row's × (on
+/// hover) removes it from the archive.
+private struct ArchiveListPopover: View {
+    let model: WindowModel
+    @Binding var isPresented: Bool
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+
+    var body: some View {
+        let matches = matchingEntries
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Search", text: $query, prompt: Text("Search archived tabs"))
+                .textFieldStyle(.settings)
+                .labelsHidden()
+                .focused($searchFocused)
+            if matches.isEmpty {
+                // Only the popped-out tab is archived: the list has no other.
+                Text(model.archivedTabs.isEmpty ? "No other archived tabs" : "No matching archived tabs")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: SidebarItemStyle.height)
+            } else {
+                ScrollView {
+                    VStack(spacing: SidebarItemStyle.spacing) {
+                        ForEach(matches, id: \.offset) { match in
+                            ArchiveRow(entry: match.element,
+                                       onOpen: {
+                                           model.openArchived(at: match.offset)
+                                           isPresented = false
+                                       },
+                                       onRemove: { model.removeArchived(at: match.offset) })
+                        }
+                    }
+                }
+                .frame(height: min(320, CGFloat(matches.count) * (SidebarItemStyle.height + SidebarItemStyle.spacing)))
+            }
+        }
+        .padding(10)
+        .frame(width: 280)
+        // Next run-loop turn, once the popover's window exists.
+        .onAppear { DispatchQueue.main.async { searchFocused = true } }
+    }
+
+    /// The archived entries whose name or folder contains the query (case- and diacritic-insensitive), each with its
+    /// index in `WindowModel.archivedTabs`; all of them for an empty query.
+    private var matchingEntries: [EnumeratedSequence<[SavedTab]>.Element] {
+        let entries = Array(model.archivedTabs.enumerated())
+        let text = query.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return entries }
+        return entries.filter {
+            $0.element.title.localizedStandardContains(text)
+                || ($0.element.path?.localizedStandardContains(text) ?? false)
+        }
+    }
+
+    /// One archived tab: a click opens it; its × on hover removes it from the archive.
+    private struct ArchiveRow: View {
+        let entry: SavedTab
+        let onOpen: () -> Void
+        let onRemove: () -> Void
+        @State private var hovered = false
+
+        var body: some View {
+            Button(action: onOpen) {
+                Label(entry.title, systemImage: "archivebox")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    // The × stands over the row's end.
+                    .padding(.trailing, TabStripMetrics.slot)
+            }
+            .buttonStyle(SidebarItemStyle(selected: false))
+            .help(entry.path ?? entry.title)
+            .overlay(alignment: .trailing) {
+                if hovered {
+                    Button(action: onRemove) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .semibold))
+                            .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+                    }
+                    .buttonStyle(TabItem.CloseButtonStyle())
+                    .help("Remove from Archive")
+                    .accessibilityLabel("Remove \(entry.title) from Archive")
+                    .padding(.trailing, 6)
+                }
+            }
+            .onHover { hovered = $0 }
         }
     }
 }

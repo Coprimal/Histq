@@ -1,6 +1,7 @@
 // Panel 0, the vertical tabs (General › Tab position: Left): the window's tabs as rows on the window glass, left of
-// every page, the selected row joined to the page's sheet, the pinned tabs as a grid of icons above the rows, with New
-// tab and the tab list at the bottom. The tab strip under the toolbar does not show then.
+// every page, the selected row joined to the page's sheet, the pinned tabs as a grid of icons above the rows, with the
+// archive button (once the window has an archive), New tab and the tab list at the bottom, and the popped-out archived
+// tab right above them. The tab strip under the toolbar does not show then.
 import SwiftUI
 
 /// Where the window's app tabs show: the strip under the toolbar, or panel 0 on the left.
@@ -49,18 +50,21 @@ enum VerticalTabsMetrics {
     static let pinnedGroupBarInset: CGFloat = 6
 }
 
-/// The window's tabs top to bottom (the pinned ones first, as a grid of icons), the selected tab's running operation,
-/// then New tab and the tab list, with no container: the selected row is a tab of the page's sheet beside it
+/// The window's tabs top to bottom (the pinned ones first, as a grid of icons) in their own scroll view, the selected
+/// tab's running operation, then the popped-out archived tab and the archive button, New tab and the tab list
+/// (`VerticalArchiveFooter`), with no container: the selected row is a tab of the page's sheet beside it
 /// (`VerticalTabSheetShape`).
 struct VerticalTabsPanel: View {
     @Environment(WindowModel.self) private var model
+    /// Shared by the list and the popped-out archived row, so the selected row's shape slides between them.
+    @Namespace private var namespace
 
     var body: some View {
         VStack(alignment: .leading, spacing: SectionCardMetrics.spacing) {
-            VerticalTabList(model: model)
+            VerticalTabList(model: model, namespace: namespace)
             VerticalTabsStatus(model: model)
                 .padding(.trailing, PanelContainerMetrics.padding)
-            TabStripButtons(model: model, popoverEdge: .trailing)
+            VerticalArchiveFooter(model: model, namespace: namespace)
         }
         .padding(.top, VerticalTabsMetrics.listTop)
         .frame(width: VerticalTabsMetrics.width)
@@ -68,11 +72,14 @@ struct VerticalTabsPanel: View {
 }
 
 /// The pinned tabs as a grid of icons (`VerticalPinnedGrid`), then the others as Settings sidebar rows
-/// (`VerticalTabRow`): a press selects at once (on mouse-down), a drag past a few points reorders a row (pinned tabs
-/// are reordered in the top strip only).
+/// (`VerticalTabRow`), in a scroll view that takes the panel's free height and shows its scroller: a press selects at
+/// once (on mouse-down), a drag past a few points reorders a row (pinned tabs are reordered in the top strip only).
+/// The popped-out archived tab is not here: it stands above the footer (`VerticalArchiveFooter`); last in `tabs`, it
+/// takes no room, so no other row moves.
 private struct VerticalTabList: View {
     let model: WindowModel
-    @Namespace private var namespace
+    /// The panel's, shared with the popped-out archived row.
+    let namespace: Namespace.ID
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The tab under the current mouse press, so a press selects once.
     @State private var pressedID: WindowModel.Tab.ID?
@@ -87,7 +94,7 @@ private struct VerticalTabList: View {
 
     var body: some View {
         ScrollViewReader { scroller in
-            ScrollView(.vertical, showsIndicators: false) {
+            ScrollView(.vertical, showsIndicators: true) {
                 // In the scroll view, so `scrollTo` reaches a pinned tab's cell and a press on it does not drag the
                 // window.
                 VStack(alignment: .leading, spacing: 0) {
@@ -97,6 +104,7 @@ private struct VerticalTabList: View {
                     }
                     rows
                 }
+                .background(OverlayScroller())
             }
             .scrollBounceBehavior(.basedOnSize)
             .background(WindowDragBlocker())
@@ -108,20 +116,22 @@ private struct VerticalTabList: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    /// The unpinned tabs and their groups' names. The pinned tabs (and their groups' names) are not rows: they take no
-    /// height, and their items are skipped. Their gaps (and names) still count in `positions`, but only as one shift
+    /// The unpinned tabs and their groups' names. The pinned tabs (and their groups' names) and the popped-out archived
+    /// tab are not rows: they take no height, and their items are skipped. The archived tab is last, so it shifts
+    /// nothing. Their gaps (and names) still count in `positions`, but only as one shift
     /// of every row, since they stand first in every order a row's drag can make (`WindowModel.moveDestinations`), and
     /// the rows use positions only as differences. Indices stay `model.tabs`' own.
     private var rows: some View {
         let layout = TabGroupLayout(tabs: model.tabs, groups: model.tabGroups, collapsed: model.collapsedGroups,
                                     tabExtent: SidebarItemStyle.height, gap: SidebarItemStyle.spacing,
-                                    extent: { model.tabs[$0].pinned ? 0 : SidebarItemStyle.height },
+                                    extent: { model.tabs[$0].pinned || model.tabs[$0].archived
+                                        ? 0 : SidebarItemStyle.height },
                                     headerExtent: { _ in VerticalTabsMetrics.groupHeaderHeight })
         // A pinned group is pinned whole, so its first tab tells.
         let items = layout.items.filter { item in
             switch item {
             case .header(let group): !model.tabs[group.range.lowerBound].pinned
-            case .tab(_, let tab): !tab.pinned
+            case .tab(_, let tab): !tab.pinned && !tab.archived
             }
         }
         let current = layout.positions(order: Array(model.tabs.indices))
@@ -222,6 +232,136 @@ private struct VerticalTabList: View {
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
     private func close(_ id: WindowModel.Tab.ID) {
         TabMenu.close(id, model)
+    }
+}
+
+/// Keeps the enclosing scroll view's scroller in the overlay style, also when the system prefers the legacy one (a
+/// mouse connected, or Show scroll bars: Always): a legacy scroller takes its width from the list, so the selected row
+/// would stop short of the page's sheet. Re-applied when the system's preferred style changes, after the scroll view's
+/// own reset. Decorative: it never takes a click.
+private struct OverlayScroller: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { OverlayScrollerView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class OverlayScrollerView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            guard window != nil else { return }
+            NotificationCenter.default.addObserver(self, selector: #selector(styleChanged),
+                                                   name: NSScroller.preferredScrollerStyleDidChangeNotification,
+                                                   object: nil)
+            apply()
+        }
+
+        /// The scroll view resets its style on the same notification: apply ours once that has run.
+        @objc private func styleChanged() {
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.apply() }
+            }
+        }
+
+        private func apply() {
+            enclosingScrollView?.scrollerStyle = .overlay
+        }
+
+        override nonisolated func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
+/// The panel's bottom: the archived tab popped out (`WindowModel.archivedOut`) as a row indented as a group's, then the
+/// archive button (once the window has an archive), New tab and the tab list in one row. The archive's line runs down
+/// the popped row's indent to the archive button, marking the two as one group, as a group's line does under its name.
+/// With nothing popped out, the button row alone, with no line. A press selects the popped row at once (on
+/// mouse-down); it never reorders.
+private struct VerticalArchiveFooter: View {
+    let model: WindowModel
+    /// The panel's, shared with the list, so the selected row's shape slides between them.
+    let namespace: Namespace.ID
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The popped row under the current mouse press, so a press selects once.
+    @State private var pressedID: WindowModel.Tab.ID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let tab = model.archivedOut {
+                poppedRow(tab)
+                    // Room for the selected row's flares above and below, as the list has inside its scroll view.
+                    .padding(.vertical, TabStripMetrics.flare)
+            }
+            // `TabStripButtons` pads itself by `rowInset`: the archive button takes the same inset on its leading side,
+            // and the spacing gives back the other one, so the three buttons stand `gap` apart.
+            HStack(spacing: TabStripMetrics.gap - TabStripMetrics.rowInset) {
+                if !model.archivedTabs.isEmpty || model.archivedOut != nil {
+                    ArchiveButton(model: model, popoverEdge: .trailing, height: SidebarItemStyle.height)
+                        .padding(.leading, TabStripMetrics.rowInset)
+                }
+                TabStripButtons(model: model, popoverEdge: .trailing)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if model.archivedOut != nil {
+                line
+            }
+        }
+        // The selected row's shape slides, also for a selection made elsewhere (the archive's list, the tab list).
+        .animation(reduceMotion ? nil : Motion.standard, value: model.selectedTabID)
+    }
+
+    /// The archive's line, down the middle of the popped row's indent from its top to the archive button's edge (the
+    /// button's center lies right of the indent, so the line keeps to the indent as a group's does). The exact x and
+    /// end are tuned against a QA shot. Decorative.
+    private var line: some View {
+        // The button is a capsule: at the line's x (half the indent in from its leading edge) its top edge lies lower
+        // than its frame's top, by this much, so the line runs on to meet the edge instead of stopping short of it.
+        let radius = SidebarItemStyle.height / 2
+        let dx = radius - VerticalTabsMetrics.groupIndent / 2
+        let dip = radius - (radius * radius - dx * dx).squareRoot()
+        return Capsule()
+            .fill(TabGroupColors.archiveLine)
+            // The row, its flares' room under it, then the button row's `rowInset` above the archive button.
+            .frame(width: TabStripMetrics.groupLine,
+                   height: SidebarItemStyle.height + TabStripMetrics.flare + TabStripMetrics.rowInset + dip)
+            .offset(x: TabStripMetrics.rowInset + (VerticalTabsMetrics.groupIndent - TabStripMetrics.groupLine) / 2,
+                    y: TabStripMetrics.flare)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    /// The popped-out tab, as the list draws a row (no group name), right of the archive's line.
+    private func poppedRow(_ tab: WindowModel.Tab) -> some View {
+        let profile = model.profile(of: tab)
+        return VerticalTabRow(title: tab.title, systemImage: TabIcon.symbol(of: tab), emoji: tab.emoji,
+                              iconColor: tab.iconColor,
+                              help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
+                              profileName: profile?.name, groupName: nil,
+                              selected: tab.id == model.selectedTabID, dragged: false, namespace: namespace,
+                              onSelect: { model.selectTab(id: tab.id) },
+                              onClose: { TabMenu.close(tab.id, model) })
+            .frame(height: SidebarItemStyle.height)
+            .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
+            // Outside the list's scroll view, so it needs its own: a press on the row never drags the window.
+            .background(WindowDragBlocker())
+            // Lined up with a group's rows in the list, right of the archive's line; none on the trailing side,
+            // where the selected row meets the sheet.
+            .padding(.leading, TabStripMetrics.rowInset + VerticalTabsMetrics.groupIndent)
+            .gesture(press(tab.id))
+            .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: true)) }
+            .id(tab.id)
+    }
+
+    /// Zero distance, so the row is selected on mouse-down (a tap would wait for mouse-up); no drag reorder.
+    private func press(_ id: WindowModel.Tab.ID) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { _ in
+                // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this row.
+                if pressedID != id {
+                    pressedID = id
+                    model.selectTab(id: id)
+                }
+            }
+            .onEnded { _ in pressedID = nil }
     }
 }
 

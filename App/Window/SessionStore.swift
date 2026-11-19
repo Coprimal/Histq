@@ -62,6 +62,16 @@ struct SavedTab: Codable, Equatable, Sendable {
     /// The tab's book icon color (its menu's Icon Color), an index into `Palette.graphLanes`; nil for the default.
     /// Absent from files of older builds.
     var iconColor: Int?
+    /// The tab is in the window's archive (its menu's Archive This Tab); nil reads as false, and a tab not archived is
+    /// written as nil. Archived entries come after every other tab; the selected one is the tab popped out beside the
+    /// archive button. Absent from files of older builds.
+    var archived: Bool?
+
+    /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab: an archived tab's row in the archive's
+    /// list.
+    var title: String {
+        alias ?? path.map { URL(fileURLWithPath: $0, isDirectory: true).lastPathComponent } ?? "New Tab"
+    }
 }
 
 /// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).
