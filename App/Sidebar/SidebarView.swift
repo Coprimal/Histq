@@ -581,7 +581,10 @@ private struct TagRows: View {
         }
         ForEach(shown, id: \.refName) { tag in
             BranchRow(session: session, item: .tag(tag.name), name: tag.name,
-                      systemImage: tag.isAnnotated ? "tag.fill" : "tag") { EmptyView() }
+                      systemImage: tag.isAnnotated ? "tag.fill" : "tag",
+                      iconHelp: tag.isAnnotated
+                        ? "Annotated tag: its own object, with a message, author and date"
+                        : "Lightweight tag: only a name pointing at a commit, no message") { EmptyView() }
         }
     }
 }
@@ -794,6 +797,8 @@ private struct BranchRow<Trailing: View>: View {
     let systemImage: String
     /// Past `SidebarMetrics.rowLeading`: a remote's branches sit one step in from the remote's row.
     var indent: CGFloat = 0
+    /// The icon's own tooltip (a tag's kind); the row's name otherwise.
+    var iconHelp: String? = nil
     @ViewBuilder let trailing: () -> Trailing
     @State private var hovered = false
     @Environment(\.textSize) private var textSize
@@ -811,6 +816,7 @@ private struct BranchRow<Trailing: View>: View {
                 .imageScale(systemImage == SidebarMetrics.currentImage ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
                 .opacity(dimmed)
+                .help(iconHelp ?? name)
             HStack(spacing: 4) {
                 Text(name)
                     .font(textSize.body)
