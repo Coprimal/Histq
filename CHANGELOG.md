@@ -4,11 +4,21 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
 ### Added
 - Settings › Appearance › Commit list › Commit order: By date (the new default) lists the graph's commits newest first across branches, each still above its parents; By branch keeps each branch's commits together, as before.
+- Branch and commit context menus gain Pull entries, Create and Copy submenus, "Interactive Rebase onto" a branch, Copy Link and Save as Patch.
+- The footer shows the repo path next to the sidebar toggle.
+- Copy Path in a tab's right-click menu.
 
 ### Changed
 - Squash and interactive rebase work with uncommitted changes: they are stashed first and put back afterwards (a squash keeps staged changes staged).
+- Staging and unstaging feel instant: the file moves to the other card as soon as you click, and each stage runs fewer git commands.
+- The footer's repo path and version text are brighter, and ref badges use pure white text and icons with smaller names.
+
+### Fixed
+- The WIP panel shows at once from the last known status instead of waiting for a fresh read.
 
 ## [0.1.1] - 2026-11-18
 
