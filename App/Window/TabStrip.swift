@@ -284,8 +284,8 @@ private struct TabTrack: View {
 }
 
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
-/// Tabs to the Right (Below), each off when it has no tab to close, then Reveal in Finder (the tab's repo or worktree
-/// folder; off for a Welcome tab or a missing folder), Set Alias…, Set Emoji…, Icon Color (the book's) and Pin Tab /
+/// Tabs to the Right (Below), each off when it has no tab to close, then Copy Path (off for a Welcome tab), Reveal in
+/// Finder (the tab's repo or worktree folder; off for a Welcome tab or a missing folder), Set Alias…, Set Emoji…, Icon Color (the book's) and Pin Tab /
 /// Unpin Tab (Pin Group / Unpin Group for a tab of a worktree group, which pins with it), these four off for a Welcome
 /// tab.
 @MainActor
@@ -303,6 +303,9 @@ enum TabMenu {
             .action(vertical ? "Close Tabs Below" : "Close Tabs to the Right",
                     enabled: index < model.tabs.count - 1) { model.closeTabs(after: id) },
             .separator,
+            .action("Copy Path", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository.") {
+                if let url = tab.repoURL { RepoMenus.copy(url.path(percentEncoded: false)) }
+            },
             .action("Reveal in Finder", enabled: revealable,
                     toolTip: revealable ? nil
                         : isRepo ? "The repository's folder is gone." : "A new tab has no repository.") {
