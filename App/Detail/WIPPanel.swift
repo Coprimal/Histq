@@ -51,9 +51,9 @@ struct WIPPanel: View {
 
     var body: some View {
         let (conflicted, unstaged, staged) = Self.lists(session.status.value, moves: moves)
-        // The panel's height is always used: a card with files scrolls inside and shares the free height equally with
-        // the other cards that have files; an empty card fits its text; the commit box stays at the bottom, or at the
-        // top (`PrefKey.commitBoxPosition`).
+        // The panel's height is always used: an Unstaged or Staged card with files scrolls inside and shares the free
+        // height equally with the other; the Conflicted card fits its rows up to a cap; an empty card fits its text; the
+        // commit box stays at the bottom, or at the top (`PrefKey.commitBoxPosition`).
         VStack(spacing: SectionCardMetrics.spacing) {
             if commitBoxOnTop { commitBox(staged: staged, unstaged: unstaged) }
             // During an operation the card stays once its files are resolved, saying nothing is left.
@@ -61,7 +61,7 @@ struct WIPPanel: View {
                 conflictedCard(conflicted)
             }
             UnstagedStagedCards { unstagedCard(unstaged) } staged: { stagedCard(staged) }
-            if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
+            if unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
             if !commitBoxOnTop { commitBox(staged: staged, unstaged: unstaged) }
@@ -85,7 +85,7 @@ struct WIPPanel: View {
             if files.isEmpty {
                 EmptyFilesText(text: "No conflicts left")
             } else {
-                FilesScroll {
+                FitFilesScroll {
                     FileListView(files: files, repoURL: session.url, card: .conflicted) { file in
                         rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
                             stage([file], part: .conflicted)
@@ -497,7 +497,7 @@ struct WorktreeChangesPanel: View {
                 filesCard("Staged", systemImage: "tray.full", staged, empty: "No staged changes", folder: folder,
                           card: .staged)
             }
-            if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
+            if unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
         }
@@ -510,6 +510,10 @@ struct WorktreeChangesPanel: View {
         SectionCard(title, systemImage: systemImage, count: files.count, contentPadding: 6, tone: tone) {
             if files.isEmpty {
                 EmptyFilesText(text: empty)
+            } else if card == .conflicted {
+                FitFilesScroll {
+                    FileListView(files: files, repoURL: folder, card: card)
+                }
             } else {
                 FilesScroll {
                     FileListView(files: files, repoURL: folder, card: card)
@@ -573,7 +577,6 @@ struct WIPPlaceholder: View {
                 SectionCard("Conflicted", systemImage: "exclamationmark.triangle", countIsLoading: true, contentPadding: 6,
                             tone: Palette.conflictTone) {
                     SkeletonFileRows(fractions: [0.45, 0.6])
-                        .frame(maxHeight: .infinity, alignment: .top)
                 }
             }
             SkeletonUnstagedStagedCards()
@@ -823,6 +826,23 @@ private struct FilesScroll<Content: View>: View {
             content()
         }
         .frame(maxHeight: .infinity)
+    }
+}
+
+/// The Conflicted card's rows: as tall as they are, up to `maxRows` rows, then they scroll inside. It does not share
+/// the panel's free height, so a single conflict leaves the room to the other cards.
+private struct FitFilesScroll<Content: View>: View {
+    var maxRows: CGFloat = 6.5
+    @ViewBuilder let content: () -> Content
+    @Environment(\.textSize) private var textSize
+    @State private var contentHeight: CGFloat = 0
+
+    var body: some View {
+        CardScrollView {
+            content()
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { contentHeight = $0 }
+        }
+        .frame(height: min(contentHeight, FileListView<EmptyView>.rowHeight(textSize) * maxRows))
     }
 }
 
