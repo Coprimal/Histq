@@ -48,6 +48,12 @@ no local `feature`; `origin/feature` conflicts with `main` in 3 files, the stub'
 `--big N` adds `big` (N commits); `--portable` skips `graph-wt`, for git older than 2.48. The script refuses `/`, your
 home folder and any non-empty folder it did not create. Everything under `build/` is git-ignored.
 
+Submodule QA uses `build/qa/view/make-submodules.sh <root>`, a maintainer script kept outside git in `build/qa/view/`
+(not in `scripts/`). It builds `<root>/subs` (`build/qa/view/fx/subs` with `<root>` = `build/qa/view/fx`): six
+submodules, one in each state (clean with a nested submodule, moved, dirty, on a branch, not initialized, never cloned),
+the branches `sub/bump`, `ff/behind` and `ff/diverged`, and their bare sources `<root>/subs-*.git`. Its own git calls
+allow `file://` submodules; Histq does not, so Initialize on `vendor/never` shows git's refusal.
+
 ## Benchmark
 
 The graph benchmark parses and lays out 50,000 commits and must finish in under 2 seconds. It runs only when
@@ -154,7 +160,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | --- | --- |
 | `-HistqStateDir <dir>` | Keeps files, logs and session state in `<dir>`; uses the QA preferences suite and Keychain service. |
 | `-HistqBackground YES` | Never activates the app; windows stay behind others and are never key. |
-| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `commits:<sha>,<sha\|wip>` (full shas), `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`. |
+| `-HistqSelect <kind>[:<value>]` | Selects at launch through the click path: `tab:<n>`, `wip`, `commit:<sha>`, `commits:<sha>,<sha\|wip>` (full shas), `branch:<name>`, `file:<path>`, `conflict:<path>`, `commitfile:<sha>:<path>`, `settings:<section>`, `sidebar:<tab>`, `pr:<n>`, `issue:<n>`, `prbadge:<branch>`, `submodule:<path>` (a Submodules card row). |
 | `-HistqSelectWalk <n>[,<ms>]` | Selects the first n commits `ms` apart (default 250), walks back up, then logs `walk done`. |
 | `-HistqHistoryWalk <n>[,<ms>]` | With `-HistqSelect history:<path>`: clicks the first n history rows `ms` apart (default 250), walks back up, then logs `walk done`. |
 | `-HistqSelectAfter <path>` | Then selects that WIP file (with or without `-HistqResolve`), to drive the conflict editor's leave prompt. |
@@ -175,7 +181,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqSlotProbe YES` | Outlines the pull request and issue pages' overlay slots in red and logs `slot-probe <id> html <x,y,w,h> overlay <x,y,w,h> delta <d>` after each measurement; 3 s after the first, the window widens by 400 pt for a pass at another width. Stub only. |
 | `-HistqScrollProbe YES` | Wheels 120 px over the first GitHub page, then over an avatar and the first reply row (when the page has one), logging `scroll-probe outer <before>-><after>` for each, then scrolls the column to its end. Not with `-HistqHTMLProbe`. Stub only. |
 | `-HistqKeychain memory` / `-HistqKeychainSelfTest memory\|login` | In-memory Keychain; a Keychain round trip to `keychain-selftest.txt`. |
-| `-HistqRun "<menu>\|<item>[;;<next>...]"` | Runs context-menu items by title, accepting confirmations. Menus include `local:<name>`, `remote:<name>`, `tag:<name>` (`tag:v1.0\|Hide`), `badge:<local\|remote\|tag>:<name>` (a graph badge's menu), `wipfile:<path>` (a WIP file's Stash Changes and, when untracked, its Ignore entries: `wipfile:<path>\|Ignore <name>`, `wipfile:<path>\|Exclude Locally\|Ignore <name>`), `stashfile:<sha>:<path>` (a tracked file of a stash, full sha), `repo` (the toolbar repo menu's repository actions: `repo\|Optimize Repository…`, `repo\|Show Reflog`) and `reflog:<sha>` (a reflog entry's menu, full sha). Fixture copies only. |
+| `-HistqRun "<menu>\|<item>[;;<next>...]"` | Runs context-menu items by title, accepting confirmations. Menus include `local:<name>`, `remote:<name>`, `tag:<name>` (`tag:v1.0\|Hide`), `badge:<local\|remote\|tag>:<name>` (a graph badge's menu), `wipfile:<path>` (a WIP file's Stash Changes and, when untracked, its Ignore entries: `wipfile:<path>\|Ignore <name>`, `wipfile:<path>\|Exclude Locally\|Ignore <name>`), `stashfile:<sha>:<path>` (a tracked file of a stash, full sha), `repo` (the toolbar repo menu's repository actions: `repo\|Optimize Repository…`, `repo\|Show Reflog`), `reflog:<sha>` (a reflog entry's menu, full sha), `submodule:<path>` (a submodule row's menu: `submodule:vendor/moved\|Update`) and `submodules` (the Submodules card's menu: `submodules\|Update All`); a submodule root waits for the submodule list. Fixture copies only. |
 | `-HistqShow "<menu>\|<item>"` / `-HistqFormName "<name>"` | Opens one item's confirmation or form; fills and submits the form. |
 | `-HistqWorktreeFolder "<parent>"` | With `-HistqFormName`, fills and submits the Add Worktree form. |
 | `-HistqCommit "<message>"` | Commits the staged changes through the WIP panel. |

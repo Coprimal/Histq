@@ -4,6 +4,18 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+### Added
+- "Merge X into Y" is a submenu with three choices: Fast-forward if possible, Fast-forward only, and Always create a merge commit (no fast-forward). The command palette lists each one as its own row.
+- "Fast-forward the current branch to X" in a branch's menu: an undoable fast-forward-only merge, refused when the branches have diverged.
+- A Submodules card in the sidebar, in repositories that have submodules: each submodule's recorded commit and state (Not initialized, Not checked out, New commits, its uncommitted changes, its branch), and a detail with the recorded and checked-out commits and the commits between.
+- Submodule actions from a row's menu, the card's menu, the repository menu and the command palette: Open in New Tab, Initialize or Update, Sync URL, Stage New Pointer, Set URL…, Set Branch…, Copy, Reveal in Finder and Remove…, plus Add Submodule…, Update All and Sync All.
+- A moved submodule pointer, in the working tree or in a commit, shows a card with the old and new commits and the commits between, instead of a text diff, with Open Submodule, Stage and Discard.
+- Clone submodules (on by default) in the clone form clones the repository's submodules at every level after the clone.
+- Settings › General › Update submodules automatically (on by default): after a checkout, pull, merge, rebase, reset, cherry-pick, revert, undo or redo, clean submodules move to the commit the repository now records. Submodules with new commits, uncommitted changes or a checked-out branch are left alone and named in a toast; a submodule that is not initialized is never cloned.
+
+### Fixed
+- Discard on a submodule now puts it back on the recorded commit (it did nothing before).
+
 ## [0.2.0] - 2026-11-18
 
 ### Added
