@@ -691,6 +691,78 @@ struct NetworkTokenTests {
         #expect(box.transportGotToken)
         #expect(try await box.hasRef("refs/remotes/origin/main", in: destination))
     }
+
+    // MARK: - Submodule fetch
+
+    @Test("A submodule fetch gets the token only for an https URL on the profile's host")
+    func submoduleGate() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let lib = try await box.sandbox.makeRepo("lib")
+        let libHead = try await box.sandbox.git(["rev-parse", "HEAD"], in: lib)
+        let target = GitInvocation.NetworkTarget.submodule(path: "lib")
+        // A parent whose origin is on the profile's host and whose `.gitmodules` gives the submodule `mod` (named
+        // apart from its path) at `lib` this URL, not checked out.
+        let parent = { (name: String, url: String) async throws -> URL in
+            let repo = try await box.sandbox.makeRepo(name)
+            try await box.sandbox.git(["remote", "add", "origin", box.url(repo)], in: repo)
+            try await box.sandbox.git(["config", "-f", ".gitmodules", "submodule.mod.path", "lib"], in: repo)
+            try await box.sandbox.git(["config", "-f", ".gitmodules", "submodule.mod.url", url], in: repo)
+            try await box.sandbox.git(["update-index", "--add", "--cacheinfo", "160000,\(libHead),lib"], in: repo)
+            try await box.sandbox.git(["add", ".gitmodules"], in: repo)
+            try await box.sandbox.git(["commit", "-q", "-m", "add lib"], in: repo)
+            return repo
+        }
+
+        // 1. https on the profile's host; only the repo's config counts, so nothing before `submodule init`.
+        let https = try await parent("https", box.url(lib))
+        #expect(await box.decision(target, in: https) == .otherURL, "no URL in the config yet")
+        try await box.sandbox.git(["submodule", "init", "--", "lib"], in: https)
+        #expect(await box.decision(target, in: https) == .attach)
+        try box.writeGlobal("[submodule]\n\trecurse = true\n")
+        #expect(await box.decision(target, in: https) == .attach, "the caller never recurses")
+        try box.writeGlobal("")
+        #expect(await box.decision(.submodule(path: "other"), in: https) == .otherURL, "no submodule at that path")
+
+        // 2. ssh.
+        let ssh = try await parent("ssh", "ssh://\(Self.host)\(lib.path)")
+        try await box.sandbox.git(["submodule", "init", "--", "lib"], in: ssh)
+        #expect(await box.decision(target, in: ssh) == .otherURL)
+
+        // 3. Checked out: the submodule repo's own fetch URLs and network keys count too.
+        try await box.sandbox.git(["clone", "-q", lib.path, https.appending(path: "lib").path], in: box.sandbox.root)
+        #expect(await box.decision(target, in: https) == .otherURL, "its origin is a local folder")
+        let checkedOut = https.appending(path: "lib")
+        try await box.sandbox.git(["remote", "set-url", "origin", box.url(lib)], in: checkedOut)
+        #expect(await box.decision(target, in: https) == .attach)
+        try await box.sandbox.git(["config", "http.proxy", "http://127.0.0.1:1"], in: checkedOut)
+        #expect(await box.decision(target, in: https) == .repoNetworkConfig(keys: ["http.proxy"]))
+
+        // 4. A relative URL, resolved by `submodule init` against the parent's https remote.
+        let relative = try await parent("relative", "../lib")
+        try await box.sandbox.git(["submodule", "init", "--", "lib"], in: relative)
+        #expect(try await box.sandbox.git(["config", "submodule.mod.url"], in: relative) == box.url(lib))
+        #expect(await box.decision(target, in: relative) == .attach)
+
+        // 5. End to end: `submodule update` in the token's environment signs in with the token.
+        #expect(!box.transportRan)
+        let env = GitInvocation.environment(
+            profile: Self.profile, base: box.base, access: .network(.fetch), token: Self.token)
+        try await box.sandbox.git(["submodule", "update", "--init", "--", "lib"], in: relative, env: env)
+        #expect(box.transportGotToken)
+        #expect(try await box.sandbox.git(["rev-parse", "HEAD"], in: relative.appending(path: "lib")) == libHead)
+        #expect(await box.decision(target, in: relative) == .attach, "checked out with an https origin")
+
+        // A git folder left in `.git/modules` after a deinit is reused by the next update: its config counts.
+        try await box.sandbox.git(["submodule", "deinit", "-q", "-f", "--", "lib"], in: relative)
+        try await box.sandbox.git(["submodule", "init", "--", "lib"], in: relative)
+        try await box.sandbox.git(
+            ["config", "http.proxy", "http://127.0.0.1:1"], in: relative.appending(path: ".git/modules/mod"))
+        #expect(await box.decision(target, in: relative) == .repoNetworkConfig(keys: ["http.proxy"]))
+        try await box.sandbox.git(["submodule", "update", "--", "lib"], in: relative)
+        #expect(try await box.sandbox.git(["config", "http.proxy"], in: relative.appending(path: "lib"))
+            == "http://127.0.0.1:1", "the update reused the left git folder")
+    }
 }
 
 // MARK: - Harness

@@ -78,6 +78,15 @@ public struct GitOperations: Sendable {
         case rebase
     }
 
+    public enum MergeMode: Sendable {
+        /// Fast-forward when possible, else a merge commit (`--ff`).
+        case fastForward
+        /// Refuse unless a fast-forward is possible (`--ff-only`, `GitError.nonFastForward`).
+        case fastForwardOnly
+        /// Always a merge commit (`--no-ff`).
+        case noFastForward
+    }
+
     /// Per-commit signing on top of the profile's `commit.gpgSign` default.
     public enum CommitSigning: Sendable {
         case profileDefault, sign, noSign
@@ -260,12 +269,29 @@ public struct GitOperations: Sendable {
         }
     }
 
-    /// Discards the unstaged changes of tracked `paths` (the working tree takes the index version).
+    /// Discards the unstaged changes of tracked `paths` (the working tree takes the index version). A gitlink (a moved
+    /// submodule) goes back to its recorded commit by a submodule update in the same lane, after the files' journaled
+    /// restore and not journaled (the journal skips gitlinks), whatever its configured update mode; one that is not
+    /// checked out is left alone. Throws `SubmoduleUpdateFailure` when a submodule failed to update or, not
+    /// initialized, stays away from its recorded commit.
     public func discard(_ paths: [String]) async throws {
         try requirePaths(paths)
-        let content = UndoJournal.ContentScope(paths: paths, untrackedPaths: nil)
-        try await journaled(.discard, "Discard changes", mode: .discard, content: content) { ops in
-            try await ops.exec(["--literal-pathspecs", "restore", "--worktree", "--"] + paths)
+        let links = try await gitlinks(among: paths)
+        let files = paths.filter { !links.all.contains($0) }
+        guard !files.isEmpty else {
+            guard !links.checkedOut.isEmpty else { return }
+            try await lane { ops in try await ops.updateGitlinks(links.checkedOut) }
+            return
+        }
+        let content = UndoJournal.ContentScope(paths: files, untrackedPaths: nil)
+        // In `after`: it runs once the files' entry is recorded, so a failed submodule update keeps that entry.
+        try await journaled(
+            .discard, "Discard changes", mode: .discard, content: content,
+            after: { ops, _, error in
+                if error == nil, !links.checkedOut.isEmpty { try await ops.updateGitlinks(links.checkedOut) }
+            }
+        ) { ops in
+            try await ops.exec(["--literal-pathspecs", "restore", "--worktree", "--"] + files)
         }
     }
 
@@ -278,7 +304,8 @@ public struct GitOperations: Sendable {
         }
     }
 
-    /// "Discard all unstaged": `restore .` (staged changes and untracked files stay).
+    /// "Discard all unstaged": `restore .` (staged changes and untracked files stay). A moved submodule stays on its
+    /// commit (unless the user's config sets `submodule.recurse`).
     public func discardAllUnstaged() async throws {
         let content = UndoJournal.ContentScope(paths: ["."], untrackedPaths: nil)
         try await journaled(.discard, "Discard all unstaged changes", mode: .discard, content: content) { ops in
@@ -287,7 +314,8 @@ public struct GitOperations: Sendable {
     }
 
     /// "Discard all": `reset --hard` (index and tracked files back to HEAD), plus `clean -fd` when
-    /// `includingUntracked`. The caller confirms first.
+    /// `includingUntracked`. The caller confirms first. A moved submodule stays on its commit (unless the user's config
+    /// sets `submodule.recurse`).
     public func discardAll(includingUntracked: Bool) async throws {
         // `reset --hard` covers the whole worktree, `clean` (no pathspec) only the folder of `cwd`.
         let content = UndoJournal.ContentScope(
@@ -740,12 +768,28 @@ public struct GitOperations: Sendable {
 
     // MARK: - Merge, rebase, cherry-pick, revert, reset
 
-    /// Merges `revision` into the current branch. A conflict throws `GitError.conflict` and leaves the
-    /// merge in progress (see `RepoState`).
-    public func merge(_ revision: String, noFastForward: Bool = false) async throws {
-        try await journaled(.merge, "Merge \(Self.shortRevision(revision))", mode: .carry) { ops in
-            try await ops.exec(["merge", "--no-edit"] + (noFastForward ? ["--no-ff"] : []) + ["--end-of-options", revision])
+    /// Merges `revision` into the current branch; nil `mode` passes no flag (git's config decides). A conflict throws
+    /// `GitError.conflict` and leaves the merge in progress (see `RepoState`); `.fastForwardOnly` throws
+    /// `GitError.nonFastForward` when the branches diverged.
+    public func merge(_ revision: String, mode: MergeMode? = nil) async throws {
+        let flags: [String] = switch mode {
+        case nil: []
+        case .fastForward: ["--ff"]
+        case .fastForwardOnly: ["--ff-only"]
+        case .noFastForward: ["--no-ff"]
         }
+        try await journaled(.merge, "Merge \(Self.shortRevision(revision))", mode: .carry) { ops in
+            try await ops.exec(["merge", "--no-edit"] + flags + ["--end-of-options", revision])
+        }
+    }
+
+    /// Whether `ancestor` is an ancestor of (or the same commit as) `descendant` (`merge-base --is-ancestor`). Throws
+    /// when git fails otherwise (an unknown revision).
+    public func isAncestor(_ ancestor: String, of descendant: String) async throws -> Bool {
+        let result = try await runner.run(
+            ["merge-base", "--is-ancestor", "--end-of-options", ancestor, descendant], cwd: cwd, env: env,
+            allowedExitCodes: [0, 1])
+        return result.exitCode == 0
     }
 
     /// Rebases the current branch onto `upstream`.
@@ -1165,6 +1209,33 @@ public struct GitOperations: Sendable {
 
     private func requirePaths(_ paths: [String]) throws {
         if paths.isEmpty { throw GitOperationError.noPaths }
+    }
+
+    /// The gitlinks (mode 160000, stage 0 in the index: a conflicted one stays with the files) among `paths`, by exact
+    /// path, and those of them whose submodule is checked out (has its own `.git`). A read: runs before the lane.
+    private func gitlinks(among paths: [String]) async throws -> (all: Set<String>, checkedOut: [String]) {
+        let output = try await runner.run(
+            ["--literal-pathspecs", "ls-files", "-s", "-z", "--"] + paths, cwd: cwd, env: env)
+        var all = Set<String>()
+        // `<mode> <sha> <stage>\t<path>` per entry.
+        for record in output.stdout.split(separator: 0) {
+            guard let tab = record.firstIndex(of: UInt8(ascii: "\t")) else { continue }
+            let fields = String(decoding: record[..<tab], as: UTF8.self).split(separator: " ")
+            guard fields.count == 3, fields[0] == "160000", fields[2] == "0" else { continue }
+            let path = String(decoding: record[record.index(after: tab)...], as: UTF8.self)
+            if paths.contains(path) { all.insert(path) }
+        }
+        let checkedOut = all.sorted().filter {
+            FileManager.default.fileExists(atPath: cwd.appending(path: $0 + "/.git").path)
+        }
+        return (all, checkedOut)
+    }
+
+    /// Puts the submodules at `gitlinks` back on their recorded commits (this level only, never initialized here).
+    /// Only calls `exec`: it runs inside the caller's lane.
+    private func updateGitlinks(_ gitlinks: [String]) async throws {
+        let report = try await updateLevel(gitlinks, initialize: false, recursive: false, prefix: "", restoring: true)
+        guard report.failures.isEmpty else { throw report }
     }
 
     private static func signingFlags(_ signing: CommitSigning) -> [String] {

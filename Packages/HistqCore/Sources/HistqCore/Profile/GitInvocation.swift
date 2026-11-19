@@ -371,6 +371,10 @@ public enum GitInvocation {
         case push(remote: String)
         /// A clone of this URL: there is no repository yet.
         case clone(url: String)
+        /// A fetch (or clone) of the submodule at this path (relative to the top of the repo's worktree, as in
+        /// `.gitmodules`), one level only: the URL the repo's config gives it and, once it has a git folder, every
+        /// fetch URL of that repo.
+        case submodule(path: String)
     }
 
     /// Whether a network command gets the profile's token, and why not.
@@ -394,7 +398,8 @@ public enum GitInvocation {
 
     /// The gate of the profile's token: `.attach` only when the profile has a GitHub account and a usable token,
     /// the repo in `cwd` sets no network key of its own nor, with submodules, a recursion key that is on
-    /// (`submoduleRecursion`; not for a clone), and every URL `target` contacts passes
+    /// (`submoduleRecursion`; not for a clone, nor for a submodule fetch, whose caller never recurses), and every URL
+    /// `target` contacts passes
     /// `isTokenURL(_:host:)` after the rewrites git applies (`remote get-url`: `insteadOf`, and `pushInsteadOf` for
     /// a push; `ls-remote --get-url` for a clone). The git runs read config only, under a read environment (no
     /// transport at all), so the gate never touches the network; a clone's URL is resolved in `/`, where no
@@ -423,12 +428,24 @@ public enum GitInvocation {
                 let keys = try await networkConfig(runner: runner, cwd: cwd, env: listingEnv).repoKeys
                 guard keys.isEmpty else { return .repoNetworkConfig(keys: keys) }
                 urls = try await remoteURLs(remote, push: true, runner: runner, cwd: cwd, env: listingEnv)
+            case .submodule(let path):
+                let keys = try await networkConfig(runner: runner, cwd: cwd, env: listingEnv).repoKeys
+                guard keys.isEmpty else { return .repoNetworkConfig(keys: keys) }
+                guard let submodule = try await submoduleURLs(path, runner: runner, cwd: cwd, env: listingEnv) else {
+                    return .otherURL
+                }
+                guard submodule.repoKeys.isEmpty else { return .repoNetworkConfig(keys: submodule.repoKeys) }
+                urls = submodule.urls
             }
         } catch {
             return .lookupFailed
         }
         guard !urls.isEmpty, urls.allSatisfy({ isTokenURL($0, host: host) }) else { return .otherURL }
-        if case .clone = target { return .attach }
+        // A clone has no repo yet; a submodule's caller never recurses (the parent has `.gitmodules` anyway).
+        switch target {
+        case .clone, .submodule: return .attach
+        case .fetch, .push: break
+        }
         do {
             let keys = try await submoduleRecursion(runner: runner, cwd: cwd, env: listingEnv)
             if !keys.isEmpty { return .submoduleRecursion(keys: keys) }
@@ -501,6 +518,83 @@ public enum GitInvocation {
     ) async throws -> [String] {
         let args = ["remote", "get-url"] + (push ? ["--push"] : []) + ["--all", "--end-of-options", remote]
         return lines(try await runner.run(args, cwd: cwd, env: env, timeout: .seconds(10)).stdout)
+    }
+
+    /// What a fetch of the submodule at `path` of the repo in `cwd` contacts: every `submodule.<name>.url` of the
+    /// repo's config (`git submodule init` fills it, a relative `.gitmodules` URL already resolved against the
+    /// repo's remote), as typed and after the user's rewrites (`ls-remote --get-url` in `/`, as for a clone); then,
+    /// when the submodule has a git folder (checked out at `path`, or left in `modules/<name>` of the repo's git
+    /// folder, which `git submodule update` reuses), every fetch URL of that repo and the network keys its own
+    /// config sets. The name is the one `.gitmodules` gives `path`. Nil (no token) for no such path, a name or path
+    /// git would refuse, or no URL. Every value is an argument, never shell text.
+    private static func submoduleURLs(
+        _ path: String, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async throws -> (urls: [String], repoKeys: [String])? {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.isEmpty, !path.hasPrefix("/"), !components.contains(".."), !components.contains(".") else {
+            return nil
+        }
+        let top = try await gitLine(["rev-parse", "--show-toplevel"], runner: runner, cwd: cwd, env: env)
+        // `.gitmodules` alone, without its includes (`--file` reads none).
+        let listing = try await runner.run(
+            ["config", "-z", "--file", top + "/.gitmodules", "--get-regexp", #"^submodule\..*\.path$"#],
+            cwd: cwd, env: env, timeout: .seconds(10), allowedExitCodes: [0, 1])
+        var names: [String] = []
+        // `<key>\n<value>\0` per entry.
+        for entry in listing.stdout.split(separator: 0) {
+            let parts = String(decoding: entry, as: UTF8.self)
+                .split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, parts[1] == path else { continue }
+            names.append(String(parts[0].dropFirst("submodule.".count).dropLast(".path".count)))
+        }
+        guard names.count == 1, let name = names.first, !name.isEmpty,
+              !name.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+        else { return nil }
+        let configured = lines(try await runner.run(
+            ["config", "--get-all", "submodule.\(name).url"], cwd: cwd, env: env,
+            timeout: .seconds(10), allowedExitCodes: [0, 1]).stdout)
+        guard !configured.isEmpty else { return nil }
+        var urls: [String] = []
+        for url in configured {
+            let resolved = try await runner.run(
+                ["ls-remote", "--get-url", "--end-of-options", url], cwd: URL(filePath: "/"), env: env,
+                timeout: .seconds(10))
+            urls += [url] + lines(resolved.stdout)
+        }
+        // The submodule's own repo, checked that git finds it there and not the parent around it.
+        let repo: URL
+        if FileManager.default.fileExists(atPath: top + "/" + path + "/.git") {
+            repo = URL(filePath: top + "/" + path, directoryHint: .isDirectory)
+            let found = try await gitLine(["rev-parse", "--show-toplevel"], runner: runner, cwd: repo, env: env)
+            guard found == top + "/" + path else { throw SubmoduleRepoMismatch() }
+        } else {
+            let modules = try await gitLine(
+                ["rev-parse", "--path-format=absolute", "--git-path", "modules/" + name], runner: runner, cwd: cwd,
+                env: env)
+            var isFolder: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: modules, isDirectory: &isFolder), isFolder.boolValue else {
+                return (urls, [])
+            }
+            repo = URL(filePath: modules, directoryHint: .isDirectory)
+            let found = try await gitLine(["rev-parse", "--absolute-git-dir"], runner: runner, cwd: repo, env: env)
+            guard found == modules else { throw SubmoduleRepoMismatch() }
+        }
+        let repoKeys = try await networkConfig(runner: runner, cwd: repo, env: env).repoKeys
+        for remote in try await remoteNames(runner: runner, cwd: repo, env: env) {
+            urls += try await remoteURLs(remote, push: false, runner: runner, cwd: repo, env: env)
+        }
+        return (urls, repoKeys)
+    }
+
+    /// Git found another repo than the submodule's (an empty or broken folder inside the parent's worktree).
+    private struct SubmoduleRepoMismatch: Error {}
+
+    /// Git's one line of output, without its newline.
+    private static func gitLine(_ args: [String], runner: GitRunner, cwd: URL, env: [String: String]) async throws
+        -> String
+    {
+        let text = try await runner.run(args, cwd: cwd, env: env, timeout: .seconds(10)).text
+        return text.hasSuffix("\n") ? String(text.dropLast()) : text
     }
 
     /// The lines of git's output without the last newline; an empty line stays (an empty URL fails the gate).
