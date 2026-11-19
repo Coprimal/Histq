@@ -1349,11 +1349,11 @@ final class RepoSession: Identifiable {
     // MARK: Select
 
     /// Switches the detail to `selection` now, in the click's frame: a commit read before shows whole from the cache
-    /// (no load), a commit of the log shows its header with its files loading, anything else is `.loading` (the
-    /// placeholder). The load runs in a task that a newer select cancels. Selecting the current selection again (a tab
-    /// switch) reloads it, unless the cache has it. A commit on screen whole prefetches its neighbours
-    /// (`prefetchNeighbours`); a newer select cancels that too. `keepsPanel2`: another selection leaves panel2 as it is
-    /// (a blame gutter's click keeps the blame).
+    /// (no load), a commit of the log shows its header with its files loading, the WIP shows from the last status (a
+    /// read refreshes it), anything else is `.loading` (the placeholder). The load runs in a task that a newer select
+    /// cancels. Selecting the current selection again (a tab switch) reloads it, unless the cache has it. A commit on
+    /// screen whole prefetches its neighbours (`prefetchNeighbours`); a newer select cancels that too. `keepsPanel2`:
+    /// another selection leaves panel2 as it is (a blame gutter's click keeps the blame).
     func select(_ selection: Selection, keepsPanel2: Bool = false) {
         // Another row (a parent jump, a vanished WIP) shows the graph again; a tab switch keeps the open file.
         if selection != self.selection, !keepsPanel2 { closePanel2() }
@@ -1370,7 +1370,10 @@ final class RepoSession: Identifiable {
         case .stash(let hash): instantDetail(hash, isStash: true)
         default: nil
         }
-        detail = instant.map { .loaded(.commit($0)) } ?? .loading
+        // The WIP panel reads the live status: once one is loaded it shows at once, and the read below refreshes it.
+        detail = if let instant { .loaded(.commit(instant)) }
+            else if selection == .wip, status.value != nil { .loaded(.wip) }
+            else { .loading }
         if instant?.files != nil {
             detailTask = nil
             if case .commit(let hash) = selection { prefetchNeighbours(of: hash) }
