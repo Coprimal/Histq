@@ -80,10 +80,17 @@ struct TabStrip: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if !model.archivedTabs.isEmpty || model.archivedOut != nil {
-                ArchiveCluster(model: model, namespace: namespace)
+            // The archive sits `gap` from the first tab, as the track's items sit from each other: the cluster ends with
+            // flare room (the button's or the popped tab's) and the track starts with its first tab's, so the two
+            // overlap by both. Above the track, so the overlap's clicks reach the button or the popped tab.
+            HStack(spacing: 0) {
+                if !model.archivedTabs.isEmpty || model.archivedOut != nil {
+                    ArchiveCluster(model: model, namespace: namespace)
+                        .padding(.trailing, TabStripMetrics.gap - 2 * TabStripMetrics.flare)
+                        .zIndex(1)
+                }
+                TabTrack(model: model, namespace: namespace)
             }
-            TabTrack(model: model, namespace: namespace)
             TabStripButtons(model: model, popoverEdge: .bottom, buttonHeight: TabStripMetrics.buttonHeight)
         }
     }
@@ -323,7 +330,8 @@ private struct ArchiveCluster: View {
 
     var body: some View {
         let buttonWidth = ArchiveButton.width(height: TabStripMetrics.groupChipHeight)
-        // Each item carries its flares' room on both sides, as the track's do; the two still sit `gap` apart.
+        // The popped tab carries its flares' room on both sides, the button only on its trailing side (none before it,
+        // at the strip's start); the two still sit `gap` apart.
         HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
             ArchiveButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.groupChipHeight)
                 .frame(height: TabStripMetrics.tabHeight)
@@ -333,7 +341,7 @@ private struct ArchiveCluster: View {
                              selected: tab.id == model.selectedTabID)
                     }
                 }
-                .padding(.horizontal, TabStripMetrics.flare)
+                .padding(.trailing, TabStripMetrics.flare)
             if let tab = model.archivedOut {
                 tabView(tab)
             }
@@ -886,9 +894,12 @@ struct ArchiveButton: View {
     @State private var showingList = false
     @State private var hovered = false
 
+    /// Between the icon's square and the capsule's ends.
+    static let padding: CGFloat = 4
+
     /// The button's width for its `height`: a short capsule around the icon.
     static func width(height: CGFloat) -> CGFloat {
-        height + 2 * TabStripMetrics.groupChipPadding
+        height + 2 * padding
     }
 
     var body: some View {
