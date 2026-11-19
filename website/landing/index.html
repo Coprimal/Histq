@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Histq, a native macOS git client</title>
+    <meta name="description" content="Histq is a native macOS git client that runs the git you already have: a commit graph you can read, a profile per tab, tabs on top or down the side, layouts, AI help and a terminal in every tab." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Histq, a native macOS git client" />
+    <meta property="og:description" content="A native macOS git client that runs the git you already have." />
+    <meta property="og:image" content="https://histq.coprimal.dev/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="../logo.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geologica:wght,CRSV,SHRP@200..500,0,0..100&amp;display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <script>document.documentElement.classList.add("js");</script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="nav">
+      <div class="container nav__inner">
+        <a class="brand" href="./" aria-label="Histq home">
+          <img src="../logo.png" alt="" width="28" height="28" />
+          <span>Histq</span>
+        </a>
+        <nav class="nav__links" aria-label="Primary">
+          <a class="nav__hide" href="../docs.html">Docs</a>
+          <a class="nav__hide" href="https://github.com/Coprimal/Histq/blob/main/CHANGELOG.md">Changelog</a>
+          <a href="https://github.com/Coprimal/Histq">GitHub</a>
+          <a class="btn btn--sm" href="https://github.com/Coprimal/Histq/releases/latest">Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Hero -->
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="container hero__grid">
+          <div class="hero__text">
+            <h1 id="hero-title">Git history, drawn to be read.</h1>
+            <p class="lead">A native macOS git client that runs the git you already have.</p>
+            <div class="actions">
+              <a class="btn" href="https://github.com/Coprimal/Histq/releases/latest">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
+                Download for macOS
+              </a>
+              <a class="btn btn--line" href="https://github.com/Coprimal/Histq">Read the source</a>
+            </div>
+            <p class="hero__note">Free and open source. macOS 15+, Apple silicon.</p>
+          </div>
+
+          <figure class="hero-graph" data-solo="">
+<svg class="graph-svg" viewBox="0 0 740 476" role="img" aria-labelledby="graph-title">
+<title id="graph-title">Diagram of a commit graph as Histq draws it: main, develop, feature/login and feature/search in four coloured lanes, with local and remote branch badges and a tag</title>
+<g class="cols" aria-hidden="true"><text x="14" y="20">Branch / tag</text><text x="204" y="20">Graph</text><text x="334" y="20">Commit message</text>
+<line x1="0" y1="32" x2="740" y2="32" /></g>
+<rect class="sel" x="0" y="39" width="740" height="30" rx="6" />
+<rect class="band l0" x="214" y="40" width="110" height="28" />
+<rect class="band l0" x="214" y="72" width="110" height="28" />
+<rect class="band l1" x="242" y="104" width="82" height="28" />
+<rect class="band l1" x="242" y="136" width="82" height="28" />
+<rect class="band l2" x="270" y="168" width="54" height="28" />
+<rect class="band l3" x="298" y="200" width="26" height="28" />
+<rect class="band l0" x="214" y="264" width="110" height="28" />
+<g class="lanes" aria-hidden="true">
+<path class="lane l0" style="--d:0.0s" pathLength="1" d="M214 54 V438" />
+<path class="lane l1" style="--d:0.15s" pathLength="1" d="M214 54 H232 Q242 54 242 64 V396 Q242 406 232 406 H214" />
+<path class="lane l2" style="--d:0.3s" pathLength="1" d="M242 118 H260 Q270 118 270 128 V364 Q270 374 260 374 H242" />
+<path class="lane l3" style="--d:0.45s" pathLength="1" d="M298 214 V300 Q298 310 288 310 H242" />
+</g>
+<g class="row l0 is-head" style="--i:0">
+<line class="link" x1="190" y1="54" x2="214" y2="54" />
+<g class="badge" transform="translate(101.4 42)"><rect width="88.6" height="24" rx="6" />
+<g class="bi" transform="translate(10 5)"><circle cx="7" cy="7" r="6" class="fill" /><path class="ck" d="m4.3 7.1 1.9 1.9 3.5-3.7" /></g>
+<text x="28" y="16.5">main</text>
+<g class="bi" transform="translate(63.6 5)"><path d="M2.5 3.5h9v6h-9zM1 11.5h12" /></g>
+</g>
+<rect class="bar" x="324" y="40" width="3" height="28" />
+<circle class="node" cx="214" cy="54" r="10" /><circle class="dot" cx="214" cy="54" r="4.5" />
+<text class="msg" x="334" y="59">Merge develop into main</text>
+</g>
+<g class="row l0" style="--i:1">
+<line class="link" x1="190" y1="86" x2="214" y2="86" />
+<g class="badge" transform="translate(67.6 74)"><rect width="122.4" height="24" rx="6" />
+<text x="10" y="16.5">origin/main</text>
+<g class="bi" transform="translate(97.4 5)"><path d="M4 11h6.5a2.5 2.5 0 0 0 .3-5A3.5 3.5 0 0 0 4 6.3 2.4 2.4 0 0 0 4 11Z" /></g>
+</g>
+<rect class="bar" x="324" y="72" width="3" height="28" />
+<circle class="node" cx="214" cy="86" r="10" /><circle class="dot" cx="214" cy="86" r="3.5" />
+<text class="msg" x="334" y="91">Commit message 11</text>
+</g>
+<g class="row l1" style="--i:2">
+<line class="link" x1="190" y1="118" x2="242" y2="118" />
+<g class="badge" transform="translate(97.2 106)"><rect width="92.8" height="24" rx="6" />
+<text x="10" y="16.5">develop</text>
+<g class="bi" transform="translate(67.8 5)"><path d="M2.5 3.5h9v6h-9zM1 11.5h12" /></g>
+</g>
+<rect class="bar" x="324" y="104" width="3" height="28" />
+<circle class="node" cx="242" cy="118" r="10" /><circle class="dot" cx="242" cy="118" r="3.5" />
+<text class="msg" x="334" y="123">Merge feature/login into develop</text>
+</g>
+<g class="row l1" style="--i:3">
+<line class="link" x1="190" y1="150" x2="242" y2="150" />
+<g class="badge" transform="translate(45.4 138)"><rect width="144.6" height="24" rx="6" />
+<text x="10" y="16.5">origin/develop</text>
+<g class="bi" transform="translate(119.6 5)"><path d="M4 11h6.5a2.5 2.5 0 0 0 .3-5A3.5 3.5 0 0 0 4 6.3 2.4 2.4 0 0 0 4 11Z" /></g>
+</g>
+<rect class="bar" x="324" y="136" width="3" height="28" />
+<circle class="node" cx="242" cy="150" r="10" /><circle class="dot" cx="242" cy="150" r="3.5" />
+<text class="msg" x="334" y="155">Commit message 10</text>
+</g>
+<g class="row l2" style="--i:4">
+<line class="link" x1="190" y1="182" x2="270" y2="182" />
+<g class="badge" transform="translate(33.8 170)"><rect width="156.2" height="24" rx="6" />
+<text x="10" y="16.5">feature/login</text>
+<g class="bi" transform="translate(112.2 5)"><path d="M2.5 3.5h9v6h-9zM1 11.5h12" /></g>
+<g class="bi" transform="translate(131.2 5)"><path d="M4 11h6.5a2.5 2.5 0 0 0 .3-5A3.5 3.5 0 0 0 4 6.3 2.4 2.4 0 0 0 4 11Z" /></g>
+</g>
+<rect class="bar" x="324" y="168" width="3" height="28" />
+<circle class="node" cx="270" cy="182" r="10" /><circle class="dot" cx="270" cy="182" r="3.5" />
+<text class="msg" x="334" y="187">Commit message 9</text>
+</g>
+<g class="row l3" style="--i:5">
+<line class="link" x1="190" y1="214" x2="298" y2="214" />
+<g class="badge" transform="translate(45.4 202)"><rect width="144.6" height="24" rx="6" />
+<text x="10" y="16.5">feature/search</text>
+<g class="bi" transform="translate(119.6 5)"><path d="M2.5 3.5h9v6h-9zM1 11.5h12" /></g>
+</g>
+<rect class="bar" x="324" y="200" width="3" height="28" />
+<circle class="node" cx="298" cy="214" r="10" /><circle class="dot" cx="298" cy="214" r="3.5" />
+<text class="msg" x="334" y="219">Commit message 8</text>
+</g>
+<g class="row l2" style="--i:6">
+<circle class="node" cx="270" cy="246" r="10" /><circle class="dot" cx="270" cy="246" r="3.5" />
+<text class="msg" x="334" y="251">Commit message 7</text>
+</g>
+<g class="row l0" style="--i:7">
+<line class="link" x1="190" y1="278" x2="214" y2="278" />
+<g class="badge tag" transform="translate(105.6 266)"><rect width="84.4" height="24" rx="6" />
+<g class="bi" transform="translate(10 5)"><path d="M1.5 2h5l5.5 5-5 5L1.5 7Z" /><circle cx="4.5" cy="5" r="0.9" /></g>
+<text x="28" y="16.5">v1.2.0</text>
+</g>
+<rect class="bar" x="324" y="264" width="3" height="28" />
+<circle class="node" cx="214" cy="278" r="10" /><circle class="dot" cx="214" cy="278" r="3.5" />
+<text class="msg" x="334" y="283">Commit message 6</text>
+</g>
+<g class="row l1" style="--i:8">
+<circle class="node" cx="242" cy="310" r="10" /><circle class="dot" cx="242" cy="310" r="3.5" />
+<text class="msg" x="334" y="315">Commit message 5</text>
+</g>
+<g class="row l2" style="--i:9">
+<circle class="node" cx="270" cy="342" r="10" /><circle class="dot" cx="270" cy="342" r="3.5" />
+<text class="msg" x="334" y="347">Commit message 4</text>
+</g>
+<g class="row l1" style="--i:10">
+<circle class="node" cx="242" cy="374" r="10" /><circle class="dot" cx="242" cy="374" r="3.5" />
+<text class="msg" x="334" y="379">Commit message 3</text>
+</g>
+<g class="row l0" style="--i:11">
+<circle class="node" cx="214" cy="406" r="10" /><circle class="dot" cx="214" cy="406" r="3.5" />
+<text class="msg" x="334" y="411">Commit message 2</text>
+</g>
+<g class="row l0" style="--i:12">
+<circle class="node" cx="214" cy="438" r="10" /><circle class="dot" cx="214" cy="438" r="3.5" />
+<text class="msg" x="334" y="443">Commit message 1</text>
+</g>
+</svg>
+            <div class="solo" role="group" aria-label="Solo a branch in the diagram">
+              <span>Solo</span>
+              <button type="button" data-solo-btn="" aria-pressed="true">All</button>
+              <button type="button" class="sw-l1" data-solo-btn="l1" aria-pressed="false">develop</button>
+              <button type="button" class="sw-l2" data-solo-btn="l2" aria-pressed="false">feature/login</button>
+              <button type="button" class="sw-l3" data-solo-btn="l3" aria-pressed="false">feature/search</button>
+            </div>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Graph, annotated -->
+      <section class="sec sec--graph" id="graph" aria-labelledby="graph-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="graph-h">Every branch in one picture.</h2>
+            <p class="lead">Branches, tags, stashes, remotes and worktrees in one window, each part one click away.</p>
+          </div>
+          <figure class="annot">
+            <div class="annot__img">
+              <picture>
+                <source media="(max-width: 40rem)" srcset="shots/graph-phone.webp" width="1000" height="616" />
+                <img data-kind="product" src="shots/graph-full.webp" width="2880" height="1800" loading="lazy" alt="Histq window: pinned tabs and a worktree group in the tab strip, the branch, remote and worktree sidebar, the commit graph with coloured lanes and badges, and the selected commit’s details and files" />
+              </picture>
+              <span class="pin" style="--x: 6%; --y: 5.4%; --i: 0"><span class="pin__box">Pinned tabs, archive</span></span>
+              <span class="pin" style="--x: 35.7%; --y: 5.4%; --i: 1"><span class="pin__box">Worktree group</span></span>
+              <span class="pin" style="--x: 58.4%; --y: 5.4%; --i: 2"><span class="pin__box">Work profile dot</span></span>
+              <span class="pin pin--end" style="--x: 93%; --y: 18.9%; --i: 3"><span class="pin__box">Commit details</span></span>
+              <span class="pin pin--down" style="--x: 0.75%; --y: 66.4%; --i: 4"><span class="pin__box">Sidebar cards</span></span>
+              <span class="pin pin--down" style="--x: 19%; --y: 68.5%; --i: 5"><span class="pin__box">Branch badges</span></span>
+              <span class="pin pin--down" style="--x: 38.4%; --y: 75.5%; --i: 6"><span class="pin__box">A colour per branch</span></span>
+              <span class="pin pin--down pin--end" style="--x: 82.3%; --y: 63%; --i: 7"><span class="pin__box">Changed files</span></span>
+            </div>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Diff -->
+      <section class="sec sec--diff" id="diff" aria-labelledby="diff-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="diff-h">Stage the lines you mean.</h2>
+            <p class="lead">Diff, Split or Full file, with syntax colours. Stage a file, a hunk or only the lines you select.</p>
+          </div>
+          <figure class="annot">
+            <div class="annot__img">
+              <img data-kind="product" src="shots/stage.webp" width="2344" height="1597" loading="lazy" alt="Histq staging a Swift file: the unstaged diff with Stage Hunk and Discard Hunk and five selected lines, the staged hunk below, and the Unstaged, Staged and Commit cards on the right" />
+              <span class="pin pin--end" style="--x: 58.6%; --y: 10%; --i: 0"><span class="pin__box">Diff, Split or Full file</span></span>
+              <span class="pin pin--end" style="--x: 92.5%; --y: 0.8%; --i: 1"><span class="pin__box">Unstaged and staged files</span></span>
+              <span class="pin pin--down" style="--x: 1.2%; --y: 30%; --i: 2"><span class="pin__box">Selected lines only</span></span>
+              <span class="pin pin--down" style="--x: 40%; --y: 54.8%; --i: 3"><span class="pin__box">What is staged</span></span>
+              <span class="pin pin--down" style="--x: 56.7%; --y: 16.5%; --i: 4"><span class="pin__box">Stage or discard a hunk</span></span>
+              <span class="pin pin--down pin--end" style="--x: 92%; --y: 75.5%; --i: 5"><span class="pin__box">AI commit message</span></span>
+            </div>
+          </figure>
+        </div>
+      </section>
+
+      <!-- History and blame -->
+      <section class="sec sec--hb" id="history" aria-labelledby="hb-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="hb-h">Who changed it, and when.</h2>
+            <p class="lead">File History lists every commit that touched a file. Blame names the last change on each line.</p>
+          </div>
+          <div class="hb" data-view="history">
+            <div class="seg" role="group" aria-label="View">
+              <button type="button" data-hb-btn="history" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>File History</button>
+              <button type="button" data-hb-btn="blame" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h4M4 12h4M4 18h4M11 6h9M11 12h6M11 18h8"/></svg>Blame</button>
+            </div>
+            <figure class="hb__panel hb__panel--history shot">
+              <img data-kind="product" src="shots/history.webp" width="2117" height="832" loading="lazy" alt="Histq File History of SettingsView.swift: the four commits that changed it, with Follow renames, and the selected commit’s diff of that file" />
+            </figure>
+            <div class="hb__panel hb__panel--blame blame" role="img" aria-label="Histq Blame of CouponValidator.swift: each run of lines shows its commit, message, author and date, lines not committed yet are tinted, and the selected commit’s lines are marked">
+              <div class="blame__head">
+                <span class="blame__badge">Blame</span>
+                <span class="blame__path"><span>app / services /</span> CouponValidator.swift</span>
+                <span class="blame__rev">21d980a</span>
+                <span class="blame__x" aria-hidden="true">×</span>
+              </div>
+              <div class="blame__rows">
+                <div class="blame__row"><span class="blame__g"><b>21d980a</b><span class="blame__m">Add coupon validation</span><span class="blame__a">Bao Nguyen</span><span class="blame__d">11/17/26 @ 20:36</span></span><span class="blame__n">1</span><code><i class="k">import</i> Foundation</code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">2</span><code></code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">3</span><code><i class="k">struct</i> <i class="t">CouponValidator</i> {</code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">4</span><code>    <i class="k">enum</i> <i class="t">Failure</i>: <i class="t">Error</i>, <i class="t">Equatable</i> {</code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">5</span><code>        <i class="k">case</i> expired</code></div>
+                <div class="blame__row is-sel is-run"><span class="blame__g"><b>8e8ac22</b><span class="blame__m">Let coupons start on a future date</span><span class="blame__a">Chloé Dubois</span><span class="blame__d">11/18/26 @ 09:12</span></span><span class="blame__n">6</span><code>        <i class="k">case</i> notStarted(startsAt: <i class="t">Date</i>)</code></div>
+                <div class="blame__row is-run"><span class="blame__g"><b>21d980a</b><span class="blame__m">Add coupon validation</span><span class="blame__a">Bao Nguyen</span><span class="blame__d">11/17/26 @ 20:36</span></span><span class="blame__n">7</span><code>        <i class="k">case</i> alreadyUsed</code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">8</span><code>    }</code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">9</span><code></code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">10</span><code>    <i class="k">func</i> validate(<i class="k">_</i> coupon: <i class="t">Coupon</i>) -&gt; <i class="t">Result</i>&lt;<i class="t">Decimal</i>, <i class="t">Failure</i>&gt; {</code></div>
+                <div class="blame__row is-sel is-run"><span class="blame__g"><b>8e8ac22</b><span class="blame__m">Let coupons start on a future date</span><span class="blame__a">Chloé Dubois</span><span class="blame__d">11/18/26 @ 09:12</span></span><span class="blame__n">11</span><code>        <i class="k">if let</i> start = coupon.startsAt, start &gt; now() {</code></div>
+                <div class="blame__row is-sel"><span class="blame__g"></span><span class="blame__n">12</span><code>            <i class="k">return</i> .failure(.notStarted(startsAt: start))</code></div>
+                <div class="blame__row is-sel"><span class="blame__g"></span><span class="blame__n">13</span><code>        }</code></div>
+                <div class="blame__row is-wip is-run"><span class="blame__g"><span class="blame__m">Not Committed Yet</span></span><span class="blame__n">14</span><code>        <i class="k">guard</i> !coupon.isPaused <i class="k">else</i> { <i class="k">return</i> .failure(.expired) }</code></div>
+                <div class="blame__row is-run"><span class="blame__g"><b>21d980a</b><span class="blame__m">Add coupon validation</span><span class="blame__a">Bao Nguyen</span><span class="blame__d">11/17/26 @ 20:36</span></span><span class="blame__n">15</span><code>        <i class="k">return</i> .success(coupon.amount)</code></div>
+                <div class="blame__row"><span class="blame__g"></span><span class="blame__n">16</span><code>    }</code></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Speed -->
+      <section class="sec sec--speed" id="speed" aria-labelledby="speed-h">
+        <div class="container">
+          <div class="head">
+            <h2 id="speed-h">Fast on big histories.</h2>
+            <p class="lead">Built for long-lived repositories.</p>
+          </div>
+          <div class="speed">
+            <figure class="measure ticks">
+              <p class="measure__fig num">1,000,000<span class="u">&#8201;commits</span></p>
+              <figcaption>On a repository this big, a new commit shows in about 0.7&#8201;s.</figcaption>
+            </figure>
+            <dl class="rows">
+              <div><dt>Native</dt><dd>SwiftUI and AppKit.</dd></div>
+              <div><dt>Instant staging</dt><dd>Files move as you click.</dd></div>
+              <div><dt><kbd>⌘F</kbd> search</dt><dd>Matches light up.</dd></div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- Profiles -->
+      <section class="sec sec--profiles" id="profiles" aria-labelledby="profiles-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="profiles-h">A profile for every tab.</h2>
+            <p class="lead">Identity, signing, SSH key and GitHub account, per git command. Your git config stays untouched.</p>
+          </div>
+          <div class="prof" data-prof="personal">
+            <div class="seg" role="group" aria-label="Profile">
+              <button type="button" data-prof-btn="personal" aria-pressed="true"><i class="pdot pdot--personal" aria-hidden="true"></i>Personal</button>
+              <button type="button" data-prof-btn="work" aria-pressed="false"><i class="pdot pdot--work" aria-hidden="true"></i>Work</button>
+            </div>
+
+            <div class="flow" role="img" aria-label="Diagram: the tab deep picks a profile; git then commits, signs and pushes with that profile’s identity, key and GitHub account">
+              <div class="flow__col flow__tab">
+                <span class="flow__k">Tab</span>
+                <span class="tabchip"><span class="tico c-blue" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot"></i></span>deep</span>
+              </div>
+              <div class="wire" aria-hidden="true"><span class="wire__line"></span><span class="wire__packet"></span></div>
+              <div class="flow__col flow__profile">
+                <span class="flow__k">Profile</span>
+                <div class="pcard">
+                  <div class="pcard__head"><span class="avatar"><span data-for="personal">P</span><span data-for="work">W</span></span>
+                    <strong><span data-for="personal">Personal</span><span data-for="work">Work</span></strong></div>
+                  <dl class="pcard__rows">
+                    <div><dt>Commits as</dt><dd><span data-for="personal">you@example.com</span><span data-for="work">you@work.example</span></dd></div>
+                    <div><dt>Signing</dt><dd><span data-for="personal">SSH key</span><span data-for="work">GPG</span></dd></div>
+                    <div><dt>SSH key</dt><dd><span data-for="personal">id_ed25519</span><span data-for="work">id_work</span></dd></div>
+                  </dl>
+                </div>
+              </div>
+              <div class="wire wire--2" aria-hidden="true"><span class="wire__line"></span><span class="wire__packet"></span></div>
+              <div class="flow__col flow__remote">
+                <span class="flow__k">git push</span>
+                <span class="host"><svg class="gh" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.79 23.4c.6.11.82-.26.82-.58v-2.2c-3.34.73-4.04-1.43-4.04-1.43-.55-1.4-1.34-1.77-1.34-1.77-1.09-.75.08-.73.08-.73 1.21.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.25 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.83.58A12 12 0 0 0 12 .5Z"/></svg></span>
+                <strong class="flow__host"><span data-for="personal">github.com</span><span data-for="work">ghe.example.com</span></strong>
+                <span class="flow__sub"><span data-for="personal">as @you</span><span data-for="work">as @you-work</span></span>
+              </div>
+            </div>
+
+            <div class="settings" role="img" aria-label="Histq Settings, Integrations: each profile has its own GitHub account, connected with a token kept in the login Keychain">
+              <div class="settings__bar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>Settings</div>
+              <div class="settings__body">
+                <ul class="settings__nav" aria-hidden="true">
+                  <li>General</li><li>Appearance</li><li>Profiles</li><li>SSH</li><li class="is-on">Integrations</li><li>AI</li><li>Terminal</li>
+                </ul>
+                <div class="settings__main">
+                  <p class="settings__h">Profile</p>
+                  <div class="scard scard--row">
+                    <p class="scard__t"><i class="pdot"></i>Integrations of</p>
+                    <span class="spill"><span data-for="personal">Personal</span><span data-for="work">Work</span><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+                  </div>
+                  <p class="settings__h">GitHub account</p>
+                  <div class="scard scard--row">
+                    <div class="acct"><span class="acct__av" aria-hidden="true"><span data-for="personal">Y</span><span data-for="work">Y</span></span><div>
+                      <p class="scard__t"><span data-for="personal">you</span><span data-for="work">you-work</span></p>
+                      <p class="scard__d"><span data-for="personal">Connected to github.com</span><span data-for="work">Connected to ghe.example.com</span><br />The token is in your login Keychain.</p>
+                    </div></div>
+                    <span class="spill">Disconnect…</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="note note--lg">Paste a token or import the <code>gh</code> CLI’s, for github.com or GitHub Enterprise.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Pull requests -->
+      <section class="sec sec--pr" id="pull-requests" aria-labelledby="pr-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="pr-h">Review pull requests in place.</h2>
+            <p class="lead">Read, review and merge without leaving the repository.</p>
+          </div>
+          <div class="prs" data-view="conv">
+            <div class="seg" role="group" aria-label="Pull request tab">
+              <button type="button" data-pr-btn="conv" aria-pressed="true">Conversation</button>
+              <button type="button" data-pr-btn="files" aria-pressed="false">Files changed</button>
+            </div>
+            <figure class="prs__frame">
+              <img data-kind="product" class="prs__img prs__img--conv" src="shots/pr-conversation.webp" width="2880" height="1597" loading="lazy" alt="Histq pull request page: My PRs, Review requested and All open in the sidebar, the description, a review with an inline thread and a reply, and reviewers, assignees and labels" />
+              <img data-kind="product" class="prs__img prs__img--files" src="shots/pr-files.webp" width="2880" height="1597" loading="lazy" alt="Histq pull request Files changed tab: eight files with their line counts and the diff of a new CI workflow" />
+            </figure>
+            <ul class="prs__facts">
+              <li><strong>Your queue</strong>My PRs, review requests, issues.</li>
+              <li><strong>Threads</strong>Reply, resolve, reopen.</li>
+              <li><strong>Merge box</strong>Merge, or resolve conflicts with AI.</li>
+              <li><strong>New pull requests</strong>AI drafts the description.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tabs -->
+      <section class="sec sec--tabs" id="tabs" aria-labelledby="tabs-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="tabs-h">Tabs on top, or down the side.</h2>
+            <p class="lead">Group a repo with its worktrees, pin the ones you keep, archive the rest.</p>
+          </div>
+          <div class="tdemo" data-pos="top">
+            <div class="seg" role="group" aria-label="Tab position">
+              <button type="button" data-pos-btn="top" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Top</button>
+              <button type="button" data-pos-btn="side" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>Side</button>
+            </div>
+            <div class="tdemo__stage">
+              <div class="tui" role="img" aria-label="Histq tabs: an archive button holding deep-worktree-3 and deep-worktree-4, two pinned tabs, the group deep with deep, deep-worktree-1 and deep-worktree-2, and a plain tab api-server on the Work profile">
+                <div class="tui__bar">
+                  <span class="tui__archive" data-k="archive" data-leg="archive"><svg class="ico" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/></svg></span>
+                  <span class="tui__pins" data-leg="pin">
+                    <span class="tui__pin" data-k="pin1"><span class="tico c-green"><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot"></i></span></span>
+                    <span class="tui__pin" data-k="pin2"><span class="tico c-red"><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot"></i></span></span>
+                  </span>
+                  <span class="tui__group" data-leg="group">
+                    <span class="tui__glabel" data-k="glabel">deep</span>
+                    <span class="tui__tab is-sel" data-k="t1"><span class="tico c-blue"><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot"></i></span><span>deep</span></span>
+                    <span class="tui__tab" data-k="t2"><span class="tico "><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot"></i></span><span>deep-worktree-1</span></span>
+                    <span class="tui__tab" data-k="t3"><span class="tico "><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot"></i></span><span>deep-worktree-2</span></span>
+                  </span>
+                  <span class="tui__tab tui__tab--solo" data-k="t4" data-leg="tab"><span class="tico c-amber"><svg viewBox="0 0 16 16"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z"/><path d="M5.5 2.5v11"/></svg><i class="pdot pdot--work"></i></span><span>api-server</span></span>
+                </div>
+                <div class="tui__pop" data-k="pop">
+                  <p>Archived</p>
+                  <span>deep-worktree-3</span>
+                  <span>deep-worktree-4</span>
+                </div>
+                <div class="tui__body" aria-hidden="true">
+                  <span style="--w: 62%"></span><span style="--w: 48%"></span><span style="--w: 70%"></span><span style="--w: 40%"></span><span style="--w: 56%"></span>
+                </div>
+              </div>
+              <ul class="legend">
+                <li data-leg-for="archive"><strong>Archive</strong>deep-worktree-3 and -4 wait here, one click from coming back.</li>
+                <li data-leg-for="pin"><strong>Pinned</strong>Icons only, always first.</li>
+                <li data-leg-for="group"><strong>Worktree group</strong>A repo and its worktrees, together.</li>
+                <li data-leg-for="tab"><strong>A plain tab</strong>Here on the Work profile, its orange dot.</li>
+              </ul>
+              <svg class="leaders" aria-hidden="true"></svg>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Terminal -->
+      <section class="sec sec--terminal" id="terminal" aria-labelledby="terminal-h">
+        <div class="container split">
+          <div class="split__text">
+            <h2 id="terminal-h">A terminal in every tab.</h2>
+            <p class="lead">Press <kbd>⌃`</kbd>: a shell opens in the repository, signed as the tab’s profile.</p>
+          </div>
+          <figure class="shot">
+            <picture><source media="(max-width: 40rem)" srcset="shots/terminal-phone.webp" width="951" height="468" /><img data-kind="product" src="shots/terminal.webp" width="1555" height="1116" loading="lazy" alt="Histq terminal drawer under the commit graph, running git log in the repository folder" /></picture>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Layouts -->
+      <section class="sec sec--layouts" id="layouts" aria-labelledby="layouts-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="layouts-h">Four layouts, two tab styles.</h2>
+            <p class="lead">Mix them as you like. The toolbar, text size, rows and columns are yours too.</p>
+          </div>
+          <div class="lay" data-layout="stacked" data-tabs="top">
+            <div class="lay__controls">
+              <div class="seg" role="group" aria-label="Layout">
+                <button type="button" data-lay-btn="classic" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M16 4v16"/></svg>Classic</button>
+                <button type="button" data-lay-btn="stacked" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M16 4v16M8 13h8"/></svg>Stacked</button>
+                <button type="button" data-lay-btn="columns" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M11.5 4v16M16 4v16"/></svg>Columns</button>
+                <button type="button" data-lay-btn="focus" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/></svg>Focus</button>
+              </div>
+              <div class="seg" role="group" aria-label="Tabs">
+                <button type="button" data-tab-btn="top" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>Top</button>
+                <button type="button" data-tab-btn="left" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>Side</button>
+              </div>
+            </div>
+            <div class="lay__frame">
+              <img data-kind="product" data-l="stacked" data-t="top" class="is-on" src="shots/layout-stacked-top.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Stacked layout with tabs on top: the diff opens under the graph" />
+              <img data-kind="product" data-l="stacked" data-t="left" src="shots/layout-stacked-left.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Stacked layout with tabs down the side" />
+              <img data-kind="product" data-l="classic" data-t="top" src="shots/layout-classic-top.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Classic layout with tabs on top: sidebar, graph and details" />
+              <img data-kind="product" data-l="classic" data-t="left" src="shots/layout-classic-left.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Classic layout with tabs down the side" />
+              <img data-kind="product" data-l="columns" data-t="top" src="shots/layout-columns-top.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Columns layout with tabs on top: the diff in a fourth column" />
+              <img data-kind="product" data-l="columns" data-t="left" src="shots/layout-columns-left.webp" width="2600" height="1566" loading="lazy" alt="Histq in the Columns layout with tabs down the side" />
+              <img data-kind="product" data-l="focus" data-t="top" src="shots/layout-focus-top.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Focus layout with tabs on top: only the graph" />
+              <img data-kind="product" data-l="focus" data-t="left" src="shots/layout-focus-left.webp" width="2600" height="1625" loading="lazy" alt="Histq in the Focus layout with tabs down the side" />
+            </div>
+            <p class="lay__cap">
+              <span data-cap="classic">Sidebar, graph and details; a file opens over the graph.</span>
+              <span data-cap="stacked">The diff opens under the graph, so the graph stays in view.</span>
+              <span data-cap="columns">The diff takes a fourth column beside the commit details.</span>
+              <span data-cap="focus"><kbd>⌥⌘F</kbd> hides the side panels and gives the graph the window.</span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI -->
+      <section class="sec sec--ai" id="ai" aria-labelledby="ai-h">
+        <div class="container">
+          <div class="head head--split">
+            <h2 id="ai-h">AI drafts it. You apply it.</h2>
+            <p class="lead">Your key: OpenAI, Anthropic, Google Gemini, xAI or any OpenAI-compatible server.</p>
+          </div>
+          <div class="trio">
+            <figure class="shot-card">
+              <div class="shot"><img data-kind="product" src="shots/aicommit.webp" width="1200" height="803" loading="lazy" alt="Histq writing a commit message with AI from the staged changes, with Apply, Regenerate and Copy" /></div>
+              <figcaption><strong>Commit messages</strong>From the staged diff, in your repo’s style.</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <div class="shot"><img data-kind="product" src="shots/aiexplain.webp" width="1200" height="803" loading="lazy" alt="Histq explaining a commit with AI: a short summary of what the commit adds" /></div>
+              <figcaption><strong>Explanations</strong>What a commit does, in plain words.</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <div class="shot"><img data-kind="product" src="shots/airesolve.webp" width="1200" height="803" loading="lazy" alt="Histq suggesting a resolution for a merge conflict with AI, with a one-line reason and the merged code" /></div>
+              <figcaption><strong>Conflicts</strong>A suggested merge, with its reason.</figcaption>
+            </figure>
+          </div>
+          <p class="note">Also drafts rebase messages and pull requests. <code>.aiignore</code> keeps files out.</p>
+        </div>
+      </section>
+
+      <!-- Download -->
+      <section class="band" id="download" aria-labelledby="download-h">
+        <div class="container split split--close">
+          <div class="split__text">
+            <h2 id="download-h">Native on macOS. Windows and Linux next.</h2>
+            <p class="lead">Needs git 2.36 or later. Histq updates itself.</p>
+          </div>
+          <div class="split__text">
+            <table class="platforms">
+              <caption class="visually-hidden">Platforms</caption>
+              <thead><tr><th scope="col">Platform</th><th scope="col">Status</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">macOS 15+, Apple silicon</th><td class="is-live">Available</td></tr>
+                <tr><th scope="row">Windows</th><td>Coming soon</td></tr>
+                <tr><th scope="row">Linux</th><td>Coming soon</td></tr>
+              </tbody>
+            </table>
+            <a class="btn" href="https://github.com/Coprimal/Histq/releases/latest">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
+              Download for macOS
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer__inner">
+        <a class="brand" href="./" aria-label="Histq home"><img src="../logo.png" alt="" width="28" height="28" /><span>Histq</span></a>
+        <p>Free software under the GPLv3, made by <a href="https://coprimal.dev">Coprimal</a>. <a href="../docs.html">Docs</a>, <a href="https://github.com/Coprimal/Histq/blob/main/CHANGELOG.md">changelog</a>, <a href="../privacy.html">privacy</a> and <a href="https://github.com/Coprimal/Histq">source</a>.</p>
+      </div>
+    </footer>
+    <script src="site.js"></script>
+  </body>
+</html>
