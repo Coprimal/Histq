@@ -31,6 +31,9 @@ final class WindowModel {
         /// The color of the tab's book icon (its menu's Icon Color), an index into `Palette.graphLanes`; nil draws it in
         /// the text's color. Shown when the tab has no emoji, pinned or not.
         var iconColor: Int?
+        /// The archived tab popped out beside the archive button (`openArchived(at:)`): always the last of `tabs`, at
+        /// most one, never pinned and never in a group (its `repoKey` stays nil).
+        var archived = false
 
         /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { alias ?? repoURL?.lastPathComponent ?? "New Tab" }
@@ -48,6 +51,10 @@ final class WindowModel {
     private static let closedTabsLimit = 25
 
     private(set) var tabs: [Tab] = [Tab()]
+    /// The window's archive: the stowed archived tabs, most recently archived first, each saved with `archived` set.
+    /// They have no `Tab` and no session; `openArchived(at:)` pops one out as the last of `tabs`. Observed: the session
+    /// saves them (`savedTabs`).
+    private(set) var archivedTabs: [SavedTab] = []
     private(set) var selectedTabID: Tab.ID? {
         didSet { expandSelectedGroup() }
     }
@@ -99,6 +106,12 @@ final class WindowModel {
     }
 
     var selectedIndex: Int? { tabs.firstIndex { $0.id == selectedTabID } }
+
+    /// The archived tab popped out beside the archive button, the last of `tabs`; nil when none is out.
+    var archivedOut: Tab? { tabs.last?.archived == true ? tabs.last : nil }
+
+    /// Where the normal tabs end in `tabs` (the popped-out archived tab comes after them): new tabs go here.
+    private var normalEnd: Int { tabs.count - (archivedOut == nil ? 0 : 1) }
 
     // MARK: Toasts
 
@@ -211,13 +224,14 @@ final class WindowModel {
     /// Welcome tab, else a new tab. `nil` opens a new Welcome tab. A worktree opened from the tab `opener` (a
     /// double-click in its sidebar, "Open in New Tab") joins the opener's group at once: its new tab goes right after
     /// the group's last tab, pinned when the group is (`gatherGroups`). Any other new tab goes last, and moves beside
-    /// its repo's tabs once its repo is read (`resolveRepoKeys`).
+    /// its repo's tabs once its repo is read (`resolveRepoKeys`). A repo in the archive pops out (`openArchived(at:)`)
+    /// instead of opening twice.
     func openTab(_ url: URL?, opener: Tab.ID? = nil) {
         navigation.page = .home
         closeSettings()
         guard let url = url?.standardizedFileURL else {
             let tab = Tab()
-            tabs.append(tab)
+            tabs.insert(tab, at: normalEnd)
             selectedTabID = tab.id
             return
         }
@@ -230,19 +244,21 @@ final class WindowModel {
                 resolveRepoKeys([tabs[existing].id])
             }
             selectedTabID = tabs[existing].id
+        } else if let archived = archivedIndex(of: url.path) {
+            return openArchived(at: archived)
         } else if let index = selectedIndex, tabs[index].repoURL == nil {
             tabs[index].repoURL = url
             resolveRepoKeys([tabs[index].id])
         } else if let opener = opener.flatMap({ id in tabs.firstIndex { $0.id == id } }) {
             var tab = Tab(repoURL: url)
             tab.repoKey = tabs[opener].repoKey
-            tabs.insert(tab, at: groupEnd(of: opener) + 1)
+            tabs.insert(tab, at: min(groupEnd(of: opener) + 1, normalEnd))
             gatherGroups()
             selectedTabID = tab.id
             if tab.repoKey == nil { resolveRepoKeys([tab.id]) }
         } else {
             let tab = Tab(repoURL: url)
-            tabs.append(tab)
+            tabs.insert(tab, at: normalEnd)
             selectedTabID = tab.id
             resolveRepoKeys([tab.id])
         }
@@ -258,13 +274,14 @@ final class WindowModel {
     }
 
     /// Opens a repo from the Welcome tab `id`: in that tab while it is selected (as `openTab`). A clone that ends
-    /// after the user switched away fills that tab without selecting it.
+    /// after the user switched away fills that tab without selecting it, unless another tab or the archive has the
+    /// repo.
     private func open(_ url: URL, fromWelcome id: Tab.ID) {
         welcomes.removeValue(forKey: id)
         guard selectedTabID != id else { return openTab(url) }
         let url = url.standardizedFileURL
         guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].repoURL == nil,
-              !tabs.contains(where: { $0.repoURL?.path == url.path })
+              !tabs.contains(where: { $0.repoURL?.path == url.path }), archivedIndex(of: url.path) == nil
         else { return }
         UITiming.open(url.path)
         RecentRepos.shared.add(url)
@@ -457,18 +474,37 @@ final class WindowModel {
 
     /// Session restore: this new window's tabs become `saved` (`missing` = the folders that are gone) and the saved
     /// selected tab opens, as a click would show it. Not `openTab`: no recent-repos update, and the other tabs get their
-    /// session only when selected.
+    /// session only when selected. The archived entries go back to the archive, but the selected one: it is popped
+    /// out again, last and selected.
     func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>) {
         guard !saved.isEmpty else { return }
         welcomes.removeAll()
-        tabs = saved.map { tab in
-            Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
-                isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias, emoji: tab.emoji,
-                pinned: tab.pinned ?? false, iconColor: tab.iconColor)
+        var entries: [SavedTab] = []
+        var popped: SavedTab?
+        var selectedEntry: Int?
+        archivedTabs = []
+        for (offset, entry) in saved.enumerated() {
+            if entry.archived != true {
+                if offset == selected { selectedEntry = entries.count }
+                entries.append(entry)
+            } else if entry.path != nil {
+                if offset == selected { popped = entry } else { archivedTabs.append(entry) }
+            }
         }
-        restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), saved))
-        resolveRepoKeys(tabs.filter { !$0.isMissing }.map(\.id))
-        let index = selected.flatMap { tabs.indices.contains($0) ? $0 : nil } ?? 0
+        if let popped {
+            selectedEntry = entries.count
+            entries.append(popped)
+        }
+        tabs = entries.map { tab in
+            let archived = tab.archived == true
+            return Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
+                       isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias, emoji: tab.emoji,
+                       pinned: archived ? false : tab.pinned ?? false, iconColor: tab.iconColor, archived: archived)
+        }
+        restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), entries))
+        if tabs.isEmpty { tabs = [Tab()] }
+        resolveRepoKeys(tabs.filter { !$0.isMissing && !$0.archived }.map(\.id))
+        let index = selectedEntry ?? 0
         selectedTabID = tabs[index].id
         if let url = tabs[index].repoURL, !tabs[index].isMissing { UITiming.open(url.path) }
         activateSelectedTab()
@@ -476,9 +512,10 @@ final class WindowModel {
 
     /// The tabs as the session saves them, in order. A tab with a session saves its live profile and commit; one
     /// without keeps what it was restored with. Observable: reading it in `withObservationTracking` follows every
-    /// change it depends on (tabs, their sessions' selection and profile).
+    /// change it depends on (tabs, their sessions' selection and profile, the archive). The stowed archived tabs come
+    /// after every tab, so the normal tabs keep their indices.
     var savedTabs: [SavedTab] {
-        tabs.map(saved)
+        tabs.map(saved) + archivedTabs
     }
 
     /// One tab as the session saves it (`savedTabs`), and as ⇧⌘T reopens it.
@@ -491,22 +528,31 @@ final class WindowModel {
             saved.emoji = tab.emoji
             saved.pinned = tab.pinned ? true : nil
             saved.iconColor = tab.iconColor
+            saved.archived = tab.archived ? true : nil
             return saved
         }
         let commit: String? = if case .commit(let hash) = session.selection { hash } else { nil }
         // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
         let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
         return SavedTab(path: path, profile: profile, commit: commit, alias: tab.alias, emoji: tab.emoji,
-                        pinned: tab.pinned ? true : nil, iconColor: tab.iconColor)
+                        pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil)
     }
 
-    /// "Repo not found" › Locate…: the tab opens `url` instead (the tab that already shows it when there is one).
+    /// "Repo not found" › Locate…: the tab opens `url` instead (the tab that already shows it when there is one, or
+    /// its entry in the archive, popped out).
     func locate(_ id: Tab.ID, at url: URL) {
         let url = url.standardizedFileURL
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         if let existing = tabs.first(where: { $0.id != id && $0.repoURL?.path == url.path }) {
             _ = closeTab(id: id)
             return selectTab(id: existing.id)
+        }
+        if archivedIndex(of: url.path) != nil {
+            // Removed directly, not through `closeTab`: a lone tab must not give way to a Welcome tab first. A
+            // popped-out tab is stowed at the archive's front, so the entry is looked up again after.
+            remove(at: index)
+            if let archived = archivedIndex(of: url.path) { openArchived(at: archived) }
+            return
         }
         UITiming.open(url.path)
         RecentRepos.shared.add(url)
@@ -530,30 +576,48 @@ final class WindowModel {
     }
 
     /// Closes a tab; when it was the selected one, its neighbor is selected. Returns false when no tab is left (the
-    /// caller closes the window).
+    /// caller closes the window). The popped-out archived tab goes back to the archive. A window whose archive is not
+    /// empty does not close when its last repo tab closes: a Welcome tab takes its place, so the archive stays
+    /// reachable. Closing that lone Welcome tab closes the window.
     func closeTab(id: Tab.ID) -> Bool {
+        closeTab(id: id, archiving: false)
+    }
+
+    /// `closeTab(id:)`, or with `archiving` the tab goes to the archive instead of the stack ⇧⌘T reopens.
+    private func closeTab(id: Tab.ID, archiving: Bool) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
-        remove(at: index)
+        let wasWelcome = tabs[index].repoURL == nil
+        remove(at: index, archiving: archiving)
+        // A lone Welcome tab still closes the window (⌘W), its archive with it.
+        if tabs.isEmpty, !archivedTabs.isEmpty, !wasWelcome {
+            let welcome = Tab()
+            tabs = [welcome]
+            selectedTabID = welcome.id
+            return true
+        }
         if selectedTabID == id {
-            // The next shown tab, else the one before: a collapsed group stays collapsed unless nothing else is left.
-            let next = min(index, tabs.count - 1)
-            let shown = tabs.indices.filter { !isHidden($0) }
-            selectedTabID = tabs.isEmpty ? nil : tabs[shown.first { $0 >= next } ?? shown.last ?? next].id
+            // The next shown normal tab, else the one before: a collapsed group stays collapsed unless nothing else is
+            // left. The popped-out archived tab only when no normal tab is left.
+            let next = min(index, normalEnd - 1)
+            let shown = (0..<normalEnd).filter { !isHidden($0) }
+            let fallback = normalEnd > 0 ? next : tabs.count - 1
+            selectedTabID = tabs.isEmpty ? nil : tabs[shown.first { $0 >= next } ?? shown.last ?? fallback].id
             activateSelectedTab()
         }
         return !tabs.isEmpty
     }
 
-    /// A tab's menu › Close Other Tabs: every tab but `id`, which is selected.
+    /// A tab's menu › Close Other Tabs: every tab but `id`, which is selected. The popped-out archived tab stays.
     func closeOtherTabs(_ id: Tab.ID) {
-        closeTabs(keeping: id) { $0 != id }
+        let popped = archivedOut?.id
+        closeTabs(keeping: id) { $0 != id && $0 != popped }
     }
 
     /// A tab's menu › Close Tabs to the Right (Below, in the vertical tabs): the tabs after `id`; `id` is selected when
-    /// the selected tab was one of them.
+    /// the selected tab was one of them. The popped-out archived tab stays.
     func closeTabs(after id: Tab.ID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
-        let after = Set(tabs[(index + 1)...].map(\.id))
+        let after = Set(tabs[(index + 1)...].filter { !$0.archived }.map(\.id))
         closeTabs(keeping: id) { after.contains($0) }
     }
 
@@ -567,7 +631,8 @@ final class WindowModel {
     }
 
     /// A worktree removed from another tab (its sidebar or graph menu): its tabs in this window close, and ⇧⌘T forgets
-    /// them, as its folder is gone. The window's last tab stays (it shows "Repo not found").
+    /// them, as its folder is gone, and so does the archive (a popped-out tab of that worktree included). The window's
+    /// last tab stays (it shows "Repo not found").
     private func closeRemovedWorktreeTabs(_ path: String) {
         // The folder is gone: its parent's symlinks are resolved (git's `/private/tmp/…` is a tab's `/tmp/…`).
         func key(_ url: URL) -> String {
@@ -578,13 +643,21 @@ final class WindowModel {
         for tab in tabs where tab.repoURL.map(key) == removed && tabs.count > 1 {
             _ = closeTab(id: tab.id)
         }
+        // After the loop: a popped-out tab of that worktree was just stowed, and the archive forgets it too.
+        archivedTabs.removeAll { $0.path.map { key(URL(filePath: $0)) } == removed }
         closedTabs.removeAll { $0.saved.path.map { key(URL(filePath: $0)) } == removed }
     }
 
-    /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens.
-    private func remove(at index: Int) {
+    /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens. The
+    /// popped-out archived tab, or any tab when `archiving`, goes to the archive's front instead (unpinned).
+    private func remove(at index: Int, archiving: Bool = false) {
         let tab = tabs[index]
-        if tab.repoURL != nil, !tab.isMissing {
+        if tab.archived || archiving {
+            var entry = saved(tab)
+            entry.archived = true
+            entry.pinned = nil
+            archivedTabs.insert(entry, at: 0)
+        } else if tab.repoURL != nil, !tab.isMissing {
             closedTabs.append(ClosedTab(saved: saved(tab), repoKey: tab.repoKey, index: index))
             if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
         }
@@ -603,25 +676,85 @@ final class WindowModel {
 
     /// ⇧⌘T: reopens the last closed repo tab at its index, back in its worktree group (`gatherGroups`), with its
     /// profile, commit, alias, emoji and pin, and selects it. A repo open again in another tab meanwhile is selected
-    /// instead.
+    /// instead, and one in the archive pops out.
     func reopenClosedTab() {
         guard let closed = closedTabs.popLast(), let path = closed.saved.path else { return }
         navigation.page = .home
         closeSettings()
         if let existing = tabs.first(where: { $0.repoURL?.path == path }) { return selectTab(id: existing.id) }
+        if let archived = archivedIndex(of: path) { return openArchived(at: archived) }
         let url = URL(fileURLWithPath: path, isDirectory: true)
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
         var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias, emoji: closed.saved.emoji,
-                      pinned: closed.saved.pinned ?? false, iconColor: closed.saved.iconColor)
+                      pinned: closed.saved.pinned ?? false, iconColor: closed.saved.iconColor, archived: false)
         tab.repoKey = closed.repoKey
-        tabs.insert(tab, at: min(closed.index, tabs.count))
+        tabs.insert(tab, at: min(closed.index, normalEnd))
         restored[tab.id] = closed.saved
         gatherGroups()
         if exists, tab.repoKey == nil { resolveRepoKeys([tab.id]) }
         UITiming.select("reopen tab")
         selectedTabID = tab.id
         activateSelectedTab()
+    }
+
+    // MARK: Archive
+
+    /// A repo tab's menu › Archive This Tab: the tab goes to the archive's front (its profile, commit, alias, emoji
+    /// and icon color kept), its session closes, and its neighbor is selected as when it closes; ⇧⌘T does not reopen
+    /// it. On the popped-out archived tab it is the same as closing it. The window never closes: its last tab gives way
+    /// to a Welcome tab.
+    func archiveTab(_ id: Tab.ID) {
+        guard let tab = tabs.first(where: { $0.id == id }), tab.repoURL != nil else { return }
+        _ = closeTab(id: id, archiving: true)
+    }
+
+    /// A click on the archive's row `index`: that tab pops out, last in `tabs`, selected and shown as ⇧⌘T shows a
+    /// tab (a new session with its saved profile and commit). The tab popped out before goes back to the archive's
+    /// front. The popped tab never joins a group, so its repo is not read.
+    func openArchived(at index: Int) {
+        guard archivedTabs.indices.contains(index), let path = archivedTabs[index].path else { return }
+        // The entry first, then the tab popped out before: stowing it shifts the archive's indices.
+        let entry = archivedTabs.remove(at: index)
+        navigation.page = .home
+        closeSettings()
+        if archivedOut != nil { remove(at: tabs.count - 1) }
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+        let tab = Tab(repoURL: url, isMissing: !exists, alias: entry.alias, emoji: entry.emoji, pinned: false,
+                      iconColor: entry.iconColor, archived: true)
+        // The popped-out tab is always the last one.
+        tabs.append(tab)
+        restored[tab.id] = entry
+        UITiming.select("archived tab")
+        selectedTabID = tab.id
+        activateSelectedTab()
+    }
+
+    /// The popped-out tab's menu › Unarchive Tab: it becomes a normal tab at the start of the unpinned area, then
+    /// rejoins its worktree group once its repo is read. The selection stays.
+    func unarchiveTab(_ id: Tab.ID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].archived else { return }
+        var tab = tabs.remove(at: index)
+        tab.archived = false
+        tabs.insert(tab, at: pinnedCount)
+        if !tab.isMissing { resolveRepoKeys([id]) }
+    }
+
+    /// The × on the archive's row `index`: the entry leaves the archive, and ⇧⌘T can reopen it as a normal tab.
+    func removeArchived(at index: Int) {
+        guard archivedTabs.indices.contains(index) else { return }
+        var entry = archivedTabs.remove(at: index)
+        entry.archived = nil
+        guard entry.path != nil else { return }
+        closedTabs.append(ClosedTab(saved: entry, repoKey: nil, index: normalEnd))
+        if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
+    }
+
+    /// The index in `archivedTabs` of the entry for the repo folder `path`; nil when the archive has none.
+    private func archivedIndex(of path: String) -> Int? {
+        archivedTabs.firstIndex { $0.path == path }
     }
 
     /// A tab's menu › Set Alias…: `alias` names the tab; empty (or only spaces) gives it back its folder's name.
@@ -648,7 +781,8 @@ final class WindowModel {
     /// `repoKey`). Pinned tabs go to the end of the pinned area, unpinned ones to the start of the other tabs. The
     /// selection stays.
     func setPinned(_ pinned: Bool, for id: Tab.ID) {
-        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        // The popped-out archived tab is never pinned.
+        guard let tab = tabs.first(where: { $0.id == id }), !tab.archived else { return }
         let isAffected: (Tab) -> Bool = { other in tab.repoKey.map { other.repoKey == $0 } ?? (other.id == id) }
         guard tabs.contains(where: { isAffected($0) && $0.pinned != pinned }) else { return }
         var moved = tabs.filter(isAffected)
@@ -675,14 +809,15 @@ final class WindowModel {
 
     // MARK: Tab groups
 
-    /// The runs of two or more neighboring tabs of one repository, in tab order.
+    /// The runs of two or more neighboring tabs of one repository, in tab order. The popped-out archived tab is in
+    /// none.
     var tabGroups: [TabGroup] {
         var groups: [TabGroup] = []
         var start = 0
         while start < tabs.count {
             var end = start
-            if let key = tabs[start].repoKey {
-                while end + 1 < tabs.count, tabs[end + 1].repoKey == key { end += 1 }
+            if let key = tabs[start].repoKey, !tabs[start].archived {
+                while end + 1 < tabs.count, tabs[end + 1].repoKey == key, !tabs[end + 1].archived { end += 1 }
                 if end > start {
                     groups.append(TabGroup(key: key, range: start...end, name: TabGroupNames.shared.name(of: key)))
                 }
@@ -694,11 +829,11 @@ final class WindowModel {
 
     /// Where the tab at `source` may be dropped (indices once moved): a grouped tab only within its group, another
     /// tab anywhere but between two tabs of a group, so a group is never split; and a pinned tab only among the pinned
-    /// tabs, an unpinned one only among the others.
+    /// tabs, an unpinned one only among the others (before the popped-out archived tab, which never moves).
     func moveDestinations(from source: Int) -> [Int] {
-        guard tabs.indices.contains(source) else { return [] }
+        guard tabs.indices.contains(source), !tabs[source].archived else { return [] }
         if let group = tabGroups.first(where: { $0.range.contains(source) }) { return Array(group.range) }
-        let area = tabs[source].pinned ? 0..<pinnedCount : pinnedCount..<tabs.count
+        let area = tabs[source].pinned ? 0..<pinnedCount : pinnedCount..<normalEnd
         var rest = tabs.map(\.repoKey)
         rest.remove(at: source)
         return (0...rest.count).filter { index in
@@ -708,7 +843,7 @@ final class WindowModel {
     }
 
     /// A click on a group's name: collapses it to its name, or shows its tabs again. Collapsing the selected tab's
-    /// group selects the next shown tab after it, else before it, else a new tab, as Chrome does.
+    /// group selects the next shown tab after it, else before it, else the popped-out archived tab, else a new tab.
     func toggleGroup(_ key: String) {
         if collapsedGroups.contains(key) {
             collapsedGroups.remove(key)
@@ -716,8 +851,9 @@ final class WindowModel {
         }
         guard let group = tabGroups.first(where: { $0.key == key }) else { return }
         if let selected = selectedIndex, group.range.contains(selected) {
-            let shown = tabs.indices.filter { !group.range.contains($0) && !isHidden($0) }
-            if let next = shown.first(where: { $0 > group.range.upperBound }) ?? shown.last {
+            let shown = (0..<normalEnd).filter { !group.range.contains($0) && !isHidden($0) }
+            let popped = archivedOut == nil ? nil : tabs.count - 1
+            if let next = shown.first(where: { $0 > group.range.upperBound }) ?? shown.last ?? popped {
                 selectTab(at: next)
             } else {
                 openTab(nil)
@@ -757,10 +893,11 @@ final class WindowModel {
     }
 
     private func applyRepoKeys(_ keys: [(Tab.ID, URL, String?)]) {
-        // A tab closed or pointed elsewhere (Locate) meanwhile keeps what it has.
+        // A tab closed or pointed elsewhere (Locate) meanwhile keeps what it has. The popped-out archived tab never
+        // joins a group.
         for (id, url, key) in keys {
             guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].repoURL == url,
-                  tabs[index].repoKey != key
+                  !tabs[index].archived, tabs[index].repoKey != key
             else { continue }
             tabs[index].repoKey = key
         }
@@ -769,17 +906,17 @@ final class WindowModel {
 
     /// Moves each repo's tabs right after its first tab, the others keeping their order; then pins a whole group when
     /// one of its tabs is pinned and moves the pinned tabs first, each side
-    /// keeping its order. The selection stays.
+    /// keeping its order. The popped-out archived tab is left out of both and stays last. The selection stays.
     private func gatherGroups() {
         var gathered: [Tab] = []
         var placed = Set<String>()
-        for tab in tabs {
+        for tab in tabs where !tab.archived {
             guard let key = tab.repoKey else {
                 gathered.append(tab)
                 continue
             }
             guard placed.insert(key).inserted else { continue }
-            gathered += tabs.filter { $0.repoKey == key }
+            gathered += tabs.filter { $0.repoKey == key && !$0.archived }
         }
         // A tab that joins a pinned group (a new worktree tab, a repo read, Locate, ⇧⌘T) is pinned with it.
         let pinnedKeys = Set(gathered.filter(\.pinned).compactMap(\.repoKey))
@@ -787,7 +924,7 @@ final class WindowModel {
             if let key = gathered[index].repoKey, pinnedKeys.contains(key) { gathered[index].pinned = true }
         }
         // Groups stay side by side: each is wholly pinned or not.
-        gathered = gathered.filter(\.pinned) + gathered.filter { !$0.pinned }
+        gathered = gathered.filter(\.pinned) + gathered.filter { !$0.pinned } + tabs.filter(\.archived)
         if gathered != tabs { tabs = gathered }
         // The selected tab may just have joined a collapsed group (a Welcome tab's repo read).
         expandSelectedGroup()
@@ -883,6 +1020,17 @@ final class WindowModel {
                 return
             }
             selectTab(at: index)
+        case .archive:
+            // `archive:<n>`: a click on the archive's row n; `archive` alone: the selected tab's Archive This Tab.
+            guard let value = request.value else {
+                if let selectedTabID { archiveTab(selectedTabID) }
+                return
+            }
+            guard let index = Int(value), archivedTabs.indices.contains(index) else {
+                Self.logger.error("-HistqSelect archive: no archived tab \(value, privacy: .public)")
+                return
+            }
+            openArchived(at: index)
         case .settings:
             guard let value = request.value else {
                 openSettings()
