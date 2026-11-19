@@ -1,10 +1,11 @@
-// A repo tab's sidebar (panel 1): tabs Branches (Local, Remote, Worktrees and Stashes cards, ahead/behind counts), Tags, and
+// A repo tab's sidebar (panel 1): tabs Branches (Local, Remote, Worktrees, Submodules and Stashes cards, ahead/behind counts), Tags, and
 // Pull requests & Issues (`PullRequestSections`: the GitHub lists, or the Connect card). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
 // for it); a right-click opens the same menu as its badge in the graph. A branch the graph hides is dimmed, with an eye
 // that shows it again; a pinned or soloed one has a pin or a scope. The Local and Remote cards' header menus hide stale
 // branches or show all. The Remote card's header menu also adds a remote and renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
-// when one has uncommitted changes); a double-click opens another one in a tab, its header menu adds or prunes.
+// when one has uncommitted changes); a double-click opens another one in a tab, its header menu adds or prunes. The
+// Submodules card, only in a repo that has some, lists them with their state; its header menu updates or syncs them.
 import HistqCore
 import SwiftUI
 
@@ -104,6 +105,8 @@ enum SidebarMetrics {
     static let branchImage = "lucide-git-branch"
     /// The Worktrees card and each worktree's row: a folder.
     static let worktreeImage = "folder"
+    /// The Submodules card and each submodule's row: a box.
+    static let submoduleImage = "shippingbox"
     /// The Stashes card and each stash's row: the tray of the graph's stash node.
     static let stashImage = "tray"
 
@@ -167,7 +170,9 @@ struct SidebarView: View {
         switch (tab, session.refs) {
         case (.prs, _):
             PullRequestSections(session: session)
-        case (.branches, _) where branchIDs.isEmpty:
+        // A Submodules card in a repo without any shows nothing, so it counts as hidden (not while still reading).
+        case (.branches, _) where branchIDs.allSatisfy({ $0 == .submodules })
+            && (branchIDs.isEmpty || session.submodules.value?.isEmpty == true):
             HiddenSectionsCard()
         case (.branches, .loaded(let refs)):
             BranchSections(session: session, refs: refs, ids: branchIDs)
@@ -195,11 +200,16 @@ struct SidebarView: View {
                                    isExpanded: $session.remoteExpanded) { _ in
                         SkeletonRows(fractions: [0.3, 0.55, 0.4])
                     }
-                default:
+                case .worktrees:
                     SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
                                    isExpanded: $session.worktreesExpanded) { _ in
                         SkeletonRows(fractions: [0.4, 0.55])
                     }
+                case .submodules:
+                    // Read after the graph's first page, and only shown when the repo has some.
+                    EmptyView()
+                default:
+                    EmptyView()
                 }
             }
             SidebarSection(title: "Stashes", systemImage: SidebarMetrics.stashImage, count: nil,
@@ -222,8 +232,8 @@ struct SidebarView: View {
     }
 }
 
-/// The Local, Remote and Worktrees cards, those of `ids` in its order. Remote branches are grouped by remote inside
-/// their card.
+/// The Local, Remote, Worktrees and Submodules cards, those of `ids` in its order. Remote branches are grouped by
+/// remote inside their card.
 private struct BranchSections: View {
     @Bindable var session: RepoSession
     let refs: Refs
@@ -235,7 +245,9 @@ private struct BranchSections: View {
             switch id {
             case .local: localCard
             case .remote: remoteCard
-            default: WorktreeSection(session: session)
+            case .worktrees: WorktreeSection(session: session)
+            case .submodules: SubmoduleSection(session: session)
+            default: EmptyView()
             }
         }
         StashSection(session: session)
@@ -348,7 +360,8 @@ private struct BranchSections: View {
     }
 }
 
-/// The Branches tab with Local, Remote and Worktrees all hidden: says so, with the button to Settings › Appearance.
+/// The Branches tab with Local, Remote, Worktrees and Submodules all hidden: says so, with the button to Settings ›
+/// Appearance.
 private struct HiddenSectionsCard: View {
     @Environment(WindowModel.self) private var model
     @Environment(\.textSize) private var textSize
@@ -358,7 +371,7 @@ private struct HiddenSectionsCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("All sections are hidden")
                     .font(textSize.bodyMedium)
-                Text("Local, Remote and Worktrees are hidden in Settings › Appearance.")
+                Text("Local, Remote, Worktrees and Submodules are hidden in Settings › Appearance.")
                     .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -490,6 +503,172 @@ private struct WorktreeRow: View {
     private func open() {
         guard !info.isCurrent, !info.worktree.isPrunable else { return }
         session.openWorktree(info.path)
+    }
+}
+
+/// The Submodules card, only in a repo that has submodules (read after the graph's first page): its submodules in
+/// index order, each nested one under its parent, and the header's menu (Update All, Sync All).
+private struct SubmoduleSection: View {
+    @Bindable var session: RepoSession
+
+    var body: some View {
+        switch session.submodules {
+        case .loaded(let submodules) where !submodules.isEmpty:
+            SidebarSection(title: "Submodules", systemImage: SidebarMetrics.submoduleImage, count: submodules.count,
+                           isExpanded: $session.submodulesExpanded) { query in
+                // By its name, its path or its branch.
+                let shown = submodules.filter { FileSearch.matches("\($0.name) \($0.path) \(branch($0))", query: query) }
+                if shown.isEmpty { EmptyRow(text: "No matching submodules") }
+                ForEach(shown) { submodule in
+                    SubmoduleRow(session: session, submodule: submodule,
+                                 depth: submodules.count { submodule.path.hasPrefix($0.path + "/") })
+                }
+            } accessory: {
+                Menu {
+                    MenuEntriesView(entries: RepoMenus.submodules(session))
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundStyle(.secondary)
+                        // Square, so the hover circle (sized on the label's shorter side) clears the wide glyph.
+                        .frame(width: SidebarMetrics.menuIconSide, height: SidebarMetrics.menuIconSide)
+                }
+                .menuStyle(.button)
+                .buttonStyle(RowIconButtonStyle())
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Submodules")
+                .accessibilityLabel("Submodule actions")
+            }
+        case .failed(let message):
+            // The repo has a `.gitmodules` the read could not list.
+            SidebarSection(title: "Submodules", systemImage: SidebarMetrics.submoduleImage, count: 0,
+                           isExpanded: $session.submodulesExpanded) { _ in
+                EmptyRow(text: message)
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private func branch(_ submodule: Submodule) -> String {
+        if case .checkedOut(_, let branch?) = submodule.state { branch } else { "" }
+    }
+
+}
+
+/// A submodule's row: a box, its name (a nested one's path, indented under its parent), its state chips (not
+/// initialized or not checked out; new commits when its checkout is off the recorded commit; its uncommitted changes;
+/// its branch), then the recorded commit. A click selects it at once; a double-click, recognized beside the single
+/// click (`simultaneousGesture`), opens it in a tab, or initializes and checks out a top-level one with no checkout.
+private struct SubmoduleRow: View {
+    let session: RepoSession
+    let submodule: Submodule
+    /// How many submodules it is nested in.
+    let depth: Int
+    @State private var hovered = false
+    @Environment(\.textSize) private var textSize
+
+    var body: some View {
+        let selected = session.selection == .submodule(submodule.path)
+        HStack(spacing: SidebarMetrics.iconGap) {
+            Image(systemName: SidebarMetrics.submoduleImage)
+                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+            HStack(spacing: 4) {
+                Text(depth == 0 ? submodule.name : submodule.path)
+                    .font(textSize.body)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    // The name first; the chips and the commit take what is left.
+                    .layoutPriority(1)
+                Spacer(minLength: 4)
+                // The chips and the recorded commit when they fit, else the commit goes, then whole chips, the branch
+                // first (all of them are in the tooltip). The first chip always stays: the name truncates for it.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        chipViews(chips)
+                        Text(submodule.recordedCommit.prefix(7))
+                            .font(textSize.caption)
+                            .monospaced()
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    ForEach(Array(stride(from: chips.count, through: min(chips.count, 1), by: -1)), id: \.self) {
+                        count in
+                        HStack(spacing: 4) { chipViews(Array(chips.prefix(count))) }
+                    }
+                }
+            }
+        }
+        .foregroundStyle(selected ? Color.primary : Color.secondary)
+        .padding(.leading, SidebarMetrics.capsuleLeading)
+        .padding(.trailing, 10)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
+        .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
+        .contentShape(Capsule())
+        .padding(.leading, SidebarMetrics.rowLeading - SidebarMetrics.capsuleLeading
+                    + CGFloat(depth) * SidebarMetrics.nestedIndent)
+        .animation(Motion.hover, value: hovered)
+        .onHover { hovered = $0 }
+        .onTapGesture { select() }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { open() })
+        .contextMenu { MenuEntriesView(entries: RepoMenus.submodule(submodule.path, session)) }
+        .help(([submodule.path, submodule.url, chips.isEmpty ? nil : chips.joined(separator: " · ")])
+            .compactMap(\.self).joined(separator: "\n"))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityLabel(([ "Submodule \(submodule.path)"] + chips).joined(separator: ", "))
+        .accessibilityAction { select() }
+        .accessibilityAction(named: "Open in New Tab") { open() }
+    }
+
+    private func chipViews(_ chips: [String]) -> some View {
+        ForEach(chips, id: \.self) { chip in
+            Text(chip)
+                .font(textSize.caption)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .background(Capsule().fill(Palette.inputSurface))
+        }
+    }
+
+    private var isCheckedOut: Bool {
+        if case .checkedOut = submodule.state { true } else { false }
+    }
+
+    private var chips: [String] {
+        var chips: [String] = []
+        switch submodule.state {
+        case .notInitialized: chips.append("Not initialized")
+        case .notCheckedOut: chips.append("Not checked out")
+        case .checkedOut: break
+        }
+        if submodule.isMoved { chips.append("New commits") }
+        if submodule.changeCount > 0 {
+            chips.append(submodule.changeCount == 1 ? "1 change" : "\(submodule.changeCount) changes")
+        }
+        if case .checkedOut(_, let branch?) = submodule.state { chips.append(branch) }
+        return chips
+    }
+
+    private func select() {
+        session.selectSubmodule(submodule.path)
+    }
+
+    private func open() {
+        if isCheckedOut {
+            session.openSubmodule(submodule.path)
+        } else if depth == 0 {
+            update()
+        }
+    }
+
+    private func update() {
+        let initialize = !isCheckedOut
+        session.run(.updateSubmodules([submodule.path], initialize: initialize),
+                    title: "\(initialize ? "Initialize" : "Update") submodule \(submodule.path)")
     }
 }
 

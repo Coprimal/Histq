@@ -774,6 +774,8 @@ private struct DetailPanel: View {
             MultipleSelectionCard(session: session, count: count)
         case .worktree(let path):
             WorktreeChangesPlaceholder(path: path)
+        case .submodule(let path):
+            SubmoduleStatusPanel(session: session, path: path, detail: nil)
         case .compare(let base, let head):
             CompareDetailPanel(session: session, base: base, head: head, files: nil, token: session.selectToken,
                                timingDetail: session.selectDetail)
@@ -802,6 +804,8 @@ private struct DetailPanel: View {
             MultipleSelectionCard(session: session, count: count)
         case .worktree(let path, let status):
             WorktreeChangesPanel(path: path, status: status)
+        case .submodule(let detail):
+            SubmoduleStatusPanel(session: session, path: detail.submodule.path, detail: detail)
         case .compare(let base, let head, let files):
             CompareDetailPanel(session: session, base: base, head: head, files: files, token: session.selectToken,
                                timingDetail: session.selectDetail)
@@ -867,7 +871,7 @@ private struct WorkingChangesNotice: View {
     private var count: Int? {
         switch session.selection {
         case .commit, .stash, .ref: break
-        case .overview, .wip, .multiple, .worktree, .compare: return nil
+        case .overview, .wip, .multiple, .worktree, .compare, .submodule: return nil
         }
         guard let count = session.status.value?.entries.count, count > 0 else { return nil }
         return count

@@ -245,6 +245,46 @@ struct GitOperationsTests {
         }
     }
 
+    @Test("Merge modes pass --ff, --ff-only or --no-ff")
+    func mergeModes() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("modes")
+        let ops = GitOperations(
+            runner: sandbox.runner, cwd: repo, env: GitInvocation.environment(profile: nil, base: sandbox.base))
+        let base = try await sandbox.git(["rev-parse", "HEAD"], in: repo)
+        try await sandbox.git(["checkout", "-q", "-b", "ahead"], in: repo)
+        try Data("ahead\n".utf8).write(to: repo.appending(path: "ahead.txt"))
+        try await sandbox.git(["add", "ahead.txt"], in: repo)
+        try await sandbox.git(["commit", "-q", "-m", "ahead"], in: repo)
+        let ahead = try await sandbox.git(["rev-parse", "HEAD"], in: repo)
+        try await sandbox.git(["checkout", "-q", "main"], in: repo)
+
+        // --ff: HEAD moves to the tip, no new commit.
+        try await ops.merge("ahead", mode: .fastForward)
+        #expect(try await sandbox.git(["rev-parse", "HEAD"], in: repo) == ahead)
+
+        // --no-ff on a fast-forwardable branch: a two-parent merge commit.
+        try await sandbox.git(["reset", "-q", "--hard", base], in: repo)
+        try await ops.merge("ahead", mode: .noFastForward)
+        #expect(try await sandbox.git(["rev-parse", "HEAD^1", "HEAD^2"], in: repo) == "\(base)\n\(ahead)")
+
+        // --ff-only on a diverged branch: refused, HEAD unchanged.
+        try await sandbox.git(["reset", "-q", "--hard", base], in: repo)
+        try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "local"], in: repo)
+        let local = try await sandbox.git(["rev-parse", "HEAD"], in: repo)
+        await #expect {
+            try await ops.merge("ahead", mode: .fastForwardOnly)
+        } throws: { error in
+            if case GitError.nonFastForward = error { true } else { false }
+        }
+        #expect(try await sandbox.git(["rev-parse", "HEAD"], in: repo) == local)
+
+        #expect(try await ops.isAncestor(base, of: "ahead"))
+        #expect(try await ops.isAncestor("ahead", of: "main") == false)
+        await #expect(throws: GitError.self) { try await ops.isAncestor("no-such-rev", of: "main") }
+    }
+
     @Test("ignore appends one line to the top level's .gitignore, keeping its bytes (CRLF, no final newline) and mode")
     func ignoreKeepsBytes() async throws {
         let fx = try await Repo("graph")

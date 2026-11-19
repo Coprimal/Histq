@@ -1,15 +1,15 @@
 // The sidebar's sections as the user orders and hides them (`PrefKey.sidebarSectionOrder`, `.hiddenSidebarSections`):
-// the Branches tab's cards, the Tags card and the PRs tab's lists. A section moves only inside its tab; a tab with
+// the Branches tab's cards (Submodules only in a repo that has some), the Tags card and the PRs tab's lists. A section moves only inside its tab; a tab with
 // nothing left to show goes away, except Branches, which then says all its sections are hidden.
 import Foundation
 
 /// A sidebar section, by its id in the prefs. The PR lists' ids are `GitHubStore.List`'s raw values.
 enum SidebarSectionID: String, CaseIterable, Sendable {
-    case local, remote, worktrees, tags, mine, reviewRequested, allOpen, assigned
+    case local, remote, worktrees, submodules, tags, mine, reviewRequested, allOpen, assigned
 
     var tab: SidebarTab {
         switch self {
-        case .local, .remote, .worktrees: .branches
+        case .local, .remote, .worktrees, .submodules: .branches
         case .tags: .tags
         case .mine, .reviewRequested, .allOpen, .assigned: .prs
         }

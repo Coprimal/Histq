@@ -198,13 +198,15 @@ enum FailureHints {
         case checkHostKey, pull, forceDelete(String)
         /// A worktree git refused to remove for its changes: the forced removal, confirmed.
         case forceRemoveWorktree(String)
+        /// A submodule git refused to remove for its local changes: the forced removal, confirmed.
+        case forceRemoveSubmodule(String)
 
         var title: String {
             switch self {
             case .checkHostKey: "Check Host Key…"
             case .pull: "Pull"
             case .forceDelete: "Delete Anyway…"
-            case .forceRemoveWorktree: "Remove Anyway…"
+            case .forceRemoveWorktree, .forceRemoveSubmodule: "Remove Anyway…"
             }
         }
     }
@@ -222,6 +224,16 @@ enum FailureHints {
             return Hint(text: "The worktree has uncommitted changes or untracked files.",
                         action: .forceRemoveWorktree(path))
         }
+        if case .removeSubmodule(let path, false) = failure.write, failure.message.contains("local modifications") {
+            return Hint(text: "The submodule has uncommitted changes, untracked files or commits not recorded here.",
+                        action: .forceRemoveSubmodule(path))
+        }
+        // Each failed submodule's git message is kept as text: a sign-in refusal among them gets the auth hint.
+        if let update = failure.error as? SubmoduleUpdateFailure,
+           update.failures.contains(where: { isAuthMessage($0.message) })
+        {
+            return Hint(text: authText + " " + submoduleAuthText)
+        }
         if let withheld = failure.error as? NetworkTokenWithheld {
             switch withheld.reason {
             case .repoNetworkConfig(let keys):
@@ -236,8 +248,7 @@ enum FailureHints {
         guard let error = failure.error as? GitError else { return Hint() }
         switch error {
         case .auth:
-            return Hint(text: "Git could not sign in to the remote. Check that your SSH key is loaded (ssh-add) or that a "
-                + "credential helper knows this host.")
+            return Hint(text: authText + (isSubmoduleWrite(failure.write) ? " " + submoduleAuthText : ""))
         case .hostKey:
             if HostKeyTrust.isKeyChanged(error) {
                 return Hint(text: "The host's SSH key has changed since the last connection. Someone may be intercepting "
@@ -267,6 +278,28 @@ enum FailureHints {
         }
     }
 
+    private static let authText = "Git could not sign in to the remote. Check that your SSH key is loaded (ssh-add) or "
+        + "that a credential helper knows this host."
+    static let submoduleAuthText =
+        "Submodule fetches use your SSH key, or the GitHub account token for https URLs on its host."
+
+    private static func isSubmoduleWrite(_ write: RepoSession.Write) -> Bool {
+        switch write {
+        case .updateSubmodules, .syncSubmodules, .addSubmodule, .removeSubmodule, .setSubmoduleURL,
+             .setSubmoduleBranch:
+            true
+        default: false
+        }
+    }
+
+    /// git's sign-in refusals, as `GitError` classifies them (its classifier is internal to the core).
+    static func isAuthMessage(_ message: String) -> Bool {
+        let text = message.lowercased()
+        return ["permission denied (publickey", "authentication failed", "could not read username",
+                "could not read password", "terminal prompts disabled", "invalid username or password"]
+            .contains { text.contains($0) }
+    }
+
     @MainActor
     static func perform(_ action: Action, for failure: OperationFailure, in session: RepoSession) {
         switch action {
@@ -282,6 +315,12 @@ enum FailureHints {
             let name = URL(filePath: path).lastPathComponent
             let changes = session.worktrees.value?.first { $0.path == path }?.changes?.detail
             RepoMenus.confirmForceRemove(path, name: name, changes: changes, session)
+        case .forceRemoveSubmodule(let path):
+            session.confirm("Remove the submodule \(path) anyway?",
+                            message: "Its folder with its uncommitted changes and untracked files, its clone in "
+                                + ".git/modules and any commits not pushed from it are deleted. This cannot be undone.",
+                            button: "Remove Submodule", write: .removeSubmodule(path, force: true),
+                            operation: "Remove submodule \(path)")
         }
     }
 }

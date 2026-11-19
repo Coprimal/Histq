@@ -5,7 +5,8 @@
 // graph, a tag's hide), a graph badge's menu (its ref's menu, then its commit's), the Local and Remote cards' Hide Stale
 // Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
-// (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, stash one WIP file or
+// (open in a tab, add, remove, prune), the submodule menus (open in a tab, initialize or update, sync, stage the new
+// pointer, set the URL or branch, remove; add, update or sync all), checkout file from a commit, a file's history and blame, stash one WIP file or
 // folder, ignore or exclude an untracked one, apply one file of a stash, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
@@ -480,14 +481,18 @@ enum RepoMenus {
         return entries
     }
 
-    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current`, rebase `current` onto it (plain or
-    /// interactive), compare with it.
+    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current` (each merge mode), fast-forward
+    /// `current` to it (git refuses when they diverged), rebase `current` onto it (plain or interactive), compare with it.
     private static func integrate(_ name: String, ref: String, commit: String?, into current: String,
                                   _ session: RepoSession) -> [MenuEntry] {
         let rebaseReason = commit == nil ? "\(name) has no commit." : session.rebaseOntoUnavailableReason()
         return [
-            .action("Merge \(name) into \(current)") {
-                session.run(.merge(ref, checkoutFirst: nil), title: "Merge \(name) into \(current)")
+            mergeSubmenu("Merge \(name) into \(current)") { mode in
+                session.run(.merge(ref, checkoutFirst: nil, mode: mode), title: "Merge \(name) into \(current)")
+            },
+            .action("Fast-forward \(current) to \(name)") {
+                session.run(.merge(ref, checkoutFirst: nil, mode: .fastForwardOnly),
+                            title: "Fast-forward \(current) to \(name)")
             },
             .action("Rebase \(current) onto \(name)") {
                 session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
@@ -499,6 +504,23 @@ enum RepoMenus {
                 session.selectCompare(base: "refs/heads/\(current)", head: ref)
             },
         ]
+    }
+
+    /// A "Merge X into Y" submenu's choices: the item's title, the palette row's suffix, the mode.
+    nonisolated static let mergeChoices: [(title: String, palette: String, mode: GitOperations.MergeMode)] = [
+        ("Fast-forward if possible", "fast-forward if possible", .fastForward),
+        ("Fast-forward only", "fast-forward only", .fastForwardOnly),
+        ("Always create a merge commit (no fast-forward)", "always create a merge commit", .noFastForward),
+    ]
+
+    /// Whether a menu title is a "Merge X into Y" submenu's.
+    nonisolated static func isMergeSubmenu(_ title: String) -> Bool {
+        title.hasPrefix("Merge ") && title.contains(" into ")
+    }
+
+    private static func mergeSubmenu(_ title: String,
+                                     merge: @escaping @MainActor (GitOperations.MergeMode) -> Void) -> MenuEntry {
+        .submenu(title, mergeChoices.map { choice in .action(choice.title) { merge(choice.mode) } })
     }
 
     /// The web page at `path` (`tree/<branch>`, `commit/<sha>`) of the repository `remote`'s URL names, in GitHub's
@@ -688,11 +710,96 @@ enum RepoMenus {
         ]
     }
 
+    // MARK: Submodules
+
+    /// A submodule's menu (its sidebar row, the palette): open it in a tab (once checked out), initialize or update it,
+    /// sync its URL, stage its new pointer (once its checkout moved), set its URL or branch, copy its path or URL, reveal
+    /// it in Finder, remove it (confirmed). A nested one's pointer and URL live in its parent submodule, so it only opens,
+    /// copies and reveals. A path the list does not have gets its items disabled.
+    static func submodule(_ path: String, _ session: RepoSession) -> [MenuEntry] {
+        let list = session.submodules.value ?? []
+        let submodule = list.first { $0.path == path }
+        let isNested = SubmoduleDetail.isNested(path, in: list)
+        let state = submodule?.state
+        let isCheckedOut = if case .checkedOut? = state { true } else { false }
+        let isInitialized = if case .notInitialized? = state { false } else { submodule != nil }
+        let canWrite = submodule != nil && !isNested
+        let nested: String? = isNested ? "A nested submodule: act on it from its parent submodule's tab." : nil
+        let verb = isCheckedOut ? "Update" : "Initialize"
+        let isMoved = submodule?.isMoved ?? false
+        let url = submodule?.url
+        return [
+            .action("Open in New Tab", enabled: isCheckedOut,
+                    toolTip: submodule != nil && !isCheckedOut ? "It has no checkout: initialize it first." : nil) {
+                session.openSubmodule(path)
+            },
+            .separator,
+            .action(verb, enabled: canWrite, toolTip: nested) {
+                session.run(.updateSubmodules([path], initialize: !isCheckedOut), title: "\(verb) submodule \(path)")
+            },
+            .action("Sync URL", enabled: canWrite && isInitialized,
+                    toolTip: nested ?? (canWrite && !isInitialized ? "Not initialized: nothing to sync." : nil)) {
+                session.run(.syncSubmodules([path]), title: "Sync submodule URL \(path)")
+            },
+            .action("Stage New Pointer", enabled: canWrite && isMoved,
+                    toolTip: nested ?? (canWrite && isCheckedOut && !isMoved
+                        ? "Its checkout is on the recorded commit." : nil)) {
+                session.run(.stage([path]), title: "Stage submodule pointer \(path)")
+            },
+            .separator,
+            .action("Set URL…", enabled: canWrite, toolTip: nested) { session.dialog = .setSubmoduleURL(path) },
+            .action("Set Branch…", enabled: canWrite, toolTip: nested) { session.dialog = .setSubmoduleBranch(path) },
+            .separator,
+            .submenu("Copy", [
+                .action("Path") { copy(path) },
+                .action("URL", enabled: url != nil, toolTip: url == nil ? "No URL in .gitmodules." : nil) {
+                    copy(url ?? "")
+                },
+            ]),
+            .action("Reveal in Finder", enabled: submodule != nil) {
+                Task {
+                    guard let url = await session.submoduleURL(path) else { return }
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            },
+            .separator,
+            .action("Remove…", enabled: canWrite, destructive: true, toolTip: nested) {
+                confirmRemoveSubmodule(path, session)
+            },
+        ]
+    }
+
+    /// The Submodules card's menu and the repo menu's Submodules submenu: add a submodule, update (checking out each
+    /// recorded commit) or sync the URLs of every submodule.
+    static func submodules(_ session: RepoSession) -> [MenuEntry] {
+        let hasSubmodules = session.submodules.value?.isEmpty == false
+        let none = hasSubmodules ? nil : "This repository has no submodules."
+        return [
+            .action("Add Submodule…") { session.dialog = .addSubmodule },
+            .separator,
+            .action("Update All", enabled: hasSubmodules, toolTip: none) {
+                session.run(.updateSubmodules([], initialize: false), title: "Update submodules")
+            },
+            .action("Sync All", enabled: hasSubmodules, toolTip: none) {
+                session.run(.syncSubmodules([]), title: "Sync submodule URLs")
+            },
+        ]
+    }
+
+    /// Removing a submodule (its menu, its detail's Remove…): names what is lost.
+    static func confirmRemoveSubmodule(_ path: String, _ session: RepoSession) {
+        session.confirm("Remove the submodule \(path)?",
+                        message: "Its folder, its clone in .git/modules and any commits not pushed from it are "
+                            + "deleted, and the removal is staged. This cannot be undone.",
+                        button: "Remove Submodule", write: .removeSubmodule(path, force: false),
+                        operation: "Remove submodule \(path)")
+    }
+
     // MARK: Repository
 
     /// The repository's own actions (the toolbar's repo menu, the palette): Show Reflog, Optimize Repository
     /// (confirmed; disabled while one runs: it is outside the write lane, so a second one would redo the work or fail on
-    /// git's lock).
+    /// git's lock), the Submodules submenu.
     static func repository(_ session: RepoSession) -> [MenuEntry] {
         let operation = "Optimize repository"
         return [
@@ -705,6 +812,8 @@ enum RepoMenus {
                                 button: "Optimize", write: .optimizeRepository, operation: operation,
                                 isDestructive: false)
             },
+            .separator,
+            .submenu("Submodules", submodules(session)),
         ]
     }
 
@@ -753,8 +862,8 @@ enum RepoMenus {
         let current = session.currentBranch
         var entries: [MenuEntry] = []
         if case .local = target {
-            entries.append(.action("Merge \(sourceName) into \(targetName)") {
-                session.run(.merge(sourceRef, checkoutFirst: targetName == current ? nil : targetName),
+            entries.append(mergeSubmenu("Merge \(sourceName) into \(targetName)") { mode in
+                session.run(.merge(sourceRef, checkoutFirst: targetName == current ? nil : targetName, mode: mode),
                             title: "Merge \(sourceName) into \(targetName)")
             })
         }
@@ -765,8 +874,11 @@ enum RepoMenus {
             })
         }
         if case .local = target {
+            // The checked-out branch moves with a journaled fast-forward-only merge, so it can be undone.
             entries.append(.action("Fast-forward \(targetName) to \(sourceName)") {
-                session.run(.fastForward(targetName, to: sourceRef), title: "Fast-forward \(targetName) to \(sourceName)")
+                let write: RepoSession.Write = targetName == current
+                    ? .merge(sourceRef, checkoutFirst: nil, mode: .fastForwardOnly) : .fastForward(targetName, to: sourceRef)
+                session.run(write, title: "Fast-forward \(targetName) to \(sourceName)")
             })
         }
         let pullReason = createPullRequestUnavailableReason(head: source, base: target, session)
@@ -880,7 +992,8 @@ enum RepoMenus {
     ) {
         let title = "Checkout \(name)"
         let preference = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue)
-        guard session.status.value?.entries.isEmpty == false, preference != "never" else {
+        // A moved or edited submodule is not a change the checkout carries: the submodule update deals with it.
+        guard session.status.value?.entries.contains(where: { !$0.isSubmodule }) == true, preference != "never" else {
             session.run(write(false), title: title, key: .checkout)
             return
         }
@@ -940,9 +1053,10 @@ enum RepoMenus {
     }
 
     /// "Checkout File from This Commit" in a commit's file list (confirmed when the file has local changes), then its
-    /// File History and Blame at the commit. A deleted file has only its history.
+    /// File History and Blame at the commit. A deleted file has only its history, a submodule neither.
     static func checkoutFile(_ file: FileChange, commit: String, session: RepoSession) -> [MenuEntry] {
-        let tools = fileTools(path: file.path, rev: commit, blame: file.kind != .deleted, session: session)
+        let tools = file.isSubmodule ? []
+            : fileTools(path: file.path, rev: commit, blame: file.kind != .deleted, session: session)
         guard file.kind != .deleted else { return tools }
         let short = String(commit.prefix(7))
         let write = RepoSession.Write.checkoutFiles([file.path], from: commit)
@@ -962,7 +1076,8 @@ enum RepoMenus {
     }
 
     /// A stash's file: "Apply This File" (confirmed when the file has local changes), then its File History and Blame
-    /// at the stash. Its untracked files come from the stash's untracked-files commit and have no history or blame.
+    /// at the stash. Its untracked files come from the stash's untracked-files commit and have no history or blame;
+    /// nor does a submodule.
     static func stashFile(_ file: FileChange, stash hash: String, session: RepoSession) -> [MenuEntry] {
         // "View all files" lists the files the stash did not change: nothing of the stash to apply.
         guard file.kind != .unchanged else {
@@ -981,7 +1096,7 @@ enum RepoMenus {
                 session.run(write, title: operation)
             }
         }
-        guard !untracked else { return [apply] }
+        guard !untracked, !file.isSubmodule else { return [apply] }
         return [apply, .separator]
             + fileTools(path: file.path, rev: hash, blame: file.kind != .deleted, session: session)
     }
@@ -1009,9 +1124,10 @@ enum RepoMenus {
     /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `badge:<local|remote|tag>:<name>`
     /// (a graph badge), `remotes`, `file:<sha>:<path>`, `wipfile:<path>` (a WIP file's `wipExtras`),
     /// `stashfile:<sha>:<path>` (a tracked file of a stash), `drop:<local|remote>:<name>><local|remote>:<name>`,
-    /// `branches` (the toolbar's branch menu), `repo` (`repository`, the toolbar's repo menu) or `reflog:<sha>` (a
-    /// reflog entry's menu). Each step's outcome goes to `operations.txt` in the state folder. For QA on fixture copies
-    /// only.
+    /// `branches` (the toolbar's branch menu), `repo` (`repository`, the toolbar's repo menu), `reflog:<sha>` (a
+    /// reflog entry's menu), `submodule:<path>` (a submodule's menu) or `submodules` (the Submodules card's menu); a
+    /// submodule root waits for the submodule list (`RepoSession`'s launch). Each step's outcome goes to
+    /// `operations.txt` in the state folder. For QA on fixture copies only.
     static func debugRun(_ spec: String, session: RepoSession) async {
         for step in spec.components(separatedBy: ";;") {
             guard let perform = debugAction(step, session) else {
@@ -1081,6 +1197,8 @@ enum RepoMenus {
         case "worktrees": return worktrees(session)
         case "repo": return repository(session)
         case "reflog": return reflog(value, session)
+        case "submodules": return submodules(session)
+        case "submodule": return submodule(value, session)
         case "worktree":
             // By folder name or path.
             let info = session.worktrees.value?.first { $0.name == value || $0.path == value }

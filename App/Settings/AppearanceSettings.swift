@@ -295,6 +295,8 @@ struct AppearanceSettings: View {
             Text(title)
             if id == .allOpen {
                 SettingsHint("Still loads when hidden: it feeds the graph's pull request badges.")
+            } else if id == .submodules {
+                SettingsHint("Only in a repository that has submodules.")
             }
         }
     }
@@ -333,6 +335,7 @@ struct AppearanceSettings: View {
         case .local: "Local"
         case .remote: "Remote"
         case .worktrees: "Worktrees"
+        case .submodules: "Submodules"
         case .tags: "Tags"
         case .mine, .reviewRequested, .allOpen, .assigned: GitHubStore.List(rawValue: id.rawValue)?.title ?? id.rawValue
         }

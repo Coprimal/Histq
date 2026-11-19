@@ -108,6 +108,8 @@ struct FileDiffDetail: Sendable {
         case tooLarge(Int)
         /// git printed no diff for the file (it has no change left).
         case unchanged
+        /// A submodule's pointer change, one per side that has one (`SubmoduleChangeCard`).
+        case submodule([SubmodulePointer])
     }
 
     var loadID: Int
@@ -158,12 +160,15 @@ struct DiffView: View {
             switch session.fileDiff {
             case .idle, .loading:
                 DiffCard(header: DiffFileHeader(session: session, target: target, counts: .loading),
-                         contentPadding: target.isImage ? SettingsMetrics.cardPadding : 0) {
+                         contentPadding: target.isImage || target.file.isSubmodule ? SettingsMetrics.cardPadding : 0) {
                     PlaceholderCard(
                         token: session.fileToken, detail: session.fileDetail,
                         isCurrent: { [model, session] in model.selectedSession === session && session.openFile != nil }
                     ) {
-                        if target.isImage { ImageDiffPlaceholder() } else { DiffPlaceholder() }
+                        if target.file.isSubmodule {
+                            SubmoduleChangeCard(session: session, path: target.path, pointer: nil,
+                                                isWIP: target.source == .wip)
+                        } else if target.isImage { ImageDiffPlaceholder() } else { DiffPlaceholder() }
                     }
                 }
             case .loaded(let detail):
@@ -271,7 +276,9 @@ private struct DiffFileHeader: View {
             countsView
                 .fixedSize()
             // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
-            if !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true {
+            if !target.file.isSubmodule,
+               !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true
+            {
                 CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
                             compact: true, small: true)
                     .fixedSize()
@@ -408,7 +415,7 @@ struct DiffControlsCard: View {
     }
 
     /// Checkout This Version (a commit's file), as a button or an icon, then File History and Blame (a tracked file; no
-    /// Blame for an image).
+    /// Blame for an image, neither for a submodule).
     @ViewBuilder private func actions(checkoutAsIcon: Bool) -> some View {
         if let target {
             let file = target.file
@@ -423,7 +430,7 @@ struct DiffControlsCard: View {
                         .help("Replace the file in the working tree with this commit's version")
                 }
             }
-            if file.kind != .untracked {
+            if file.kind != .untracked, !file.isSubmodule {
                 iconButton("clock.arrow.circlepath", help: "File History") {
                     session.selectTool(.fileHistory(path: file.path, rev: rev(of: target), follow: false))
                 }
@@ -445,7 +452,7 @@ struct DiffControlsCard: View {
             } else {
                 []
             }
-            let tools = file.kind == .untracked ? []
+            let tools = file.kind == .untracked || file.isSubmodule ? []
                 : RepoMenus.fileTools(path: file.path, rev: rev(of: target),
                                       blame: file.kind != .deleted && !target.isImage, session: session)
             let entries = checkout + tools
@@ -611,6 +618,20 @@ private struct DiffContent: View {
             })
         case .unchanged:
             noticeCard(FileNotice(systemImage: "checkmark.circle", message: "This file has no changes to show."))
+        case .submodule(let pointers):
+            // One card per side, sharing panel2's height as the sections do.
+            VStack(spacing: SectionCardMetrics.spacing) {
+                ForEach(pointers) { pointer in
+                    let isFirst = pointer.id == pointers.first?.id
+                    DiffCard(header: isFirst ? header(side: pointers.count > 1 ? pointer.side.title : nil,
+                                                      counts: .none) : nil,
+                             title: pointer.side.title, systemImage: pointer.side.systemImage,
+                             contentPadding: SettingsMetrics.cardPadding) {
+                        SubmoduleChangeCard(session: session, path: target.path, pointer: pointer,
+                                            isWIP: target.source == .wip)
+                    }
+                }
+            }
         }
     }
 

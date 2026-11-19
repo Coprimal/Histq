@@ -269,6 +269,7 @@ final class WindowModel {
     func welcome(for id: Tab.ID) -> WelcomeModel {
         if let welcome = welcomes[id] { return welcome }
         let welcome = WelcomeModel { [weak self] url in self?.open(url, fromWelcome: id) }
+        welcome.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         welcomes[id] = welcome
         return welcome
     }
@@ -324,6 +325,8 @@ final class WindowModel {
             self?.openTab(url, opener: id)
             self?.selectedSession?.showWorkingState()
         }
+        // A submodule's "Open in New Tab" opens its own repo: a tab outside this tab's group.
+        session.openRepoInTab = { [weak self] url in self?.openTab(url) }
         session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         session.worktreeRemoved = { [weak self] path in self?.closeRemovedWorktreeTabs(path) }
         let saved = restored.removeValue(forKey: id)
@@ -1054,6 +1057,13 @@ final class WindowModel {
                 return
             }
             session.selectBranch(named: name)
+        case .submodule:
+            // `submodule:<path>`: a click on its sidebar row, at once (the detail reads the list when it is not in).
+            guard let session = selectedSession, let path = request.value else {
+                Self.logger.error("-HistqSelect submodule: no repo tab or no path")
+                return
+            }
+            session.selectSubmodule(path)
         case .worktree, .openworktree, .branchclick:
             // `worktree:<folder name>`: a click on its sidebar row; `openworktree:<folder name>`: a double-click
             // (its tab opens); `branchclick:<name>`: a click on a branch's row. Once the worktrees are read.

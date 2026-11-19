@@ -84,6 +84,7 @@
               <li><a href="#conflicts">Conflicts</a></li>
               <li><a href="#undo">Undo &amp; redo</a></li>
               <li><a href="#worktrees">Worktrees</a></li>
+              <li><a href="#submodules">Submodules</a></li>
               <li><a href="#tabs">Tabs &amp; sessions</a></li>
               <li><a href="#palette">Command palette</a></li>
               <li><a href="#profiles">Profiles &amp; SSH</a></li>
@@ -156,6 +157,7 @@
             <li><strong>Actions:</strong> pick, reword, edit, squash, fixup or drop. Drag rows to reorder them.</li>
             <li><strong>Reword:</strong> edit the message in the row; no editor opens.</li>
             <li><strong>Squash:</strong> select a run of commits, <strong>Squash N Commits…</strong>, and edit the combined message.</li>
+            <li><strong>Merge:</strong> a branch's <strong>Merge X into Y</strong> submenu offers <strong>Fast-forward if possible</strong>, <strong>Fast-forward only</strong> (refused when the branches have diverged) and <strong>Always create a merge commit (no fast-forward)</strong>. <strong>Fast-forward</strong> the current branch <strong>to X</strong> does the same as Fast-forward only.</li>
 </ul>
           </section>
 
@@ -175,7 +177,8 @@
 <ul class="list">
             <li><kbd>⌘Z</kbd> and <kbd>⇧⌘Z</kbd>, also in the command palette.</li>
             <li><strong>Undoable:</strong> commit, amend, checkout, reset, merge, rebase, cherry-pick, revert, branch create, delete and rename, and discard.</li>
-            <li><strong>Not undoable:</strong> push, pull, fetch, and remote branch and tag changes.</li>
+            <li><strong>Not undoable:</strong> push, pull, fetch, remote branch and tag changes, and submodule operations (initialize, update, add, remove, set URL or branch, and discard of a submodule).</li>
+            <li><strong>Submodules:</strong> with <a href="#submodules">Update submodules automatically</a> on, an undo or redo that moves a submodule's recorded commit moves the clean submodules along.</li>
             <li><strong>Safe:</strong> undo refuses when the repository changed since (for example, a commit made in a terminal), instead of overwriting work.</li>
 </ul>
           </section>
@@ -187,6 +190,21 @@
             <li><strong>Add:</strong> <strong>Add Worktree…</strong>, or from a commit or a branch's menu.</li>
             <li><strong>Open</strong> a worktree in a new tab, <strong>Remove</strong> it, or <strong>Prune Worktrees</strong>.</li>
             <li>Tabs of one repository's worktrees sit side by side as a tab group.</li>
+</ul>
+          </section>
+
+          <section id="submodules" class="doc">
+            <h2>Submodules</h2>
+<ul class="list">
+            <li>The <strong>Submodules</strong> card in the sidebar lists a repository's submodules, each nested one indented under its parent, with the commit the repository records for it. The card shows only when the repository has submodules.</li>
+            <li><strong>States:</strong> <strong>Not initialized</strong> (not set up in this clone yet), <strong>Not checked out</strong> (set up, but its folder is empty), <strong>New commits</strong> (its checkout is on another commit than the recorded one), <strong>N changes</strong> (uncommitted changes in it, untracked files included), and its branch name when one is checked out.</li>
+            <li><strong>Detail:</strong> a click shows the recorded and checked-out commits and the commits between. A double-click opens it in a new tab, or initializes a top-level one that has no checkout.</li>
+            <li><strong>Actions:</strong> a row's menu has <strong>Open in New Tab</strong>, <strong>Initialize</strong> or <strong>Update</strong>, <strong>Sync URL</strong>, <strong>Stage New Pointer</strong>, <strong>Set URL…</strong>, <strong>Set Branch…</strong>, <strong>Copy</strong>, <strong>Reveal in Finder</strong> and <strong>Remove…</strong>. A nested submodule only opens, copies and reveals; act on it from its parent's tab.</li>
+            <li><strong>Add:</strong> <strong>Add Submodule…</strong>, <strong>Update All</strong> and <strong>Sync All</strong> are in the card's menu and the repository menu's <strong>Submodules</strong> submenu.</li>
+            <li><strong>Pointer changes:</strong> a moved submodule in the working tree or in a commit shows the old and new commits and the commits between. <strong>Discard</strong> puts the submodule back on the recorded commit.</li>
+            <li><strong>Clone:</strong> <strong>Clone submodules</strong> in the clone form clones them at every level.</li>
+            <li><strong>Automatic update:</strong> after a checkout, pull, merge, rebase, reset, cherry-pick, revert, undo or redo, clean submodules move to the commit the repository now records. It leaves alone, and names in a toast, a submodule with new commits, uncommitted changes, a checked-out branch or an update mode other than checkout. It never initializes one. Turn it off in <strong>Settings › General › Update submodules automatically</strong>.</li>
+            <li><strong>Credentials:</strong> when Histq initializes, updates or clones a submodule, an https URL on the host of the tab profile's GitHub account gets that account's token. Other URLs use your SSH key or your own credential helpers, and so does <strong>Add Submodule…</strong>.</li>
 </ul>
           </section>
 
