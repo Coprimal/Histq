@@ -43,6 +43,10 @@ enum TabStripMetrics {
     static var groupChipFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
     /// The archived tab popped out beside the archive button (`ArchiveCluster`): one fixed width, outside the track.
     static let archivedTabWidth: CGFloat = 160
+    /// How far the archive button sits left of the strip's start, and the room it adds after itself, so it stands as
+    /// far from the sheet's left edge (`HeaderMetrics.tabRowLeading` minus this) as from what follows it (`gap` plus
+    /// this). The tabs after it do not move.
+    static let archiveShift: CGFloat = (HeaderMetrics.tabRowLeading - gap) / 2
 
     /// A group's chip width for its name.
     static func groupChipWidth(_ name: String) -> CGFloat {
@@ -331,21 +335,23 @@ private struct ArchiveCluster: View {
     var body: some View {
         let buttonWidth = ArchiveButton.width(height: TabStripMetrics.groupChipHeight)
         // The popped tab carries its flares' room on both sides, the button only on its trailing side (none before it,
-        // at the strip's start); the two still sit `gap` apart.
+        // at the strip's start); the two sit `gap` apart, plus `archiveShift`: the button moves that much left of the
+        // strip's start and keeps the room after it, so it has as much space on each side.
         HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
             ArchiveButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.groupChipHeight)
                 .frame(height: TabStripMetrics.tabHeight)
                 .overlay(alignment: .bottomLeading) {
                     if let tab = model.archivedOut {
-                        line(tabStart: buttonWidth + TabStripMetrics.gap,
+                        line(tabStart: buttonWidth + TabStripMetrics.gap + TabStripMetrics.archiveShift,
                              selected: tab.id == model.selectedTabID)
                     }
                 }
-                .padding(.trailing, TabStripMetrics.flare)
+                .padding(.trailing, TabStripMetrics.flare + TabStripMetrics.archiveShift)
             if let tab = model.archivedOut {
                 tabView(tab)
             }
         }
+        .padding(.leading, -TabStripMetrics.archiveShift)
         .padding(.top, TabStripMetrics.rowInset)
         // The selected tab's shape slides, also for a selection made elsewhere (the archive's list, the tab list).
         .animation(reduceMotion ? nil : Motion.standard, value: model.selectedTabID)
