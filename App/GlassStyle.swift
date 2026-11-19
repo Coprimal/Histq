@@ -635,6 +635,138 @@ struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
     }
 }
 
+/// A `CapsuleMenuPicker` for a long list of names (branches): the same capsule, opening a popover with a filter field
+/// over the list. Typing keeps the entries whose title holds every word typed; Up/Down move the highlight, Return picks
+/// it, Escape closes. The current choice is checked, highlighted and scrolled to on open.
+struct FilterCapsulePicker: View {
+    let label: String
+    @Binding var selection: String
+    let items: [String]
+    var title: (String) -> String = { $0 }
+    @State private var isOpen = false
+
+    var body: some View {
+        Button { isOpen.toggle() } label: {
+            HStack(spacing: MenuChevron.gap) {
+                Text(title(selection)).lineLimit(1)
+                MenuChevron()
+            }
+        }
+        .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 12, menu: true))
+        .fixedSize()
+        .accessibilityLabel(Text(label))
+        .accessibilityValue(Text(title(selection)))
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            FilterPickerList(label: label, selection: $selection, items: items, title: title, isOpen: $isOpen)
+        }
+    }
+}
+
+/// The popover of a `FilterCapsulePicker`.
+private struct FilterPickerList: View {
+    let label: String
+    @Binding var selection: String
+    let items: [String]
+    let title: (String) -> String
+    @Binding var isOpen: Bool
+    @State private var query = ""
+    @State private var highlighted: String?
+    @FocusState private var focused: Bool
+
+    private static let maxHeight: CGFloat = 320
+
+    var body: some View {
+        let matches = self.matches
+        VStack(alignment: .leading, spacing: 8) {
+            TextField(label, text: $query, prompt: Text("Filter"))
+                .textFieldStyle(.settings)
+                .labelsHidden()
+                .autocorrectionDisabled()
+                .focused($focused)
+                .onSubmit(pickHighlighted)
+                .onKeyPress(.downArrow) { move(by: 1, in: matches) }
+                .onKeyPress(.upArrow) { move(by: -1, in: matches) }
+            if matches.isEmpty {
+                Text(items.isEmpty ? "None" : "No match for \"\(query)\"")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: SidebarItemStyle.height)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(matches, id: \.self) { item in
+                                Button { pick(item) } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .opacity(item == selection ? 1 : 0)
+                                            .accessibilityHidden(true)
+                                        Text(title(item))
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                                .buttonStyle(SidebarItemStyle(selected: item == highlighted))
+                                .help(title(item))
+                                .id(item)
+                            }
+                        }
+                    }
+                    .frame(height: min(Self.maxHeight, CGFloat(matches.count) * (SidebarItemStyle.height + 2)))
+                    .onChange(of: highlighted) { _, item in
+                        if let item { proxy.scrollTo(item) }
+                    }
+                    .onAppear {
+                        if let highlighted { proxy.scrollTo(highlighted, anchor: .center) }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(width: 300)
+        .onAppear {
+            highlighted = items.contains(selection) ? selection : items.first
+            // Next run-loop turn, once the popover's window exists.
+            DispatchQueue.main.async { focused = true }
+        }
+        .onChange(of: query) { _, _ in
+            let matches = self.matches
+            highlighted = matches.contains(selection) && query.isEmpty ? selection : matches.first
+        }
+    }
+
+    /// The items whose title holds every word of the query (case- and diacritic-insensitive); all for an empty one.
+    private var matches: [String] {
+        let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else { return items }
+        return items.filter { item in
+            let text = title(item)
+            return words.allSatisfy { text.localizedStandardContains($0) }
+        }
+    }
+
+    private func pick(_ item: String) {
+        selection = item
+        isOpen = false
+    }
+
+    private func pickHighlighted() {
+        let matches = self.matches
+        guard let item = highlighted.flatMap({ matches.contains($0) ? $0 : nil }) ?? matches.first else { return }
+        pick(item)
+    }
+
+    /// Up/Down: moves the highlight, stopping at the ends.
+    private func move(by step: Int, in matches: [String]) -> KeyPress.Result {
+        guard !matches.isEmpty else { return .handled }
+        let index = highlighted.flatMap { matches.firstIndex(of: $0) } ?? (step > 0 ? -1 : matches.count)
+        highlighted = matches[min(max(index + step, 0), matches.count - 1)]
+        return .handled
+    }
+}
+
 /// Tabs for a toolbar item, as tall as its buttons' highlights, in the toolbar's capsule on macOS 26 (a surface capsule
 /// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
 /// `compact`: smaller, always on a surface capsule, for a form row or a card header; it has the sidebar's look (the

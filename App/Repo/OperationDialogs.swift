@@ -387,9 +387,8 @@ struct AddWorktreeView: View {
                             Text("No local branch")
                                 .foregroundStyle(.secondary)
                         } else {
-                            CapsuleMenuPicker(label: "Branch", selection: $branch, title: Text(branchTitle(branch))) {
-                                ForEach(branches, id: \.self) { Text(branchTitle($0)).tag($0) }
-                            }
+                            FilterCapsulePicker(label: "Branch", selection: $branch, items: branches,
+                                                title: branchTitle)
                         }
                     }
                 case .commit:

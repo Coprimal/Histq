@@ -255,9 +255,7 @@ struct CreatePRView: View {
     }
 
     private func branchPicker(_ label: String, selection: Binding<String>) -> some View {
-        CapsuleMenuPicker(label: label, selection: selection, title: Text(selection.wrappedValue)) {
-            ForEach(branches, id: \.self) { Text($0).tag($0) }
-        }
+        FilterCapsulePicker(label: label, selection: selection, items: branches)
     }
 
     /// A row of choices the API gave: the picked ones, and a menu that checks and unchecks them. A list the token may
