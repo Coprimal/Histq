@@ -648,6 +648,9 @@ final class RepoSession: Identifiable {
         case pushTag(String, remote: String)
         case pushMirror(remote: String)
         case deleteRemoteBranch(String, remote: String)
+        /// A local branch and its upstream `remoteBranch` on `remote`, both at the same commit: the local one first
+        /// (`branch -d`, which git checks against the upstream still there), then the remote one.
+        case deleteBranchAndRemote(String, remote: String, remoteBranch: String)
         case deleteRemoteTag(String, remote: String)
 
         case createBranch(String, from: String, checkout: Bool)
@@ -737,8 +740,8 @@ final class RepoSession: Identifiable {
         var remote: String? {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
-                 .deleteRemoteBranch(_, let remote), .deleteRemoteTag(_, let remote), .checkoutPullRequest(_, let remote),
-                 .pullBranch(_, let remote, _):
+                 .deleteRemoteBranch(_, let remote), .deleteBranchAndRemote(_, let remote, _),
+                 .deleteRemoteTag(_, let remote), .checkoutPullRequest(_, let remote), .pullBranch(_, let remote, _):
                 remote
             default:
                 nil
@@ -751,7 +754,7 @@ final class RepoSession: Identifiable {
             case .push, .pushMirror: .push
             case .fetchAll: .fetch
             case .pull, .pullBranch: .pull
-            case .deleteRemoteBranch: .deleteRemoteBranch
+            case .deleteRemoteBranch, .deleteBranchAndRemote: .deleteRemoteBranch
             case .deleteRemoteTag: .deleteRemoteTag
             case .pushTag: .pushTag
             default: nil
@@ -761,8 +764,8 @@ final class RepoSession: Identifiable {
         /// The writes that talk to a remote: the only ones that read the profile's GitHub token.
         var isNetwork: Bool {
             switch self {
-            case .fetchAll, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag,
-                 .checkoutPullRequest, .updateSubmodules, .addSubmodule:
+            case .fetchAll, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch,
+                 .deleteBranchAndRemote, .deleteRemoteTag, .checkoutPullRequest, .updateSubmodules, .addSubmodule:
                 true
             default: false
             }
@@ -4958,6 +4961,9 @@ final class RepoSession: Identifiable {
         case .pushTag(let name, let remote): try await ops.pushTag(name, to: remote)
         case .pushMirror(let remote): try await ops.pushMirror(to: remote)
         case .deleteRemoteBranch(let name, let remote): try await ops.deleteRemoteBranch(name, on: remote)
+        case .deleteBranchAndRemote(let name, let remote, let remoteBranch):
+            try await ops.deleteBranch(name, force: false)
+            try await ops.deleteRemoteBranch(remoteBranch, on: remote)
         case .deleteRemoteTag(let name, let remote): try await ops.deleteRemoteTag(name, on: remote)
 
         case .createBranch(let name, let revision, let checkout):

@@ -528,6 +528,19 @@ enum RepoMenus {
         ]
         if let upstream {
             entries.append(deleteRemote(upstream, session))
+            // Both at the same commit: one click deletes them together.
+            if upstream.commit == branch?.commit {
+                let short = localName(of: upstream)
+                let both = "\(name) and \(upstream.name)"
+                entries.append(.action("Delete \(both)…", enabled: !isCurrent, destructive: true) {
+                    session.confirm("Delete \(both)?",
+                                    message: "The local branch is deleted, then \(short) is deleted on "
+                                        + "\(upstream.remote) for everyone. The remote branch cannot be brought back.",
+                                    button: "Delete Both",
+                                    write: .deleteBranchAndRemote(name, remote: upstream.remote, remoteBranch: short),
+                                    operation: "Delete \(both)")
+                })
+            }
         }
         entries += visibility(ref, canHide: !isCurrent, session)
         let copies: [MenuEntry] = [.action("Branch Name") { copy(name) }] + (upstream.map { [copyLink(to: $0, session)] } ?? [])
