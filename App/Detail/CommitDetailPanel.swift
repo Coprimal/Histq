@@ -77,11 +77,14 @@ struct CommitDetailPanel: View {
                     FileListView(files: files, repoURL: session.url, card: .commit)
                         .fileMenu { [session, commit] file in
                             // A stash's file is applied, not checked out.
-                            if !commit.isStash {
-                                RepoMenus.checkoutFile(file, commit: commit.hash, session: session)
-                            } else {
-                                RepoMenus.stashFile(file, stash: commit.hash, session: session)
+                            guard !commit.isStash else {
+                                return RepoMenus.stashFile(file, stash: commit.hash, session: session)
                             }
+                            // A merge commit has no single patch; a file it did not change has none either.
+                            let patch = commit.parents.count > 1 || file.kind == .unchanged ? []
+                                : RepoMenus.filePatch(path: file.path, originalPath: file.originalPath,
+                                                      source: .commit(commit.hash), session: session)
+                            return RepoMenus.checkoutFile(file, commit: commit.hash, session: session) + patch
                         }
                         .onSelectFile(selected: openPath) { [session, commit] file in
                             session.selectFile(FileTarget(source: .commit(commit.hash), file: file))
@@ -338,7 +341,7 @@ struct MultipleSelectionPanel: View {
 }
 
 /// The selected rows: avatar, subject, short sha, date and author for a commit; the WIP and stash rows too. Two rows
-/// that `RepoMenus.comparePair` accepts get a Compare button.
+/// that `RepoMenus.comparePair` accepts get a Compare button; the Patch menu copies or saves the selected commits.
 private struct SelectedRowsCard: View {
     let session: RepoSession
     let items: [GraphItem]
@@ -359,14 +362,40 @@ private struct SelectedRowsCard: View {
             .frame(height: listHeight)
             .frame(maxHeight: maxHeight == nil ? .infinity : nil, alignment: .top)
         } accessory: {
-            if let pair = RepoMenus.comparePair(session) {
-                Button("Compare") {
-                    session.selectCompare(base: pair.base, head: pair.head)
+            HStack(spacing: 10) {
+                if let pair = RepoMenus.comparePair(session) {
+                    Button("Compare") {
+                        session.selectCompare(base: pair.base, head: pair.head)
+                    }
+                    .buttonStyle(RowTextButtonStyle())
+                    .help(pair.head == nil ? "Compare the commit with the working tree" : "Compare the two commits")
                 }
-                .buttonStyle(RowTextButtonStyle())
-                .help(pair.head == nil ? "Compare the commit with the working tree" : "Compare the two commits")
+                patchMenu
             }
         }
+    }
+
+    /// Copy as Patch and Save as Patch of the selected commits, as one series; disabled with the reason when the
+    /// selection has a merge commit, a stash or the WIP row.
+    private var patchMenu: some View {
+        let selection = RepoMenus.patchSelection(session)
+        let target = PatchExport.commits(selection.commits)
+        return Menu {
+            Button("Copy as Patch") { session.copyPatch(target) }
+            Button("Save as Patch…") { session.savePatch(target) }
+        } label: {
+            HStack(spacing: 4) {
+                Text("Patch")
+                MenuChevron()
+            }
+        }
+        .menuStyle(.button)
+        .buttonStyle(RowTextButtonStyle())
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(selection.reason != nil || selection.commits.isEmpty)
+        .help(selection.reason ?? "Copy or save the selected commits as one patch")
+        .accessibilityLabel("Patch of the selected commits")
     }
 
     private var rowHeight: CGFloat { textSize.scaled(44) }

@@ -22,6 +22,7 @@ work as they are.
 - Fast commit graph with search
 - Stage files, hunks or lines; a line-by-line conflict editor
 - Interactive rebase, merge (fast-forward only or always a merge commit), and undo/redo for local operations
+- Patch files: copy or save commits, uncommitted changes or a file as a patch, and apply one from a file or the clipboard
 - Worktrees, tabs and a command palette (Cmd-K)
 - Submodules: status in the sidebar, init, update, add, remove, and an automatic update after checkout, pull, merge and rebase
 - Per-tab profiles: identity, commit signing, SSH key, GitHub account

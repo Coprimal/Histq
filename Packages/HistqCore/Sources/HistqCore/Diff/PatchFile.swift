@@ -145,9 +145,12 @@ public enum PatchFile {
         } else {
             let threeWay = try await runner.run(
                 check + ["--3way"], cwd: cwd, env: env, stdin: data, allowedExitCodes: [0, 1])
-            let tail = threeWay.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The plain check's reason first: the 3-way one often starts with "lacks the necessary blob" and
+            // "Falling back to direct application" before the real error.
+            let tail = plain.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
             verdict = threeWay.exitCode == 0
-                ? .threeWay : .fails(tail.isEmpty ? plain.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines) : tail)
+                ? .threeWay
+                : .fails(tail.isEmpty ? threeWay.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines) : tail)
         }
         return PatchPreview(
             files: files(numstat: numstat.stdout), verdict: verdict, isMailbox: isMailbox(data),

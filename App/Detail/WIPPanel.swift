@@ -149,7 +149,7 @@ struct WIPPanel: View {
                             },
                             menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                        busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
-                        ] + wipExtras(file) + fileTools(file) + copyPath(file)
+                        ] + wipExtras(file) + patch(file, staged: false) + fileTools(file) + copyPath(file)
                     }
                     .folderMenu { folder, files in
                         [
@@ -194,7 +194,7 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [menuAction("Unstage File", busy: [.unstage(file.path)]) {
                             unstage([file])
-                        }] + wipExtras(file) + fileTools(file) + copyPath(file)
+                        }] + wipExtras(file) + patch(file, staged: true) + fileTools(file) + copyPath(file)
                     }
                     .folderButtons { _, files in
                         rowButton("minus.circle", help: "Unstage Folder", busy: files.map { .unstage($0.path) }) {
@@ -315,6 +315,15 @@ struct WIPPanel: View {
     /// "Copy Relative Path" after a separator: the file's path from the repository's root, as git lists it.
     private func copyPath(_ file: FileChange) -> [MenuEntry] {
         [.separator, .action("Copy Relative Path") { RepoMenus.copy(file.path) }]
+    }
+
+    /// Copy as Patch and Save as Patch of an unstaged (`staged` false: an untracked file as a new file) or staged
+    /// file row; none for a conflicted file (its diff does not apply) or a nested repo's folder (`inner/`).
+    private func patch(_ file: FileChange, staged: Bool) -> [MenuEntry] {
+        let isConflicted = session.status.value?.conflicted.contains { $0.path == file.path } ?? false
+        guard !isConflicted, file.kind != .conflicted, !file.path.hasSuffix("/") else { return [] }
+        let source: PatchFile.FileSource = staged ? .staged : file.kind == .untracked ? .untracked : .unstaged
+        return RepoMenus.filePatch(path: file.path, originalPath: file.originalPath, source: source, session: session)
     }
 
     /// `RepoMenus.wipExtras` of a file row (not the conflicted card's: git cannot stash with unmerged files).

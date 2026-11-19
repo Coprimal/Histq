@@ -1,13 +1,14 @@
 // The repo's context menus, built once as `MenuEntry` lists and shown both by the graph (an `NSMenu`) and by the sidebar
 // and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset,
-// interactive rebase from here, squash the selected commits, copy),
-// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…; hide, solo and pin in the
-// graph, a tag's hide), a graph badge's menu (its ref's menu, then its commit's), the Local and Remote cards' Hide Stale
-// Branches, the Remote card's menus,
+// interactive rebase from here, squash the selected commits, copy, copy or save as a patch, also the selected commits),
+// the WIP and stash menus (the WIP's changes as a patch), the branch, remote branch and tag menus (with Create Pull
+// Request…; hide, solo and pin in the graph, a tag's hide), a graph badge's menu (its ref's menu, then its commit's),
+// the Local and Remote cards' Hide Stale Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
 // (open in a tab, add, remove, prune), the submodule menus (open in a tab, initialize or update, sync, stage the new
 // pointer, set the URL or branch, remove; add, update or sync all), checkout file from a commit, a file's history and blame, stash one WIP file or
-// folder, ignore or exclude an untracked one, apply one file of a stash, and what a double-click checks out.
+// folder, ignore or exclude an untracked one, apply one file of a stash, copy or save one file's change as a patch,
+// Apply Patch in the repository menu, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -168,12 +169,60 @@ enum RepoMenus {
             .separator,
             .action("Stash All Changes") { session.run(.stashPush(message: nil), title: "Stash", key: .stash) },
             .separator,
+        ] + wipPatch(session) + [
+            .separator,
             .action("Discard All Changes…", destructive: true) {
                 session.confirm("Discard all changes in \(session.url.lastPathComponent)?",
                                 message: "Every staged and unstaged change is lost, and untracked files are deleted. This cannot be undone.",
                                 button: "Discard All", write: .discardAll(includingUntracked: true),
                                 operation: "Discard all changes")
             },
+        ]
+    }
+
+    /// The WIP row's "Copy as Patch" and "Save as Patch" submenus: its unstaged (with the untracked files), staged or
+    /// all changes, each disabled when that part is empty. Both are disabled while files are conflicted: the diff would
+    /// hold combined sections that do not apply. The items are disabled too, as the palette lists them on their own.
+    private static func wipPatch(_ session: RepoSession) -> [MenuEntry] {
+        let status = session.status.value
+        // A nested repo's folder (`inner/`) is left out of the export.
+        let hasUnstaged = status.map { !$0.unstaged.isEmpty || $0.untracked.contains { !$0.path.hasSuffix("/") } }
+            ?? false
+        let hasStaged = status.map { !$0.staged.isEmpty } ?? false
+        let conflicted = status.map { !$0.conflicted.isEmpty } ?? false
+        let reason = conflicted ? "Resolve the conflicted files first." : nil
+        let parts: [(title: String, part: PatchFile.WorkingTreePart, hasChanges: Bool)] = [
+            ("Unstaged Changes", .unstaged, hasUnstaged),
+            ("Staged Changes", .staged, hasStaged),
+            ("All Changes", .all, hasUnstaged || hasStaged),
+        ]
+        func submenu(_ title: String, ellipsis: String, _ perform: @escaping @MainActor (PatchExport) -> Void)
+            -> MenuEntry
+        {
+            var entry = MenuEntry.submenu(title, parts.map { item in
+                .action(item.title + ellipsis, enabled: item.hasChanges && !conflicted, toolTip: reason) {
+                    perform(.workingTree(item.part))
+                }
+            })
+            entry.isEnabled = !conflicted
+            return entry
+        }
+        return [
+            submenu("Copy as Patch", ellipsis: "") { session.copyPatch($0) },
+            submenu("Save as Patch", ellipsis: "…") { session.savePatch($0) },
+        ]
+    }
+
+    /// "Copy as Patch" and "Save as Patch…" of one file's change from `source`, after a separator. `originalPath` is
+    /// a rename's old path.
+    static func filePatch(path: String, originalPath: String?, source: PatchFile.FileSource, session: RepoSession)
+        -> [MenuEntry]
+    {
+        let target = PatchExport.file(path: path, originalPath: originalPath, source: source)
+        return [
+            .separator,
+            .action("Copy as Patch") { session.copyPatch(target) },
+            .action("Save as Patch…") { session.savePatch(target) },
         ]
     }
 
@@ -301,14 +350,42 @@ enum RepoMenus {
                 if let link { copy(link) }
             })
         }
-        let patchReason = commit?.isMerge == true ? "A merge commit has no single patch." : nil
+        // The clicked row in a multi-selection of commits: export them all, as one series.
+        let selection = patchSelection(session)
+        let several = selection.commits.count >= 2 && selection.commits.contains(hash)
+        let patch: PatchExport = .commits(several ? selection.commits : [hash])
+        let patchReason = several ? selection.reason : commit?.isMerge == true ? mergeHasNoPatch : nil
+        let what = several ? " \(selection.commits.count) Commits" : ""
         entries += [
             .separator,
-            .action("Save as Patch…", enabled: patchReason == nil, toolTip: patchReason) {
-                savePatch(hash, subject: commit?.subject ?? "", session)
+            .action("Copy\(what) as Patch", enabled: patchReason == nil, toolTip: patchReason) {
+                session.copyPatch(patch)
+            },
+            .action("Save\(what) as Patch…", enabled: patchReason == nil, toolTip: patchReason) {
+                session.savePatch(patch)
             },
         ]
         return [.submenu("Copy", copies), .separator] + entries
+    }
+
+    private static let mergeHasNoPatch = "A merge commit has no single patch."
+
+    /// The commits of a multi-selection that Copy as Patch and Save as Patch export, in graph order (newest first),
+    /// and why they cannot (a merge commit, a stash or the WIP row in the selection); nil when they can.
+    static func patchSelection(_ session: RepoSession) -> (commits: [String], reason: String?) {
+        let items = session.graphSelection
+        let commits = items.compactMap { item -> String? in
+            if case .commit(let hash) = item { hash } else { nil }
+        }
+        guard commits.count == items.count else {
+            return (commits, "Only commits make a patch: the selection has a stash or the working tree.")
+        }
+        guard let log = session.log.value else { return (commits, nil) }
+        let hasMerge = commits.contains { hash in
+            guard let index = log.commitIndex[hash], log.commits.indices.contains(index) else { return false }
+            return log.commits[index].isMerge
+        }
+        return (commits, hasMerge ? mergeHasNoPatch + " Leave it out of the selection." : nil)
     }
 
     /// "Compare" for the clicked row of a 2-row selection that `comparePair` accepts; else nothing.
@@ -823,9 +900,11 @@ enum RepoMenus {
 
     /// The repository's own actions (the toolbar's repo menu, the palette): Show Reflog, Optimize Repository
     /// (confirmed; disabled while one runs: it is outside the write lane, so a second one would redo the work or fail on
-    /// git's lock), the Submodules submenu.
+    /// git's lock), Apply Patch… and Apply Patch from Clipboard (the preview; disabled during an operation), the
+    /// Submodules submenu.
     static func repository(_ session: RepoSession) -> [MenuEntry] {
         let operation = "Optimize repository"
+        let applyReason = session.repoState?.isOperationInProgress == true ? UndoError.operationInProgress.message : nil
         return [
             .action("Show Reflog") { session.selectTool(.reflog) },
             .action("Optimize Repository…", enabled: !session.running.contains { $0.title == operation }) {
@@ -835,6 +914,13 @@ enum RepoMenus {
                                     + "while on a large repository.",
                                 button: "Optimize", write: .optimizeRepository, operation: operation,
                                 isDestructive: false)
+            },
+            .separator,
+            .action("Apply Patch…", enabled: applyReason == nil, toolTip: applyReason) {
+                session.chooseAndPreviewPatch()
+            },
+            .action("Apply Patch from Clipboard", enabled: applyReason == nil, toolTip: applyReason) {
+                session.previewClipboardPatch()
             },
             .separator,
             .submenu("Submodules", submodules(session)),
@@ -1275,24 +1361,6 @@ enum RepoMenus {
     /// `origin/feature/x` → `feature/x`.
     static func localName(of branch: RemoteBranch) -> String {
         String(branch.name.dropFirst(branch.remote.count + 1))
-    }
-
-    /// Asks where to save `hash` as a patch file (`git format-patch`), then writes it off the main actor.
-    private static func savePatch(_ hash: String, subject: String, _ session: RepoSession) {
-        let panel = NSSavePanel()
-        let slug = subject.lowercased().split { !$0.isLetter && !$0.isNumber }.joined(separator: "-").prefix(52)
-        panel.nameFieldStringValue = "\(hash.prefix(7))\(slug.isEmpty ? "" : "-" + slug).patch"
-        panel.begin { response in
-            guard response == .OK, let file = panel.url else { return }
-            Task { @MainActor in
-                do {
-                    try await session.savePatch(hash, to: file)
-                    session.postToast(.success("Saved \(file.lastPathComponent)"))
-                } catch {
-                    session.postToast(.warning("Save as Patch", detail: RepoSession.writeMessage(for: error)))
-                }
-            }
-        }
     }
 
     static func copy(_ text: String) {

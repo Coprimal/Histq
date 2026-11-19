@@ -82,6 +82,7 @@
               <li><a href="#commit">Stage &amp; commit</a></li>
               <li><a href="#rebase">Interactive rebase</a></li>
               <li><a href="#conflicts">Conflicts</a></li>
+              <li><a href="#patches">Patches</a></li>
               <li><a href="#undo">Undo &amp; redo</a></li>
               <li><a href="#worktrees">Worktrees</a></li>
               <li><a href="#submodules">Submodules</a></li>
@@ -172,11 +173,23 @@
 </ul>
           </section>
 
+          <section id="patches" class="doc">
+            <h2>Patches</h2>
+<ul class="list">
+            <li><strong>Create:</strong> <strong>Copy as Patch</strong> or <strong>Save as Patch…</strong> in a commit's menu. With several commits selected (adjacent or not), <strong>Copy N Commits as Patch</strong> or <strong>Save N Commits as Patch…</strong>, also in the selected commits card's <strong>Patch</strong> menu; they are exported oldest first. Merges, stashes and the WIP row can't be included.</li>
+            <li><strong>Uncommitted changes:</strong> the WIP row's <strong>Copy as Patch</strong> and <strong>Save as Patch</strong> submenus offer <strong>Unstaged Changes</strong>, <strong>Staged Changes</strong> and <strong>All Changes</strong> (untracked files count as unstaged). A file's menu, in the WIP lists or a commit's files, has the same two items. Binary changes are included.</li>
+            <li><strong>Apply:</strong> <strong>Apply Patch…</strong> (a <code>.patch</code> or <code>.diff</code> file) or <strong>Apply Patch from Clipboard</strong>, in the repository menu, the File menu and the command palette. A preview lists the files with their +/− counts and says whether the patch applies cleanly, needs a 3-way merge, or does not apply (with git's reason).</li>
+            <li><strong>Apply to Working Tree:</strong> the changes land unstaged, or staged when a 3-way merge was needed; conflicts show in the Conflicted card. It can't be undone: discard the changes instead.</li>
+            <li><strong>Apply as Commits:</strong> for patches made from commits (mail format, as Copy or Save as Patch makes them). It creates the commits with their author and message; on a conflict a banner offers <strong>Skip</strong>, <strong>Abort</strong> and <strong>Continue</strong>. It can be undone.</li>
+            <li><strong>Local only:</strong> patches are files or clipboard text; nothing is uploaded. Patches over 20 MB, or that are not text, are refused.</li>
+</ul>
+          </section>
+
           <section id="undo" class="doc">
             <h2>Undo &amp; redo</h2>
 <ul class="list">
             <li><kbd>⌘Z</kbd> and <kbd>⇧⌘Z</kbd>, also in the command palette.</li>
-            <li><strong>Undoable:</strong> commit, amend, checkout, reset, merge, rebase, cherry-pick, revert, branch create, delete and rename, and discard.</li>
+            <li><strong>Undoable:</strong> commit, amend, checkout, reset, merge, rebase, cherry-pick, revert, branch create, delete and rename, discard, and applying patches as commits.</li>
             <li><strong>Not undoable:</strong> push, pull, fetch, remote branch and tag changes, and submodule operations (initialize, update, add, remove, set URL or branch, and discard of a submodule).</li>
             <li><strong>Submodules:</strong> with <a href="#submodules">Update submodules automatically</a> on, an undo or redo that moves a submodule's recorded commit moves the clean submodules along.</li>
             <li><strong>Safe:</strong> undo refuses when the repository changed since (for example, a commit made in a terminal), instead of overwriting work.</li>

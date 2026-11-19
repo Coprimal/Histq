@@ -518,6 +518,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         newTab(sender)
     }
 
+    /// Asks for a patch file and opens the Apply Patch preview on it, in the key window's repo tab.
+    @objc func applyPatch(_ sender: Any?) {
+        patchSession()?.chooseAndPreviewPatch()
+    }
+
+    /// Opens the Apply Patch preview on the clipboard's text, in the key window's repo tab.
+    @objc func applyClipboardPatch(_ sender: Any?) {
+        patchSession()?.previewClipboardPatch()
+    }
+
+    /// The selected repo tab a patch can be applied in: no modal, Settings or palette over it, no operation in
+    /// progress.
+    private func patchSession() -> RepoSession? {
+        guard let model = target()?.model, !model.isShowingModal, let session = model.actionSession,
+              session.repoState?.isOperationInProgress != true
+        else { return nil }
+        return session
+    }
+
     /// Closes the key window's selected tab, and the window with its last tab.
     @objc func closeTab(_ sender: Any?) {
         guard let entry = entry(for: NSApp.keyWindow) else {
@@ -669,6 +688,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             menuItem.toolTip = updater.canCheckForUpdates ? nil : "Updates are off in this build."
             return updater.canCheckForUpdates
         }
+        if menuItem.action == #selector(applyPatch(_:)) || menuItem.action == #selector(applyClipboardPatch(_:)) {
+            return patchSession() != nil
+        }
         if menuItem.action == #selector(findCommits(_:)) {
             guard target()?.model.isShowingModal != true else { return false }
             return findPanelResponder() != nil || searchableSession() != nil
@@ -714,6 +736,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         newTabItem.allowsKeyEquivalentWhenHidden = true
         fileMenu.addItem(withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o").target = self
         fileMenu.addItem(withTitle: "Clone…", action: #selector(cloneRepository(_:)), keyEquivalent: "").target = self
+        fileMenu.addItem(withTitle: "Apply Patch…", action: #selector(applyPatch(_:)), keyEquivalent: "").target = self
+        fileMenu.addItem(withTitle: "Apply Patch from Clipboard", action: #selector(applyClipboardPatch(_:)),
+                         keyEquivalent: "").target = self
         fileMenu.addItem(withTitle: "Command Palette…", action: #selector(toggleCommandPalette(_:)), keyEquivalent: "k")
             .target = self
         // ⌘P opens the palette too: hidden, so the menu shows only ⌘K.

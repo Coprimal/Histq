@@ -476,6 +476,8 @@ enum WriteOutcome: Equatable, Sendable {
     case autostashPending
     /// A stash apply or pop: whether it applied cleanly and undo can take it back.
     case stash(GitOperations.StashApplyOutcome, pop: Bool)
+    /// A patch applied to the working tree: plainly, with a 3-way merge, or with conflicts.
+    case patch(GitOperations.PatchApplyOutcome)
 }
 
 /// A user operation in flight: what the action bar shows while it runs.
@@ -495,6 +497,19 @@ struct OperationFailure: Identifiable {
     let write: RepoSession.Write
     let error: Error
     let message: String
+}
+
+/// The Apply Patch preview (`ApplyPatchModal`): a patch from a file or the clipboard, `source` its label (the file's
+/// name, "Clipboard"). Loading until `data` and `preview` are read, or `error` says why it cannot be applied.
+struct PatchPreviewRequest: Identifiable {
+    let id = UUID()
+    var source: String
+    /// The patch as `PatchFile.validate` returned it: what the apply writes take.
+    var data: Data?
+    var preview: PatchPreview?
+    var error: String?
+
+    var isLoading: Bool { preview == nil && error == nil }
 }
 
 /// A tool panel2 shows instead of the graph: a file's history (of `rev`, HEAD when nil; across renames with `follow`),
@@ -606,6 +621,12 @@ final class RepoSession: Identifiable {
         case editMessage(commit: String, message: String)
         /// Selected lines of a diff (`PatchBuilder.patch`): staged, unstaged or discarded with `git apply`.
         case applyPatch(Data, PatchBuilder.Action)
+        /// A patch file (a diff or a mail series) applied to the working tree, not journaled: plain `git apply`, else
+        /// `--3way` (`GitOperations.applyPatchToWorkingTree`).
+        case applyPatchToWorkingTree(Data)
+        /// A mail series of `count` patches applied as commits with `git am --3way`; a conflict leaves the am in
+        /// progress for the operation banner.
+        case applyPatchCommits(Data, count: Int)
 
         case checkoutBranch(String, autostash: Bool = false)
         /// A local branch `localName` tracking the remote branch (`origin/x`), checked out.
@@ -834,6 +855,8 @@ final class RepoSession: Identifiable {
     var worktreeForm: WorktreeForm?
     /// The Create Pull Request form (`CreatePRView`).
     var pullRequestForm: PullRequestForm?
+    /// The Apply Patch preview (`ApplyPatchModal`), loading or read.
+    var patchPreview: PatchPreviewRequest?
     /// The AI result card (`AIResultSheet`, task 12.3): the job it shows, running or finished.
     private(set) var aiRun: AIRun?
     /// The Suggest All card (`AIBatchSheet`): every unresolved conflict region of the open file, asked in turn.
@@ -868,6 +891,7 @@ final class RepoSession: Identifiable {
     var hasModal: Bool {
         dialog != nil || confirmation != nil || hostKeyCheck != nil || rebaseRequest != nil || worktreeForm != nil
             || pullRequestForm != nil || aiRun != nil || aiBatch != nil || conflictSavePrompt || conflictLeave != nil
+            || patchPreview != nil
     }
 
     /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
@@ -878,6 +902,7 @@ final class RepoSession: Identifiable {
         rebaseRequest = nil
         worktreeForm = nil
         pullRequestForm = nil
+        patchPreview = nil
         cancelConflictSave()
         conflictLeave = nil
         closeAI()
@@ -1033,7 +1058,7 @@ final class RepoSession: Identifiable {
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "repo")
 
     /// What every read needs: the tab's runner, the base environment, the repo's folders.
-    private struct Backend: Sendable {
+    struct Backend: Sendable {
         let runner: GitRunner
         let base: [String: String]
         let directories: RepoDirectories
@@ -1137,6 +1162,21 @@ final class RepoSession: Identifiable {
         }
         if let revision = AppState.launchFlag("-HistqOpenRebase") {
             Task { [weak self] in await self?.runLaunchRebase([revision], squash: false) }
+        }
+        // `-HistqApplyPatch <file>`: the Apply Patch preview of that file once the refs are in (QA shots).
+        if let path = AppState.launchFlag("-HistqApplyPatch") {
+            Task { [weak self] in
+                for _ in 0..<100 {
+                    if self?.refs.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                let file = URL(filePath: path)
+                guard let self, let data = try? Data(contentsOf: file) else {
+                    RepoMenus.debugLog("fail apply patch: cannot read \(path)")
+                    return
+                }
+                openPatchPreview(data: data, source: file.lastPathComponent)
+            }
         }
         if let revisions = AppState.launchFlag("-HistqOpenSquash") {
             Task { [weak self] in
@@ -4433,18 +4473,48 @@ final class RepoSession: Identifiable {
         repoState?.isOperationInProgress == true ? UndoError.operationInProgress.message : nil
     }
 
-    /// Writes `commit` as a patch file (`git format-patch`) to `file`, read and written off the main actor.
-    func savePatch(_ commit: String, to file: URL) async throws {
-        let backend = try await backend()
-        try await Self.writePatch(commit, to: file, backend: backend, cwd: url)
+    /// Opens the Apply Patch preview on `data` at once, loading (UI rule: the click reacts first), then checks the
+    /// patch (`PatchFile.validate`) and reads its preview off the main actor at the worktree's top level. A preview
+    /// closed or replaced meanwhile is left alone.
+    func openPatchPreview(data: Data, source: String) {
+        openPatchPreview(source: source) { data }
+    }
+
+    /// Opens the Apply Patch preview at once, loading, then reads the patch with `load` (a file's read, off the main
+    /// actor) before checking it as `openPatchPreview(data:source:)` does; `load`'s error shows in the preview.
+    func openPatchPreview(source: String, load: @escaping @Sendable () async throws -> Data) {
+        let request = PatchPreviewRequest(source: source)
+        patchPreview = request
+        Task { [weak self] in
+            guard let self else { return }
+            let result: Result<(Data, PatchPreview), Error>
+            do {
+                let data = try await load()
+                let backend = try await backend()
+                result = .success(try await Self.readPatchPreview(data, backend: backend, cwd: url))
+            } catch {
+                result = .failure(error)
+            }
+            guard patchPreview?.id == request.id else { return }
+            switch result {
+            case .success(let (patch, preview)):
+                patchPreview?.data = patch
+                patchPreview?.preview = preview
+            case .failure(let error):
+                patchPreview?.error = Self.message(for: error)
+            }
+        }
     }
 
     @concurrent
-    private nonisolated static func writePatch(_ commit: String, to file: URL, backend: Backend, cwd: URL) async throws {
+    private nonisolated static func readPatchPreview(_ data: Data, backend: Backend, cwd: URL) async throws
+        -> (Data, PatchPreview)
+    {
+        let patch = try PatchFile.validate(data)
         let env = try await backend.readEnvironment(cwd: cwd)
-        let output = try await backend.runner.run(
-            ["format-patch", "-1", "--stdout", "--end-of-options", commit], cwd: cwd, env: env)
-        try output.stdout.write(to: file, options: .atomic)
+        let preview = try await PatchFile.preview(
+            patch, runner: backend.runner, cwd: backend.directories.worktree, env: env)
+        return (patch, preview)
     }
 
     /// The todo of a rebase sheet: the commits from `commit` to HEAD, or the squash of the selected commits. Read
@@ -4865,6 +4935,8 @@ final class RepoSession: Identifiable {
         case .applyPatch(let patch, let action):
             // `apply` takes the runner's write lane itself, like the operations.
             try await PatchBuilder.apply(patch, action: action, runner: backend.runner, cwd: cwd, env: environment)
+        case .applyPatchToWorkingTree(let patch): outcome = .patch(try await ops.applyPatchToWorkingTree(patch))
+        case .applyPatchCommits(let patch, let count): try await ops.applyMailbox(patch, count: count)
 
         case .checkoutBranch(let name, let autostash): try await ops.checkout(branch: name, autostash: autostash)
         case .checkoutTracking(let remoteBranch, let localName, let autostash):
@@ -5011,6 +5083,18 @@ final class RepoSession: Identifiable {
                     postToast(.warning(title, detail: stash.applied
                         ? "Applied, but this apply cannot be undone."
                         : "Applied with conflicts: this apply cannot be undone." + (pop ? " The stash is kept." : "")))
+                } else if case .patch(let patch) = outcome {
+                    switch patch {
+                    case .applied:
+                        postToast(.success(title, detail: "Applied to the working tree (unstaged). Discard the changes "
+                            + "to take it back."))
+                    case .merged:
+                        postToast(.success(title, detail: "Applied with a 3-way merge; the changes are staged."))
+                    case .conflicts:
+                        postToast(.warning(title, detail: "Applied with conflicts"))
+                        // `perform` reread the status: the conflicted paths include the apply's.
+                        if let first = status.value?.conflicted.first { selectConflict(first.path) }
+                    }
                 } else if case .optimizeRepository = write {
                     // Before `stopped`: a merge or rebase may stop on conflicts while it runs (it is outside the lane).
                     postToast(.success(title, detail: "Repository optimized: history and the graph load faster."))
@@ -5018,6 +5102,8 @@ final class RepoSession: Identifiable {
                     postToast(.stopped(title))
                 } else if case .applyPatch = write {
                     // Lines staged, unstaged or discarded from a diff: no success toast, as the WIP panel's files.
+                } else if case .applyPatchCommits(_, let count) = write {
+                    postToast(.success(title, detail: count == 1 ? "Applied 1 commit." : "Applied \(count) commits."))
                 } else if case .ignore(let pattern, let file) = write {
                     let name = switch file { case .gitignore: ".gitignore"; case .infoExclude: ".git/info/exclude" }
                     postToast(.success(title, detail: "Added \(pattern) to \(name)."))
@@ -5055,7 +5141,8 @@ final class RepoSession: Identifiable {
     private func movesSubmodules(_ write: Write) -> Bool {
         switch write {
         case .checkoutBranch, .checkoutTracking, .checkoutCommit, .checkoutPullRequest, .pull, .merge, .rebase,
-             .cherryPick, .revert, .interactiveRebase, .continueOperation, .skipOperation, .undo, .redo:
+             .cherryPick, .applyPatchCommits, .revert, .interactiveRebase, .continueOperation, .skipOperation, .undo,
+             .redo:
             true
         case .fastForward(let branch, _): branch == currentBranch
         case .reset(_, let mode): mode == .hard
@@ -5177,8 +5264,8 @@ final class RepoSession: Identifiable {
                     return ("busy", "Another operation started meanwhile: resolve again once it has finished.")
                 }
                 if repoState?.isOperationInProgress == true {
-                    return ("in-progress", "A merge, rebase, cherry-pick or revert is in progress: finish or abort it, "
-                        + "then resolve again.")
+                    return ("in-progress", "A merge, rebase, cherry-pick, revert or patch apply is in progress: "
+                        + "finish or abort it, then resolve again.")
                 }
                 guard let status = status.value, status.conflicted.isEmpty, status.staged.isEmpty,
                       status.unstaged.isEmpty
@@ -5399,7 +5486,7 @@ final class RepoSession: Identifiable {
     // MARK: Setup
 
     /// The runner and the repo's folders, set up on first use; starts the watcher once the folders are known.
-    private func backend() async throws -> Backend {
+    func backend() async throws -> Backend {
         if setUpTask == nil {
             let cwd = url
             let watcher = watcher
@@ -5480,7 +5567,7 @@ final class RepoSession: Identifiable {
             case .invalidRefspec(let refspec): "\"\(refspec)\" is not a ref and a new branch name."
             case .stashNotFound: "That stash no longer exists."
             case .invalidMainline(let parent): "A merge has no parent \(parent)."
-            case .noOperationInProgress: "No merge, rebase, cherry-pick or revert is in progress."
+            case .noOperationInProgress: "No merge, rebase, cherry-pick, revert or patch apply is in progress."
             case .unsupported(let what): "Not supported: \(what)."
             case .invalidWorktreePath(let path):
                 "\(path) cannot be a new worktree: its parent folder must exist and it must not."

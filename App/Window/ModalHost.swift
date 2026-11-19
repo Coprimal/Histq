@@ -60,6 +60,7 @@ struct ModalHost: View {
         case rebase(RepoSession, RebaseRequest)
         case worktree(RepoSession, WorktreeForm)
         case pullRequest(RepoSession, PullRequestForm)
+        case patch(RepoSession, PatchPreviewRequest)
         case ai(RepoSession, AIRun)
         case aiBatch(RepoSession, AIBatch)
         case conflictSave(RepoSession)
@@ -74,6 +75,7 @@ struct ModalHost: View {
             case .rebase(_, let request): "rebase \(request.id)"
             case .worktree(_, let form): "worktree \(form.id)"
             case .pullRequest(_, let form): "pull request \(form.id)"
+            case .patch(_, let request): "patch \(request.id)"
             case .ai(_, let run): "ai \(run.id)"
             case .aiBatch(_, let batch): "ai batch \(batch.id)"
             case .conflictSave: "conflict save"
@@ -99,6 +101,7 @@ struct ModalHost: View {
         if let request = session.rebaseRequest { return .rebase(session, request) }
         if let form = session.worktreeForm { return .worktree(session, form) }
         if let form = session.pullRequestForm { return .pullRequest(session, form) }
+        if let request = session.patchPreview { return .patch(session, request) }
         if let run = session.aiRun { return .ai(session, run) }
         if let batch = session.aiBatch { return .aiBatch(session, batch) }
         if let leave = session.conflictLeave { return .conflictLeave(session, leave.name) }
@@ -212,6 +215,8 @@ struct ModalHost: View {
             AddWorktreeView(session: session, form: form) { session.worktreeForm = nil }
         case .pullRequest(let session, let form):
             CreatePRView(session: session, form: form) { session.pullRequestForm = nil }
+        case .patch(let session, let request):
+            ApplyPatchModal(session: session, request: request) { session.patchPreview = nil }
         case .ai(let session, let run):
             AIResultSheet(session: session, run: run) { session.closeAI() }
         case .aiBatch(let session, let batch):
@@ -251,6 +256,7 @@ struct ModalHost: View {
         case .rebase(let session, _): session.rebaseRequest = nil
         case .worktree(let session, _): session.worktreeForm = nil
         case .pullRequest(let session, _): session.pullRequestForm = nil
+        case .patch(let session, _): session.patchPreview = nil
         case .ai(let session, _): session.closeAI()
         case .aiBatch(let session, _): session.closeAIBatch()
         case .conflictSave(let session): session.cancelConflictSave()

@@ -49,7 +49,7 @@ public enum UndoError: Error, Equatable, Sendable {
         case .nothingToRedo: "There is nothing to redo."
         case .repositoryChanged:
             "The repository changed since this operation (a commit, a staged file or a checkout Histq did not record, for example in a terminal), so it can no longer be undone or redone safely."
-        case .operationInProgress: "Finish or abort the merge, rebase, cherry-pick or revert first."
+        case .operationInProgress: "Finish or abort the merge, rebase, cherry-pick, revert or patch apply first."
         case .objectsMissing: "Git has cleaned up the objects this operation needs (git gc), so it can no longer be undone or redone."
         case .unsafePath(let path): "\"\(path)\" would be written outside the repository."
         case .unreadableJournal: "The undo history of this repository cannot be read."
