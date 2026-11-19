@@ -573,7 +573,7 @@ private struct CommitListPanel: View {
         Group {
             switch session.log {
             case .idle, .loading:
-                SkeletonCommitRows()
+                SkeletonCommitRows(textSize: textSize, dateFormat: dateFormat, hiddenColumns: hiddenColumns)
                     .allowsHitTesting(false)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Loading")
@@ -634,23 +634,17 @@ private struct CommitListPanel: View {
     }
 }
 
-/// The graph's shape while the log loads: the column titles' row and a hairline, then rows of node, subject (varied
-/// widths), author and date.
+/// The graph's shape while the log loads: the real column titles (static, so no skeleton) and a hairline, then rows
+/// of node, subject (varied widths), author and date.
 private struct SkeletonCommitRows: View {
+    let textSize: TextSize
+    let dateFormat: String
+    let hiddenColumns: Set<GraphColumn>
     private static let subjects: [CGFloat] = [0.7, 0.5, 0.82, 0.62, 0.45, 0.75, 0.58, 0.66, 0.4, 0.72]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                SkeletonLine(width: 72, height: 8)
-                SkeletonLine(width: 40, height: 8)
-                SkeletonLine(fraction: 0.3, height: 8)
-                SkeletonLine(width: 44, height: 8)
-                SkeletonLine(width: 96, height: 8)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            Divider()
+            GraphHeaderPlaceholder(textSize: textSize, dateFormat: dateFormat, hiddenColumns: hiddenColumns)
             ForEach(Self.subjects.indices, id: \.self) { index in
                 HStack(spacing: 8) {
                     SkeletonLine(width: 16, height: 16)
@@ -662,6 +656,54 @@ private struct SkeletonCommitRows: View {
                 .padding(.horizontal, 12)
                 .frame(height: 32)
             }
+        }
+    }
+}
+
+/// The graph's column titles while the log loads, drawn as `GraphHeaderView` draws them (same widths, font and
+/// hairlines), so the header does not change when the table replaces it.
+private struct GraphHeaderPlaceholder: View {
+    let textSize: TextSize
+    let dateFormat: String
+    let hiddenColumns: Set<GraphColumn>
+    @AppStorage(PrefKey.graphColumnWidths.rawValue, store: Preferences.defaults) private var storedWidths = ""
+
+    var body: some View {
+        let stored = GraphColumn.storedWidths(storedWidths)
+        let visible = GraphColumn.allCases.filter { !hiddenColumns.contains($0) }
+        // The table's fill column: the message, or the last visible column when the message is hidden.
+        let fill = visible.contains(.message) ? GraphColumn.message : visible.last
+        HStack(spacing: 0) {
+            ForEach(visible, id: \.self) { column in
+                let width = stored[column] ?? column.defaultWidth(textSize: textSize, dateFormat: dateFormat)
+                title(column, width: width)
+                    .frame(minWidth: column == fill ? column.minWidth : width,
+                           maxWidth: column == fill ? .infinity : width, maxHeight: .infinity, alignment: .leading)
+                    .overlay(alignment: .trailing) {
+                        Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1).padding(.vertical, 6)
+                    }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 26)
+        .clipped()
+        .overlay(alignment: .bottom) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1) }
+    }
+
+    @ViewBuilder private func title(_ column: GraphColumn, width: CGFloat) -> some View {
+        if let symbol = column.compactSymbol, !GraphHeaderCell.fits(column.title, width: width, textSize: textSize) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 8)
+        } else {
+            Text(column.title.uppercased())
+                .font(.system(size: textSize.scaled(10.5), weight: .semibold))
+                .kerning(0.6)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.leading, 8)
+                .padding(.trailing, 4)
         }
     }
 }
