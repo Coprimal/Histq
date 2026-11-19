@@ -337,7 +337,7 @@ struct DiffLineTable: NSViewRepresentable {
     let section: DiffSection
     let mode: DiffMode
     let loadID: Int
-    /// A commit's diff in the file history: its hunks (or selected lines) can be reverted in the working tree.
+    /// A commit's diff (file history or graph): its hunks (or selected lines) can be reverted in the working tree.
     var reverts = false
     /// Read with whitespace ignored: its hunks no longer match the files, so nothing stages, discards or reverts them.
     var readOnly = false
@@ -1087,7 +1087,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     }
 
     /// The header's buttons: "Stage Hunk", or "Stage 2 Lines" while lines of that hunk are selected. None for a
-    /// read-only diff (a commit outside the file history, a merge's combined diff, an untracked file, whitespace
+    /// read-only diff (a stash or a compare, a merge's combined diff, an untracked file, whitespace
     /// ignored).
     private func buttons(forHunk hunk: Int) -> [(PatchBuilder.Action, String)] {
         guard let view, let file = view.section.file(view.mode), !file.isCombined else { return [] }
@@ -1104,7 +1104,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         }
     }
 
-    /// The side's actions, and Revert for a commit's diff in the file history. Not in Full file: its one hunk has
+    /// The side's actions, and Revert for a commit's diff. Not in Full file: its one hunk has
     /// the whole file as context, which no longer applies once the file changed after the commit. None while
     /// whitespace is ignored.
     private func actions(_ view: DiffLineTable) -> [PatchBuilder.Action] {
@@ -1595,11 +1595,13 @@ final class DiffHunkCellView: NSView {
             view.removeFromSuperview()
         }
         for (index, (action, title)) in buttons.enumerated() {
-            // Stage is green, Discard a light red (user, 2026-11-17); Unstage keeps the plain bezel.
+            // Stage is green, Discard a light red (user, 2026-11-17), Revert orange (user, 2026-11-19); Unstage keeps
+            // the plain bezel.
             let fill: NSColor? = switch action {
             case .stage: Palette.diffAddedSign.withAlphaComponent(0.5)
             case .discard: Palette.diffRemovedSign.withAlphaComponent(0.3)
-            case .unstage, .revert: nil
+            case .revert: Palette.diffRevertTint.withAlphaComponent(0.45)
+            case .unstage: nil
             }
             let button = fill.map { TintedCapsuleButton(title: title, fill: $0) } ?? NSButton(title: title, target: nil, action: nil)
             button.target = self
@@ -1626,6 +1628,9 @@ final class DiffHunkCellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         Palette.diffHunkFill.setFill()
         bounds.fill(using: .sourceOver)
+        Palette.diffHunkEdge.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill(using: .sourceOver)
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill(using: .sourceOver)
     }
 }
 

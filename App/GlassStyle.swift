@@ -158,8 +158,13 @@ enum Palette {
     /// The `+` and `−` gutter signs. #5CC98A / #F0605C
     static let diffAddedSign = srgb(0x5CC98A)
     static let diffRemovedSign = srgb(0xF0605C)
-    /// A hunk header row's band. White 0.05
-    static let diffHunkFill = NSColor.white.withAlphaComponent(0.05)
+    /// A commit's Revert Hunk button: orange (undo), apart from Stage's green, Discard's red and conflicts' amber.
+    /// #F08A3C
+    static let diffRevertTint = srgb(0xF08A3C)
+    /// A hunk header row's band: a faint brand blue, apart from the code rows, with a hairline above and below.
+    /// #6E9BF5 at 0.14, white 0.08
+    static let diffHunkFill = srgb(0x6E9BF5).withAlphaComponent(0.14)
+    static let diffHunkEdge = NSColor.white.withAlphaComponent(0.08)
     /// The line numbers in the gutters. White 0.45
     static let diffLineNumber = NSColor.white.withAlphaComponent(0.45)
     /// Code text without a token: white, not grey (user, 2026-11-17). White 0.97

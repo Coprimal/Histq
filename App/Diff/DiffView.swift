@@ -656,7 +656,7 @@ private struct DiffContent: View {
         } else {
             DiffLineTable(
                 section: section, mode: session.diffMode, loadID: detail.loadID,
-                reverts: session.historyTool != nil, readOnly: detail.ignoresWhitespace, wraps: wrapLines,
+                reverts: session.revertsCommitHunks, readOnly: detail.ignoresWhitespace, wraps: wrapLines,
                 jump: session.diffJump, isFirst: isFirst,
                 onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
                 onClose: { [session] in session.closeFile() })

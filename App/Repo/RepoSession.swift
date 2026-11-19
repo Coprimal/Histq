@@ -896,6 +896,13 @@ final class RepoSession: Identifiable {
         if case .fileHistory? = tool { return tool }
         return nil
     }
+    /// The open diff is a commit's (in the file history, or picked in the graph): its hunks can be reverted in the
+    /// working tree. Not a stash's or a compare's.
+    var revertsCommitHunks: Bool {
+        if historyTool != nil { return true }
+        if case .commit = selection, case .commit? = openFile?.source { return true }
+        return false
+    }
     /// The last selected tool's read: `.loading` in the same call as the click, then its content. Kept while the tool
     /// is closed, so a diff opened from it returns to it as it was; the next `selectTool` replaces it.
     private(set) var toolState: Loadable<ToolContent> = .idle
@@ -3156,7 +3163,7 @@ final class RepoSession: Identifiable {
             UITiming.fileLoad("\(file.path) \(steps.description)")
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         case .compare(let base, let head):
-            // Read-only like a commit's changes (no hunk buttons).
+            // Read-only (no hunk buttons).
             async let diff = DiffReader.compare(
                 base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths,
                 ignoringWhitespace: ignoresWhitespace)
