@@ -81,6 +81,8 @@ enum Palette {
     /// The field of a single-input modal (`.textFieldStyle(.modal)`): darker than the modal's `bgCard`, set into it; also
     /// the track of `CapsuleTabs(compact:)` on a card, so it does not blend into the card's fill. #1A1A1C
     static let modalInput = color(srgb(0x1A1A1C))
+    /// The fill behind inline code (a branch name) in a modal's title and message. White 0.1
+    static let inlineCodeFill = color(.white.withAlphaComponent(0.1))
     /// The 1 pt edge of cards and panels.
     static let surfaceBorder = color(.white.withAlphaComponent(0.08))
     /// The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom.
@@ -1462,13 +1464,13 @@ struct ModalCard<Content: View, Actions: View>: View {
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(Self.inlineCode(title))
                     .font(.title3.weight(.semibold))
                     .lineLimit(2)
                     .truncationMode(.middle)
                 if let subtitle {
-                    Text(subtitle)
+                    Text(Self.inlineCode(subtitle))
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1479,6 +1481,25 @@ struct ModalCard<Content: View, Actions: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
+    }
+
+    /// `text` with each part between backticks (a branch name) as inline code: monospaced, in the primary color, on
+    /// `Palette.inlineCodeFill`, so names stand out from the words around them.
+    private static func inlineCode(_ text: String) -> AttributedString {
+        var result = AttributedString()
+        for (index, part) in text.split(separator: "`", omittingEmptySubsequences: false).enumerated() {
+            guard !index.isMultiple(of: 2) else {
+                result += AttributedString(String(part))
+                continue
+            }
+            // Narrow no-break spaces pad the fill and keep it on the name's line.
+            var code = AttributedString("\u{202F}\(part)\u{202F}")
+            code.inlinePresentationIntent = .code
+            code.foregroundColor = .primary
+            code.backgroundColor = Palette.inlineCodeFill
+            result += code
+        }
+        return result
     }
 }
 

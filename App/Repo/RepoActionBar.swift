@@ -69,8 +69,8 @@ extension RepoSession {
         let destination = "\(target.remote)/\(target.remoteBranch ?? branch)"
         if force {
             guard let lease = target.lease else { return }
-            confirm("Force push \(branch) to \(destination)?",
-                    message: "\(destination) is overwritten if it is still at \(lease.prefix(7)). Its commits that are not on \(branch) are lost.",
+            confirm("Force push `\(branch)` to `\(destination)`?",
+                    message: "`\(destination)` is overwritten if it is still at `\(lease.prefix(7))`. Its commits that are not on `\(branch)` are lost.",
                     button: "Force Push",
                     write: .push(branch: branch, remote: target.remote, remoteBranch: target.remoteBranch,
                                  setUpstream: false, forceWithLease: lease),
@@ -97,11 +97,11 @@ extension RepoSession {
         self.failure = failure
         let count = "\(local.behind) \(local.behind == 1 ? "commit" : "commits")"
         let canPull = branch == currentBranch
-        confirm("Force push \(branch) to \(destination)?",
-                message: (local.ahead > 0 ? "\(branch) and \(destination) have diverged. " : "")
-                    + "\(destination) has \(count) that \(branch) does not have. Force Push (with lease) removes "
+        confirm("Force push `\(branch)` to `\(destination)`?",
+                message: (local.ahead > 0 ? "`\(branch)` and `\(destination)` have diverged. " : "")
+                    + "`\(destination)` has \(count) that `\(branch)` does not have. Force Push removes "
                     + (canPull ? "them from the remote; Pull brings them in first." : "them from the remote."),
-                button: "Force Push (with lease)",
+                button: "Force Push",
                 write: .push(branch: branch, remote: remote, remoteBranch: remoteBranch, setUpstream: setUpstream,
                              forceWithLease: lease),
                 operation: "Force push \(branch)", key: key,
