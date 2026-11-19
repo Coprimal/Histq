@@ -515,6 +515,8 @@ final class RepoSession: Identifiable {
         case worktree(String)
         /// `base` against `head` (commit hashes or ref names), or against the working tree when `head` is nil.
         case compare(base: String, head: String?)
+        /// A submodule's state and its commits (its sidebar row), by its path.
+        case submodule(String)
     }
 
     /// The loaded detail of a selection; the views read `status`, `refs` and `log` for its values.
@@ -530,6 +532,7 @@ final class RepoSession: Identifiable {
         case worktree(String, WorkingStatus)
         /// A compare's files (`base` against `head`, nil for the working tree; untracked files left out).
         case compare(base: String, head: String?, files: [FileChange])
+        case submodule(SubmoduleDetail)
 
         /// False for a commit whose files are still loading.
         var isReady: Bool {
@@ -596,6 +599,20 @@ final class RepoSession: Identifiable {
         /// A linked worktree by its listed path; `force` loses its changes (only after the user chose that).
         case removeWorktree(String, force: Bool)
         case pruneWorktrees
+
+        /// The submodules at these paths (empty = all) checked out at their recorded commits, nested ones too;
+        /// `initialize` runs `git submodule init` first.
+        case updateSubmodules([String], initialize: Bool)
+        /// The URLs of `.gitmodules` copied into the config and each submodule's remote (empty = all).
+        case syncSubmodules([String])
+        /// A new submodule cloned from `url` at `path` (staged), on `branch` (nil = the remote's default).
+        case addSubmodule(url: String, path: String, branch: String?, recursive: Bool)
+        /// `force` loses its local changes and unpushed commits (only after the user chose that).
+        case removeSubmodule(String, force: Bool)
+        case setSubmoduleURL(String, url: String)
+        /// An empty `branch`: the remote's default branch.
+        case setSubmoduleBranch(String, branch: String)
+
         /// `git commit-graph write` (Optimize Repository): no timeout, no undo entry.
         case optimizeRepository
         /// One line (a `GitOperations.ignorePattern`) added to `.gitignore` or `.git/info/exclude`: no undo entry.
@@ -677,7 +694,7 @@ final class RepoSession: Identifiable {
         var isNetwork: Bool {
             switch self {
             case .fetchAll, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag,
-                 .checkoutPullRequest:
+                 .checkoutPullRequest, .updateSubmodules, .addSubmodule:
                 true
             default: false
             }
@@ -723,6 +740,7 @@ final class RepoSession: Identifiable {
     var remoteExpanded = true
     var tagsExpanded = true
     var worktreesExpanded = true
+    var submodulesExpanded = true
     /// The Stashes card, last in the Branches tab: collapsed until opened.
     var stashesExpanded = false
     /// The Local, Remote and Tags cards list their hidden rows too (dimmed), so they can be shown again: the card
@@ -734,9 +752,15 @@ final class RepoSession: Identifiable {
     /// The repo's worktrees (the main one first) with the other worktrees' change counts: read after the first log
     /// page, so they never delay the tab's first content, then with every refs read and when the tab is shown again.
     private(set) var worktrees: Loadable<[WorktreeInfo]> = .idle
+    /// The repo's submodules, nested ones included: read after the first log page, then with every status or refs read
+    /// (a write rereads both). `.loaded([])` without a read when the repo has no `.gitmodules`.
+    private(set) var submodules: Loadable<[Submodule]> = .idle
     /// Opens a folder in a tab of this tab's window, selecting the tab that already shows it (a worktree's "Open in
     /// New Tab", a double-click on its sidebar row). Set by `WindowModel` when it makes the session.
     @ObservationIgnored var openInTab: @MainActor (URL) -> Void = { _ in }
+    /// Opens another repo in a tab of this tab's window, outside this tab's group (a submodule's "Open in New Tab").
+    /// Set by `WindowModel` when it makes the session.
+    @ObservationIgnored var openRepoInTab: @MainActor (URL) -> Void = { _ in }
     /// Shows an operation's outcome as a toast in the tab's window (`ToastHost`). Set by `WindowModel` when it makes
     /// the session.
     @ObservationIgnored var postToast: @MainActor (OperationToast) -> Void = { _ in }
@@ -867,6 +891,7 @@ final class RepoSession: Identifiable {
     /// The last save of `view`: each save waits for the one before, so the file ends with the latest state.
     @ObservationIgnored private var viewSave: Task<Void, Never>?
     @ObservationIgnored private var worktreeTask: Task<Void, Never>?
+    @ObservationIgnored private var submoduleTask: Task<Void, Never>?
     @ObservationIgnored private let watcher = RepoWatcher()
     /// The auto-fetch timer while `PrefKey.autoFetchMinutes` is on; cancelled when the tab closes.
     @ObservationIgnored private var autoFetchTask: Task<Void, Never>?
@@ -999,8 +1024,10 @@ final class RepoSession: Identifiable {
         if let spec = AppState.launchFlag("-HistqRun") {
             Task { [weak self] in
                 for _ in 0..<100 {
-                    // The worktree menus need the worktrees, read after the first log page.
-                    if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil { break }
+                    // The worktree and submodule menus need the worktrees and the submodules, read after the first log
+                    // page.
+                    if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil,
+                       self?.debugSubmodulesReady(spec) == true { break }
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 guard let self else { return }
@@ -1011,7 +1038,8 @@ final class RepoSession: Identifiable {
         if let step = AppState.launchFlag("-HistqShow") {
             Task { [weak self] in
                 for _ in 0..<100 {
-                    if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil { break }
+                    if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil,
+                       self?.debugSubmodulesReady(step) == true { break }
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 guard let self else { return }
@@ -1098,6 +1126,7 @@ final class RepoSession: Identifiable {
         logTask?.cancel()
         branchMapTask?.cancel()
         worktreeTask?.cancel()
+        submoduleTask?.cancel()
         setUpTask?.cancel()
         autoFetchTask?.cancel()
         profileTask?.cancel()
@@ -1114,6 +1143,7 @@ final class RepoSession: Identifiable {
         logTask?.cancel()
         branchMapTask?.cancel()
         worktreeTask?.cancel()
+        submoduleTask?.cancel()
         setUpTask?.cancel()
         autoFetchTask?.cancel()
         autoFetchTask = nil
@@ -1507,6 +1537,7 @@ final class RepoSession: Identifiable {
         case .worktree(let path): "worktree-wip \(URL(filePath: path).lastPathComponent)"
         case .ref(let item): item.timingDetail
         case .compare(let base, let head): "compare \(base) \(head ?? "worktree")"
+        case .submodule(let path): "submodule \(path)"
         }
     }
 
@@ -1551,6 +1582,14 @@ final class RepoSession: Identifiable {
             case .compare(let base, let head):
                 loaded = .compare(base: base, head: head,
                                   files: try await Self.readCompareFiles(backend, cwd: url, base: base, head: head))
+            case .submodule(let path):
+                // A first select (`-HistqSelect submodule:`) still loads the sidebar's refs and the graph.
+                if status.value == nil || refs.value == nil,
+                   try await readStatusAndRefs(backend, scope: [.status, .refs])
+                {
+                    loadLog(backend)
+                }
+                loaded = .submodule(try await Self.readSubmoduleDetail(backend, path: path, list: submodules.value))
             case .ref(let item):
                 if refs.value == nil, try await readStatusAndRefs(backend, scope: [.status, .refs]) {
                     loadLog(backend)
@@ -1669,6 +1708,14 @@ final class RepoSession: Identifiable {
 
     // MARK: Keeping the selection
 
+    /// Another worktree or a submodule that went: the WIP takes over when this worktree has changes.
+    private static func movesToWIP(_ selection: Selection) -> Bool {
+        switch selection {
+        case .worktree, .submodule: true
+        default: false
+        }
+    }
+
     /// After a refresh or a log reload, a selected row that is gone moves to HEAD (the detail shows it): the WIP once the
     /// working tree is clean (a commit, a stash, a discard), a stash once dropped or popped, a commit that was in the
     /// previous complete log and is not in the new one (an amend, a reset), and another worktree's row once it is clean
@@ -1688,12 +1735,17 @@ final class RepoSession: Identifiable {
             // Its graph row goes once it is clean, removed or unreadable.
             guard worktrees.value != nil else { return }
             vanished = !dirtyWorktrees.contains { $0.path == path }
+        case .submodule(let path):
+            // Removed (or its `.gitmodules` entry gone); not before the submodules are read.
+            guard let submodules = submodules.value else { return }
+            vanished = !submodules.contains { $0.path == path }
         case .overview, .multiple, .ref, .compare:
             return
         }
         guard vanished else { return }
-        // The pane closes in Stacked too: what it shows (a WIP file once the tree is clean) may be gone.
-        if case .worktree = selection, hasChanges {
+        // The pane closes in Stacked too: what it shows (a WIP file once the tree is clean) may be gone. A removed
+        // submodule leaves its removal staged: the WIP shows it.
+        if hasChanges, Self.movesToWIP(selection) {
             selectGraph([.wip], keepsPanel2: false)
         } else if let head = status.value?.branch.commit {
             selectGraph([.commit(head)], keepsPanel2: false)
@@ -1730,6 +1782,8 @@ final class RepoSession: Identifiable {
             // A worktree added or removed, or a commit made in one, shows as a refs change. Never before the first log
             // page: that one starts the first read.
             if scope.contains(.refs), log.value != nil { loadWorktrees(backend) }
+            // A checkout, an edit inside a submodule or a submodule write: after the first log page, as the worktrees.
+            if !scope.isDisjoint(with: [.status, .refs]), log.value != nil { loadSubmodules(backend) }
             refreshTask = nil
             refreshScope = []
         } catch {
@@ -1913,6 +1967,7 @@ final class RepoSession: Identifiable {
                             self?.log = .loaded(first)
                             self?.updateBranchMap()
                             self?.loadWorktrees(backend)
+                            self?.loadSubmodules(backend)
                         }
                     }
                 }
@@ -1937,6 +1992,7 @@ final class RepoSession: Identifiable {
                 UITiming.logPublish(since: publishStart)
                 // A log without a page (an unborn branch) never started the worktrees' first read.
                 if case .idle = self.worktrees { loadWorktrees(backend) }
+                if case .idle = self.submodules { loadSubmodules(backend) }
                 // The status or the stashes changed while it loaded, or the worktrees were read meanwhile; or the
                 // refs it read itself differ from the session's.
                 if syntheticRowsChanged || (filter == nil && refs.value != nil && snapshot.filter != visibility) {
@@ -2412,6 +2468,93 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// Reads the submodules off the main actor (`SubmoduleReader.list`), then publishes them when they changed. A newer
+    /// read cancels this one. A repo without `.gitmodules` gets `.loaded([])` at once, with no read.
+    private func loadSubmodules(_ backend: Backend) {
+        submoduleTask?.cancel()
+        let cwd = backend.directories.worktree
+        guard FileManager.default.fileExists(atPath: cwd.appending(path: ".gitmodules").path) else {
+            submoduleTask = nil
+            if submodules.value != [] {
+                submodules = .loaded([])
+                refreshSubmoduleSelection(backend)
+            }
+            return
+        }
+        if submodules.value == nil { submodules = .loading }
+        submoduleTask = Task { [weak self] in
+            do {
+                let list = try await Self.readSubmodules(backend, cwd: cwd)
+                try Task.checkCancellation()
+                guard let self else { return }
+                submoduleTask = nil
+                if submodules.value != list {
+                    submodules = .loaded(list)
+                    refreshSubmoduleSelection(backend)
+                }
+            } catch {
+                guard !Self.isCancellation(error), let self else { return }
+                submoduleTask = nil
+                Self.logger.error("submodule read failed: \(error, privacy: .public)")
+                if submodules.value == nil { submodules = .failed(Self.message(for: error)) }
+            }
+        }
+    }
+
+    @concurrent
+    private nonisolated static func readSubmodules(_ backend: Backend, cwd: URL) async throws -> [Submodule] {
+        try await SubmoduleReader.list(runner: backend.runner, cwd: cwd, base: backend.base)
+    }
+
+    /// After the submodules are read again: a selected submodule moves on once it is gone (`dropVanishedSelection`),
+    /// else its detail is read again in place (no placeholder; a failed read keeps it as it was).
+    private func refreshSubmoduleSelection(_ backend: Backend) {
+        guard case .submodule(let path) = selection else { return }
+        dropVanishedSelection()
+        guard selection == .submodule(path), case .loaded(.submodule) = detail else { return }
+        let token = selectToken
+        let list = submodules.value
+        detailTask?.cancel()
+        detailTask = Task { [weak self] in
+            guard let loaded = try? await Self.readSubmoduleDetail(backend, path: path, list: list), let self,
+                  token == selectToken
+            else { return }
+            detail = .loaded(.submodule(loaded))
+        }
+    }
+
+    /// A submodule's detail, off the main actor: its entry of `list` (read here when nil), then in its checkout the
+    /// recorded and checked-out commits and, when they differ, the commits between them (`SubmoduleReader`).
+    @concurrent
+    private nonisolated static func readSubmoduleDetail(_ backend: Backend, path: String, list: [Submodule]?)
+        async throws -> SubmoduleDetail
+    {
+        let cwd = backend.directories.worktree
+        let list = if let list { list } else {
+            try await SubmoduleReader.list(runner: backend.runner, cwd: cwd, base: backend.base)
+        }
+        guard let submodule = list.first(where: { $0.path == path }) else {
+            throw SubmoduleOperationError.notASubmodule(path)
+        }
+        let isNested = SubmoduleDetail.isNested(path, in: list)
+        guard case .checkedOut(let head, _) = submodule.state else {
+            return SubmoduleDetail(submodule: submodule, isNested: isNested, recorded: nil, checkedOut: nil, change: nil)
+        }
+        let folder = cwd.appending(path: path, directoryHint: .isDirectory)
+        let recorded = submodule.recordedCommit
+        async let commits = SubmoduleReader.commits(
+            runner: backend.runner, in: folder, base: backend.base,
+            shas: submodule.isMoved ? [recorded, head] : [recorded])
+        let change: SubmoduleChange? = if submodule.isMoved {
+            try await SubmoduleReader.change(runner: backend.runner, in: folder, base: backend.base, from: recorded,
+                                             to: head)
+        } else { nil }
+        let found = try await commits
+        return SubmoduleDetail(
+            submodule: submodule, isNested: isNested, recorded: found.first { $0.sha == recorded },
+            checkedOut: found.first { $0.sha == head }, change: change)
+    }
+
     /// After the worktrees are read again: another worktree's changes on screen move on once it is clean or gone
     /// (`dropVanishedSelection`), else are read again in place (no placeholder; a failed read keeps them as they were).
     private func refreshWorktreeSelection(_ backend: Backend) {
@@ -2605,6 +2748,36 @@ final class RepoSession: Identifiable {
     func openWorktree(_ path: String) {
         UITiming.select("worktree \(URL(filePath: path).lastPathComponent)")
         openInTab(URL(filePath: path, directoryHint: .isDirectory))
+    }
+
+    // MARK: Submodules
+
+    /// A click on a submodule's sidebar row: selects it at once, its detail on its placeholder in the click's frame until
+    /// its status is read.
+    func selectSubmodule(_ path: String) {
+        if asksBeforeLeavingConflict({ [weak self] in self?.selectSubmodule(path) }) { return }
+        // No graph row or branch row stands for it.
+        graphSelection = []
+        sidebarSelection = nil
+        let selection = Selection.submodule(path)
+        UITiming.select(timingDetail(selection))
+        select(selection)
+    }
+
+    /// Opens a checked-out submodule's folder in a tab of this window (a double-click on its sidebar row, "Open in New
+    /// Tab"): its own repo, so its tab joins no group of this repo's.
+    func openSubmodule(_ path: String) {
+        UITiming.select("submodule tab \(path)")
+        Task { [weak self] in
+            guard let url = await self?.submoduleURL(path) else { return }
+            self?.openRepoInTab(url)
+        }
+    }
+
+    /// A submodule's folder: `path` under this repo's worktree; nil while the repo is not set up.
+    func submoduleURL(_ path: String) async -> URL? {
+        guard let backend = try? await backend() else { return nil }
+        return backend.directories.worktree.appending(path: path, directoryHint: .isDirectory)
     }
 
     // MARK: File diff
@@ -3996,6 +4169,16 @@ final class RepoSession: Identifiable {
             run(confirmation.write, title: confirmation.operation, key: confirmation.key)
         }
     }
+
+    /// DEBUG `-HistqRun` / `-HistqShow`: a spec with a `submodule:<path>` or `submodules` root, or the repo menu's
+    /// Submodules submenu, waits for the submodule list, read in its own task after the first log page; any other spec
+    /// does not.
+    func debugSubmodulesReady(_ spec: String) -> Bool {
+        let usesSubmodules = spec.components(separatedBy: ";;").contains {
+            $0.hasPrefix("submodule:") || $0.hasPrefix("submodules|") || $0.hasPrefix("repo|Submodules|")
+        }
+        return !usesSubmodules || submodules.value != nil
+    }
     #endif
 
     /// "Checkout this version" of a commit's file (its diff header): `git checkout <commit> -- <path>` through the write
@@ -4565,6 +4748,15 @@ final class RepoSession: Identifiable {
             try await ops.addWorktree(at: path, from: source, newBranch: newBranch)
         case .removeWorktree(let path, let force): try await ops.removeWorktree(path, force: force)
         case .pruneWorktrees: try await ops.pruneWorktrees()
+
+        case .updateSubmodules(let paths, let initialize):
+            try await ops.updateSubmodules(paths, initialize: initialize, recursive: true)
+        case .syncSubmodules(let paths): try await ops.syncSubmodules(paths)
+        case .addSubmodule(let url, let path, let branch, let recursive):
+            try await ops.addSubmodule(url: url, path: path, branch: branch, recursive: recursive)
+        case .removeSubmodule(let path, let force): try await ops.removeSubmodule(path, force: force)
+        case .setSubmoduleURL(let path, let url): try await ops.setSubmoduleURL(path, url: url)
+        case .setSubmoduleBranch(let path, let branch): try await ops.setSubmoduleBranch(path, branch: branch)
         case .optimizeRepository: try await ops.optimizeRepository()
         case .ignore(let pattern, let file): try await ops.ignore(pattern: pattern, in: file)
 
@@ -4987,7 +5179,7 @@ final class RepoSession: Identifiable {
     }
 
     /// A short message for the detail's failed state.
-    private nonisolated static func message(for error: Error) -> String {
+    nonisolated static func message(for error: Error) -> String {
         switch error {
         case GitError.other(_, let stderrTail) where stderrTail.contains("not a git repository"):
             "This folder is not a git repository."
@@ -5020,6 +5212,20 @@ final class RepoSession: Identifiable {
             case .mainWorktree: "The main worktree cannot be removed."
             case .currentWorktree: "This tab's own worktree cannot be removed from here."
             }
+        case let error as SubmoduleOperationError:
+            switch error {
+            case .invalidURL(let url): "\"\(url)\" is not a submodule URL Histq accepts (https, ssh or a relative path)."
+            case .invalidPath(let path): "\"\(path)\" is not a valid submodule folder."
+            case .invalidName(let name): "The submodule name \"\(name)\" is not safe to use."
+            case .notASubmodule(let path): "\(path) is not a submodule of this repository."
+            }
+        case let error as SubmoduleUpdateFailure:
+            // Each failed submodule with git's words, then those left alone for their configured update mode.
+            (error.failures.map { "\($0.path): \($0.message.trimmingCharacters(in: .whitespacesAndNewlines))" }
+                + (error.skipped.isEmpty ? [] : [
+                    "Skipped for their update mode: "
+                        + error.skipped.map { "\($0.path) (\($0.mode))" }.joined(separator: ", ") + ".",
+                ])).joined(separator: "\n")
         case GitInvocation.BackgroundFetchError.repoSetsNetworkConfig(let keys):
             "The repo sets its own http or proxy config (\(keys.joined(separator: ", "))); "
                 + "auto-fetch skipped, fetch manually."

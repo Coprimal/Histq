@@ -177,10 +177,23 @@ final class RepoWatcher: @unchecked Sendable {
             case "index": return .status
             // A merge, cherry-pick or revert started or ended: the status shows the conflicts.
             case "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD": return .status
-            default: return relative.hasPrefix("refs/") ? .refs : []
+            default:
+                if relative.hasPrefix("refs/") { return .refs }
+                // A submodule's HEAD, index or refs moved: its row's state changes. Only in this worktree's git dir
+                // (a linked worktree keeps its own `modules/`).
+                return dir == directories.gitDir.path && isSubmoduleState(relative) ? .status : []
             }
         }
         return isInside(path, directories.worktree.path) ? .status : []
+    }
+
+    /// `modules/<name>/HEAD`, `modules/<name>/index` or `modules/<name>/refs/…`, nested submodules' too (`<name>` may
+    /// hold slashes, so no depth is assumed). Their reflogs (`logs/HEAD`, `logs/refs/…`) match too: git writes them
+    /// with the HEAD or ref they follow, inside the same debounce.
+    private static func isSubmoduleState(_ relative: String) -> Bool {
+        guard relative.hasPrefix("modules/") else { return false }
+        let parts = relative.split(separator: "/")
+        return parts.last == "HEAD" || parts.last == "index" || parts.dropLast().contains("refs")
     }
 
     /// `path` relative to `root` ("" for the root itself), or nil when it is outside.

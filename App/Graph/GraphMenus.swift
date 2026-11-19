@@ -5,7 +5,8 @@
 // graph, a tag's hide), a graph badge's menu (its ref's menu, then its commit's), the Local and Remote cards' Hide Stale
 // Branches, the Remote card's menus,
 // the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
-// (open in a tab, add, remove, prune), checkout file from a commit, a file's history and blame, stash one WIP file or
+// (open in a tab, add, remove, prune), the submodule menus (open in a tab, initialize or update, sync, stage the new
+// pointer, set the URL or branch, remove; add, update or sync all), checkout file from a commit, a file's history and blame, stash one WIP file or
 // folder, ignore or exclude an untracked one, apply one file of a stash, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
@@ -686,11 +687,96 @@ enum RepoMenus {
         ]
     }
 
+    // MARK: Submodules
+
+    /// A submodule's menu (its sidebar row, the palette): open it in a tab (once checked out), initialize or update it,
+    /// sync its URL, stage its new pointer (once its checkout moved), set its URL or branch, copy its path or URL, reveal
+    /// it in Finder, remove it (confirmed). A nested one's pointer and URL live in its parent submodule, so it only opens,
+    /// copies and reveals. A path the list does not have gets its items disabled.
+    static func submodule(_ path: String, _ session: RepoSession) -> [MenuEntry] {
+        let list = session.submodules.value ?? []
+        let submodule = list.first { $0.path == path }
+        let isNested = SubmoduleDetail.isNested(path, in: list)
+        let state = submodule?.state
+        let isCheckedOut = if case .checkedOut? = state { true } else { false }
+        let isInitialized = if case .notInitialized? = state { false } else { submodule != nil }
+        let canWrite = submodule != nil && !isNested
+        let nested: String? = isNested ? "A nested submodule: act on it from its parent submodule's tab." : nil
+        let verb = isCheckedOut ? "Update" : "Initialize"
+        let isMoved = submodule?.isMoved ?? false
+        let url = submodule?.url
+        return [
+            .action("Open in New Tab", enabled: isCheckedOut,
+                    toolTip: submodule != nil && !isCheckedOut ? "It has no checkout: initialize it first." : nil) {
+                session.openSubmodule(path)
+            },
+            .separator,
+            .action(verb, enabled: canWrite, toolTip: nested) {
+                session.run(.updateSubmodules([path], initialize: !isCheckedOut), title: "\(verb) submodule \(path)")
+            },
+            .action("Sync URL", enabled: canWrite && isInitialized,
+                    toolTip: nested ?? (canWrite && !isInitialized ? "Not initialized: nothing to sync." : nil)) {
+                session.run(.syncSubmodules([path]), title: "Sync submodule URL \(path)")
+            },
+            .action("Stage New Pointer", enabled: canWrite && isMoved,
+                    toolTip: nested ?? (canWrite && isCheckedOut && !isMoved
+                        ? "Its checkout is on the recorded commit." : nil)) {
+                session.run(.stage([path]), title: "Stage submodule pointer \(path)")
+            },
+            .separator,
+            .action("Set URL…", enabled: canWrite, toolTip: nested) { session.dialog = .setSubmoduleURL(path) },
+            .action("Set Branch…", enabled: canWrite, toolTip: nested) { session.dialog = .setSubmoduleBranch(path) },
+            .separator,
+            .submenu("Copy", [
+                .action("Path") { copy(path) },
+                .action("URL", enabled: url != nil, toolTip: url == nil ? "No URL in .gitmodules." : nil) {
+                    copy(url ?? "")
+                },
+            ]),
+            .action("Reveal in Finder", enabled: submodule != nil) {
+                Task {
+                    guard let url = await session.submoduleURL(path) else { return }
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            },
+            .separator,
+            .action("Remove…", enabled: canWrite, destructive: true, toolTip: nested) {
+                confirmRemoveSubmodule(path, session)
+            },
+        ]
+    }
+
+    /// The Submodules card's menu and the repo menu's Submodules submenu: add a submodule, update (checking out each
+    /// recorded commit) or sync the URLs of every submodule.
+    static func submodules(_ session: RepoSession) -> [MenuEntry] {
+        let hasSubmodules = session.submodules.value?.isEmpty == false
+        let none = hasSubmodules ? nil : "This repository has no submodules."
+        return [
+            .action("Add Submodule…") { session.dialog = .addSubmodule },
+            .separator,
+            .action("Update All", enabled: hasSubmodules, toolTip: none) {
+                session.run(.updateSubmodules([], initialize: false), title: "Update submodules")
+            },
+            .action("Sync All", enabled: hasSubmodules, toolTip: none) {
+                session.run(.syncSubmodules([]), title: "Sync submodule URLs")
+            },
+        ]
+    }
+
+    /// Removing a submodule (its menu, its detail's Remove…): names what is lost.
+    static func confirmRemoveSubmodule(_ path: String, _ session: RepoSession) {
+        session.confirm("Remove the submodule \(path)?",
+                        message: "Its folder, its clone in .git/modules and any commits not pushed from it are "
+                            + "deleted, and the removal is staged. This cannot be undone.",
+                        button: "Remove Submodule", write: .removeSubmodule(path, force: false),
+                        operation: "Remove submodule \(path)")
+    }
+
     // MARK: Repository
 
     /// The repository's own actions (the toolbar's repo menu, the palette): Show Reflog, Optimize Repository
     /// (confirmed; disabled while one runs: it is outside the write lane, so a second one would redo the work or fail on
-    /// git's lock).
+    /// git's lock), the Submodules submenu.
     static func repository(_ session: RepoSession) -> [MenuEntry] {
         let operation = "Optimize repository"
         return [
@@ -703,6 +789,8 @@ enum RepoMenus {
                                 button: "Optimize", write: .optimizeRepository, operation: operation,
                                 isDestructive: false)
             },
+            .separator,
+            .submenu("Submodules", submodules(session)),
         ]
     }
 
@@ -1007,9 +1095,10 @@ enum RepoMenus {
     /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `badge:<local|remote|tag>:<name>`
     /// (a graph badge), `remotes`, `file:<sha>:<path>`, `wipfile:<path>` (a WIP file's `wipExtras`),
     /// `stashfile:<sha>:<path>` (a tracked file of a stash), `drop:<local|remote>:<name>><local|remote>:<name>`,
-    /// `branches` (the toolbar's branch menu), `repo` (`repository`, the toolbar's repo menu) or `reflog:<sha>` (a
-    /// reflog entry's menu). Each step's outcome goes to `operations.txt` in the state folder. For QA on fixture copies
-    /// only.
+    /// `branches` (the toolbar's branch menu), `repo` (`repository`, the toolbar's repo menu), `reflog:<sha>` (a
+    /// reflog entry's menu), `submodule:<path>` (a submodule's menu) or `submodules` (the Submodules card's menu); a
+    /// submodule root waits for the submodule list (`RepoSession`'s launch). Each step's outcome goes to
+    /// `operations.txt` in the state folder. For QA on fixture copies only.
     static func debugRun(_ spec: String, session: RepoSession) async {
         for step in spec.components(separatedBy: ";;") {
             guard let perform = debugAction(step, session) else {
@@ -1079,6 +1168,8 @@ enum RepoMenus {
         case "worktrees": return worktrees(session)
         case "repo": return repository(session)
         case "reflog": return reflog(value, session)
+        case "submodules": return submodules(session)
+        case "submodule": return submodule(value, session)
         case "worktree":
             // By folder name or path.
             let info = session.worktrees.value?.first { $0.name == value || $0.path == value }

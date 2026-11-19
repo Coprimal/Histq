@@ -346,7 +346,7 @@ enum LayoutPreset: String {
 struct SelectRequest: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
         case tab, wip, commit, commits, branch, branchclick, worktree, openworktree, file, conflict, commitfile,
-            history, settings, sidebar, pr, issue, prbadge
+            history, settings, sidebar, pr, issue, prbadge, submodule
     }
 
     let kind: Kind

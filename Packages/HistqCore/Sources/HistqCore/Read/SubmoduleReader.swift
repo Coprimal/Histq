@@ -168,6 +168,24 @@ public enum SubmoduleReader {
             behind: counts.count == 2 ? counts[0] : 0, commits: commits)
     }
 
+    /// The commits `shas` in the submodule checked out at `folder` (its subject, author and date; no refs), read
+    /// with the read environment built there, in `shas`' order; a sha the checkout does not have is left out (and
+    /// nothing is read when it is not checked out or a sha is not a full hash). Throws `GitError`.
+    public static func commits(
+        runner: GitRunner, in folder: URL, base: [String: String], shas: [String]
+    ) async throws -> [SubmoduleChange.Commit] {
+        guard !shas.isEmpty, shas.allSatisfy({ LogParser.isHash(Substring($0)) }),
+              FileManager.default.fileExists(atPath: folder.appending(path: ".git").path)
+        else { return [] }
+        let env = try await GitInvocation.readEnvironment(
+            profile: nil, base: ownRepository(base, folder), runner: runner, cwd: folder)
+        let log = try await runner.run(
+            ["log", "-z", "--no-walk=unsorted", "--ignore-missing", "--format=%m%x1f%H%x1f%at%x1f%x1f%an%x1f%s",
+             "--end-of-options"] + shas + ["--"],
+            cwd: folder, env: env)
+        return log.text.split(separator: "\0").compactMap(parseCommit)
+    }
+
     // MARK: - Private
 
     private struct Entry {

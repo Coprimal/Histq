@@ -1,5 +1,6 @@
 // The forms and confirmations of the repo operations: create and rename a branch, create a tag (lightweight or
-// annotated), the reset mode chooser, add / rename a remote and set its URL, add a worktree, the interactive rebase and squash sheet
+// annotated), the reset mode chooser, add / rename a remote and set its URL, add a submodule and set its URL or
+// branch, add a worktree, the interactive rebase and squash sheet
 // (`InteractiveRebaseView`), and the confirmation of every destructive operation (it names its target). A menu, the action bar or the sidebar sets `RepoSession.dialog` or
 // `RepoSession.confirmation`; `ModalHost` presents them over the window. Every form runs its write
 // through `RepoSession.run`, and new names are checked first as the operation checks them (`git check-ref-format`, no
@@ -19,6 +20,11 @@ enum OperationDialog: Identifiable {
     case addRemote
     case renameRemote(String)
     case setRemoteURL(String, url: String)
+    case addSubmodule
+    /// The submodule at this path: its URL (prefilled from `RepoSession.submodules`).
+    case setSubmoduleURL(String)
+    /// The submodule at this path: the branch it follows (prefilled; empty = the remote's default branch).
+    case setSubmoduleBranch(String)
 
     var id: String {
         switch self {
@@ -29,6 +35,9 @@ enum OperationDialog: Identifiable {
         case .addRemote: "add remote"
         case .renameRemote(let name): "rename remote \(name)"
         case .setRemoteURL(let name, _): "url \(name)"
+        case .addSubmodule: "add submodule"
+        case .setSubmoduleURL(let path): "submodule url \(path)"
+        case .setSubmoduleBranch(let path): "submodule branch \(path)"
         }
     }
 }
@@ -114,8 +123,11 @@ struct OperationDialogView: View {
 
     @State private var name = ""
     @State private var url = ""
+    @State private var path = ""
+    @State private var branch = ""
     @State private var message = ""
     @State private var checkout = true
+    @State private var recursive = true
     @State private var annotated = false
     @State private var mode = GitOperations.ResetMode.mixed
     @State private var error: String?
@@ -186,6 +198,9 @@ struct OperationDialogView: View {
         case .addRemote: "Add a remote"
         case .renameRemote(let name): "Rename remote \(name)"
         case .setRemoteURL(let name, _): "Set the URL of \(name)"
+        case .addSubmodule: "Add a submodule"
+        case .setSubmoduleURL(let path): "Set the URL of \(path)"
+        case .setSubmoduleBranch(let path): "Set the branch of \(path)"
         }
     }
 
@@ -196,7 +211,9 @@ struct OperationDialogView: View {
         case .createTag: "Create Tag"
         case .reset: "Reset"
         case .addRemote: "Add Remote"
-        case .setRemoteURL: "Set URL"
+        case .setRemoteURL, .setSubmoduleURL: "Set URL"
+        case .addSubmodule: "Add Submodule"
+        case .setSubmoduleBranch: "Set Branch"
         }
     }
 
@@ -234,21 +251,32 @@ struct OperationDialogView: View {
         case .addRemote:
             field("Name") { TextField("origin", text: $name) }
             field("URL") { TextField("git@github.com:owner/repo.git", text: $url) }
-        case .setRemoteURL:
+        case .setRemoteURL, .setSubmoduleURL:
             field("URL") { TextField("git@github.com:owner/repo.git", text: $url) }
+        case .addSubmodule:
+            field("URL") { TextField("git@github.com:owner/repo.git", text: $url) }
+            field("Folder", focus: false) { TextField("vendor/repo", text: $path) }
+            field("Branch (optional)", focus: false) { TextField("Empty: the remote's default branch", text: $branch) }
+            Toggle("Also fetch nested submodules", isOn: $recursive)
+        case .setSubmoduleBranch:
+            field("Branch") { TextField("Empty: the remote's default branch", text: $branch) }
         }
     }
 
-    private func field<Field: View>(_ label: String, @ViewBuilder _ content: () -> Field) -> some View {
+    /// `focus`: the field the form focuses when it opens (the fields share one focus flag, so only the first one).
+    private func field<Field: View>(_ label: String, focus: Bool = true, @ViewBuilder _ content: () -> Field)
+        -> some View
+    {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.settingsCaption)
                 .foregroundStyle(.secondary)
-            content()
-                .textFieldStyle(.settings)
-                .autocorrectionDisabled()
-                .focused($fieldFocused)
-                .onSubmit(submit)
+            Group {
+                if focus { content().focused($fieldFocused) } else { content() }
+            }
+            .textFieldStyle(.settings)
+            .autocorrectionDisabled()
+            .onSubmit(submit)
         }
     }
 
@@ -256,6 +284,8 @@ struct OperationDialogView: View {
         switch dialog {
         case .renameBranch(let current), .renameRemote(let current): name = current
         case .setRemoteURL(_, let current): url = current
+        case .setSubmoduleURL(let path): url = submodule(path)?.url ?? ""
+        case .setSubmoduleBranch(let path): branch = submodule(path)?.branch ?? ""
         case .reset(_, _, _, let preselected): mode = preselected
         default: break
         }
@@ -265,6 +295,12 @@ struct OperationDialogView: View {
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var trimmedURL: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedPath: String { path.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedBranch: String { branch.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func submodule(_ path: String) -> Submodule? {
+        session.submodules.value?.first { $0.path == path }
+    }
 
     private var canSubmit: Bool {
         switch dialog {
@@ -272,20 +308,31 @@ struct OperationDialogView: View {
         case .createTag: !trimmedName.isEmpty && (!annotated || !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         case .reset: true
         case .addRemote: !trimmedName.isEmpty && !trimmedURL.isEmpty
-        case .setRemoteURL: !trimmedURL.isEmpty
+        case .setRemoteURL, .setSubmoduleURL: !trimmedURL.isEmpty
+        case .addSubmodule: !trimmedURL.isEmpty && !trimmedPath.isEmpty
+        case .setSubmoduleBranch: true
         }
     }
 
-    /// Checks the new name (off the main actor), then runs the write and closes; a bad name stays in the form.
+    /// Checks the new name or submodule branch (off the main actor), then runs the write and closes; a bad value stays
+    /// in the form.
     private func submit() {
         guard canSubmit, !checking else { return }
         error = nil
         if case .addRemote = dialog, !Self.isValidURL(trimmedURL) { return error = "That is not a valid remote URL." }
         if case .setRemoteURL = dialog, !Self.isValidURL(trimmedURL) { return error = "That is not a valid remote URL." }
-        guard let kind = nameKind else { return finish() }
+        if let problem = submoduleProblem { return error = problem }
+        let check: (kind: RepoSession.NameKind, name: String)? = if let kind = nameKind {
+            (kind, trimmedName)
+        } else if submoduleBranchChecked, !trimmedBranch.isEmpty {
+            (.branch, trimmedBranch)
+        } else {
+            nil
+        }
+        guard let check else { return finish() }
         checking = true
         Task {
-            let reason = await session.validate(kind, trimmedName)
+            let reason = await session.validate(check.kind, check.name)
             checking = false
             if let reason { error = reason } else { finish() }
         }
@@ -296,7 +343,32 @@ struct OperationDialogView: View {
         case .createBranch, .renameBranch: .branch
         case .createTag: .tag
         case .addRemote, .renameRemote: .remote
-        case .reset, .setRemoteURL: nil
+        case .reset, .setRemoteURL, .addSubmodule, .setSubmoduleURL, .setSubmoduleBranch: nil
+        }
+    }
+
+    /// The submodule forms whose branch field is checked as a branch name (when not empty).
+    private var submoduleBranchChecked: Bool {
+        switch dialog {
+        case .addSubmodule, .setSubmoduleBranch: true
+        default: false
+        }
+    }
+
+    /// Why the submodule URL or folder is refused, as the operation would refuse it; nil when valid or not asked.
+    private var submoduleProblem: String? {
+        do {
+            switch dialog {
+            case .addSubmodule:
+                try GitOperations.validateSubmoduleURL(trimmedURL)
+                try GitOperations.validateSubmodulePath(trimmedPath)
+            case .setSubmoduleURL:
+                try GitOperations.validateSubmoduleURL(trimmedURL)
+            default: break
+            }
+            return nil
+        } catch {
+            return RepoSession.message(for: error)
         }
     }
 
@@ -323,6 +395,16 @@ struct OperationDialogView: View {
             session.run(.renameRemote(old, to: name), title: "Rename remote \(old) to \(name)")
         case .setRemoteURL(let remote, _):
             session.run(.setRemoteURL(remote, url: trimmedURL), title: "Set the URL of \(remote)")
+        case .addSubmodule:
+            let branch = trimmedBranch.isEmpty ? nil : trimmedBranch
+            session.run(.addSubmodule(url: trimmedURL, path: trimmedPath, branch: branch, recursive: recursive),
+                        title: "Add submodule \(trimmedPath)")
+        case .setSubmoduleURL(let path):
+            session.run(.setSubmoduleURL(path, url: trimmedURL), title: "Set the URL of submodule \(path)")
+        case .setSubmoduleBranch(let path):
+            session.run(.setSubmoduleBranch(path, branch: trimmedBranch),
+                        title: trimmedBranch.isEmpty ? "Follow the default branch in submodule \(path)"
+                            : "Set the branch of submodule \(path) to \(trimmedBranch)")
         }
         onClose()
     }

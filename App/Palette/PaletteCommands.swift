@@ -1,6 +1,6 @@
 // The command palette's rows for one window, copied when it opens (task 8.5): Undo / Redo, the toolbar's repo actions and their
-// Pull ▾ / Push ▾ menus, Show All Branches and Hide / Show Stale Branches, "Checkout <branch>" for every local and
-// remote branch, the window's tabs, Open Repository…, the Settings pages, the tab position and the layout presets, then
+// Pull ▾ / Push ▾ menus, the repo menu and each submodule's menu, Show All Branches and Hide / Show Stale Branches,
+// "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…, the Settings pages, the tab position and the layout presets, then
 // the repo's menu operations (working tree, the selected commit, the stashes, each branch, remote branch and tag, the
 // remotes). Every repo row runs the same `MenuEntry` or `ToolbarAction` the menus and buttons run, so its
 // confirmations, forms and enabled state are theirs.
@@ -98,7 +98,8 @@ enum PaletteCommands {
     }
 
     /// Undo and Redo (named and enabled as the toolbar's), the toolbar's buttons (enabled as they are), the Pull ▾
-    /// and Push ▾ menus, then Show All Branches and Hide / Show Stale Branches.
+    /// and Push ▾ menus, the repo menu (with its Submodules submenu), each submodule's menu, then Show All Branches and
+    /// Hide / Show Stale Branches.
     private static func repository(_ session: RepoSession, into snapshot: inout PaletteSnapshot) {
         for isRedo in [false, true] {
             let availability = session.historyAvailability(redo: isRedo)
@@ -119,8 +120,13 @@ enum PaletteCommands {
                      systemImage: ToolbarAction.pull.systemImage)
         snapshot.add(RepoMenus.push(session), detail: "Push ▾", section: .repository,
                      systemImage: ToolbarAction.push.systemImage)
+        // Its Submodules submenu (Update All, Sync All) comes as "Submodules › …" rows.
         snapshot.add(RepoMenus.repository(session), detail: "Repository", section: .repository,
                      systemImage: "gauge.with.needle")
+        for submodule in session.submodules.value ?? [] {
+            snapshot.add(RepoMenus.submodule(submodule.path, session), detail: "Submodule \(submodule.path)",
+                         section: .repository, systemImage: SidebarMetrics.submoduleImage)
+        }
         snapshot.add("Show All Branches", detail: "Graph", section: .repository, systemImage: "eye",
                      enabled: session.hiddenCount > 0 || session.isSoloActive) { session.showAll() }
         let hideStale = session.view.hideStale

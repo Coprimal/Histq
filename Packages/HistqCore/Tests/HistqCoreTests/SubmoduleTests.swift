@@ -117,6 +117,38 @@ struct SubmoduleTests {
         #expect(empty.map(\.state) == [.notCheckedOut])
     }
 
+    @Test("The commits read by sha come back in the order given, without the ones the submodule lacks")
+    func commitsBySha() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let source = try await sandbox.makeRepo("sub-source")
+        let repo = try await sandbox.makeRepo("super")
+        let sub = try await sandbox.addSubmodule(source, as: "sub", in: repo)
+        let old = try await sandbox.git(["rev-parse", "HEAD"], in: sub)
+        try await sandbox.git(["config", "user.name", "Sub Author"], in: sub)
+        try await sandbox.git(["config", "user.email", "sub@histq.invalid"], in: sub)
+        try Data("second\n".utf8).write(to: sub.appending(path: "tracked.txt"))
+        try await sandbox.git(["commit", "-q", "-a", "-m", "second"], in: sub)
+        let new = try await sandbox.git(["rev-parse", "HEAD"], in: sub)
+        let newTime = try #require(TimeInterval(try await sandbox.git(["log", "-1", "--format=%at", new], in: sub)))
+
+        // Oldest first, unlike git's date order, with a full sha the submodule lacks in between.
+        let missing = String(repeating: "1", count: 40)
+        let commits = try await SubmoduleReader.commits(
+            runner: sandbox.runner, in: sub, base: sandbox.base, shas: [old, missing, new])
+        #expect(commits.map(\.sha) == [old, new])
+        #expect(commits.map(\.subject) == ["initial", "second"])
+        #expect(commits.last?.author == "Sub Author")
+        #expect(commits.last?.date == Date(timeIntervalSince1970: newTime))
+        #expect(commits.allSatisfy { $0.refs.isEmpty })
+
+        // A name that is not a full hash reads nothing.
+        #expect(try await SubmoduleReader.commits(
+            runner: sandbox.runner, in: sub, base: sandbox.base, shas: [old, "HEAD"]).isEmpty)
+        #expect(try await SubmoduleReader.commits(
+            runner: sandbox.runner, in: sub, base: sandbox.base, shas: [String(old.prefix(12))]).isEmpty)
+    }
+
     // MARK: - Writes
 
     @Test("Submodule URLs and paths are checked before git sees them")
