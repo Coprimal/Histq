@@ -34,7 +34,8 @@ struct SubmoduleStatusPanel: View {
 
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
-            SectionCard(path, systemImage: SidebarMetrics.submoduleImage) {
+            SectionCard(path, systemImage: SidebarMetrics.submoduleImage,
+                        titleFont: .system(size: textSize.scaled(16), weight: .semibold)) {
                 VStack(alignment: .leading, spacing: 4) {
                     if let detail {
                         let state = Self.state(detail)
@@ -58,9 +59,12 @@ struct SubmoduleStatusPanel: View {
                     }
                     // The placeholder lays out the same buttons (from the listed submodule), hidden under bars.
                     let actions = detail.map(actions) ?? placeholderActions
-                    VStack(alignment: .leading, spacing: 6) {
-                        buttonRow(actions.pointer, skeleton: detail == nil)
-                        buttonRow(actions.folder, skeleton: detail == nil)
+                    ViewThatFits(in: .horizontal) {
+                        buttonRow(actions.pointer + actions.folder, skeleton: detail == nil)
+                        VStack(alignment: .leading, spacing: 6) {
+                            buttonRow(actions.pointer, skeleton: detail == nil)
+                            buttonRow(actions.folder, skeleton: detail == nil)
+                        }
                     }
                     .padding(.top, 4)
                 }
@@ -133,8 +137,8 @@ struct SubmoduleStatusPanel: View {
         var id: String { title }
     }
 
-    /// The buttons in two rows, so the card keeps its height whatever the state: the pointer's (Initialize or Update,
-    /// Stage New Pointer once the checkout moved), then the folder's (Open in New Tab, Remove…). Initialize, Update,
+    /// The buttons in one row, or two when they don't fit the card's width: the pointer's (Initialize or Update, Stage
+    /// New Pointer once the checkout moved), then the folder's (Open in New Tab, Remove…). Initialize, Update,
     /// Stage New Pointer and Remove act on this repo's index, so a nested submodule has only Open in New Tab.
     private func actions(_ detail: SubmoduleDetail) -> (pointer: [Action], folder: [Action]) {
         actions(detail.submodule, isNested: detail.isNested)

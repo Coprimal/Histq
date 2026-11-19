@@ -27,6 +27,8 @@ struct SectionCard<Content: View, Accessory: View>: View {
     /// Around the body, below the header: smaller for rows that draw their own capsules.
     let contentPadding: CGFloat
     let tone: Color?
+    /// The title's font; nil: the text size's semibold body.
+    let titleFont: Font?
     @ViewBuilder let content: () -> Content
     @ViewBuilder let accessory: () -> Accessory
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -38,6 +40,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
         isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding, tone: Color? = nil,
+        titleFont: Font? = nil,
         @ViewBuilder content: @escaping () -> Content, @ViewBuilder accessory: @escaping () -> Accessory
     ) {
         self.title = title
@@ -47,6 +50,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
         self.isExpanded = isExpanded
         self.contentPadding = contentPadding
         self.tone = tone
+        self.titleFont = titleFont
         self.content = content
         self.accessory = accessory
     }
@@ -114,7 +118,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
                     .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
             }
             Text(title)
-                .font(textSize.bodySemibold)
+                .font(titleFont ?? textSize.bodySemibold)
                 .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
                 .lineLimit(1)
             if countIsLoading {
@@ -145,10 +149,11 @@ extension SectionCard where Accessory == EmptyView {
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
         isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding, tone: Color? = nil,
-        @ViewBuilder content: @escaping () -> Content
+        titleFont: Font? = nil, @ViewBuilder content: @escaping () -> Content
     ) {
         self.init(title, systemImage: systemImage, count: count, countIsLoading: countIsLoading, isExpanded: isExpanded,
-                  contentPadding: contentPadding, tone: tone, content: content, accessory: { EmptyView() })
+                  contentPadding: contentPadding, tone: tone, titleFont: titleFont, content: content,
+                  accessory: { EmptyView() })
     }
 }
 
