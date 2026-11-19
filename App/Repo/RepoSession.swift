@@ -4102,6 +4102,32 @@ final class RepoSession: Identifiable {
         rebaseRequest = RebaseRequest(kind: .squash(commits))
     }
 
+    /// "Interactive Rebase <current> onto <name>": the current branch's commits that `commit` (the tip of `name`) lacks,
+    /// replayed onto it.
+    func openInteractiveRebase(onto commit: String, name: String) {
+        rebaseRequest = RebaseRequest(kind: .onto(commit, name: name))
+    }
+
+    /// Why "Interactive Rebase … onto …" cannot start (its tooltip); nil when it can. The sheet shows the rest
+    /// (nothing to replay, a merge in the range).
+    func rebaseOntoUnavailableReason() -> String? {
+        repoState?.isOperationInProgress == true ? UndoError.operationInProgress.message : nil
+    }
+
+    /// Writes `commit` as a patch file (`git format-patch`) to `file`, read and written off the main actor.
+    func savePatch(_ commit: String, to file: URL) async throws {
+        let backend = try await backend()
+        try await Self.writePatch(commit, to: file, backend: backend, cwd: url)
+    }
+
+    @concurrent
+    private nonisolated static func writePatch(_ commit: String, to file: URL, backend: Backend, cwd: URL) async throws {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let output = try await backend.runner.run(
+            ["format-patch", "-1", "--stdout", "--end-of-options", commit], cwd: cwd, env: env)
+        try output.stdout.write(to: file, options: .atomic)
+    }
+
     /// The todo of a rebase sheet: the commits from `commit` to HEAD, or the squash of the selected commits. Read
     /// environment, off the main actor; throws `RebaseTodoError` when the commits do not allow it.
     func loadRebaseTodo(_ kind: RebaseRequest.Kind) async throws -> RebaseTodo {
@@ -4119,6 +4145,8 @@ final class RepoSession: Identifiable {
             return try await RebaseTodo.fromCommit(commit, runner: backend.runner, cwd: cwd, env: env)
         case .squash(let commits):
             return try await RebaseTodo.squash(commits, runner: backend.runner, cwd: cwd, env: env)
+        case .onto(let commit, let name):
+            return try await RebaseTodo.onto(commit, name: name, runner: backend.runner, cwd: cwd, env: env)
         }
     }
 

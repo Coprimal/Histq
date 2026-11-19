@@ -251,9 +251,11 @@ enum RepoMenus {
         entries += [
             .action("Compare with Working Tree") { session.selectCompare(base: hash, head: nil) },
             .separator,
-            .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
-            .action("Create Tag Here…") { session.dialog = .createTag(at: hash, label: short) },
-            .action("Add Worktree Here…") { session.worktreeForm = WorktreeForm(source: .commit(hash), label: short) },
+            .submenu("Create Here", [
+                .action("Branch…") { session.dialog = .createBranch(from: hash, label: short) },
+                .action("Tag…") { session.dialog = .createTag(at: hash, label: short) },
+                .action("Worktree…") { session.worktreeForm = WorktreeForm(source: .commit(hash), label: short) },
+            ]),
             .separator,
             .action(mainline == nil ? "Cherry-pick Commit" : "Cherry-pick Merge (parent 1)", enabled: !isHead) {
                 session.run(.cherryPick(hash, mainline: mainline), title: "Cherry-pick \(short)")
@@ -284,14 +286,27 @@ enum RepoMenus {
             MenuEntry.submenu(item.menuTitle, self.ref(item, session))
         }
         if !refEntries.isEmpty { entries += [.separator] + refEntries }
-        entries += [
-            .separator,
-            .action("Copy SHA") { copy(hash) },
-            .action("Copy Short SHA") { copy(short) },
-            .action("Copy Message", enabled: commit != nil) {
+        var copies: [MenuEntry] = [
+            .action("SHA") { copy(hash) },
+            .action("Short SHA") { copy(short) },
+            .action("Message", enabled: commit != nil) {
                 guard let commit else { return }
                 copy(commit.body.isEmpty ? commit.subject : commit.subject + "\n\n" + commit.body)
             },
+        ]
+        if let remote = linkRemote(session) {
+            let link = webLink(remote: remote, "commit/" + hash, session)
+            copies.append(.action("Link on \(remote)", enabled: link != nil, toolTip: link == nil ? noWebLink(remote) : nil) {
+                if let link { copy(link) }
+            })
+        }
+        let patchReason = commit?.isMerge == true ? "A merge commit has no single patch." : nil
+        entries += [
+            .separator,
+            .action("Save as Patch…", enabled: patchReason == nil, toolTip: patchReason) {
+                savePatch(hash, subject: commit?.subject ?? "", session)
+            },
+            .submenu("Copy", copies),
         ]
         return entries
     }
@@ -346,7 +361,15 @@ enum RepoMenus {
             case .separator: true
             }
         }
-        return refEntries + [.separator] + commitEntries
+        // One Copy submenu, at the end: the ref's copies, then the commit's.
+        let isCopy = { (entry: MenuEntry) -> Bool in
+            if case .submenu = entry.kind { entry.title == "Copy" } else { false }
+        }
+        guard let refCopy = refEntries.first(where: isCopy), case .submenu(let refCopies) = refCopy.kind,
+              let commitCopy = commitEntries.first(where: isCopy), case .submenu(let commitCopies) = commitCopy.kind
+        else { return refEntries + [.separator] + commitEntries }
+        return refEntries.filter { !isCopy($0) } + [.separator] + commitEntries.filter { !isCopy($0) }
+            + [.separator, .submenu("Copy", refCopies + [.separator] + commitCopies)]
     }
 
     static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
@@ -367,22 +390,9 @@ enum RepoMenus {
         let ref = "refs/heads/\(name)"
         var entries: [MenuEntry] = [
             .action("Checkout \(name)", enabled: !isCurrent) { checkout(.local(name), session) },
+            .separator,
         ]
-        if let current, !isCurrent {
-            entries += [
-                .action("Merge \(name) into \(current)") {
-                    session.run(.merge(ref, checkoutFirst: nil), title: "Merge \(name) into \(current)")
-                },
-                .action("Rebase \(current) onto \(name)") {
-                    session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
-                },
-                .action("Compare with Current Branch") {
-                    session.selectCompare(base: "refs/heads/\(current)", head: ref)
-                },
-            ]
-        }
         let pullReason = createPullRequestUnavailableReason(head: .local(name), base: nil, session)
-        entries.append(.separator)
         entries += pull(name, isCurrent: isCurrent, upstream: upstream, session)
         entries += [
             .action("Push \(name)", enabled: session.pushTarget(of: name) != nil) { session.push(branch: name) },
@@ -398,6 +408,11 @@ enum RepoMenus {
             .action("Add Worktree for \(name)…") {
                 session.worktreeForm = WorktreeForm(source: .branch(name), label: name)
             },
+        ]
+        if let current, !isCurrent {
+            entries += [.separator] + integrate(name, ref: ref, commit: branch?.commit, into: current, session)
+        }
+        entries += [
             .separator,
             .action("Rename \(name)…") { session.dialog = .renameBranch(name) },
             .action("Delete \(name)…", enabled: !isCurrent, destructive: true) {
@@ -411,11 +426,12 @@ enum RepoMenus {
             entries.append(deleteRemote(upstream, session))
         }
         entries += visibility(ref, canHide: !isCurrent, session)
-        entries += [.separator, .action("Copy Branch Name") { copy(name) }]
+        let copies: [MenuEntry] = [.action("Branch Name") { copy(name) }] + (upstream.map { [copyLink(to: $0, session)] } ?? [])
+        entries += [.separator, .submenu("Copy", copies)]
         return entries
     }
 
-    /// A local branch's pull: the checked-out branch gets each pull mode; another branch can only be fast-forwarded
+    /// A local branch's Pull submenu: the checked-out branch gets each pull mode; another branch can only be fast-forwarded
     /// to its upstream (fetched straight into the branch, no checkout). Greyed without an upstream.
     private static func pull(_ name: String, isCurrent: Bool, upstream: RemoteBranch?,
                              _ session: RepoSession) -> [MenuEntry] {
@@ -423,17 +439,17 @@ enum RepoMenus {
             return [.action("Pull \(name)", enabled: false, toolTip: "\(name) has no upstream.") {}]
         }
         if isCurrent {
-            return [
-                .action("Pull (fast-forward if possible)") { session.pull(.fastForward) },
-                .action("Pull (fast-forward only)") { session.pull(.fastForwardOnly) },
-                .action("Pull (rebase)") { session.pull(.rebase) },
-            ]
+            return [.submenu("Pull \(name)", [
+                .action("Fast-forward if possible") { session.pull(.fastForward) },
+                .action("Fast-forward only") { session.pull(.fastForwardOnly) },
+                .action("Rebase") { session.pull(.rebase) },
+            ])]
         }
         let remoteBranch = String(upstream.name.dropFirst(upstream.remote.count + 1))
-        return [.action("Fast-forward \(name) to \(upstream.name)") {
+        return [.submenu("Pull \(name)", [.action("Fast-forward to \(upstream.name)") {
             session.run(.pullBranch(name, remote: upstream.remote, remoteBranch: remoteBranch),
                         title: "Fast-forward \(name) to \(upstream.name)")
-        }]
+        }])]
     }
 
     private static func remote(_ name: String, _ session: RepoSession) -> [MenuEntry] {
@@ -444,17 +460,7 @@ enum RepoMenus {
             .action("Checkout \(branch.map { localName(of: $0) } ?? name)") { checkout(.remote(name), session) },
         ]
         if let current {
-            entries += [
-                .action("Merge \(name) into \(current)") {
-                    session.run(.merge(ref, checkoutFirst: nil), title: "Merge \(name) into \(current)")
-                },
-                .action("Rebase \(current) onto \(name)") {
-                    session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
-                },
-                .action("Compare with Current Branch") {
-                    session.selectCompare(base: "refs/heads/\(current)", head: ref)
-                },
-            ]
+            entries += integrate(name, ref: ref, commit: branch?.commit, into: current, session)
         }
         // Only a branch of the GitHub remote can be a pull request's head.
         if let branch, branch.remote == session.github.api?.remote {
@@ -467,8 +473,59 @@ enum RepoMenus {
             entries += [.separator, deleteRemote(branch, session)]
         }
         entries += visibility(ref, canHide: true, session)
-        entries += [.separator, .action("Copy Branch Name") { copy(name) }]
+        let copies: [MenuEntry] = [.action("Branch Name") { copy(name) }] + (branch.map { [copyLink(to: $0, session)] } ?? [])
+        entries += [.separator, .submenu("Copy", copies)]
         return entries
+    }
+
+    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current`, rebase `current` onto it (plain or
+    /// interactive), compare with it.
+    private static func integrate(_ name: String, ref: String, commit: String?, into current: String,
+                                  _ session: RepoSession) -> [MenuEntry] {
+        let rebaseReason = commit == nil ? "\(name) has no commit." : session.rebaseOntoUnavailableReason()
+        return [
+            .action("Merge \(name) into \(current)") {
+                session.run(.merge(ref, checkoutFirst: nil), title: "Merge \(name) into \(current)")
+            },
+            .action("Rebase \(current) onto \(name)") {
+                session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
+            },
+            .action("Interactive Rebase \(current) onto \(name)…", enabled: rebaseReason == nil, toolTip: rebaseReason) {
+                if let commit { session.openInteractiveRebase(onto: commit, name: name) }
+            },
+            .action("Compare with Current Branch") {
+                session.selectCompare(base: "refs/heads/\(current)", head: ref)
+            },
+        ]
+    }
+
+    /// The web page at `path` (`tree/<branch>`, `commit/<sha>`) of the repository `remote`'s URL names, in GitHub's
+    /// URL layout; nil when the URL names no host/owner/repo.
+    private static func webLink(remote: String, _ path: String, _ session: RepoSession) -> String? {
+        guard let url = session.remotes.first(where: { $0.name == remote })?.url,
+              let repo = GitHubClient.repository(fromRemoteURL: url)
+        else { return nil }
+        return "https://\(repo.host)/\(repo.owner)/\(repo.name)/\(path)"
+    }
+
+    private static func noWebLink(_ remote: String) -> String {
+        "The URL of \(remote) is not a host/owner/repository URL."
+    }
+
+    /// Copy › "Link to <remote branch>": its page on the remote's host.
+    private static func copyLink(to branch: RemoteBranch, _ session: RepoSession) -> MenuEntry {
+        let name = localName(of: branch)
+        let path = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        let link = webLink(remote: branch.remote, "tree/" + path, session)
+        return .action("Link to \(branch.name)", enabled: link != nil,
+                       toolTip: link == nil ? noWebLink(branch.remote) : nil) {
+            if let link { copy(link) }
+        }
+    }
+
+    /// The remote a commit's link points at: the GitHub remote, else `origin`, else the first one.
+    private static func linkRemote(_ session: RepoSession) -> String? {
+        session.github.api?.remote ?? session.remotes.first { $0.name == "origin" }?.name ?? session.remotes.first?.name
     }
 
     /// The graph's view of a branch or tag (`ref`, a full ref name): Hide / Show, then for a branch Solo / Unsolo, Pin
@@ -530,7 +587,7 @@ enum RepoMenus {
             }
         }
         entries += visibility("refs/tags/\(name)", canHide: true, soloAndPin: false, session)
-        entries += [.separator, .action("Copy Tag Name") { copy(name) }]
+        entries += [.separator, .submenu("Copy", [.action("Tag Name") { copy(name) }])]
         return entries
     }
 
@@ -1072,6 +1129,24 @@ enum RepoMenus {
     /// `origin/feature/x` → `feature/x`.
     static func localName(of branch: RemoteBranch) -> String {
         String(branch.name.dropFirst(branch.remote.count + 1))
+    }
+
+    /// Asks where to save `hash` as a patch file (`git format-patch`), then writes it off the main actor.
+    private static func savePatch(_ hash: String, subject: String, _ session: RepoSession) {
+        let panel = NSSavePanel()
+        let slug = subject.lowercased().split { !$0.isLetter && !$0.isNumber }.joined(separator: "-").prefix(52)
+        panel.nameFieldStringValue = "\(hash.prefix(7))\(slug.isEmpty ? "" : "-" + slug).patch"
+        panel.begin { response in
+            guard response == .OK, let file = panel.url else { return }
+            Task { @MainActor in
+                do {
+                    try await session.savePatch(hash, to: file)
+                    session.postToast(.success("Saved \(file.lastPathComponent)"))
+                } catch {
+                    session.postToast(.warning("Save as Patch", detail: RepoSession.writeMessage(for: error)))
+                }
+            }
+        }
     }
 
     static func copy(_ text: String) {

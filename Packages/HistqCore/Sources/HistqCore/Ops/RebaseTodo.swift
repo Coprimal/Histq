@@ -33,6 +33,8 @@ public enum RebaseTodoError: Error, Equatable, Sendable {
     case commitsChanged
     /// A path with a line break or NUL, which cannot go into a todo line or a shell word.
     case unsafePath(String)
+    /// The current branch has no commit the named branch lacks.
+    case nothingToReplay(String)
 
     /// A sentence for the UI.
     public var message: String {
@@ -48,6 +50,7 @@ public enum RebaseTodoError: Error, Equatable, Sendable {
         case .emptyMessage(let oid): "The new message of \(GitOperations.shortRevision(oid)) is empty."
         case .commitsChanged: "The list of commits changed; start the interactive rebase again."
         case .unsafePath(let path): "\"\(path)\" cannot be used for the rebase files."
+        case .nothingToReplay(let name): "The current branch has no commits that \(name) lacks."
         }
     }
 }
@@ -72,7 +75,7 @@ public struct RebaseTodo: Sendable, Equatable {
     }
 
     public enum Base: Sendable, Equatable {
-        /// Rebase onto the first commit's parent (its full object id).
+        /// Rebase onto this commit (full object id): the first commit's parent, or the tip of the branch rebased onto.
         case parent(String)
         /// The first commit has no parent: `git rebase -i --root`.
         case root
@@ -112,23 +115,25 @@ public struct RebaseTodo: Sendable, Equatable {
             .split(whereSeparator: \.isWhitespace).dropFirst().map(String.init)
         guard parents.count <= 1 else { throw RebaseTodoError.mergeCommit(oid) }
 
-        let log = try await git.run(
-            ["log", "-z", "--reverse", "--topo-order", "--no-show-signature", "--format=%H%x1f%P%x1f%B",
-             "--end-of-options", parents.first.map { "\($0)..HEAD" } ?? "HEAD"])
-        var items: [Item] = []
-        for record in log.text.split(separator: "\0") {
-            let fields = record.split(separator: "\u{1F}", maxSplits: 2, omittingEmptySubsequences: false)
-            guard fields.count == 3 else { continue }
-            let hash = String(fields[0]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if fields[1].split(separator: " ").count > 1 { throw RebaseTodoError.mergeCommit(hash) }
-            let message = String(fields[2])
-            let subject = message.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
-            items.append(Item(commit: hash, subject: subject, message: message, action: .pick, newMessage: nil))
-        }
+        let items = try await git.picks([parents.first.map { "\($0)..HEAD" } ?? "HEAD"])
         guard items.first?.commit == oid else { throw RebaseTodoError.notAncestorOfHead(oid) }
         return RebaseTodo(
             base: parents.first.map(Base.parent) ?? .root, items: items, title: "Interactive rebase",
             range: items.map(\.commit))
+    }
+
+    /// "Interactive rebase onto <name>": the current branch rebased onto `upstream` (the tip of branch `name`), so the
+    /// todo lists the commits of HEAD that `upstream` lacks, all `pick`. Like git's own todo it leaves out the commits
+    /// whose change `upstream` already has (`--cherry-pick`): picked again, they would stop the rebase as empty.
+    public static func onto(
+        _ upstream: String, name: String, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async throws -> RebaseTodo {
+        let git = Reader(runner: runner, cwd: cwd, env: env)
+        let oid = try await git.resolve(upstream)
+        let items = try await git.picks(["--cherry-pick", "--right-only", "\(oid)...HEAD"])
+        guard !items.isEmpty else { throw RebaseTodoError.nothingToReplay(name) }
+        return RebaseTodo(
+            base: .parent(oid), items: items, title: "Interactive rebase onto \(name)", range: items.map(\.commit))
     }
 
     /// "Squash N commits": the selected commits (any order, at least two) must follow each other on the current
@@ -234,6 +239,25 @@ public struct RebaseTodo: Sendable, Equatable {
 
         func run(_ args: [String], allowed: Set<Int32> = [0]) async throws -> GitResult {
             try await runner.run(args, cwd: cwd, env: env, allowedExitCodes: allowed)
+        }
+
+        /// The commits `revisions` select, oldest first, each a `pick`; throws on a merge, which `rebase -i` would
+        /// flatten.
+        func picks(_ revisions: [String]) async throws -> [Item] {
+            let log = try await run(
+                ["log", "-z", "--reverse", "--topo-order", "--no-show-signature", "--format=%H%x1f%P%x1f%B"]
+                    + revisions.dropLast() + ["--end-of-options"] + revisions.suffix(1))
+            var items: [Item] = []
+            for record in log.text.split(separator: "\0") {
+                let fields = record.split(separator: "\u{1F}", maxSplits: 2, omittingEmptySubsequences: false)
+                guard fields.count == 3 else { continue }
+                let hash = String(fields[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if fields[1].split(separator: " ").count > 1 { throw RebaseTodoError.mergeCommit(hash) }
+                let message = String(fields[2])
+                let subject = message.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+                items.append(Item(commit: hash, subject: subject, message: message, action: .pick, newMessage: nil))
+            }
+            return items
         }
 
         /// The full object id of the commit `id` names.

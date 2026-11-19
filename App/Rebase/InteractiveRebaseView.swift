@@ -15,6 +15,8 @@ struct RebaseRequest: Identifiable {
         case fromCommit(String)
         /// The selected commits (full ids), folded into the oldest.
         case squash([String])
+        /// The current branch's commits that this commit (full id, the tip of branch `name`) lacks, replayed onto it.
+        case onto(String, name: String)
     }
 
     let id = UUID()
@@ -71,6 +73,8 @@ struct InteractiveRebaseView: View {
             "Interactive rebase of \(session.currentBranch ?? "HEAD") from \(commit.prefix(7))"
         case .squash(let commits):
             "Squash \(commits.count) commits"
+        case .onto(_, let name):
+            "Interactive rebase of \(session.currentBranch ?? "HEAD") onto \(name)"
         }
     }
 
