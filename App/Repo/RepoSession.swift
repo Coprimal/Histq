@@ -3664,7 +3664,7 @@ final class RepoSession: Identifiable {
         case .rebase: "REBASE_HEAD"
         case .cherryPick: "CHERRY_PICK_HEAD"
         case .revert: "REVERT_HEAD"
-        case .none: nil
+        case .am, .none: nil
         }
         async let source = ConflictSource.load(path: path, labels: state.labels, runner: runner, cwd: cwd, env: env)
         async let aCommit = shortHash("HEAD", runner: runner, cwd: cwd, env: env)
@@ -4006,7 +4006,7 @@ final class RepoSession: Identifiable {
             (label, ref) = ("intent of side B: message of the commit being replayed", "REBASE_HEAD")
         case .cherryPick:
             (label, ref) = ("intent of side B: message of the commit being cherry-picked", "CHERRY_PICK_HEAD")
-        case .revert, .none:
+        case .revert, .am, .none:
             return nil
         }
         guard let env = try? await backend.readEnvironment(cwd: cwd),
@@ -4231,12 +4231,13 @@ final class RepoSession: Identifiable {
         case .rebase: "Rebase"
         case .cherryPick: "Cherry-pick"
         case .revert: "Revert"
+        case .am: "Patch Apply"
         case .none: "Operation"
         }
         return switch step {
         case .continue: "Continue \(name)"
         case .abort: "Abort \(name)"
-        case .skip: "Skip Commit"
+        case .skip: operation == .am ? "Skip Patch" : "Skip Commit"
         }
     }
 
@@ -4272,11 +4273,19 @@ final class RepoSession: Identifiable {
                 operation: Self.title(of: .abort, operation))
     }
 
-    /// The banner's Skip (a rebase only), after a confirmation: the commit being replayed is left out of the branch.
+    /// The banner's Skip (a rebase or a patch apply), after a confirmation: the commit being replayed, or the patch
+    /// being applied, is left out of the branch.
     func skipOperation() {
-        guard repoState?.operation == .rebase, !isOperationStepRunning else { return }
-        confirm("Skip this commit?", message: "The rebased branch will not have its changes.", button: "Skip Commit",
-                write: .skipOperation(.rebase), operation: Self.title(of: .skip, .rebase))
+        guard let operation = repoState?.operation, operation == .rebase || operation == .am, !isOperationStepRunning
+        else { return }
+        let title = Self.title(of: .skip, operation)
+        if operation == .am {
+            confirm("Skip this patch?", message: "The branch will not have its changes.", button: title,
+                    write: .skipOperation(.am), operation: title)
+        } else {
+            confirm("Skip this commit?", message: "The rebased branch will not have its changes.", button: title,
+                    write: .skipOperation(.rebase), operation: title)
+        }
     }
 
     #if DEBUG
@@ -5457,6 +5466,8 @@ final class RepoSession: Identifiable {
         case let error as UndoError:
             error.message
         case let error as RebaseTodoError:
+            error.message
+        case let error as PatchFile.InputError:
             error.message
         case let error as GitOperationError:
             switch error {

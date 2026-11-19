@@ -1,7 +1,7 @@
-// The card at the top of panel2 while a merge, rebase, cherry-pick or revert is stopped: what is in progress, how many
-// files still have conflicts, and its buttons: Continue (disabled until no file is conflicted), Abort (confirmed) and,
-// in a rebase, Skip (confirmed). Each runs through the session's write path; the status read after it updates the
-// banner, or removes it once the operation is over.
+// The card at the top of panel2 while a merge, rebase, cherry-pick, revert or patch apply (`git am`) is stopped: what
+// is in progress, how many files still have conflicts, and its buttons: Continue (disabled until no file is
+// conflicted), Abort (confirmed) and, in a rebase or a patch apply, Skip (confirmed). Each runs through the session's
+// write path; the status read after it updates the banner, or removes it once the operation is over.
 import HistqCore
 import SwiftUI
 
@@ -43,10 +43,11 @@ struct OperationBanner: View {
                 }
                 .accessibilityElement(children: .combine)
                 Spacer(minLength: 8)
-                if state.operation == .rebase {
+                if state.operation == .rebase || state.operation == .am {
                     button("Skip", step: .skip, state: state) { session.skipOperation() }
                         .disabled(isBusy)
-                        .help("Leave the commit being replayed out of the branch")
+                        .help(state.operation == .am
+                            ? "Leave this patch out" : "Leave the commit being replayed out of the branch")
                 }
                 button("Abort", step: .abort, state: state) { session.abortOperation() }
                     .disabled(isBusy)
@@ -83,6 +84,7 @@ struct OperationBanner: View {
         case .rebase: "Rebasing onto \(a): replaying \(b)"
         case .cherryPick: "Cherry-picking \(b) onto \(a)"
         case .revert: "Reverting \(b.hasPrefix("Revert ") ? String(b.dropFirst("Revert ".count)) : b) on \(a)"
+        case .am: "Applying \(b.hasPrefix("Patch") ? "patch" + b.dropFirst("Patch".count) : b) onto \(a)"
         case .none: ""
         }
     }
@@ -93,6 +95,7 @@ struct OperationBanner: View {
         case .rebase: "rebase"
         case .cherryPick: "cherry-pick"
         case .revert: "revert"
+        case .am: "patch apply"
         case .none: "operation"
         }
     }
@@ -103,6 +106,7 @@ struct OperationBanner: View {
         case .rebase: "arrow.triangle.branch"
         case .cherryPick: "arrow.turn.down.right"
         case .revert: "arrow.uturn.backward"
+        case .am: "doc.badge.plus"
         case .none: "circle"
         }
     }

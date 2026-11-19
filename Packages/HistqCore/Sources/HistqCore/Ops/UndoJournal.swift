@@ -62,7 +62,7 @@ public enum UndoError: Error, Equatable, Sendable {
 public struct UndoJournal: Sendable {
     /// The operations the journal records.
     public enum Kind: String, Codable, Sendable {
-        case commit, amend, checkout, reset, merge, rebase, cherryPick, revert
+        case commit, amend, checkout, reset, merge, rebase, cherryPick, revert, am
         case createBranch, deleteBranch, renameBranch, discard
         case createTag, deleteTag, stage, unstage
         case stashSave, stashDrop, stashApply, stashPop, resolve
@@ -232,7 +232,8 @@ public struct UndoJournal: Sendable {
     /// without `pending` (nil when it started outside Histq): `RepoState.Operation`, the commit it stopped at and HEAD.
     struct OperationKey: Codable, Equatable, Sendable {
         var operation: String
-        /// `MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`, the first that exists.
+        /// `MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`, the first that exists; for `git am`, the
+        /// number of the patch it stopped at (`rebase-apply/next`).
         var stop: String?
         var head: String?
     }
@@ -774,6 +775,14 @@ public struct UndoJournal: Sendable {
         var stop: String?
         for name in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] where stop == nil {
             stop = try await oid(name)
+        }
+        // `git am` writes none of them, and a skip into the next conflict keeps HEAD: the patch number tells the
+        // stops apart.
+        if operation == .am {
+            let path = try await ops.exec(
+                ["rev-parse", "--path-format=absolute", "--git-path", "rebase-apply/next"]).text
+            let next = trimmed(path).flatMap { try? String(contentsOf: URL(filePath: $0), encoding: .utf8) }
+            stop = next.flatMap(trimmed)
         }
         return OperationKey(operation: String(describing: operation), stop: stop, head: try await oid("HEAD"))
     }

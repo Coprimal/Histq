@@ -15,7 +15,7 @@
 // the remotes it contacts) and gets the GitHub token only when the gate lets it; see `networkExec`.
 //
 // Undo: with a `journal`, the operations the journal can take back (commit, amend, checkout, reset, merge, rebase,
-// cherry-pick, revert, local branch create/delete/rename, discard) are snapshotted before and after inside their
+// cherry-pick, revert, am, local branch create/delete/rename, discard) are snapshotted before and after inside their
 // own lane, so no other write can slip in between; `undo()` and `redo()` move between those snapshots.
 import Foundation
 
@@ -837,6 +837,67 @@ public struct GitOperations: Sendable {
         }
     }
 
+    // MARK: - Patches
+
+    /// What `applyPatchToWorkingTree` did.
+    public enum PatchApplyOutcome: Sendable {
+        /// Plain `git apply`: the changes are unstaged, new files untracked.
+        case applied
+        /// `git apply --3way` merged it cleanly: the result is staged.
+        case merged
+        /// `git apply --3way` left conflicted files to resolve.
+        case conflicts
+    }
+
+    /// Applies `patch` (a diff or a mail series, on stdin) to the working tree from the worktree's top level, not
+    /// journaled: plain `apply` when `apply --check` passes, else `apply --3way`. Its exit 1 means conflicts or a
+    /// refusal (nothing written), so the outcome comes from the unmerged paths before and after; a refusal throws.
+    public func applyPatchToWorkingTree(_ patch: Data) async throws -> PatchApplyOutcome {
+        try await lane { cwdOps in
+            let ops = try await UndoJournal.topLevel(cwdOps).ops
+            let unmerged = { Set(try await RepoState.conflictedPaths(runner: ops.runner, cwd: ops.cwd, env: ops.env)) }
+            let unmergedBefore = try await unmerged()
+            let check = try await ops.exec(
+                ["apply", "--check", "--whitespace=nowarn"], stdin: patch, allowedExitCodes: [0, 1])
+            if check.exitCode == 0 {
+                try await ops.exec(["apply", "--whitespace=nowarn"], stdin: patch)
+                return .applied
+            }
+            let result = try await ops.exec(
+                ["apply", "--3way", "--whitespace=nowarn"], stdin: patch, allowedExitCodes: [0, 1])
+            if !(try await unmerged()).subtracting(unmergedBefore).isEmpty { return .conflicts }
+            guard result.exitCode == 0 else {
+                throw GitError.other(exit: result.exitCode, stderrTail: result.stderrTail)
+            }
+            return .merged
+        }
+    }
+
+    /// Applies the mail series `patch` (`count` patches, on stdin) as commits with `git am --3way` from the
+    /// worktree's top level. A conflict leaves the am session for continue, skip or abort, pending in the journal
+    /// like a stopped cherry-pick. A stop without conflicts (a patch that does not apply) is aborted before the error
+    /// is rethrown, only when no operation was in progress before, am is in progress now and nothing is unmerged, so
+    /// an am started elsewhere is never thrown away (`am --abort` keeps unrelated local changes).
+    public func applyMailbox(_ patch: Data, count: Int) async throws {
+        let title = count == 1 ? "Apply patch" : "Apply \(count) patches"
+        try await journaled(.am, title, mode: .carry) { cwdOps in
+            let ops = try await UndoJournal.topLevel(cwdOps).ops
+            let operation = { try await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env) }
+            let before = try await operation()
+            do {
+                try await ops.exec(["am", "--3way"], stdin: patch)
+            } catch {
+                if before == .none, (try? await operation()) == .am,
+                   (try? await RepoState.conflictedPaths(runner: ops.runner, cwd: ops.cwd, env: ops.env))?.isEmpty
+                    == true
+                {
+                    _ = try? await ops.exec(Self.sequencerArguments(.am, "--abort"))
+                }
+                throw error
+            }
+        }
+    }
+
     /// Moves the current branch to `revision`: soft keeps index and files, mixed keeps files, hard resets both.
     public func reset(to revision: String, mode: ResetMode) async throws {
         // A hard reset throws the working tree's changes away: the journal keeps them like a discard.
@@ -1259,6 +1320,7 @@ public struct GitOperations: Sendable {
         case .rebase: "rebase"
         case .cherryPick: "cherry-pick"
         case .revert: "revert"
+        case .am: "am"
         }
         return ["-c", "core.editor=true", verb, step]
     }
@@ -1308,6 +1370,7 @@ public struct GitOperations: Sendable {
         case .none, .merge: .merge
         case .rebase: .rebase
         case .cherryPick: .cherryPick
+        case .am: .am
         case .revert: .revert
         }
     }

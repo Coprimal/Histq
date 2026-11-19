@@ -1,4 +1,4 @@
-// What the repository is in the middle of (a stopped merge, rebase, cherry-pick or revert), its conflicted
+// What the repository is in the middle of (a stopped merge, rebase, cherry-pick, revert or `git am`), its conflicted
 // paths and the names of the conflict editor's A and B panes. During a rebase git replays the branch's
 // commits on top of the upstream, so stage :2 ("ours", pane A) is the upstream and stage :3 ("theirs",
 // pane B) is the commit being replayed: the labels follow the stages, not the checked-out branch.
@@ -6,7 +6,7 @@ import Foundation
 
 public struct RepoState: Sendable, Equatable {
     public enum Operation: Sendable, Equatable {
-        case none, merge, rebase, cherryPick, revert
+        case none, merge, rebase, cherryPick, revert, am
     }
 
     public let operation: Operation
@@ -15,7 +15,8 @@ public struct RepoState: Sendable, Equatable {
     public let conflictedPaths: [String]
     /// Pane A = stage :2, pane B = stage :3. Merge: the current branch / the merged ref. Rebase: the
     /// upstream (`onto`) / the commit being replayed. Cherry-pick and revert: the current branch / the
-    /// picked (reverted) commit. No operation: the current branch / "Incoming".
+    /// picked (reverted) commit. Am: the current branch / "Patch N/M: <subject>". No operation: the current
+    /// branch / "Incoming".
     public let labels: ConflictLabels
 
     public init(operation: Operation, conflictedPaths: [String], labels: ConflictLabels) {
@@ -30,7 +31,7 @@ public struct RepoState: Sendable, Equatable {
     public static func read(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> RepoState {
         let paths = try await operationPaths(runner: runner, cwd: cwd, env: env)
         let mergeHead = paths[0], rebaseMerge = paths[1], rebaseApply = paths[2]
-        let cherryPickHead = paths[3], revertHead = paths[4]
+        let cherryPickHead = paths[3], revertHead = paths[4], amApplying = paths[5]
 
         let conflicted = try await conflictedPaths(runner: runner, cwd: cwd, env: env)
         let head = try await headLabel(runner: runner, cwd: cwd, env: env)
@@ -42,6 +43,10 @@ public struct RepoState: Sendable, Equatable {
             let a = try await refLabel(onto, runner: runner, cwd: cwd, env: env) ?? "upstream"
             let b = try await commitLabel(replayed, runner: runner, cwd: cwd, env: env) ?? "commit being replayed"
             return RepoState(operation: .rebase, conflictedPaths: conflicted, labels: ConflictLabels(a: a, b: b))
+        }
+        if FileManager.default.fileExists(atPath: amApplying.path) {
+            let b = amLabel(rebaseApply)
+            return RepoState(operation: .am, conflictedPaths: conflicted, labels: ConflictLabels(a: head, b: b))
         }
         if let merged = firstLine(mergeHead) {
             let b = try await refLabel(merged, runner: runner, cwd: cwd, env: env) ?? "MERGE_HEAD"
@@ -65,6 +70,7 @@ public struct RepoState: Sendable, Equatable {
     public static func readOperation(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> Operation {
         let paths = try await operationPaths(runner: runner, cwd: cwd, env: env)
         if rebaseFolder(merge: paths[1], apply: paths[2]) != nil { return .rebase }
+        if FileManager.default.fileExists(atPath: paths[5].path) { return .am }
         if firstLine(paths[0]) != nil { return .merge }
         if firstLine(paths[3]) != nil { return .cherryPick }
         if firstLine(paths[4]) != nil { return .revert }
@@ -73,10 +79,13 @@ public struct RepoState: Sendable, Equatable {
 
     // MARK: - Helpers
 
-    /// MERGE_HEAD, rebase-merge, rebase-apply, CHERRY_PICK_HEAD and REVERT_HEAD: per-worktree paths (`.git` is a
-    /// file in a linked worktree), absolute.
+    /// MERGE_HEAD, rebase-merge, rebase-apply, CHERRY_PICK_HEAD, REVERT_HEAD and rebase-apply/applying (a `git am`
+    /// in progress, checked before merge, cherry-pick and revert): per-worktree paths (`.git` is a file in a linked
+    /// worktree), absolute.
     private static func operationPaths(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [URL] {
-        let names = ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+        let names = [
+            "MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-apply/applying",
+        ]
         let result = try await runner.run(
             ["rev-parse", "--path-format=absolute"] + names.flatMap { ["--git-path", $0] }, cwd: cwd, env: env)
         let paths = result.text.split(separator: "\n").map { URL(filePath: String($0)) }
@@ -95,6 +104,17 @@ public struct RepoState: Sendable, Equatable {
             return apply
         }
         return nil
+    }
+
+    /// "Patch N/M: <subject>" of the patch `git am` stopped at, from its `next`, `last` and `final-commit` files
+    /// in `folder` (rebase-apply); "Patch N/M" without a message, "Patch" without the counters.
+    private static func amLabel(_ folder: URL) -> String {
+        var label = "Patch"
+        if let next = firstLine(folder.appending(path: "next")), let last = firstLine(folder.appending(path: "last")) {
+            label += " \(next)/\(last)"
+        }
+        guard let subject = firstLine(folder.appending(path: "final-commit")) else { return label }
+        return "\(label): \(subject)"
     }
 
     /// Unique paths of `ls-files -u -z` records (`<mode> <object> <stage>\t<path>\0`), in order.
