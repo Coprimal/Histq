@@ -136,12 +136,12 @@ final class AvatarStore {
     }
 
     /// The `github` organization's logo, and GitHub's default avatar: a white mark on light gray is hard to read at 16 pt, so
-    /// the bundled mark is drawn black on that gray instead. #CBCBCB
+    /// the bundled mark is drawn black on white instead.
     private func gitHubOwnerLogo() -> NSImage? {
         let cacheKey = "o|github" as NSString
         if let image = drawn.object(forKey: cacheKey) { return image }
         guard let logo = NSImage(named: Provider.github.asset) else { return nil }
-        let background = NSColor(srgbRed: 0xCB / 255, green: 0xCB / 255, blue: 0xCB / 255, alpha: 1)
+        let background = NSColor.white
         let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
             background.setFill()
             rect.fill()
