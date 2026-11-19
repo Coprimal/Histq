@@ -307,9 +307,8 @@ enum RepoMenus {
             .action("Save as Patch…", enabled: patchReason == nil, toolTip: patchReason) {
                 savePatch(hash, subject: commit?.subject ?? "", session)
             },
-            .submenu("Copy", copies),
         ]
-        return entries
+        return [.submenu("Copy", copies), .separator] + entries
     }
 
     /// "Compare" for the clicked row of a 2-row selection that `comparePair` accepts; else nothing.
@@ -362,15 +361,15 @@ enum RepoMenus {
             case .separator: true
             }
         }
-        // One Copy submenu, at the end: the ref's copies, then the commit's.
+        // One Copy submenu, at the top: the ref's copies, then the commit's.
         let isCopy = { (entry: MenuEntry) -> Bool in
             if case .submenu = entry.kind { entry.title == "Copy" } else { false }
         }
         guard let refCopy = refEntries.first(where: isCopy), case .submenu(let refCopies) = refCopy.kind,
               let commitCopy = commitEntries.first(where: isCopy), case .submenu(let commitCopies) = commitCopy.kind
         else { return refEntries + [.separator] + commitEntries }
-        return refEntries.filter { !isCopy($0) } + [.separator] + commitEntries.filter { !isCopy($0) }
-            + [.separator, .submenu("Copy", refCopies + [.separator] + commitCopies)]
+        return [.submenu("Copy", refCopies + [.separator] + commitCopies), .separator]
+            + refEntries.filter { !isCopy($0) } + [.separator] + commitEntries.filter { !isCopy($0) }
     }
 
     static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
