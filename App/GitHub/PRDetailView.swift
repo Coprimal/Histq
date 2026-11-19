@@ -673,7 +673,7 @@ private struct PRHeaderCard: View {
                     .help("Back to the Graph (Esc)")
                     .accessibilityLabel("Back to the graph")
                     .padding(.leading, 4)
-                    Image(systemName: "arrow.triangle.pull")
+                    IconImage("lucide-git-pull-request-arrow")
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
                     if let title {
@@ -847,9 +847,9 @@ private struct PRStatePill: View {
             } else if detail.pull.draft == true {
                 ("Draft", "circle.dashed", Palette.inputSurface, .secondary)
             } else {
-                ("Open", "arrow.triangle.pull", Color(nsColor: Palette.diffAddedFill), Color(nsColor: Palette.diffAddedSign))
+                ("Open", "lucide-git-pull-request-arrow", Color(nsColor: Palette.diffAddedFill), Color(nsColor: Palette.diffAddedSign))
             }
-        Label(title, systemImage: symbol)
+        Label { Text(title) } icon: { IconImage(symbol, size: 12) }
             .font(.settingsCaption.weight(.semibold))
             .foregroundStyle(text)
             .padding(.horizontal, 8)

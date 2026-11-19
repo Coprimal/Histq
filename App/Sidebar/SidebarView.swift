@@ -41,7 +41,7 @@ enum SidebarTab: String, CaseIterable, Hashable, Sendable {
         switch self {
         case .branches: "lucide-git-branch"
         case .tags: "tag"
-        case .prs: "arrow.triangle.pull"
+        case .prs: "lucide-git-pull-request-arrow"
         }
     }
 }

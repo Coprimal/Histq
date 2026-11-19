@@ -95,7 +95,7 @@ final class GitHubStore {
             switch self {
             case .mine: "person"
             case .reviewRequested: "eye"
-            case .allOpen: "arrow.triangle.pull"
+            case .allOpen: "lucide-git-pull-request-arrow"
             case .assigned: "smallcircle.filled.circle"
             }
         }
