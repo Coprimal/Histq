@@ -2,7 +2,9 @@
 // (Wrap Lines). Each line row has the old and new line numbers, a `+`/`−` gutter, a green or red band, a stronger mark
 // on the changed part of a replaced line, and syntax colors; in Split a row has the old line on the left and the new
 // one on the right. Each hunk starts with a header row whose buttons stage, unstage, discard or revert the hunk, or only
-// its selected lines (none while whitespace is ignored). ⌘C copies the selected lines whole; Esc goes back to the graph.
+// its selected lines (none while whitespace is ignored). A click selects a line; a drag in the text selects text (never
+// the numbers or the signs; in Split, on one side). ⌘C copies the selected text, else the selected lines whole; Esc goes
+// back to the graph.
 //
 // The rows (with their tokens) are built off the main actor when the diff loads: the table only draws the rows on
 // screen, so its cost does not grow with the file.
@@ -597,8 +599,103 @@ final class DiffTableView: NSTableView {
         controller?.copySelection()
     }
 
+    /// In a line's text: a click selects the line (as in the gutter), a drag selects text, a double click a word and a
+    /// triple click the line's text. Anywhere else, or with ⇧ or ⌘, the table selects lines.
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let controller, event.modifierFlags.intersection([.shift, .command, .control]).isEmpty,
+              let hit = controller.textHit(at: point)
+        else {
+            controller?.clearTextSelection()
+            return super.mouseDown(with: event)
+        }
+        let (start, column) = hit
+        if event.clickCount > 1 {
+            window?.makeFirstResponder(self)
+            controller.selectWord(at: start, column: column, wholeLine: event.clickCount > 2)
+            return
+        }
+        // A click or a drag: wait for the mouse to go up or to move away.
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture,
+                                           inMode: .eventTracking, dequeue: false) {
+            guard next.type == .leftMouseDragged else { break }
+            let moved = convert(next.locationInWindow, from: nil)
+            if hypot(moved.x - point.x, moved.y - point.y) >= 3 {
+                window?.makeFirstResponder(self)
+                controller.beginTextSelection(at: start, column: column)
+                trackTextDrag(from: next)
+                return
+            }
+            _ = window?.nextEvent(matching: .leftMouseDragged)
+        }
+        controller.clearTextSelection()
+        super.mouseDown(with: event)
+    }
+
+    /// Follows the drag until the mouse goes up, scrolling while it is past the edge (periodic events keep it going
+    /// while the mouse holds still there).
+    private func trackTextDrag(from event: NSEvent) {
+        NSEvent.startPeriodicEvents(afterDelay: 0.05, withPeriod: 0.05)
+        defer { NSEvent.stopPeriodicEvents() }
+        var last = event
+        repeat {
+            autoscroll(with: last)
+            controller?.extendTextSelection(to: convert(last.locationInWindow, from: nil))
+            guard let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .periodic]),
+                  next.type != .leftMouseUp
+            else { return }
+            if next.type == .leftMouseDragged { last = next }
+        } while true
+    }
+
+    /// An I-beam over the lines' text.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for rect in controller?.textRects(in: visibleRect) ?? [] {
+            addCursorRect(rect, cursor: .iBeam)
+        }
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         controller?.menu(at: row(at: convert(event.locationInWindow, from: nil)))
+    }
+}
+
+/// Which line of a row a text selection reads: a unified row's line, or one half of a split row.
+enum DiffTextColumn {
+    case unified, old, new
+}
+
+/// A place in a diff's text: a row, and an offset (UTF-16) in its line's text.
+struct DiffTextPoint: Comparable {
+    var row: Int
+    var offset: Int
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        (lhs.row, lhs.offset) < (rhs.row, rhs.offset)
+    }
+}
+
+/// Text selected by a drag, from where it started (`anchor`) to where the mouse is (`head`), on one column.
+struct DiffTextSelection {
+    let column: DiffTextColumn
+    var anchor: DiffTextPoint
+    var head: DiffTextPoint
+
+    var start: DiffTextPoint { min(anchor, head) }
+    var end: DiffTextPoint { max(anchor, head) }
+
+    /// The selected part of `row`'s line, whose text is `length` long; nil when none of it is.
+    func part(row: Int, length: Int) -> DiffLineDrawing.Selection? {
+        let start = start
+        let end = end
+        guard start.row <= row, row <= end.row else { return nil }
+        let lower = row == start.row ? min(start.offset, length) : 0
+        let upper = row == end.row ? min(end.offset, length) : length
+        let throughEnd = row < end.row
+        guard upper > lower || throughEnd else { return nil }
+        return DiffLineDrawing.Selection(range: NSRange(location: lower, length: max(0, upper - lower)),
+                                         throughEnd: throughEnd)
     }
 }
 
@@ -614,6 +711,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     private var heightsWidth: CGFloat = -1
     /// The last jump this table saw (followed or not), so a redraw does not repeat it.
     private var jumpSerial: Int?
+    /// Text selected by a drag; it and the selected lines never go together.
+    private var textSelection: DiffTextSelection?
 
     private struct Shown: Equatable {
         let loadID: Int
@@ -652,12 +751,15 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             layout = DiffLayout(rows: view.section.rows(view.mode),
                                 oneGutter: [.untracked, .file].contains(view.section.side))
             heightsWidth = -1
+            textSelection = nil
             // A reload after a stage keeps the scroll offset; the selection goes (its lines may be gone).
             // `reloadData` keeps the selected row indexes, which would now point at other lines, so clear them.
             table.reloadData()
             table.deselectAll(nil)
             table.contentWidth = view.wraps || view.mode == .split ? 0 : layout.contentWidth
             table.tile()
+            // The I-beam follows the new rows' text.
+            table.window?.invalidateCursorRects(for: table)
             if modeChanged { scrollToFirstChange(table) }
             #if DEBUG
             runLaunchStage()
@@ -786,6 +888,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             cell.row = data
             cell.layout = layout
             cell.wraps = view?.wraps == true
+            cell.selection = selectionPart(row: row, column: .unified)
             cell.needsDisplay = true
             return cell
         case .pair(let old, let new):
@@ -797,6 +900,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             cell.set(old: old, new: new)
             cell.layout = layout
             cell.wraps = view?.wraps == true
+            cell.oldSelection = selectionPart(row: row, column: .old)
+            cell.newSelection = selectionPart(row: row, column: .new)
             cell.needsDisplay = true
             return cell
         }
@@ -808,7 +913,162 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        // Lines selected (by a click or the arrow keys): the text selection goes.
+        if table?.selectedRowIndexes.isEmpty == false { clearTextSelection() }
         refreshHunkButtons()
+    }
+
+    // MARK: Text selection
+
+    /// The line `row` shows on `column`: a unified row's line, or a split row's old or new line (nil for a hunk
+    /// header or an empty half).
+    private func line(_ row: Int, _ column: DiffTextColumn) -> DiffRow? {
+        guard rows.indices.contains(row) else { return nil }
+        switch rows[row] {
+        case .single(let line): return line.isLine ? line : nil
+        case .pair(let old, let new): return column == .new ? new : old
+        }
+    }
+
+    /// Where the text of `row` starts on `column`, in the table, and the width it wraps at (nil: one line). The
+    /// same spots as `DiffLineCellView` and `DiffSplitCellView` draw it at.
+    private func textOrigin(row: Int, column: DiffTextColumn) -> (NSPoint, CGFloat?)? {
+        guard let table, rows.indices.contains(row) else { return nil }
+        let cell = table.frameOfCell(atColumn: 0, row: row)
+        let wraps = view?.wraps == true
+        let y = cell.minY + (wraps ? DiffLayout.wrapPadding / 2 : 0)
+        switch rows[row] {
+        case .single:
+            return (NSPoint(x: cell.minX + layout.textX, y: y),
+                    wraps ? layout.wrapWidth(rowWidth: cell.width, split: false) : nil)
+        case .pair:
+            let half = column == .new ? (cell.width / 2).rounded(.down) : 0
+            return (NSPoint(x: cell.minX + half + layout.splitTextX, y: y),
+                    wraps ? layout.wrapWidth(rowWidth: cell.width, split: true) : nil)
+        }
+    }
+
+    /// The offset in `row`'s line on `column` nearest `point` (in the table).
+    private func offset(at point: NSPoint, row: Int, column: DiffTextColumn) -> Int {
+        guard let line = line(row, column), let text = textOrigin(row: row, column: column) else { return 0 }
+        return DiffLineDrawing.offset(at: NSPoint(x: point.x - text.0.x, y: point.y - text.0.y), in: line.text,
+                                      wrapWidth: text.1)
+    }
+
+    /// The place in a line's text under `point`, and its column; nil outside the text (the gutters, a hunk header,
+    /// an empty half of a split row).
+    func textHit(at point: NSPoint) -> (DiffTextPoint, DiffTextColumn)? {
+        guard let table else { return nil }
+        let row = table.row(at: point)
+        guard rows.indices.contains(row) else { return nil }
+        let column: DiffTextColumn
+        if case .pair = rows[row] {
+            let cell = table.frameOfCell(atColumn: 0, row: row)
+            column = point.x < cell.minX + (cell.width / 2).rounded(.down) ? .old : .new
+        } else {
+            column = .unified
+        }
+        guard line(row, column) != nil, let text = textOrigin(row: row, column: column), point.x >= text.0.x
+        else { return nil }
+        return (DiffTextPoint(row: row, offset: offset(at: point, row: row, column: column)), column)
+    }
+
+    func beginTextSelection(at point: DiffTextPoint, column: DiffTextColumn) {
+        table?.deselectAll(nil)
+        setTextSelection(DiffTextSelection(column: column, anchor: point, head: point))
+    }
+
+    /// Moves the selection's end to `point`: above the first row it is the start, under the last the end, on a hunk
+    /// header or an empty half the start of that row.
+    func extendTextSelection(to point: NSPoint) {
+        guard let table, var selection = textSelection, !rows.isEmpty else { return }
+        let row = table.row(at: NSPoint(x: table.bounds.minX + 1, y: point.y))
+        if row >= 0 {
+            selection.head = DiffTextPoint(row: row, offset: offset(at: point, row: row, column: selection.column))
+        } else if point.y < table.rect(ofRow: 0).minY {
+            selection.head = DiffTextPoint(row: 0, offset: 0)
+        } else {
+            let last = rows.count - 1
+            selection.head = DiffTextPoint(row: last, offset: line(last, selection.column)?.text.utf16.count ?? 0)
+        }
+        setTextSelection(selection)
+    }
+
+    /// A double click: the word at `point`; a triple click: the line's whole text.
+    func selectWord(at point: DiffTextPoint, column: DiffTextColumn, wholeLine: Bool) {
+        guard let line = line(point.row, column) else { return }
+        let word = DiffLineDrawing.word(at: point.offset, in: line.text, wholeLine: wholeLine)
+        table?.deselectAll(nil)
+        setTextSelection(DiffTextSelection(column: column, anchor: DiffTextPoint(row: point.row, offset: word.location),
+                                           head: DiffTextPoint(row: point.row, offset: NSMaxRange(word))))
+    }
+
+    func clearTextSelection() {
+        if textSelection != nil { setTextSelection(nil) }
+    }
+
+    private func setTextSelection(_ selection: DiffTextSelection?) {
+        textSelection = selection
+        guard let table else { return }
+        let visible = table.rows(in: table.visibleRect)
+        for index in visible.location..<NSMaxRange(visible) {
+            switch table.view(atColumn: 0, row: index, makeIfNecessary: false) {
+            case let cell as DiffLineCellView:
+                cell.selection = selectionPart(row: index, column: .unified)
+            case let cell as DiffSplitCellView:
+                cell.oldSelection = selectionPart(row: index, column: .old)
+                cell.newSelection = selectionPart(row: index, column: .new)
+            default:
+                break
+            }
+        }
+    }
+
+    /// The selected part of `row`'s line on `column`.
+    private func selectionPart(row: Int, column: DiffTextColumn) -> DiffLineDrawing.Selection? {
+        guard let selection = textSelection, selection.column == column, let line = line(row, column) else { return nil }
+        return selection.part(row: row, length: line.text.utf16.count)
+    }
+
+    /// The selected text: each line's selected part, one per line (no numbers, no `+`/`−`); nil when none.
+    private func selectedText() -> String? {
+        guard let selection = textSelection, selection.start != selection.end else { return nil }
+        var parts: [String] = []
+        for row in selection.start.row...selection.end.row {
+            guard let line = line(row, selection.column),
+                  let part = selection.part(row: row, length: line.text.utf16.count)
+            else { continue }
+            parts.append((line.text as NSString).substring(with: part.range))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    }
+
+    /// The lines' text areas among the rows in `rect` (for the I-beam).
+    func textRects(in rect: NSRect) -> [NSRect] {
+        guard let table else { return [] }
+        let range = table.rows(in: rect)
+        return (range.location..<NSMaxRange(range)).flatMap { row -> [NSRect] in
+            guard rows.indices.contains(row) else { return [] }
+            let cell = table.frameOfCell(atColumn: 0, row: row)
+            switch rows[row] {
+            case .single(let line):
+                guard line.isLine else { return [] }
+                return [NSRect(x: cell.minX + layout.textX, y: cell.minY,
+                               width: max(0, cell.width - layout.textX), height: cell.height)]
+            case .pair(let old, let new):
+                let half = (cell.width / 2).rounded(.down)
+                var rects: [NSRect] = []
+                if old != nil {
+                    rects.append(NSRect(x: cell.minX + layout.splitTextX, y: cell.minY,
+                                        width: max(0, half - layout.splitTextX), height: cell.height))
+                }
+                if new != nil {
+                    rects.append(NSRect(x: cell.minX + half + layout.splitTextX, y: cell.minY,
+                                        width: max(0, cell.width - half - layout.splitTextX), height: cell.height))
+                }
+                return rects
+            }
+        }
     }
 
     // MARK: Actions
@@ -873,9 +1133,15 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         view.onApply(action, selected.isEmpty ? Set(file.changedLineIDs(inHunk: hunk)) : selected, file)
     }
 
-    /// The selected lines, whole, one per line (no `+`/`−`, no line numbers; a split row's old line, then its new one).
+    /// The selected text; else the selected lines, whole, one per line (no `+`/`−`, no line numbers; a split row's old
+    /// line, then its new one).
     func copySelection() {
         guard let table else { return }
+        if let text = selectedText() {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            return
+        }
         let lines = table.selectedRowIndexes.flatMap { rows.indices.contains($0) ? rows[$0].lines.map(\.text) : [] }
         guard !lines.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -886,6 +1152,12 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     /// side's actions on the selected lines.
     func menu(at row: Int) -> NSMenu? {
         guard let table, let view, rows.indices.contains(row), rows[row].isLine else { return nil }
+        // On selected text: Copy copies it, and the selection stays.
+        if let selection = textSelection, selectedText() != nil,
+           (selection.start.row...selection.end.row).contains(row) {
+            return MenuBuilder.menu([.action("Copy") { [weak self] in self?.copySelection() }])
+        }
+        clearTextSelection()
         if !table.selectedRowIndexes.contains(row) {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
@@ -1027,8 +1299,71 @@ enum DiffLineDrawing {
         }
     }
 
+    /// The selected part of a line's text, and whether the selection goes on past its end (to the next line).
+    struct Selection: Equatable {
+        var range: NSRange
+        var throughEnd: Bool
+    }
+
+    /// `text` laid out as it draws: one line, or wrapped at `wrapWidth`. The storage owns the layout manager.
+    private static func textLayout(_ text: String, wrapWidth: CGFloat?) -> (NSTextStorage, NSLayoutManager, NSTextContainer) {
+        let storage = NSTextStorage(string: text, attributes: wrapWidth == nil ? style.text : style.wrappedText)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: wrapWidth ?? .greatestFiniteMagnitude,
+                                                     height: .greatestFiniteMagnitude))
+        // String drawing lays text out without padding.
+        container.lineFragmentPadding = 0
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        manager.ensureLayout(for: container)
+        return (storage, manager, container)
+    }
+
+    /// The offset in `text` (UTF-16, between two characters) nearest `point`, from the text's top left corner.
+    static func offset(at point: NSPoint, in text: String, wrapWidth: CGFloat?) -> Int {
+        guard !text.isEmpty else { return 0 }
+        let (storage, manager, container) = textLayout(text, wrapWidth: wrapWidth)
+        var fraction: CGFloat = 0
+        let index = manager.characterIndex(for: NSPoint(x: point.x, y: wrapWidth == nil ? 1 : point.y), in: container,
+                                           fractionOfDistanceBetweenInsertionPoints: &fraction)
+        guard index < storage.length else { return storage.length }
+        let character = (storage.string as NSString).rangeOfComposedCharacterSequence(at: index)
+        return fraction > 0.5 ? NSMaxRange(character) : character.location
+    }
+
+    /// The word around `offset` (a double click), or the whole line (`wholeLine`, a triple click).
+    static func word(at offset: Int, in text: String, wholeLine: Bool) -> NSRange {
+        let length = text.utf16.count
+        guard !wholeLine, length > 0 else { return NSRange(location: 0, length: length) }
+        return NSAttributedString(string: text).doubleClick(at: min(offset, length - 1))
+    }
+
+    /// The selection's rects, from the text's top left corner: a rect per wrapped line it covers, and a character-wide
+    /// mark after the text when it goes on to the next line (so a selected empty line shows).
+    private static func selectionRects(_ selection: Selection, in text: String, wrapWidth: CGFloat?) -> [NSRect] {
+        let (storage, manager, container) = textLayout(text, wrapWidth: wrapWidth)
+        let range = NSIntersectionRange(selection.range, NSRange(location: 0, length: storage.length))
+        var rects: [NSRect] = []
+        if range.length > 0 {
+            let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            manager.enumerateEnclosingRects(forGlyphRange: glyphs,
+                                            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                            in: container) { rect, _ in rects.append(rect) }
+        }
+        if selection.throughEnd {
+            let height = wrapWidth == nil ? DiffLayout.lineHeight : DiffLayout.wrapLineHeight
+            if manager.numberOfGlyphs == 0 {
+                rects.append(NSRect(x: 0, y: 0, width: DiffLayout.charWidth, height: height))
+            } else {
+                let last = manager.lineFragmentUsedRect(forGlyphAt: manager.numberOfGlyphs - 1, effectiveRange: nil)
+                rects.append(NSRect(x: last.maxX, y: last.minY, width: DiffLayout.charWidth, height: last.height))
+            }
+        }
+        return rects
+    }
+
     /// Draws `row` in `rect` (a flipped view's coordinates). The numbers and the sign sit on the first line.
-    static func draw(_ row: DiffRow, in rect: NSRect, spots: Spots) {
+    static func draw(_ row: DiffRow, in rect: NSRect, spots: Spots, selection: Selection? = nil) {
         let style = style
         switch row.kind {
         case .added:
@@ -1071,6 +1406,15 @@ enum DiffLineDrawing {
             if let emphasis = row.emphasis, NSMaxRange(emphasis) <= length {
                 text.addAttribute(.backgroundColor, value: emphasisFill, range: emphasis)
             }
+            if let selection {
+                // The selection shows over the mark, not under it.
+                text.removeAttribute(.backgroundColor, range: NSIntersectionRange(selection.range,
+                                                                                 NSRange(location: 0, length: length)))
+                Palette.diffTextSelection.setFill()
+                for part in selectionRects(selection, in: row.text, wrapWidth: wrapWidth) {
+                    part.offsetBy(dx: rect.minX + spots.textX, dy: rect.minY + DiffLayout.wrapPadding / 2).fill()
+                }
+            }
             text.draw(with: NSRect(x: rect.minX + spots.textX, y: rect.minY + DiffLayout.wrapPadding / 2,
                                    width: wrapWidth, height: rect.height),
                       options: [.usesLineFragmentOrigin])
@@ -1085,6 +1429,13 @@ enum DiffLineDrawing {
                                              height: rect.height - 2),
                          xRadius: 2, yRadius: 2).fill()
         }
+        if let selection {
+            // The row's whole height, as the mark.
+            Palette.diffTextSelection.setFill()
+            for part in selectionRects(selection, in: row.text, wrapWidth: nil) {
+                NSRect(x: rect.minX + spots.textX + part.minX, y: rect.minY, width: part.width, height: rect.height).fill()
+            }
+        }
         text.draw(at: NSPoint(x: rect.minX + spots.textX, y: textY))
     }
 }
@@ -1096,6 +1447,10 @@ final class DiffLineCellView: NSView {
     }
     var layout = DiffLayout()
     var wraps = false
+    /// The selected part of its text.
+    var selection: DiffLineDrawing.Selection? {
+        didSet { if selection != oldValue { needsDisplay = true } }
+    }
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -1122,7 +1477,7 @@ final class DiffLineCellView: NSView {
             : [(row.oldLine, 0), (row.newLine, layout.newNumberX)]
         DiffLineDrawing.draw(row, in: bounds, spots: DiffLineDrawing.Spots(
             numbers: numbers, numberWidth: layout.numberWidth, signX: layout.signX, textX: layout.textX,
-            wrapWidth: wraps ? layout.wrapWidth(rowWidth: bounds.width, split: false) : nil))
+            wrapWidth: wraps ? layout.wrapWidth(rowWidth: bounds.width, split: false) : nil), selection: selection)
     }
 }
 
@@ -1133,6 +1488,13 @@ final class DiffSplitCellView: NSView {
     private var new: DiffRow?
     var layout = DiffLayout()
     var wraps = false
+    /// The selected part of the old (left) or the new (right) line's text: a selection stays on one side.
+    var oldSelection: DiffLineDrawing.Selection? {
+        didSet { if oldSelection != oldValue { needsDisplay = true } }
+    }
+    var newSelection: DiffLineDrawing.Selection? {
+        didSet { if newSelection != oldValue { needsDisplay = true } }
+    }
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -1162,15 +1524,16 @@ final class DiffSplitCellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let half = (bounds.width / 2).rounded(.down)
         let wrapWidth = wraps ? layout.wrapWidth(rowWidth: bounds.width, split: true) : nil
-        for (row, rect, number) in [(old, NSRect(x: 0, y: 0, width: half, height: bounds.height), old?.oldLine),
-                                    (new, NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height),
-                                     new?.newLine)] {
+        for (row, rect, number, selection) in [
+            (old, NSRect(x: 0, y: 0, width: half, height: bounds.height), old?.oldLine, oldSelection),
+            (new, NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height), new?.newLine, newSelection),
+        ] {
             guard let row else { continue }
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(rect: rect).addClip()
             DiffLineDrawing.draw(row, in: rect, spots: DiffLineDrawing.Spots(
                 numbers: [(number, 0)], numberWidth: layout.numberWidth, signX: layout.numberWidth,
-                textX: layout.splitTextX, wrapWidth: wrapWidth))
+                textX: layout.splitTextX, wrapWidth: wrapWidth), selection: selection)
             NSGraphicsContext.restoreGraphicsState()
         }
         NSColor.separatorColor.setFill()

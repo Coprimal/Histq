@@ -164,6 +164,9 @@ enum Palette {
     static let diffLineNumber = NSColor.white.withAlphaComponent(0.45)
     /// Code text without a token: white, not grey (user, 2026-11-17). White 0.97
     static let diffText = NSColor.white.withAlphaComponent(0.97)
+    /// Selected text in a diff line, under the glyphs: the accent, see-through so the band and syntax colors show.
+    /// #2F86FB at 0.45
+    static let diffTextSelection = srgb(0x2F86FB).withAlphaComponent(0.45)
 
     // MARK: Conflict editor (AppKit: its panes draw their rows in `draw(_:)`)
 
