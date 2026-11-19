@@ -1663,7 +1663,7 @@ private struct PRFilesTab: View {
             HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
                 SectionCard("Files", systemImage: PRTab.files.systemImage, count: files.count, contentPadding: 6) {
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 2) {
+                        LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(files) { file in
                                 PRFileRow(file: file, selected: file.id == session.pullDetail.selectedFile) {
                                     session.pullDetail.selectedFile = file.id
@@ -1756,6 +1756,7 @@ private struct PRFileRow: View {
         }
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .frame(minHeight: SidebarItemStyle.height)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
