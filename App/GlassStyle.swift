@@ -1257,6 +1257,9 @@ enum ModalMetrics {
     static let cornerRadius: CGFloat = SettingsMetrics.cardRadius + PanelContainerMetrics.padding
     /// Between the window content's edges and the card, so a tall card (the rebase rows) stays inside the window.
     static let margin: CGFloat = 24
+    /// Added to the container's padding on both sides of the header and the cards, so they don't hug the modal's edge:
+    /// the cards line up with the footer's buttons (16 pt from the edge).
+    static let bodyInset: CGFloat = ModalFooterMetrics.trailingPadding
 }
 
 /// Every modal's card, decorated like the command palette (task 9.6): a `PanelContainer` (bg_card, radius 20, 1 pt
@@ -1278,8 +1281,11 @@ struct ModalCard<Content: View, Actions: View>: View {
     var body: some View {
         PanelContainer(cornerRadius: ModalMetrics.cornerRadius) {
             VStack(alignment: .leading, spacing: PanelContainerMetrics.padding) {
-                header
-                content()
+                Group {
+                    header
+                    content()
+                }
+                .padding(.horizontal, ModalMetrics.bodyInset)
                 HStack(spacing: ModalFooterMetrics.spacing) {
                     Spacer(minLength: 0)
                     actions()

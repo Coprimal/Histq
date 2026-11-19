@@ -41,7 +41,7 @@ struct InteractiveRebaseView: View {
     }
 
     var body: some View {
-        ModalCard(title: title, subtitle: subtitle, systemImage: isSquash ? "arrow.triangle.merge" : "list.bullet",
+        ModalCard(title: title, subtitle: subtitle, systemImage: isSquash ? "arrow.triangle.merge" : "arrow.triangle.swap",
                   width: 600, takesFocus: true) {
             switch todo {
             case .idle, .loading:
