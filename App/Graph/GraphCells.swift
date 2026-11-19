@@ -437,6 +437,13 @@ final class RefBadgeCellView: NSView {
         context.saveGState()
         defer { context.restoreGState() }
         context.clip(to: bounds)
+        // Another worktree's WIP row is faded as a whole, its badge and line (one transparency layer).
+        let isFaded = badges.first?.kind == .worktree
+        if isFaded {
+            context.setAlpha(Palette.graphOtherWorktreeAlpha)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+        }
+        defer { if isFaded { context.endTransparencyLayer() } }
         // The stack lies over other rows: its see-through fills go on the graph's surface, as in `dragImage`, one
         // piece under every badge and the gaps between them, so nothing of the rows below shows through.
         if stack != nil {
@@ -471,7 +478,7 @@ final class RefBadgeCellView: NSView {
         let lineY = layout.lineY ?? bounds.midY
         let lineEnd = layout.lineEnd ?? bounds.maxX
         guard layout.lineStart < lineEnd else { return }
-        let lane = Palette.graphLanes[color % Palette.graphLanes.count]
+        let lane = Palette.graphLane(color)
         // Not beside "+N" alone (no badge drawn): that line is the row's own.
         let onlyGhosts = !layout.badges.isEmpty && layout.badges.allSatisfy { badges[$0.index].isGhost }
         (onlyGhosts ? lane.withAlphaComponent(Palette.graphGhostAlpha) : lane).setStroke()
@@ -586,6 +593,8 @@ final class RefBadgeCellView: NSView {
         let lane = self.color % Palette.graphLanes.count
         let color: NSColor = if case .tag = badge.kind {
             Palette.graphTagFill
+        } else if self.color == GraphLayout.stashColor {
+            Palette.graphStashBadgeFill
         } else {
             (isHead ? Palette.graphHeadBadgeFills : Palette.graphBadgeFills)[lane]
         }

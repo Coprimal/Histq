@@ -95,8 +95,9 @@ public struct GraphHungRow: Sendable, Hashable {
 /// row fed after its base) keeps its lane open to the end; a duplicate hash is laid out as a new tip.
 public struct GraphLayout: Sendable {
     public static let colorCount = 8
-    /// The color of a stash row and its line to its base: outside the lane palette (the app draws it grey), so a
-    /// stash never takes a branch's color, and the commit it hangs from never takes the stash's.
+    /// The color of a stash row, another worktree's WIP row, and their lines to their base: outside the lane palette
+    /// (the app draws it grey), so such a row never takes a branch's color, and the commit it hangs from never takes
+    /// the row's.
     public static let stashColor = colorCount
 
     /// Which kind of edge a lane is waiting along; when several lanes wait for the same commit, the node
@@ -167,7 +168,7 @@ public struct GraphLayout: Sendable {
 
     private mutating func place(_ row: GraphSyntheticRow) -> GraphRow {
         let lane = freeSlot()
-        let color = row.kind == .stash ? Self.stashColor : newColor()
+        let color = row.kind == .wip ? newColor() : Self.stashColor
         let top = passingSegments()
         if let base = row.base {
             lanes[lane] = Lane(waitingFor: base, color: color, edge: .synthetic)
@@ -184,7 +185,7 @@ public struct GraphLayout: Sendable {
         var top: [GraphSegment] = []
         for index in lanes.indices {
             guard let lane = lanes[index], lane.waitingFor == commit.hash else { continue }
-            // Among the lines of synthetic rows, a WIP's (colored) wins over a stash's (grey).
+            // Among the lines of synthetic rows, this worktree's WIP's (colored) wins over a grey one's.
             if best == nil || lane.edge < best! || (lane.edge == best! && lanes[node]!.color == Self.stashColor) {
                 node = index
                 best = lane.edge
@@ -196,7 +197,7 @@ public struct GraphLayout: Sendable {
         if node >= 0, lanes[node]!.color != Self.stashColor {
             color = lanes[node]!.color
         } else {
-            // A tip, or a commit only stashes hang from: a color of its own.
+            // A tip, or a commit only grey rows hang from: a color of its own.
             if node < 0 && pin == nil { node = freeSlot() }
             color = newColor()
         }

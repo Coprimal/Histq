@@ -970,8 +970,10 @@ enum RepoMenus {
     // MARK: Checkout
 
     /// A double-click on a graph row: the commit's local branch when it has exactly one, else the commit itself
-    /// (detached, confirmed). WIP and stash rows do nothing.
+    /// (detached, confirmed). Another worktree's WIP row opens that worktree's tab (or switches to it) on its changes.
+    /// This worktree's WIP and stash rows do nothing.
     static func activate(_ item: GraphItem, session: RepoSession) {
+        if case .worktree(let path) = item { return session.openWorktree(path) }
         guard case .commit(let hash) = item else { return }
         let local = session.refs.value?.localBranches.filter { $0.commit == hash } ?? []
         if local.count == 1 {

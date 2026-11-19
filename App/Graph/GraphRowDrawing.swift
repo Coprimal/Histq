@@ -97,7 +97,8 @@ enum GraphNodeStyle: Equatable {
 enum GraphRowDrawing {
     /// Draws `row` in `bounds` (a flipped view's bounds, the graph column's cell), clipped to it. `hasRefs` draws the
     /// line from the column's left edge (where the ref badges' line ends) to the node, at `refsAlpha` (a ghost badge's
-    /// is faded). `avatar`, when given, fills the node.
+    /// is faded). `avatar`, when given, fills the node. `nodeAlpha` fades the row's own band, refs line and node
+    /// (another worktree's WIP row), not the lanes passing by.
     ///
     /// When `bounds` is too narrow for the log's `logLanes`, the right-most lanes fold continuously
     /// (`GraphMetrics.drawnX`): their nodes are pushed left, over their neighbours' lines, and the lines of a pinned
@@ -107,8 +108,8 @@ enum GraphRowDrawing {
     /// narrowest column draws none (the collapsed column), the nodes' ring colors and the band's edge bar tell
     /// the branches apart.
     static func draw(
-        _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, avatar: NSImage?,
-        metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
+        _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, nodeAlpha: CGFloat = 1,
+        avatar: NSImage?, metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
     ) {
         context.saveGState()
         defer { context.restoreGState() }
@@ -123,10 +124,12 @@ enum GraphRowDrawing {
         let band = CGRect(x: nodeX, y: midY - metrics.bandHeight / 2,
                           width: max(0, bounds.maxX - nodeX), height: metrics.bandHeight)
         if band.width > 0 {
+            context.setAlpha(nodeAlpha)
             Palette.graphLaneBand(row.color).setFill()
             context.fill(band)
             laneColor.setFill()
             context.fill(CGRect(x: bounds.maxX - 2, y: band.minY, width: 2, height: band.height))
+            context.setAlpha(1)
         }
 
         context.setLineWidth(metrics.lineWidth)
@@ -134,7 +137,8 @@ enum GraphRowDrawing {
         context.setLineJoin(.round)
 
         if hasRefs {
-            (refsAlpha < 1 ? laneColor.withAlphaComponent(refsAlpha) : laneColor).setStroke()
+            let alpha = refsAlpha * nodeAlpha
+            (alpha < 1 ? laneColor.withAlphaComponent(alpha) : laneColor).setStroke()
             context.setLineWidth(1.5)
             context.move(to: CGPoint(x: bounds.minX, y: midY))
             context.addLine(to: CGPoint(x: nodeX, y: midY))
@@ -167,8 +171,23 @@ enum GraphRowDrawing {
             }
         }
 
+        let center = CGPoint(x: nodeX, y: midY)
+        let fadesNode = nodeAlpha < 0.99
+        if fadesNode {
+            // The surface first, at full opacity: the lines ending under the node do not show through it.
+            let diameter = metrics.nodeDiameter - 2
+            Palette.graphSurface.setFill()
+            context.fillEllipse(in: CGRect(x: center.x - diameter / 2, y: center.y - diameter / 2,
+                                           width: diameter, height: diameter))
+            context.setAlpha(nodeAlpha)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+        }
         drawNode(node, color: laneColor, band: Palette.graphLaneBand(row.color), avatar: avatar,
-                 center: CGPoint(x: nodeX, y: midY), metrics: metrics, context: context)
+                 center: center, metrics: metrics, context: context)
+        if fadesNode {
+            context.endTransparencyLayer()
+            context.setAlpha(1)
+        }
     }
 
     /// One line piece. Top half: from the row's top edge at lane `from` to the center at lane `to`. Bottom half: from
@@ -317,6 +336,8 @@ final class GraphCellView: NSView {
     var hasRefs = false
     /// The row shows only a ghost badge (`RefBadge.isGhost`): its line to the node is faded.
     var hasGhostRef = false
+    /// Another worktree's WIP row: its band, refs line and node are faded (`Palette.graphOtherWorktreeAlpha`).
+    var isFaded = false
     /// 5.2's avatar for the node; initials while nil.
     var avatar: NSImage?
     var metrics = GraphMetrics(density: "regular")
@@ -329,13 +350,14 @@ final class GraphCellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let row, let context = NSGraphicsContext.current?.cgContext else { return }
         GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef,
-                             refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha, avatar: avatar, metrics: metrics,
+                             refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha,
+                             nodeAlpha: isFaded ? Palette.graphOtherWorktreeAlpha : 1, avatar: avatar, metrics: metrics,
                              logLanes: logLanes, in: bounds, context: context)
     }
 }
 
 extension Palette {
-    /// A `GraphRow` or `GraphSegment` color: its lane color, or the stash grey.
+    /// A `GraphRow` or `GraphSegment` color: its lane color, or the grey of stashes and other worktrees' WIP rows.
     static func graphLane(_ color: Int) -> NSColor {
         color == GraphLayout.stashColor ? graphStash : graphLanes[color % graphLanes.count]
     }

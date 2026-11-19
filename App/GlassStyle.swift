@@ -122,6 +122,8 @@ enum Palette {
     /// A stash row's node, band and line to its base, outside the lane colors: a neutral grey. #8E8E93 / at 0.16
     static let graphStash = srgb(0x8E8E93)
     static let graphStashBand = graphStash.withAlphaComponent(0.16)
+    /// Another worktree's WIP badge: the grey at a branch badge's 0.38.
+    static let graphStashBadgeFill = graphStash.withAlphaComponent(0.38)
     /// A branch badge's fill: its row's lane color at 0.38.
     static let graphBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.38) }
     /// The checked-out branch's badge: brighter, its lane color at 0.6.
@@ -137,6 +139,8 @@ enum Palette {
     /// The faded ("ghost") badge of the branch a selected commit is on, and its line to the node: drawn whole at this
     /// opacity.
     static let graphGhostAlpha: CGFloat = 0.4
+    /// Another worktree's WIP row (badge, node, band, text): faded so it does not read as this worktree's changes.
+    static let graphOtherWorktreeAlpha: CGFloat = 0.45
     /// Initials on a node, dark on the bright lanes. #1C1C1E
     static let graphNodeText = srgb(0x1C1C1E)
     /// The inside of a hollow node (WIP, stash), so the lines under it do not show: `sheetCardOpaque`. #252527

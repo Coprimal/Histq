@@ -1,6 +1,7 @@
 // The commit graph: an NSTableView with its columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, TIME).
 // Rows: the WIP row (when the working tree has changes), a WIP row per other worktree with changes (labeled with its
-// folder's name; a click shows its changes), the stash rows, then the commits, laid out by `GraphLayout`.
+// folder's name, grey and faded; a click shows its changes, a double-click opens its tab), the stash rows, then the
+// commits, laid out by `GraphLayout`.
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
 // inserted as rows, a new load reloads. A click selects at once (`action`); a double-click calls the checkout hook
 // (`doubleAction`) without delaying the single click. A click on a branch badge's pull request chip opens that pull
@@ -855,7 +856,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let columns = [GraphColumn.message, .author, .date].map { table.column(withIdentifier: $0.identifier) }
             .filter { $0 >= 0 }
         table.enumerateAvailableRowViews { rowView, row in
-            let dimmed = self.dimming.isDimmed(row: row, in: self.log)
+            let dimmed = self.isDimmed(row: row)
             for column in columns {
                 guard let cell = rowView.view(atColumn: column) as? GraphTextCellView, cell.isDimmed != dimmed
                 else { continue }
@@ -1004,6 +1005,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // Another worktree's row has its folder's badge: its line runs on to the dashed node here too.
             cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? (worktree(synthetic) != nil)
             cell.hasGhostRef = ghost(at: row, commit: commit) != nil
+            cell.isFaded = worktree(synthetic) != nil
             if let commit {
                 cell.node = commit.isMerge
                     ? .merge : .commit(initials: GraphRowDrawing.initials(of: commit.authorName))
@@ -1016,7 +1018,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             let cell = reuse(tableView, column) { GraphTextCellView() }
             cell.textSize = metrics.textSize
             cell.changes = nil
-            cell.isDimmed = dimming.isDimmed(row: row, in: log)
+            cell.isDimmed = isDimmed(row: row)
             if let commit {
                 cell.text = commit.subject
                 cell.tone = .primary
@@ -1026,7 +1028,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.tone = .secondary
                 cell.isItalic = true
             } else if let worktree = worktree(synthetic) {
-                cell.text = "// WIP"
+                // This tab's own WIP row stays "// WIP"; another worktree's says whose it is.
+                cell.text = "// WIP (another worktree)"
                 cell.changes = worktree.changes
                 cell.tone = .secondary
                 cell.isItalic = true
@@ -1047,7 +1050,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             cell.avatar = commit.flatMap { avatar(for: $0, in: tableView) }
             cell.text = commit?.authorName ?? ""
             cell.changes = nil
-            cell.isDimmed = dimming.isDimmed(row: row, in: log)
+            cell.isDimmed = isDimmed(row: row)
             cell.tone = .secondary
             cell.isItalic = false
             cell.needsDisplay = true
@@ -1059,7 +1062,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             let date = commit?.authorDate ?? (synthetic?.kind == .stash ? stash(synthetic?.id)?.date : nil)
             cell.text = date.map(formatter.string(from:)) ?? ""
             cell.changes = nil
-            cell.isDimmed = dimming.isDimmed(row: row, in: log)
+            cell.isDimmed = isDimmed(row: row)
             cell.tone = .secondary
             cell.isItalic = false
             cell.needsDisplay = true
@@ -1140,6 +1143,13 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         log.stashes.first { $0.hash == hash }
     }
 
+    /// A text cell's dimming: a row the search does not match, or another worktree's WIP row (always faded, so it does
+    /// not read as this worktree's changes).
+    private func isDimmed(row: Int) -> Bool {
+        if case .synthetic(let synthetic, _) = log.entry(at: row), synthetic.kind == .worktreeWIP { return true }
+        return dimming.isDimmed(row: row, in: log)
+    }
+
     /// The other worktree of a worktree WIP row.
     private func worktree(_ synthetic: GraphSyntheticRow?) -> WorktreeInfo? {
         guard let synthetic, synthetic.kind == .worktreeWIP else { return nil }
@@ -1209,7 +1219,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         reportSelection()
     }
 
-    /// Checks out the double-clicked row (the hook); the first click of the pair has already selected it.
+    /// Activates the double-clicked row (the hook: checkout, or another worktree's tab); the first click of the pair has
+    /// already selected it.
     @objc func doubleClicked(_ sender: Any?) {
         guard let item = item(at: clickedRow) else { return }
         view?.onActivate(item)
