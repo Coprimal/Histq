@@ -123,8 +123,13 @@ private struct ListCard: View {
     var body: some View {
         let store = session.github
         let state = store.lists[list]
-        let isExpanded = Binding(get: { !store.collapsed.contains(list) },
-                                 set: { if $0 { store.collapsed.remove(list) } else { store.collapsed.insert(list) } })
+        // A list with no rows (and no error to show) stays collapsed, as the other sidebar cards.
+        let isEmpty = state?.rows?.isEmpty == true && state?.error == nil
+        let isExpanded = Binding(get: { !isEmpty && !store.collapsed.contains(list) },
+                                 set: {
+                                     guard !isEmpty else { return }
+                                     if $0 { store.collapsed.remove(list) } else { store.collapsed.insert(list) }
+                                 })
         SectionCard(list.title, systemImage: list.systemImage, count: state?.rows?.count,
                     countIsLoading: state?.rows == nil && state?.error == nil,
                     isExpanded: isExpanded, contentPadding: SidebarMetrics.cardPadding) {
@@ -148,7 +153,7 @@ private struct ListCard: View {
                 }
             }
         } accessory: {
-            if state?.rows != nil {
+            if state?.rows != nil, !isEmpty {
                 CardSearchButton(title: list.title, isSearching: $isSearching, query: $query, isExpanded: isExpanded)
             }
         }

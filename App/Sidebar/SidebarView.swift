@@ -431,11 +431,13 @@ private struct WorktreeRow: View {
             Image(systemName: info.isCurrent ? SidebarMetrics.currentImage : SidebarMetrics.worktreeImage)
                 .imageScale(info.isCurrent ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+                .foregroundStyle(nameColor)
             HStack(spacing: 4) {
                 Text(info.name)
                     .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .foregroundStyle(nameColor)
                 Spacer(minLength: 4)
                 if let changes {
                     Image(systemName: "pencil")
@@ -468,6 +470,9 @@ private struct WorktreeRow: View {
         .accessibilityAction { showHead() }
         .accessibilityAction(named: "Open in New Tab") { open() }
     }
+
+    /// This tab's own worktree's check and name in bright white, as the checked-out branch's.
+    private var nameColor: Color { info.isCurrent ? .white : .secondary }
 
     /// This tab's own changes come from its status, another worktree's from its own read.
     private var changes: String? {
@@ -603,8 +608,11 @@ private struct SidebarSection<Content: View, Accessory: View>: View {
     @State private var query = ""
 
     var body: some View {
+        // A card with no rows stays collapsed (its chevron does nothing) and opens again once it has some.
+        let isEmpty = count == 0
+        let expanded = Binding(get: { isExpanded && !isEmpty }, set: { if !isEmpty { isExpanded = $0 } })
         SectionCard(title, systemImage: systemImage, count: count, countIsLoading: count == nil,
-                    isExpanded: $isExpanded, contentPadding: SidebarMetrics.cardPadding) {
+                    isExpanded: expanded, contentPadding: SidebarMetrics.cardPadding) {
             VStack(alignment: .leading, spacing: 0) {
                 if isSearching {
                     CardSearchField(prompt: "Filter by name", isSearching: $isSearching, query: $query)
@@ -619,9 +627,9 @@ private struct SidebarSection<Content: View, Accessory: View>: View {
             }
         } accessory: {
             HStack(spacing: 10) {
-                // Not while loading: the loaded card is another view, which would drop the open field.
-                if count != nil {
-                    CardSearchButton(title: title, isSearching: $isSearching, query: $query, isExpanded: $isExpanded)
+                // Not while loading (the loaded card is another view, which would drop the open field), nor empty.
+                if let count, count > 0 {
+                    CardSearchButton(title: title, isSearching: $isSearching, query: $query, isExpanded: expanded)
                 }
                 accessory()
             }
@@ -809,11 +817,12 @@ private struct BranchRow<Trailing: View>: View {
         // A ref the graph leaves out, listed only while its card shows the hidden rows: its icon and name dimmed, with
         // a slashed eye at the end that shows it again.
         let dimmed = session.isHidden(ref) ? 0.5 : 1.0
+        let checkedOut = systemImage == SidebarMetrics.currentImage
         HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             IconImage(systemImage)
                 // The checked-out branch's check reads at a glance (a step bigger than the branch glyphs).
-                .imageScale(systemImage == SidebarMetrics.currentImage ? .large : .medium)
+                .imageScale(checkedOut ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
                 .opacity(dimmed)
                 .help(iconHelp ?? name)
@@ -830,7 +839,8 @@ private struct BranchRow<Trailing: View>: View {
                 if session.isHidden(ref) { showButton(ref) }
             }
         }
-        .foregroundStyle(selected ? Color.primary : Color.secondary)
+        // The checked-out branch's check and name in bright white, selected or not (user, 2026-11-19).
+        .foregroundStyle(checkedOut ? Color.white : selected ? Color.primary : Color.secondary)
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
         .padding(.leading, SidebarMetrics.capsuleLeading)
         .padding(.trailing, 10)
