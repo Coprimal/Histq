@@ -35,7 +35,7 @@ struct WIPPanel: View {
     @Environment(WindowModel.self) private var model
 
     fileprivate enum Busy: Hashable {
-        case stage(String), unstage(String), discard(String), stageAll, unstageAll, commit, amendMessage
+        case stage(String), unstage(String), discard(String), stageAll, unstageAll, discardAll, commit, amendMessage
     }
 
     fileprivate enum Part: Hashable {
@@ -169,6 +169,8 @@ struct WIPPanel: View {
         } accessory: {
             HStack(spacing: 10) {
                 FileListModeToggle(card: .unstaged)
+                headerButton("Discard All", systemImage: "trash", busy: .discardAll, disabled: files.isEmpty,
+                             fill: Palette.destructiveFill) { confirmDiscardAll(files) }
                 headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty, fill: Palette.stageAllFill) {
                     run([.stageAll], busy: [.stageAll], part: .unstaged, moving: files, toStaged: true)
                 }
@@ -215,9 +217,7 @@ struct WIPPanel: View {
             HStack(spacing: 10) {
                 FileListModeToggle(card: .staged)
                 headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty,
-                             fill: Palette.unstageAllFill) {
-                    run([.unstageAll], busy: [.unstageAll], part: .staged, moving: files, toStaged: false)
-                }
+                             fill: Palette.unstageAllFill) { confirmUnstageAll(files) }
             }
         }
     }
@@ -249,17 +249,27 @@ struct WIPPanel: View {
         .frame(width: 16, height: 16)
     }
 
-    private func headerButton(_ title: String, busy key: Busy, disabled: Bool, fill: Color,
-                              action: @escaping () -> Void) -> some View
+    /// A card header's colored button: `title`, or only `systemImage` (with `title` as its tooltip) where the header
+    /// has no room for another label.
+    private func headerButton(_ title: String, systemImage: String? = nil, busy key: Busy, disabled: Bool,
+                              fill: Color, action: @escaping () -> Void) -> some View
     {
         Button(action: action) {
             HStack(spacing: 4) {
-                if busy.contains(key) { ProgressView().controlSize(.mini) }
-                Text(title)
+                if busy.contains(key) {
+                    ProgressView().controlSize(.mini)
+                } else if let systemImage {
+                    Image(systemName: systemImage)
+                }
+                if systemImage == nil { Text(title) }
             }
+            .lineLimit(1)
+            .fixedSize()
         }
         .buttonStyle(RowTextButtonStyle(fill: fill))
         .disabled(disabled || busy.contains(key))
+        .help(systemImage == nil ? "" : title)
+        .accessibilityLabel(title)
     }
 
     /// The WIP file whose diff or blame panel2 shows, drawn as selected in both lists.
@@ -356,17 +366,47 @@ struct WIPPanel: View {
 
     /// Asks, then discards the tracked files under `folder` and deletes its untracked ones.
     private func confirmDiscard(folder: String, _ files: [FileChange]) {
+        let hasUntracked = files.contains { $0.kind == .untracked }
+        let message = (hasUntracked ? "Its untracked files are deleted. " : "") + "This cannot be undone."
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Discard the changes to \(Self.fileCount(files)) in \((folder as NSString).lastPathComponent)?",
+            message: message, button: "Discard", isDestructive: true) {
+            run(Self.discardWrites(files), busy: files.map { .discard($0.path) }, part: .unstaged)
+        }))
+    }
+
+    /// Asks, then discards every file of the Unstaged card (`files`, as listed): the tracked ones take their index
+    /// version, the untracked ones are deleted. Staged changes stay.
+    private func confirmDiscardAll(_ files: [FileChange]) {
+        let hasUntracked = files.contains { $0.kind == .untracked }
+        let message = "Staged changes stay. " + (hasUntracked ? "Untracked files are deleted. " : "")
+            + "This cannot be undone."
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Discard the unstaged changes to \(Self.fileCount(files))?", message: message,
+            button: "Discard All", isDestructive: true) {
+            run(Self.discardWrites(files), busy: [.discardAll], part: .unstaged)
+        }))
+    }
+
+    /// Asks, then unstages every file of the Staged card (`files`), moving them to Unstaged at once.
+    private func confirmUnstageAll(_ files: [FileChange]) {
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Unstage \(Self.fileCount(files))?", message: "Their changes stay in the working tree, in Unstaged.",
+            button: "Unstage All", isDestructive: false) {
+            run([.unstageAll], busy: [.unstageAll], part: .staged, moving: files, toStaged: false)
+        }))
+    }
+
+    /// "1 file" or "<n> files".
+    private static func fileCount(_ files: [FileChange]) -> String {
+        files.count == 1 ? "1 file" : "\(files.count) files"
+    }
+
+    /// The writes that discard unstaged `files`: a restore of the tracked ones, a delete of the untracked ones.
+    private static func discardWrites(_ files: [FileChange]) -> [RepoSession.Write] {
         let untracked = files.filter { $0.kind == .untracked }.map(\.path)
         let tracked = files.filter { $0.kind != .untracked }.map(\.path)
-        let count = files.count == 1 ? "1 file" : "\(files.count) files"
-        let message = (untracked.isEmpty ? "" : "Its untracked files are deleted. ") + "This cannot be undone."
-        model.presentModal(.confirmation(ModalConfirmation(
-            title: "Discard the changes to \(count) in \((folder as NSString).lastPathComponent)?", message: message,
-            button: "Discard", isDestructive: true) {
-            let writes: [RepoSession.Write] = (tracked.isEmpty ? [] : [.discard(tracked)])
-                + (untracked.isEmpty ? [] : [.removeUntracked(untracked)])
-            run(writes, busy: files.map { .discard($0.path) }, part: .unstaged)
-        }))
+        return (tracked.isEmpty ? [] : [.discard(tracked)]) + (untracked.isEmpty ? [] : [.removeUntracked(untracked)])
     }
 
     private func discard(_ file: FileChange) {
