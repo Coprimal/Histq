@@ -1,8 +1,8 @@
 // The interactive rebase and squash modals (task 9.3; in-window `ModalCard`s since 9.6). "Interactive Rebase from Here…" on a commit lists that commit
 // and every later one of the current branch, oldest first (the order git replays them): each row has an action
 // (pick, reword, edit, squash, fixup, drop), rows drag to a new order, and a reword row edits its message in place.
-// "Squash N Commits…" on a run of selected commits shows the message the squashed commit gets (every message, oldest
-// first), editable. The sheet opens in the click's frame with skeleton rows; `RebaseTodo` reads the commits off the
+// "Squash N Commits…" on a run of selected commits shows the message the squashed commit gets, editable as the commit
+// box's two fields: the summary (the oldest commit's subject) and the description (every commit's message, oldest first). The sheet opens in the click's frame with skeleton rows; `RebaseTodo` reads the commits off the
 // main actor. Start runs the todo as a write (`RepoSession.startRebase`): a conflict or an `edit` stop leaves the rebase
 // in progress, and the operation banner and the conflict editor take over.
 import HistqCore
@@ -33,8 +33,11 @@ struct InteractiveRebaseView: View {
     @State private var todo: Loadable<RebaseTodo> = .loading
     /// The rows as the user arranged them.
     @State private var items: [RebaseTodo.Item] = []
-    /// The squash sheet's message.
-    @State private var message = ""
+    /// The squash sheet's message, as the commit box splits it.
+    @State private var summary = ""
+    @State private var description = ""
+
+    static let summaryLimit = 72
 
     private var isSquash: Bool {
         if case .squash = request.kind { true } else { false }
@@ -130,11 +133,50 @@ struct InteractiveRebaseView: View {
             }
         }
         SectionCard("Message", systemImage: "text.alignleft") {
-            TextEditor(text: $message)
-                .font(.body)
-                .frame(height: 140)
-                .settingsTextEditor()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("Summary", text: $summary)
+                        .textFieldStyle(.settings)
+                    Text("\(summary.count)/\(Self.summaryLimit)")
+                        .font(.settingsCaption)
+                        .monospacedDigit()
+                        .foregroundStyle(summary.count > Self.summaryLimit
+                            ? Color(nsColor: Palette.graphLanes[6]) : .secondary)
+                        .help("Keep the summary within \(Self.summaryLimit) characters")
+                }
+                TextEditor(text: $description)
+                    .font(.body)
+                    .settingsTextEditor()
+                    .frame(height: 120)
+                    .overlay(alignment: .topLeading) {
+                        if description.isEmpty {
+                            Text("Description")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 8)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            }
         }
+    }
+
+    /// The summary, a blank line and the description (when there is one), as the commit box writes them.
+    private var message: String {
+        let summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        return description.isEmpty ? summary : summary + "\n\n" + description
+    }
+
+    /// The squashed commits' messages, oldest first: each subject as a bullet, its body indented under it.
+    static func squashDescription(_ items: some Sequence<RebaseTodo.Item>) -> String {
+        items.map { item in
+            let text = item.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = text.range(of: "\n\n").map { String(text[$0.upperBound...]) } ?? ""
+            let lines = body.isEmpty ? [] : body.components(separatedBy: "\n").map { $0.isEmpty ? "" : "  " + $0 }
+            return (["* " + item.subject] + lines).joined(separator: "\n")
+        }
+        .joined(separator: "\n")
     }
 
     /// The squash todo picks the oldest and squashes the others; the commits after them stay picks.
@@ -150,7 +192,7 @@ struct InteractiveRebaseView: View {
             return RebaseTodoError.nothingToFoldInto(first.commit).message
         }
         if isSquash {
-            return message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? RebaseTodoError.emptyMessage(items.first?.commit ?? "").message : nil
         }
         if let empty = items.first(where: {
@@ -167,7 +209,11 @@ struct InteractiveRebaseView: View {
         do {
             let loaded = try await session.loadRebaseTodo(request.kind)
             items = loaded.items
-            message = loaded.items.first?.newMessage ?? ""
+            if isSquash {
+                let squashed = items.prefix(squashCount)
+                summary = squashed.first?.subject ?? ""
+                description = Self.squashDescription(squashed)
+            }
             if !isSquash, let reword = request.reword, let index = items.firstIndex(where: { $0.commit == reword }) {
                 items[index].setAction(.reword)
             }
