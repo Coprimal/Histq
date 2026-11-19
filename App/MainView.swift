@@ -199,7 +199,7 @@ struct WindowFooter: View {
                 let path = (session.url.path as NSString).abbreviatingWithTildeInPath
                 Text(path)
                     .font(.settingsCaption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(path)
@@ -209,7 +209,7 @@ struct WindowFooter: View {
             Spacer(minLength: 0)
             Text("Histq v\(Self.version)")
                 .font(.settingsCaption)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
             toggle("Detail", systemImage: "sidebar.right", shown: $detailShown)
                 .disabled(session.map { RepoLayoutView.hidesDetail(session: $0, preset: preset) } ?? true)
         }
