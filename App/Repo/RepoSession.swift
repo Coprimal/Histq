@@ -561,7 +561,9 @@ final class RepoSession: Identifiable {
         case wip
         /// A commit or a stash.
         case commit(CommitDetail)
-        case multiple(Int)
+        /// Several graph rows (`graphSelection` at the select, graph order), the diff they show together
+        /// (`RepoMenus.combinedDiff`, nil for none) and its files (nil without a diff).
+        case multiple([GraphItem], diff: CombinedDiff?, files: [FileChange]?)
         /// Another worktree's changes, read-only: its path and its status.
         case worktree(String, WorkingStatus)
         /// A compare's files (`base` against `head`, nil for the working tree; untracked files left out).
@@ -573,6 +575,15 @@ final class RepoSession: Identifiable {
             if case .commit(let commit) = self { return commit.files != nil }
             return true
         }
+    }
+
+    /// The diff a multi-row selection shows: `base` against `head` (nil for the working tree). `isRange`: the selected
+    /// commits' changes together (a first-parent chain, `base` the oldest one's parent); else the difference between
+    /// two rows (`RepoMenus.comparePair`).
+    struct CombinedDiff: Hashable, Sendable {
+        let base: String
+        let head: String?
+        let isRange: Bool
     }
 
     /// A user-initiated write (the WIP panel, the action bar, the menus and dialogs), run by `perform` with the write
@@ -1618,8 +1629,15 @@ final class RepoSession: Identifiable {
                 }
                 let isStash = if case .stash = selection { true } else { false }
                 loaded = .commit(try await readCommitCached(backend, hash: hash, isStash: isStash))
-            case .multiple(let count):
-                loaded = .multiple(count)
+            case .multiple:
+                let items = graphSelection
+                let diff = RepoMenus.combinedDiff(self)
+                let files: [FileChange]? = if let diff {
+                    try await Self.readCompareFiles(backend, cwd: url, base: diff.base, head: diff.head)
+                } else {
+                    nil
+                }
+                loaded = .multiple(items, diff: diff, files: files)
             case .worktree(let path):
                 loaded = .worktree(path, try await Self.readWorktreeStatus(backend, path: path))
             case .compare(let base, let head):

@@ -3,6 +3,7 @@
 // Explain), then its files.
 import AppKit
 import Combine
+import HistqCore
 import SwiftUI
 
 struct CommitDetailPanel: View {
@@ -149,13 +150,14 @@ struct CommitFilesCard<Content: View>: View {
     let state: String
     /// False leaves the all-files button out (a compare has no single tree).
     var allFilesButton = true
+    var title = "Files"
     @ViewBuilder let content: (_ query: String) -> Content
     @State private var isSearching = false
     @State private var query = ""
     @FocusState private var searchFocused: Bool
 
     var body: some View {
-        SectionCard("Files", systemImage: "doc.on.doc", count: count, countIsLoading: count == nil, contentPadding: 6) {
+        SectionCard(title, systemImage: "doc.on.doc", count: count, countIsLoading: count == nil, contentPadding: 6) {
             // One stack: a frame on a list of views (skeleton rows) would apply to each row.
             VStack(alignment: .leading, spacing: 0) {
                 if isSearching {
@@ -290,15 +292,72 @@ struct FilesLayoutLog: ViewModifier {
     }
 }
 
-/// Several graph rows selected. Two commits, or the WIP row and a commit, get a Compare button.
-struct MultipleSelectionCard: View {
+/// Several graph rows selected, in two cards: the rows (graph order), then the files of the diff they show together
+/// (`RepoMenus.combinedDiff`), whose click opens a file's diff in panel2 as a compare's does. A selection with no such
+/// diff gets a note in the files' place. With nil `files` and a diff it is the placeholder: the rows show at once, the
+/// files as skeleton rows.
+struct MultipleSelectionPanel: View {
     let session: RepoSession
-    let count: Int
+    let items: [GraphItem]
+    let diff: RepoSession.CombinedDiff?
+    let files: [FileChange]?
+    /// The select this detail answers and its timing detail (see `CommitDetailPanel`).
+    let token: Int
+    let timingDetail: String
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
-        SectionCard("Selection", systemImage: "square.stack.3d.up") {
-            Text("\(count) commits selected")
-                .font(.body.weight(.medium))
+        // With a diff, the rows card is as tall as its rows up to `rowsFraction` of the panel (then they scroll) and
+        // the files card fills the rest; without one, the note fits its text and the rows card fills the rest.
+        GeometryReader { proxy in
+            VStack(spacing: SectionCardMetrics.spacing) {
+                SelectedRowsCard(session: session, items: items,
+                                 maxHeight: diff == nil ? nil : proxy.size.height * Self.rowsFraction)
+                if let diff {
+                    CommitFilesCard(count: files?.count, token: token, detail: timingDetail,
+                                    state: files == nil ? "placeholder" : "loaded", allFilesButton: false,
+                                    title: diff.isRange ? "Combined Changes" : "Differences") { query in
+                        CompareFileList(session: session, base: diff.base, head: diff.head, files: files,
+                                        query: query)
+                    }
+                } else {
+                    SectionCard("Files", systemImage: "doc.on.doc") {
+                        Text("The changes of this selection can't be shown together. Select commits that follow one "
+                            + "another on one branch, or any two rows, to see their changes.")
+                            .font(textSize.body)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rows card's share of the panel's height at most when the files card is under it.
+    private static let rowsFraction: CGFloat = 0.45
+}
+
+/// The selected rows: avatar, subject, short sha, date and author for a commit; the WIP and stash rows too. Two rows
+/// that `RepoMenus.comparePair` accepts get a Compare button.
+private struct SelectedRowsCard: View {
+    let session: RepoSession
+    let items: [GraphItem]
+    /// The card's height at most: its rows scroll inside. Nil: the card fills the height left.
+    let maxHeight: CGFloat?
+    @Environment(\.textSize) private var textSize
+
+    var body: some View {
+        SectionCard("Commits", systemImage: "square.stack.3d.up", count: items.count, contentPadding: 6) {
+            CardScrollView {
+                // Lazy: a shift-click can select thousands of rows.
+                LazyVStack(spacing: Self.rowSpacing) {
+                    ForEach(items, id: \.self) { item in
+                        SelectedRow(session: session, item: item, height: rowHeight)
+                    }
+                }
+            }
+            .frame(height: listHeight)
+            .frame(maxHeight: maxHeight == nil ? .infinity : nil, alignment: .top)
         } accessory: {
             if let pair = RepoMenus.comparePair(session) {
                 Button("Compare") {
@@ -308,6 +367,105 @@ struct MultipleSelectionCard: View {
                 .help(pair.head == nil ? "Compare the commit with the working tree" : "Compare the two commits")
             }
         }
+    }
+
+    private var rowHeight: CGFloat { textSize.scaled(44) }
+    private static let rowSpacing: CGFloat = 4
+
+    /// The rows' height, capped by `maxHeight` less the card's header and padding (two rows at least); nil (fill)
+    /// without a cap.
+    private var listHeight: CGFloat? {
+        guard let maxHeight else { return nil }
+        let rows = CGFloat(items.count) * (rowHeight + Self.rowSpacing) - Self.rowSpacing
+        let room = maxHeight - SectionCardMetrics.headerHeight - 2 * SettingsMetrics.cardPadding
+        return min(rows, max(room, 2 * rowHeight + Self.rowSpacing))
+    }
+}
+
+/// One selected row: a commit from the log's header, the WIP row from the status, a stash from the log's stashes.
+private struct SelectedRow: View {
+    let session: RepoSession
+    let item: GraphItem
+    let height: CGFloat
+    @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
+    @Environment(\.textSize) private var textSize
+
+    var body: some View {
+        HStack(spacing: 8) {
+            leading
+                .frame(width: InfoMetrics.avatar, height: InfoMetrics.avatar)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(info.title)
+                    .font(textSize.body)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(info.subtitle)
+                    .font(textSize.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 8)
+            if let hash = info.hash {
+                Text(hash.prefix(7))
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: height)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.tabFill))
+        .help(info.title)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var leading: some View {
+        switch item {
+        case .commit:
+            if let commit {
+                AvatarImage(email: commit.authorEmail, name: commit.authorName, size: InfoMetrics.avatar)
+            } else {
+                symbol("smallcircle.filled.circle")
+            }
+        case .wip, .worktree: symbol("pencil")
+        case .stash: symbol("archivebox")
+        }
+    }
+
+    private func symbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
+    }
+
+    private var commit: Commit? {
+        guard case .commit(let hash) = item, let log = session.log.value, let index = log.commitIndex[hash],
+              log.commits.indices.contains(index), log.commits[index].hash == hash
+        else { return nil }
+        return log.commits[index]
+    }
+
+    private var info: (title: String, subtitle: String, hash: String?) {
+        switch item {
+        case .commit(let hash):
+            guard let commit else { return (String(hash.prefix(7)), "", hash) }
+            return (commit.subject, "\(format(commit.authorDate)) by \(commit.authorName)", hash)
+        case .wip:
+            let count = session.status.value?.entries.count ?? 0
+            return ("Working directory", count == 1 ? "1 file change" : "\(count) file changes", nil)
+        case .stash(let hash):
+            let stash = session.log.value?.stashes.first { $0.hash == hash }
+            return (stash?.message ?? "Stash", stash.map { format($0.date) } ?? "", hash)
+        case .worktree(let path):
+            return (URL(filePath: path).lastPathComponent, path, nil)
+        }
+    }
+
+    private func format(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: Locale.current.identifier)
+        formatter.dateFormat = dateFormat
+        return formatter.string(from: date)
     }
 }
 

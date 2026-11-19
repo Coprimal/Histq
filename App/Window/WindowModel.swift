@@ -1099,10 +1099,11 @@ final class WindowModel {
             }
             session.selectGraph([.commit(hash)])
         case .commits:
-            // `commits:<sha>,<sha|wip>[,…]`: several rows selected at once, as a shift- or cmd-click does, once the
-            // refs and the log are in (a multi-selection's detail reads neither, so a first select would leave the
-            // sidebar unread).
-            guard let session = selectedSession, let value = request.value else {
+            // `commits:<sha>,<sha|wip>[,…][:<path>]`: several rows selected at once, as a shift- or cmd-click does,
+            // once the refs and the log are in (a multi-selection's detail reads neither, so a first select would
+            // leave the sidebar unread); with a path, then a click on that file of their combined diff once it loads.
+            let parts = request.value?.split(separator: ":", maxSplits: 1).map(String.init) ?? []
+            guard let session = selectedSession, let value = parts.first else {
                 Self.logger.error("-HistqSelect commits: no repo tab or no commits")
                 return
             }
@@ -1113,6 +1114,19 @@ final class WindowModel {
                     try? await Task.sleep(for: .milliseconds(20))
                 }
                 session?.selectGraph(value.split(separator: ",").map { $0 == "wip" ? .wip : .commit(String($0)) })
+                guard parts.count == 2 else { return }
+                for _ in 0..<150 {
+                    if case .multiple? = session?.detail.value { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let session, case .multiple(_, let diff?, let files?)? = session.detail.value,
+                      let file = files.first(where: { $0.path == parts[1] })
+                else {
+                    Self.logger.error("-HistqSelect commits: no combined diff with that file")
+                    return
+                }
+                session.selectFile(FileTarget(source: .compare(base: diff.base, head: diff.head), file: file))
             }
         case .history:
             // `history:<path>`: the file's history, as its File History menu item opens it.

@@ -13,7 +13,6 @@ struct CompareDetailPanel: View {
     /// The select this detail answers and its timing detail (see `CommitDetailPanel`).
     let token: Int
     let timingDetail: String
-    @Environment(\.textSize) private var textSize
 
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
@@ -46,13 +45,32 @@ struct CompareDetailPanel: View {
             }
             CommitFilesCard(count: files?.count, token: token, detail: timingDetail,
                             state: files == nil ? "placeholder" : "loaded", allFilesButton: false) { query in
-                list(matching: query)
+                CompareFileList(session: session, base: base, head: head, files: files, query: query)
             }
         }
     }
 
-    /// The files that `query` matches (all with an empty query); skeleton rows while they are read.
-    @ViewBuilder private func list(matching query: String) -> some View {
+    /// A full object id as its short sha, a branch's full ref as its name, any other ref name as it is.
+    private func label(_ rev: String) -> String {
+        if rev.count >= 40 && rev.allSatisfy(\.isHexDigit) { return String(rev.prefix(7)) }
+        for prefix in ["refs/heads/", "refs/remotes/"] where rev.hasPrefix(prefix) {
+            return String(rev.dropFirst(prefix.count))
+        }
+        return rev
+    }
+}
+
+/// A compare's files (`base` against `head`, nil for the working tree) that `query` matches (all with an empty query),
+/// as a Files card's body: a click opens a file's diff (read-only) in panel2. Skeleton rows while `files` is nil.
+struct CompareFileList: View {
+    let session: RepoSession
+    let base: String
+    let head: String?
+    let files: [FileChange]?
+    let query: String
+    @Environment(\.textSize) private var textSize
+
+    var body: some View {
         if let files {
             let shown = FileSearch.filter(files, query: query)
             if shown.isEmpty {
@@ -89,14 +107,5 @@ struct CompareDetailPanel: View {
     /// This compare's file whose diff or blame panel2 shows, drawn as selected.
     private var openPath: String? {
         session.openFile?.source == source ? session.openFile?.path : session.blamePath(in: source)
-    }
-
-    /// A full object id as its short sha, a branch's full ref as its name, any other ref name as it is.
-    private func label(_ rev: String) -> String {
-        if rev.count >= 40 && rev.allSatisfy(\.isHexDigit) { return String(rev.prefix(7)) }
-        for prefix in ["refs/heads/", "refs/remotes/"] where rev.hasPrefix(prefix) {
-            return String(rev.dropFirst(prefix.count))
-        }
-        return rev
     }
 }

@@ -710,7 +710,7 @@ private struct GraphHeaderPlaceholder: View {
 
 // MARK: - Panel 3: the detail
 
-/// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection count, a compare, or
+/// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection, a compare, or
 /// the overview cards (an unborn branch). Until it loads, the selection's cards hold skeleton rows (`PlaceholderCard`:
 /// spinner after 150 ms, the `placeholder` line); then the `content` line. A commit of the log skips the placeholder:
 /// its header shows in the click's frame (`content-info`), its files once read (`content`). All carry
@@ -770,8 +770,11 @@ private struct DetailPanel: View {
             WIPPlaceholder(hasConflicts: hasConflicts)
         case .commit, .stash, .ref:
             CommitDetailPlaceholder(token: session.selectToken, detail: session.selectDetail)
-        case .multiple(let count):
-            MultipleSelectionCard(session: session, count: count)
+        case .multiple:
+            // The rows and whether they make a diff are known now: only the files wait for the load.
+            MultipleSelectionPanel(session: session, items: session.graphSelection,
+                                   diff: RepoMenus.combinedDiff(session), files: nil, token: session.selectToken,
+                                   timingDetail: session.selectDetail)
         case .worktree(let path):
             WorktreeChangesPlaceholder(path: path)
         case .submodule(let path):
@@ -800,8 +803,9 @@ private struct DetailPanel: View {
         case .commit(let commit):
             CommitDetailPanel(session: session, commit: commit, token: session.selectToken,
                               timingDetail: session.selectDetail)
-        case .multiple(let count):
-            MultipleSelectionCard(session: session, count: count)
+        case .multiple(let items, let diff, let files):
+            MultipleSelectionPanel(session: session, items: items, diff: diff, files: files, token: session.selectToken,
+                                   timingDetail: session.selectDetail)
         case .worktree(let path, let status):
             WorktreeChangesPanel(path: path, status: status)
         case .submodule(let detail):

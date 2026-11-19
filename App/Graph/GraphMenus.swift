@@ -336,6 +336,31 @@ enum RepoMenus {
         }
     }
 
+    /// The diff a selection of several rows shows in the detail: commits that make a first-parent chain (each one's
+    /// first parent the next, in graph order) show their changes together, the oldest one's first parent against the
+    /// newest; else two rows show `comparePair`'s diff. Nil for any other selection (a stash or the WIP row among more
+    /// than two rows, commits off one chain, a chain down to a root commit).
+    static func combinedDiff(_ session: RepoSession) -> RepoSession.CombinedDiff? {
+        let items = session.graphSelection
+        guard items.count > 1 else { return nil }
+        if let log = session.log.value {
+            let indices = items.compactMap { item -> Int? in
+                guard case .commit(let hash) = item, let index = log.commitIndex[hash],
+                      log.commits.indices.contains(index), log.commits[index].hash == hash
+                else { return nil }
+                return index
+            }
+            if indices.count == items.count {
+                let commits = indices.sorted().map { log.commits[$0] }
+                let isChain = zip(commits, commits.dropFirst()).allSatisfy { $0.parents.first == $1.hash }
+                if isChain, let base = commits.last?.parents.first {
+                    return .init(base: base, head: commits[0].hash, isRange: true)
+                }
+            }
+        }
+        return comparePair(session).map { .init(base: $0.base, head: $0.head, isRange: false) }
+    }
+
     /// The local branches, remote branches and tags at `hash`, in the badge column's order.
     private static func refItems(at hash: String, refs: Refs?) -> [SidebarItem] {
         guard let refs else { return [] }
