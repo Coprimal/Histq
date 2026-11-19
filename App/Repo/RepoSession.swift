@@ -295,9 +295,10 @@ struct FileDiffCache {
     }
 
     /// Keeps `detail`, dropping the least recently used diffs over `rowCapacity`. Only a commit's file is kept, and
-    /// never an image's versions (decoded bitmaps, far heavier than their row count).
+    /// never an image's versions (decoded bitmaps, far heavier than their row count) or a submodule's pointer change
+    /// (its commits depend on the submodule's checkout, which a fetch or an update changes).
     mutating func insert(_ detail: FileDiffDetail, for key: Key) {
-        guard case .commit = key.target.source, entries[key] == nil else { return }
+        guard case .commit = key.target.source, !key.target.file.isSubmodule, entries[key] == nil else { return }
         let weight = switch detail.content {
         case .sections(let sections): sections.reduce(1) { $0 + $1.rows.count + $1.fullRows.count + $1.splitRows.count }
         case .images: Self.rowCapacity + 1
@@ -310,6 +311,39 @@ struct FileDiffCache {
         while rows > Self.rowCapacity, !order.isEmpty {
             rows -= entries.removeValue(forKey: order.removeFirst())?.rows ?? 0
         }
+    }
+}
+
+/// The head of one `git diff --raw` record, `:<old mode> <new mode> <old sha> <new sha> <status>` (its path follows,
+/// after a NUL with `-z`).
+struct RawDiffRecord {
+    private static let gitlinkMode = "160000"
+
+    let oldMode: String
+    let newMode: String
+    let oldSHA: String
+    let newSHA: String
+    /// `M`, `A`, `D`, `T`, `R100`, `C75`.
+    let status: String
+
+    init?(_ record: String) {
+        guard record.first == ":" else { return nil }
+        let parts = record.dropFirst().split(separator: " ").map(String.init)
+        guard parts.count == 5 else { return nil }
+        (oldMode, newMode, oldSHA, newSHA, status) = (parts[0], parts[1], parts[2], parts[3], parts[4])
+    }
+
+    /// A submodule's pointer (mode 160000) on either side.
+    var isGitlink: Bool { oldMode == Self.gitlinkMode || newMode == Self.gitlinkMode }
+
+    /// The commits the first record's gitlink points to before and after (nil on a side with no gitlink: added,
+    /// removed, or a type change); nil when that record is no gitlink. `output` is `--raw -z`.
+    static func gitlinks(in output: Data) -> (from: String?, to: String?)? {
+        guard let first = output.split(separator: 0).first,
+              let record = RawDiffRecord(String(decoding: first, as: UTF8.self)), record.isGitlink
+        else { return nil }
+        return (record.oldMode == gitlinkMode ? record.oldSHA : nil,
+                record.newMode == gitlinkMode ? record.newSHA : nil)
     }
 }
 
@@ -618,8 +652,10 @@ final class RepoSession: Identifiable {
         /// One line (a `GitOperations.ignorePattern`) added to `.gitignore` or `.git/info/exclude`: no undo entry.
         case ignore(pattern: String, in: GitOperations.IgnoreFile)
 
-        /// Merges `revision` into the current branch; `checkoutFirst` switches to that branch first.
-        case merge(String, checkoutFirst: String?)
+        /// Merges `revision` into the current branch; `checkoutFirst` switches to that branch first; nil `mode` lets
+        /// git's config decide. A fast-forward-only merge into `checkoutFirst` that has diverged from `revision` is
+        /// refused before the checkout.
+        case merge(String, checkoutFirst: String?, mode: GitOperations.MergeMode?)
         /// Rebases the current branch onto `upstream`; `checkoutFirst` switches to that branch first.
         case rebase(onto: String, checkoutFirst: String?)
         /// Fast-forwards the local branch to a full ref (`refs/heads/x`, `refs/remotes/origin/x`).
@@ -2798,16 +2834,18 @@ final class RepoSession: Identifiable {
     /// a blame shows, a file of panel 3 shows its blame.
     func selectFile(_ target: FileTarget, returnTool: RepoTool? = nil) {
         // While a blame shows, a file of panel 3 shows its blame instead, at the file's revision. A file blame can't
-        // read (untracked, deleted, an image, a conflict) opens its diff.
+        // read (untracked, deleted, an image, a conflict, a submodule) opens its diff.
         if returnTool == nil, case .blame? = openTool, !target.isConflict, !target.isImage,
-           target.file.kind != .untracked, target.file.kind != .deleted
+           target.file.kind != .untracked, target.file.kind != .deleted, !target.file.isSubmodule
         {
             let blame = RepoTool.blame(path: target.path, rev: Self.blameRev(of: target.source))
             if blame != openTool { selectTool(blame) }
             return
         }
         var returnTool = returnTool
-        if returnTool == nil, case .commit = target.source, case .fileHistory(_, let rev, let follow)? = historyTool {
+        if returnTool == nil, case .commit = target.source, !target.file.isSubmodule,
+           case .fileHistory(_, let rev, let follow)? = historyTool
+        {
             returnTool = .fileHistory(path: target.path, rev: rev, follow: follow)
         }
         if isConflictDirty {
@@ -2885,11 +2923,16 @@ final class RepoSession: Identifiable {
     /// Opens a WIP file by its path (DEBUG `-HistqSelect file:<path>`) as its row in the WIP panel would: an
     /// untracked file as untracked, a file with unstaged changes as its Unstaged row, else as its Staged row.
     func selectWIPFile(_ path: String) {
-        let file: FileChange = switch status.value?.entries.first(where: { $0.path == path }) {
+        let entry = status.value?.entries.first { $0.path == path }
+        let isSubmodule = entry?.isSubmodule ?? false
+        let file: FileChange = switch entry {
         case let entry? where entry.kind == .untracked: FileChange(kind: .untracked, path: path)
         case let entry? where entry.kind == .unmerged: FileChange(kind: .conflicted, path: path)
-        case let entry? where entry.isUnstaged: FileChange(letter: entry.worktree.rawValue, path: path)
-        case let entry?: FileChange(letter: entry.index.rawValue, path: path, originalPath: entry.originalPath)
+        case let entry? where entry.isUnstaged:
+            FileChange(letter: entry.worktree.rawValue, path: path, isSubmodule: isSubmodule)
+        case let entry?:
+            FileChange(letter: entry.index.rawValue, path: path, originalPath: entry.originalPath,
+                       isSubmodule: isSubmodule)
         case nil: FileChange(kind: .modified, path: path)
         }
         selectFile(FileTarget(source: .wip, file: file))
@@ -3281,6 +3324,11 @@ final class RepoSession: Identifiable {
         steps.lap("env")
         let runner = backend.runner
         let file = target.file
+        // A gitlink has no blob to size or diff: its pointer change instead.
+        if file.isSubmodule {
+            let pointers = try await readSubmodulePointers(backend, cwd: cwd, env: env, target: target)
+            return FileDiffDetail(loadID: loadID, content: pointers.isEmpty ? .unchanged : .submodule(pointers))
+        }
         let language = LanguageTable.language(forPath: file.path)
         if !ignoresSizeLimit {
             let size = await largestSize(of: target, runner: runner, cwd: cwd, env: env)
@@ -3340,6 +3388,60 @@ final class RepoSession: Identifiable {
                                       language: language)
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         }
+    }
+
+    /// A submodule row's pointer change, one per side that has one: a commit's or a stash's against its first parent
+    /// (`diff-tree --raw`, as `DiffReader.commit` picks it); a WIP row's unstaged change (the index's gitlink → the
+    /// checkout's HEAD, with its uncommitted files, from `SubmoduleReader.list`) and staged one (HEAD's gitlink → the
+    /// index's, `diff-index --cached --raw`). The commits between are read in the submodule's checkout
+    /// (`SubmoduleReader.change`); none without one. Off the main actor.
+    private nonisolated static func readSubmodulePointers(
+        _ backend: Backend, cwd: URL, env: [String: String], target: FileTarget
+    ) async throws -> [SubmodulePointer] {
+        let path = target.path
+        let runner = backend.runner
+        var sides: [(side: DiffSide, from: String?, to: String?, uncommitted: Int)] = []
+        switch target.source {
+        case .commit(let hash):
+            let output = try await runner.run(
+                ["--literal-pathspecs", "diff-tree", "-r", "-z", "--raw", "--no-abbrev", "--root",
+                 "--diff-merges=first-parent", "--no-commit-id", "--end-of-options", hash, "--", path],
+                cwd: cwd, env: env)
+            if let link = RawDiffRecord.gitlinks(in: output.stdout) { sides.append((.commit, link.from, link.to, 0)) }
+        case .wip:
+            // An unborn HEAD (exit 128) has nothing staged against it to read.
+            async let staged = runner.run(
+                ["--literal-pathspecs", "diff-index", "--cached", "-z", "--raw", "--no-abbrev",
+                 "--ignore-submodules=dirty", "--end-of-options", "HEAD", "--", path],
+                cwd: cwd, env: env, allowedExitCodes: [0, 128])
+            let list = try await SubmoduleReader.list(runner: runner, cwd: cwd, base: backend.base)
+            // Uncommitted files alone are no pointer change (status leaves such a submodule out).
+            if let submodule = list.first(where: { $0.path == path }), case .checkedOut(let head, _) = submodule.state,
+               head != submodule.recordedCommit
+            {
+                sides.append((.unstaged, submodule.recordedCommit, head, submodule.changeCount))
+            }
+            if let link = RawDiffRecord.gitlinks(in: try await staged.stdout) {
+                sides.append((.staged, link.from, link.to, 0))
+            }
+        case .compare:
+            // A compare's file list never marks a submodule.
+            break
+        }
+        let folder = cwd.appending(path: path, directoryHint: .isDirectory)
+        let isCheckedOut = FileManager.default.fileExists(atPath: folder.appending(path: ".git").path)
+        var pointers: [SubmodulePointer] = []
+        for side in sides {
+            var change: SubmoduleChange?
+            if isCheckedOut, let to = side.to, side.from != to {
+                change = try await SubmoduleReader.change(
+                    runner: runner, in: folder, base: backend.base, from: side.from, to: to)
+            }
+            pointers.append(SubmodulePointer(
+                side: side.side, from: side.from, to: side.to, isCheckedOut: isCheckedOut, change: change,
+                uncommitted: side.uncommitted))
+        }
+        return pointers
     }
 
     /// The diff of `file` among those git printed for its paths (a rename's old path is in the pathspec too).
@@ -4525,18 +4627,18 @@ final class RepoSession: Identifiable {
         return header.with(files: files)
     }
 
-    /// The files of commit `hash` against its first parent (`diff-tree --name-status`; a root commit against the empty
-    /// tree, a merge against its first parent, a stash adds its untracked files).
+    /// The files of commit `hash` against its first parent (`diff-tree --raw`, whose modes tell a submodule; a root
+    /// commit against the empty tree, a merge against its first parent, a stash adds its untracked files).
     private nonisolated static func readFileChanges(
         _ backend: Backend, cwd: URL, env: [String: String], hash: String, parents: [String], isStash: Bool
     ) async throws -> [FileChange] {
-        let fileOptions = ["diff-tree", "-r", "-z", "--name-status", "-M", "--no-ext-diff", "--no-textconv",
+        let fileOptions = ["diff-tree", "-r", "-z", "--raw", "-M", "--no-ext-diff", "--no-textconv",
                            "--no-commit-id"]
         let revisions = parents.first.map { ["--end-of-options", $0, hash] } ?? ["--root", "--end-of-options", hash]
-        var files = parseNameStatus(
+        var files = parseRaw(
             try await backend.runner.run(fileOptions + revisions + ["--"], cwd: cwd, env: env).stdout)
         if isStash, parents.count > 2 {
-            let untracked = parseNameStatus(try await backend.runner.run(
+            let untracked = parseRaw(try await backend.runner.run(
                 fileOptions + ["--root", "--end-of-options", parents[2], "--"], cwd: cwd, env: env).stdout)
             let known = Set(files.map(\.path))
             files += untracked.filter { !known.contains($0.path) }.map { FileChange(kind: .untracked, path: $0.path) }
@@ -4595,6 +4697,25 @@ final class RepoSession: Identifiable {
                 files.append(FileChange(letter: letter, path: newPath, originalPath: path))
             } else {
                 files.append(FileChange(letter: letter, path: path))
+            }
+        }
+        return files
+    }
+
+    /// `--raw -z`: `:<old mode> <new mode> <old sha> <new sha> <status>`, then the path; renames and copies give the old
+    /// path, then the new one. A gitlink (mode 160000) on either side is a submodule.
+    private nonisolated static func parseRaw(_ output: Data) -> [FileChange] {
+        var fields = output.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }.makeIterator()
+        var files: [FileChange] = []
+        while let field = fields.next() {
+            guard let record = RawDiffRecord(field), let letter = record.status.first, let path = fields.next()
+            else { break }
+            let isSubmodule = record.isGitlink
+            if letter == "R" || letter == "C" {
+                guard let newPath = fields.next() else { break }
+                files.append(FileChange(letter: letter, path: newPath, originalPath: path, isSubmodule: isSubmodule))
+            } else {
+                files.append(FileChange(letter: letter, path: path, isSubmodule: isSubmodule))
             }
         }
         return files
@@ -4760,9 +4881,21 @@ final class RepoSession: Identifiable {
         case .optimizeRepository: try await ops.optimizeRepository()
         case .ignore(let pattern, let file): try await ops.ignore(pattern: pattern, in: file)
 
-        case .merge(let revision, let checkoutFirst):
-            if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
-            try await ops.merge(revision)
+        case .merge(let revision, let checkoutFirst, let mode):
+            if let checkoutFirst {
+                // Diverged branches are refused before the checkout, so the user stays on their branch. A branch that
+                // already contains `revision` goes on: git's `--ff-only` reports it up to date.
+                let target = "refs/heads/\(checkoutFirst)"
+                if mode == .fastForwardOnly, try await !ops.isAncestor(target, of: revision),
+                   try await !ops.isAncestor(revision, of: target) {
+                    let name = ["refs/heads/", "refs/remotes/"].first { revision.hasPrefix($0) }
+                        .map { String(revision.dropFirst($0.count)) } ?? revision
+                    throw GitError.nonFastForward(exit: 1, stderrTail: "\(checkoutFirst) has commits that \(name) "
+                        + "does not have, so it cannot be fast-forwarded to \(name).")
+                }
+                try await ops.checkout(branch: checkoutFirst)
+            }
+            try await ops.merge(revision, mode: mode)
         case .rebase(let upstream, let checkoutFirst):
             if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
             try await ops.rebase(onto: upstream)
@@ -4827,6 +4960,8 @@ final class RepoSession: Identifiable {
             let wasInProgress = repoState?.isOperationInProgress == true
             // What a push, pull or fetch changed is read from the refs before it and after it.
             let refsBefore = refs.value
+            // The commits HEAD records for the submodules, when this write may move them (`autoUpdateSubmodules`).
+            let submodulesBefore = movesSubmodules(write) ? await recordedSubmodules() : nil
             do {
                 let outcome = try await perform(write)
                 if case .removeWorktree(let path, _) = write { worktreeRemoved(path) }
@@ -4856,6 +4991,12 @@ final class RepoSession: Identifiable {
                     postToast(.success(title, detail: OperationToast.outcome(of: write, before: refsBefore,
                                                                              after: refs.value)))
                 }
+                // Only after a write that went through: not stopped, no conflicts, no operation in progress.
+                if let submodulesBefore, outcome == .done, !stopped, repoState?.isOperationInProgress != true,
+                   status.value?.conflicted.isEmpty ?? true
+                {
+                    autoUpdateSubmodules(submodulesBefore.backend, before: submodulesBefore.recorded)
+                }
             } catch GitError.autostashKept(let hash) {
                 // A warning, not a failure, and before any cancellation check: the changes may be only in that stash.
                 postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))
@@ -4873,6 +5014,105 @@ final class RepoSession: Identifiable {
             }
             running.removeAll { $0.id == operation.id }
         }
+    }
+
+    /// The writes after which the submodules may have to follow the commits this repository records: those that move
+    /// HEAD or the working tree to other commits (a fast-forward of the current branch only).
+    private func movesSubmodules(_ write: Write) -> Bool {
+        switch write {
+        case .checkoutBranch, .checkoutTracking, .checkoutCommit, .checkoutPullRequest, .pull, .merge, .rebase,
+             .cherryPick, .revert, .interactiveRebase, .continueOperation, .skipOperation, .undo, .redo:
+            true
+        case .fastForward(let branch, _): branch == currentBranch
+        case .reset(_, let mode): mode == .hard
+        default: false
+        }
+    }
+
+    /// The commits HEAD records for the submodules, read off the main actor, with the backend that read them. Nil when
+    /// Update submodules automatically is off, without `.gitmodules`, or when the read failed: no update then.
+    private func recordedSubmodules() async -> (backend: Backend, recorded: [String: String])? {
+        guard Preferences.defaults.bool(forKey: PrefKey.autoUpdateSubmodules.rawValue),
+              let backend = try? await backend(),
+              FileManager.default.fileExists(atPath: backend.directories.worktree.appending(path: ".gitmodules").path),
+              let recorded = try? await Self.readRecordedSubmodules(backend)
+        else { return nil }
+        return (backend, recorded)
+    }
+
+    @concurrent
+    private nonisolated static func readRecordedSubmodules(_ backend: Backend) async throws -> [String: String] {
+        try await SubmoduleReader.recorded(
+            runner: backend.runner, cwd: backend.directories.worktree, base: backend.base, revision: "HEAD")
+    }
+
+    /// After a write that moved this repository's pointers: the clean submodules still on the commit recorded `before`
+    /// move to the one recorded now (`GitOperations.autoUpdateSubmodules`), as an operation of its own. Its toasts name
+    /// the submodules updated, those left alone and why, and those that failed; never a failure of the write. Then the
+    /// status, the refs and the submodules are read again.
+    private func autoUpdateSubmodules(_ backend: Backend, before: [String: String]) {
+        guard FileManager.default.fileExists(atPath: backend.directories.worktree.appending(path: ".gitmodules").path)
+        else { return }
+        nextOperationID &+= 1
+        let operation = RunningOperation(id: nextOperationID, title: "Updating submodules", key: nil)
+        running.append(operation)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { running.removeAll { $0.id == operation.id } }
+            let profile = await writeProfile()
+            guard let result = try? await Self.autoUpdateSubmodules(backend, profile: profile, before: before) else {
+                return
+            }
+            let updated = result.updated.count
+            if updated > 0 {
+                postToast(.success("Updated \(updated) submodule\(updated == 1 ? "" : "s")",
+                                   detail: Self.listed(result.updated, separator: ", ")))
+            }
+            if !result.skipped.isEmpty {
+                let count = result.skipped.count
+                postToast(.warning("\(count) submodule\(count == 1 ? "" : "s") not updated",
+                                   detail: Self.listed(result.skipped.map(Self.skipReason), separator: "\n")))
+            }
+            if !result.failed.isEmpty {
+                let lines = result.failed.map { failure in
+                    let message = failure.message.split(separator: "\n").first.map(String.init) ?? "git failed."
+                    return failure.path.isEmpty
+                        ? "The repository's submodule list could not be read: \(message)"
+                        : "\(failure.path): \(message)"
+                }
+                postToast(.warning("Updating submodules failed", detail: Self.listed(lines, separator: "\n")))
+            }
+            if updated > 0 || !result.failed.isEmpty { await refreshAfterWrite() }
+        }
+    }
+
+    /// Throws only `CancellationError`.
+    @concurrent
+    private nonisolated static func autoUpdateSubmodules(
+        _ backend: Backend, profile: Profile?, before: [String: String]
+    ) async throws -> SubmoduleAutoUpdate {
+        // It may fetch a recorded commit a submodule lacks: the profile's token, as `.updateSubmodules` gets it.
+        let ops = GitOperations(
+            runner: backend.runner, cwd: backend.directories.worktree, profile: profile,
+            base: await GitToolchain.writeBase(), token: await GitHubTokens.token(for: profile))
+        return try await ops.autoUpdateSubmodules(before: before, base: backend.base)
+    }
+
+    /// "vendor/moved has new commits".
+    private nonisolated static func skipReason(_ skipped: SubmoduleAutoUpdate.Skipped) -> String {
+        switch skipped.reason {
+        case .moved: "\(skipped.path) has new commits"
+        case .onBranch(let branch): "\(skipped.path) is on branch \(branch), use Update"
+        case .dirty: "\(skipped.path) has uncommitted changes"
+        case .updateMode(let mode): "\(skipped.path) uses update mode \(mode)"
+        case .notRecordedBefore: "\(skipped.path) is new"
+        }
+    }
+
+    /// The first six, then "and N more".
+    private nonisolated static func listed(_ items: [String], separator: String) -> String {
+        let shown = items.prefix(6).joined(separator: separator)
+        return items.count > 6 ? "\(shown)\(separator)and \(items.count - 6) more" : shown
     }
 
     /// A pull request's Resolve with AI / Resolve manually (its merge box): fetches every remote without pruning (only
@@ -4947,7 +5187,7 @@ final class RepoSession: Identifiable {
                     refuse(refusal)
                     return
                 }
-                write = .merge("\(remote)/\(base)", checkoutFirst: nil)
+                write = .merge("\(remote)/\(base)", checkoutFirst: nil, mode: nil)
                 try await perform(write)
                 UITiming.content("\(timing) clean")
                 postToast(.success(title, detail: "Merged \(base) into \(head) with no conflicts. "

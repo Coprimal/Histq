@@ -118,6 +118,9 @@ enum PrefKey: String, CaseIterable {
     case autoFetchMinutes
     /// `fetch --prune` on every fetch.
     case pruneOnFetch
+    /// After a checkout, pull, merge, rebase, reset, cherry-pick, revert, undo or redo, the clean submodules move to the
+    /// commits this repository records (`RepoSession.autoUpdateSubmodules`).
+    case autoUpdateSubmodules
     /// `git mergetool --tool=<value>`; empty = git's configured tool.
     case mergeTool
     /// Custom git executable path; empty = auto-detect.
@@ -247,6 +250,7 @@ enum PrefKey: String, CaseIterable {
         case .autoStash: "ask"
         case .autoFetchMinutes: 3
         case .pruneOnFetch: false
+        case .autoUpdateSubmodules: true
         case .mergeTool: ""
         case .gitPath: ""
         case .defaultProfileID: ""

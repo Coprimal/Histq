@@ -479,14 +479,18 @@ enum RepoMenus {
         return entries
     }
 
-    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current`, rebase `current` onto it (plain or
-    /// interactive), compare with it.
+    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current` (each merge mode), fast-forward
+    /// `current` to it (git refuses when they diverged), rebase `current` onto it (plain or interactive), compare with it.
     private static func integrate(_ name: String, ref: String, commit: String?, into current: String,
                                   _ session: RepoSession) -> [MenuEntry] {
         let rebaseReason = commit == nil ? "\(name) has no commit." : session.rebaseOntoUnavailableReason()
         return [
-            .action("Merge \(name) into \(current)") {
-                session.run(.merge(ref, checkoutFirst: nil), title: "Merge \(name) into \(current)")
+            mergeSubmenu("Merge \(name) into \(current)") { mode in
+                session.run(.merge(ref, checkoutFirst: nil, mode: mode), title: "Merge \(name) into \(current)")
+            },
+            .action("Fast-forward \(current) to \(name)") {
+                session.run(.merge(ref, checkoutFirst: nil, mode: .fastForwardOnly),
+                            title: "Fast-forward \(current) to \(name)")
             },
             .action("Rebase \(current) onto \(name)") {
                 session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
@@ -498,6 +502,23 @@ enum RepoMenus {
                 session.selectCompare(base: "refs/heads/\(current)", head: ref)
             },
         ]
+    }
+
+    /// A "Merge X into Y" submenu's choices: the item's title, the palette row's suffix, the mode.
+    nonisolated static let mergeChoices: [(title: String, palette: String, mode: GitOperations.MergeMode)] = [
+        ("Fast-forward if possible", "fast-forward if possible", .fastForward),
+        ("Fast-forward only", "fast-forward only", .fastForwardOnly),
+        ("Always create a merge commit (no fast-forward)", "always create a merge commit", .noFastForward),
+    ]
+
+    /// Whether a menu title is a "Merge X into Y" submenu's.
+    nonisolated static func isMergeSubmenu(_ title: String) -> Bool {
+        title.hasPrefix("Merge ") && title.contains(" into ")
+    }
+
+    private static func mergeSubmenu(_ title: String,
+                                     merge: @escaping @MainActor (GitOperations.MergeMode) -> Void) -> MenuEntry {
+        .submenu(title, mergeChoices.map { choice in .action(choice.title) { merge(choice.mode) } })
     }
 
     /// The web page at `path` (`tree/<branch>`, `commit/<sha>`) of the repository `remote`'s URL names, in GitHub's
@@ -839,8 +860,8 @@ enum RepoMenus {
         let current = session.currentBranch
         var entries: [MenuEntry] = []
         if case .local = target {
-            entries.append(.action("Merge \(sourceName) into \(targetName)") {
-                session.run(.merge(sourceRef, checkoutFirst: targetName == current ? nil : targetName),
+            entries.append(mergeSubmenu("Merge \(sourceName) into \(targetName)") { mode in
+                session.run(.merge(sourceRef, checkoutFirst: targetName == current ? nil : targetName, mode: mode),
                             title: "Merge \(sourceName) into \(targetName)")
             })
         }
@@ -851,8 +872,11 @@ enum RepoMenus {
             })
         }
         if case .local = target {
+            // The checked-out branch moves with a journaled fast-forward-only merge, so it can be undone.
             entries.append(.action("Fast-forward \(targetName) to \(sourceName)") {
-                session.run(.fastForward(targetName, to: sourceRef), title: "Fast-forward \(targetName) to \(sourceName)")
+                let write: RepoSession.Write = targetName == current
+                    ? .merge(sourceRef, checkoutFirst: nil, mode: .fastForwardOnly) : .fastForward(targetName, to: sourceRef)
+                session.run(write, title: "Fast-forward \(targetName) to \(sourceName)")
             })
         }
         let pullReason = createPullRequestUnavailableReason(head: source, base: target, session)
@@ -966,7 +990,8 @@ enum RepoMenus {
     ) {
         let title = "Checkout \(name)"
         let preference = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue)
-        guard session.status.value?.entries.isEmpty == false, preference != "never" else {
+        // A moved or edited submodule is not a change the checkout carries: the submodule update deals with it.
+        guard session.status.value?.entries.contains(where: { !$0.isSubmodule }) == true, preference != "never" else {
             session.run(write(false), title: title, key: .checkout)
             return
         }
@@ -1026,9 +1051,10 @@ enum RepoMenus {
     }
 
     /// "Checkout File from This Commit" in a commit's file list (confirmed when the file has local changes), then its
-    /// File History and Blame at the commit. A deleted file has only its history.
+    /// File History and Blame at the commit. A deleted file has only its history, a submodule neither.
     static func checkoutFile(_ file: FileChange, commit: String, session: RepoSession) -> [MenuEntry] {
-        let tools = fileTools(path: file.path, rev: commit, blame: file.kind != .deleted, session: session)
+        let tools = file.isSubmodule ? []
+            : fileTools(path: file.path, rev: commit, blame: file.kind != .deleted, session: session)
         guard file.kind != .deleted else { return tools }
         let short = String(commit.prefix(7))
         let write = RepoSession.Write.checkoutFiles([file.path], from: commit)
@@ -1048,7 +1074,8 @@ enum RepoMenus {
     }
 
     /// A stash's file: "Apply This File" (confirmed when the file has local changes), then its File History and Blame
-    /// at the stash. Its untracked files come from the stash's untracked-files commit and have no history or blame.
+    /// at the stash. Its untracked files come from the stash's untracked-files commit and have no history or blame;
+    /// nor does a submodule.
     static func stashFile(_ file: FileChange, stash hash: String, session: RepoSession) -> [MenuEntry] {
         // "View all files" lists the files the stash did not change: nothing of the stash to apply.
         guard file.kind != .unchanged else {
@@ -1067,7 +1094,7 @@ enum RepoMenus {
                 session.run(write, title: operation)
             }
         }
-        guard !untracked else { return [apply] }
+        guard !untracked, !file.isSubmodule else { return [apply] }
         return [apply, .separator]
             + fileTools(path: file.path, rev: hash, blame: file.kind != .deleted, session: session)
     }

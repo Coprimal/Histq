@@ -253,6 +253,7 @@ final class WindowModel {
     func welcome(for id: Tab.ID) -> WelcomeModel {
         if let welcome = welcomes[id] { return welcome }
         let welcome = WelcomeModel { [weak self] url in self?.open(url, fromWelcome: id) }
+        welcome.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         welcomes[id] = welcome
         return welcome
     }

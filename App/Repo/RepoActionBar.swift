@@ -280,7 +280,7 @@ enum FailureHints {
 
     private static let authText = "Git could not sign in to the remote. Check that your SSH key is loaded (ssh-add) or "
         + "that a credential helper knows this host."
-    private static let submoduleAuthText =
+    static let submoduleAuthText =
         "Submodule fetches use your SSH key, or the GitHub account token for https URLs on its host."
 
     private static func isSubmoduleWrite(_ write: RepoSession.Write) -> Bool {
@@ -293,7 +293,7 @@ enum FailureHints {
     }
 
     /// git's sign-in refusals, as `GitError` classifies them (its classifier is internal to the core).
-    private static func isAuthMessage(_ message: String) -> Bool {
+    static func isAuthMessage(_ message: String) -> Bool {
         let text = message.lowercased()
         return ["permission denied (publickey", "authentication failed", "could not read username",
                 "could not read password", "terminal prompts disabled", "invalid username or password"]

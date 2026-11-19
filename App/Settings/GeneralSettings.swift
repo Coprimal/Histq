@@ -9,6 +9,8 @@ struct GeneralSettings: View {
     @AppStorage(PrefKey.autoStash.rawValue, store: Preferences.defaults) private var autoStash = "ask"
     @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 3
     @AppStorage(PrefKey.pruneOnFetch.rawValue, store: Preferences.defaults) private var pruneOnFetch = false
+    @AppStorage(PrefKey.autoUpdateSubmodules.rawValue, store: Preferences.defaults) private var autoUpdateSubmodules =
+        true
     @AppStorage(PrefKey.mergeTool.rawValue, store: Preferences.defaults) private var mergeTool = ""
     @AppStorage(PrefKey.gitPath.rawValue, store: Preferences.defaults) private var gitPath = ""
     @AppStorage(PrefKey.toastLevel.rawValue, store: Preferences.defaults) private var toastLevel = ToastLevel.all
@@ -64,6 +66,12 @@ struct GeneralSettings: View {
                 SettingsSwitchRow(title: "Prune on fetch",
                                   hint: "Removes remote branches that no longer exist on their remote.",
                                   isOn: $pruneOnFetch)
+                SettingsDivider()
+                SettingsSwitchRow(title: "Update submodules automatically",
+                                  hint: "Moves clean submodules to the commit this repository records after checkout, "
+                                      + "pull, merge, rebase, reset, cherry-pick, revert and undo. Submodules with new "
+                                      + "commits, changes or a checked-out branch are left alone.",
+                                  isOn: $autoUpdateSubmodules)
             }
             SettingsGroup("Notifications") {
                 LabeledContent {

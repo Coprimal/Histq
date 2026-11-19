@@ -305,9 +305,9 @@ struct WIPPanel: View {
     }
 
     /// File History (to HEAD) and Blame (of the working tree) after a separator; none for an untracked file (no
-    /// history, nothing to blame), no Blame for a deleted one.
+    /// history, nothing to blame), no Blame for a deleted one; none for a submodule (no lines).
     private func fileTools(_ file: FileChange) -> [MenuEntry] {
-        guard file.kind != .untracked else { return [] }
+        guard file.kind != .untracked, !file.isSubmodule else { return [] }
         return [.separator]
             + RepoMenus.fileTools(path: file.path, rev: nil, blame: file.kind != .deleted, session: session)
     }
@@ -411,7 +411,7 @@ struct WIPPanel: View {
                 case .conflicted: .modified
                 default: file.kind
                 }
-                toStaged.append(FileChange(kind: kind, path: file.path))
+                toStaged.append(FileChange(kind: kind, path: file.path, isSubmodule: file.isSubmodule))
             } else {
                 switch file.kind {
                 case .added, .copied:
@@ -420,7 +420,7 @@ struct WIPPanel: View {
                     toUnstaged.append(FileChange(kind: .untracked, path: file.path))
                     if let original = file.originalPath { toUnstaged.append(FileChange(kind: .deleted, path: original)) }
                 default:
-                    toUnstaged.append(FileChange(kind: file.kind, path: file.path))
+                    toUnstaged.append(FileChange(kind: file.kind, path: file.path, isSubmodule: file.isSubmodule))
                 }
             }
         }
@@ -451,7 +451,7 @@ struct WIPPanel: View {
 
     /// Paths with unmerged index entries, in status order.
     fileprivate static func conflicted(_ status: WorkingStatus) -> [FileChange] {
-        status.conflicted.map { FileChange(kind: .conflicted, path: $0.path) }
+        status.conflicted.map { FileChange(kind: .conflicted, path: $0.path, isSubmodule: $0.isSubmodule) }
     }
 
     /// Changes in the working tree and untracked files (conflicts have their own card).
@@ -460,7 +460,8 @@ struct WIPPanel: View {
             switch entry.kind {
             case .untracked: FileChange(kind: .untracked, path: entry.path)
             case .unmerged, .ignored: nil
-            default: entry.isUnstaged ? FileChange(letter: entry.worktree.rawValue, path: entry.path) : nil
+            default: entry.isUnstaged
+                ? FileChange(letter: entry.worktree.rawValue, path: entry.path, isSubmodule: entry.isSubmodule) : nil
             }
         }
     }
@@ -468,7 +469,8 @@ struct WIPPanel: View {
     fileprivate static func staged(_ status: WorkingStatus) -> [FileChange] {
         status.entries.compactMap { entry in
             entry.isStaged
-                ? FileChange(letter: entry.index.rawValue, path: entry.path, originalPath: entry.originalPath) : nil
+                ? FileChange(letter: entry.index.rawValue, path: entry.path, originalPath: entry.originalPath,
+                             isSubmodule: entry.isSubmodule) : nil
         }
     }
 }

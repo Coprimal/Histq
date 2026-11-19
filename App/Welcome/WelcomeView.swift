@@ -70,6 +70,8 @@ final class WelcomeModel {
     /// The folder the clone goes into, as `<cloneParent>/<repoName>`.
     private(set) var cloneParent: URL
     private(set) var clone = CloneState.idle
+    /// The clone form's "Clone submodules": after the clone, its submodules (every level) are cloned too.
+    var cloneSubmodules = true
     private(set) var initError: String?
     var option = Option.clone
     /// Switching to a GitHub source loads its repositories in the background (never blocks the switch).
@@ -86,10 +88,14 @@ final class WelcomeModel {
     private(set) var selectedRepoID: Int?
 
     @ObservationIgnored private let open: (URL) -> Void
+    /// Shows a toast in the window, from this tab: why a clone's submodules were not all cloned.
+    @ObservationIgnored var postToast: (OperationToast) -> Void = { _ in }
     @ObservationIgnored private var checkTask: Task<Void, Never>?
     @ObservationIgnored private var cloneTask: Task<Void, Never>?
     /// Changes with every clone start or cancel, so a stale clone's progress or end is dropped.
     @ObservationIgnored private var cloneToken = 0
+    /// The clone itself is done and its submodules are being cloned: Cancel stops them and the clone still opens.
+    @ObservationIgnored private var isCloningSubmodules = false
     /// The source was set (by the user, or once to GitHub for a connected account): the default no longer applies.
     @ObservationIgnored private var sourceChosen = false
     @ObservationIgnored private var reposTask: Task<Void, Never>?
@@ -298,12 +304,14 @@ final class WelcomeModel {
         }
     }
 
-    /// Clones `cloneURL` into `cloneDestination`, streaming git's progress; opens the clone in this tab when done.
+    /// Clones `cloneURL` into `cloneDestination`, streaming git's progress, then its submodules when "Clone submodules"
+    /// is on; opens the clone in this tab when done. A failed submodule step still opens it, with a warning toast.
     func startClone() {
         guard !isCloning, canClone, let destination = cloneDestination else { return }
         let url = cloneURL.trimmingCharacters(in: .whitespacesAndNewlines)
         // A repository from a profile's GitHub list clones as that profile; a typed URL as the default profile.
         let profileID = cloneSource == .url ? nil : repoProfileID
+        let withSubmodules = cloneSubmodules
         cloneToken &+= 1
         let token = cloneToken
         clone = .running(line: "Starting…", fraction: nil)
@@ -312,24 +320,56 @@ final class WelcomeModel {
             Task { @MainActor in self?.progress(line, token: token) }
         }
         cloneTask = Task { [weak self] in
+            let context: CloneContext
             do {
-                try await Self.clone(url, into: destination, profileID: profileID, progress: report)
-                guard let self, token == cloneToken else { return }
-                clone = .idle
-                cloneURL = ""
-                // Before the tab opens, so its session resolves the repo to the profile it was cloned as.
-                if let profileID { ProfileLibrary.shared.update { $0.remember(profileID, forRepo: destination) } }
-                open(destination)
+                context = try await Self.clone(url, into: destination, profileID: profileID, progress: report)
             } catch {
                 guard let self, token == cloneToken else { return }
                 clone = error is CancellationError || Task.isCancelled ? .idle : .failed(Self.message(for: error))
+                return
+            }
+            // `self` is not held while the submodules clone: a closed window still stops them (`deinit`).
+            var submoduleError: Error?
+            if withSubmodules {
+                guard self?.startSubmoduleStep(token) == true else { return }
+                submoduleError = await Self.cloneSubmodules(in: destination, context: context, progress: report)
+            }
+            guard let self, token == cloneToken else { return }
+            isCloningSubmodules = false
+            clone = .idle
+            cloneURL = ""
+            // Before the tab opens, so its session resolves the repo to the profile it was cloned as.
+            if let profileID { ProfileLibrary.shared.update { $0.remember(profileID, forRepo: destination) } }
+            open(destination)
+            if let submoduleError {
+                postToast(.warning("Cloning submodules failed", detail: Self.submoduleMessage(for: submoduleError)))
             }
         }
     }
 
-    /// Stops the clone in flight (git removes its unfinished folder): the Cancel button.
+    /// The clone is still current: its submodule step starts (Cancel now stops only that step).
+    private func startSubmoduleStep(_ token: Int) -> Bool {
+        guard token == cloneToken else { return false }
+        isCloningSubmodules = true
+        return true
+    }
+
+    /// The failed submodules with git's words, and the sign-in hint when git refused a sign-in.
+    private static func submoduleMessage(for error: Error) -> String {
+        let message = RepoSession.message(for: error)
+        let messages = (error as? SubmoduleUpdateFailure)?.failures.map(\.message) ?? [message]
+        guard messages.contains(where: FailureHints.isAuthMessage) else { return message }
+        return message + "\n" + FailureHints.submoduleAuthText
+    }
+
+    /// Stops the clone in flight (git removes its unfinished folder): the Cancel button. During the submodule step the
+    /// clone itself is done, so only that step stops and the clone still opens, without the submodules not cloned yet.
     func cancelClone() {
         cloneTask?.cancel()
+        if isCloningSubmodules {
+            clone = .running(line: "Stopping…", fraction: nil)
+            return
+        }
         cloneTask = nil
         cloneToken &+= 1
         if isCloning { clone = .idle }
@@ -337,6 +377,8 @@ final class WelcomeModel {
 
     /// Stops everything in flight: the tab closed.
     func cancel() {
+        // The tab closed: nothing opens, not even a clone in its submodule step.
+        isCloningSubmodules = false
         cancelClone()
         checkTask?.cancel()
         reposTask?.cancel()
@@ -353,11 +395,19 @@ final class WelcomeModel {
         clone = .running(line: text, fraction: percent.map { min($0, 100) / 100 })
     }
 
+    /// What a clone ran as, for its submodule step: the same git, profile, environment base and token.
+    private struct CloneContext: Sendable {
+        let runner: GitRunner
+        let profile: Profile?
+        let base: [String: String]
+        let token: String?
+    }
+
     @concurrent
     private nonisolated static func clone(
         _ url: String, into destination: URL, profileID: UUID?,
         progress: @escaping @Sendable (String) -> Void
-    ) async throws {
+    ) async throws -> CloneContext {
         let toolchain = try await GitToolchain.resolve()
         let runner = GitRunner(executable: toolchain.executable.url)
         // The clone opens with `profileID`'s profile (the default one when nil or deleted), so it clones as that
@@ -366,9 +416,27 @@ final class WelcomeModel {
         let store = await ProfileLibrary.shared.loaded()
         let profile = profileID.flatMap { store?.profile(id: $0) } ?? store?.defaultProfile
         let token = await GitHubTokens.token(for: profile)
+        let base = await GitToolchain.writeBase()
         let cloneEnv = await GitInvocation.cloneEnvironment(
-            url: url, profile: profile, base: await GitToolchain.writeBase(), token: token, runner: runner)
+            url: url, profile: profile, base: base, token: token, runner: runner)
         try await GitOperations.clone(url: url, into: destination, runner: runner, env: cloneEnv, progress: progress)
+        return CloneContext(runner: runner, profile: profile, base: base, token: token)
+    }
+
+    /// Clones the submodules of the clone at `folder` (no git without `.gitmodules`) as the clone ran: the token only
+    /// where the gate lets each submodule have it. Nil when it went through or was stopped (Cancel), else its error.
+    @concurrent
+    private nonisolated static func cloneSubmodules(
+        in folder: URL, context: CloneContext, progress: @escaping @Sendable (String) -> Void
+    ) async -> Error? {
+        do {
+            try await GitOperations.cloneSubmodules(
+                in: folder, runner: context.runner, profile: context.profile, base: context.base,
+                token: context.token, progress: progress)
+            return nil
+        } catch {
+            return error is CancellationError || Task.isCancelled ? nil : error
+        }
     }
 
     // MARK: GitHub repositories
@@ -777,6 +845,10 @@ private struct CloneCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            SettingsDivider()
+            SettingsSwitchRow(title: "Clone submodules", hint: "Also clones the submodules it has, at every level.",
+                              isOn: $model.cloneSubmodules)
+                .disabled(model.isCloning)
             SettingsDivider()
             status
         }

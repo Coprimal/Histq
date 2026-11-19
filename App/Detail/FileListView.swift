@@ -18,17 +18,20 @@ struct FileChange: Hashable, Sendable, Identifiable {
     let path: String
     /// The path before a rename or copy.
     var originalPath: String?
+    /// A submodule's pointer (a gitlink): its row shows the submodule icon and its diff the pointer change.
+    var isSubmodule = false
 
     var id: String { path }
 
-    init(kind: Kind, path: String, originalPath: String? = nil) {
+    init(kind: Kind, path: String, originalPath: String? = nil, isSubmodule: Bool = false) {
         self.kind = kind
         self.path = path
         self.originalPath = originalPath
+        self.isSubmodule = isSubmodule
     }
 
     /// From git's one-letter status (`M`, `A`, `D`, `R`, `C`, `T`, `U`; anything else reads as modified).
-    init(letter: Character, path: String, originalPath: String? = nil) {
+    init(letter: Character, path: String, originalPath: String? = nil, isSubmodule: Bool = false) {
         let kind: Kind = switch letter {
         case "A": .added
         case "D": .deleted
@@ -38,12 +41,13 @@ struct FileChange: Hashable, Sendable, Identifiable {
         case "U": .conflicted
         default: .modified
         }
-        self.init(kind: kind, path: path, originalPath: originalPath)
+        self.init(kind: kind, path: path, originalPath: originalPath, isSubmodule: isSubmodule)
     }
 
-    /// The bare glyph, no circle or square behind it, drawn in `tint`.
+    /// The bare glyph, no circle or square behind it, drawn in `tint`; a submodule's is the sidebar's.
     var systemImage: String {
-        switch kind {
+        if isSubmodule { return SidebarMetrics.submoduleImage }
+        return switch kind {
         case .added: "plus"
         case .modified, .typeChanged: "pencil"
         case .deleted: "minus"
@@ -67,6 +71,10 @@ struct FileChange: Hashable, Sendable, Identifiable {
     }
 
     var kindName: String {
+        isSubmodule ? "Submodule \(kindTitle.lowercased())" : kindTitle
+    }
+
+    private var kindTitle: String {
         switch kind {
         case .added: "Added"
         case .modified: "Modified"

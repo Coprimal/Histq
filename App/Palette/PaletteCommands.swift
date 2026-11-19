@@ -49,9 +49,10 @@ struct PaletteSnapshot {
     }
 
     /// A menu's actions as rows: separators dropped, a submenu's items titled "Submenu › Item" (or left out when
-    /// `submenus` is false), entries whose title `skip` accepts left out (with their submenus).
+    /// `submenus` rejects its title), a "Merge X into Y" submenu's as "Merge X into Y (fast-forward only)", entries whose
+    /// title `skip` accepts left out (with their submenus).
     mutating func add(_ entries: [MenuEntry], detail: String, section: PaletteSection = .operations,
-                      systemImage: String, submenus: Bool = true, prefix: String = "",
+                      systemImage: String, submenus: (String) -> Bool = { _ in true }, prefix: String = "",
                       skip: (String) -> Bool = { _ in false })
     {
         for entry in entries where !skip(entry.title) {
@@ -62,9 +63,18 @@ struct PaletteSnapshot {
                 add(prefix + entry.title, detail: detail, section: section, systemImage: systemImage,
                     enabled: entry.isEnabled, perform: perform)
             case .submenu(let children):
-                guard submenus else { continue }
-                add(children, detail: detail, section: section, systemImage: systemImage, submenus: true,
-                    prefix: prefix + entry.title + " › ", skip: skip)
+                guard submenus(entry.title) else { continue }
+                guard RepoMenus.isMergeSubmenu(entry.title) else {
+                    add(children, detail: detail, section: section, systemImage: systemImage,
+                        prefix: prefix + entry.title + " › ", skip: skip)
+                    continue
+                }
+                for child in children {
+                    guard case .action(let perform) = child.kind else { continue }
+                    let choice = RepoMenus.mergeChoices.first { $0.title == child.title }?.palette ?? child.title
+                    add(prefix + entry.title + " (\(choice))", detail: detail, section: section,
+                        systemImage: systemImage, enabled: child.isEnabled, perform: perform)
+                }
             }
         }
     }
@@ -206,8 +216,8 @@ enum PaletteCommands {
     /// The repo's context menus: the working tree's (when it has changes), the selected commit's or stash's, each
     /// stash's, the current branch's, every other branch's, each remote branch's and tag's, then the Remote card's.
     /// Their "Checkout …" items are left out (the Checkout rows run the same `RepoMenus.checkout`), and so are the
-    /// commit menu's ref submenus (each ref has its own rows). Only the current branch's submenus are listed (Set
-    /// Upstream): another branch's would add one row per remote branch for each local branch.
+    /// commit menu's ref submenus (each ref has its own rows). Of another branch's submenus only its Merge choices are
+    /// listed: its Set Upstream would add one row per remote branch for each local branch.
     private static func operations(_ session: RepoSession, into snapshot: inout PaletteSnapshot) {
         let refs = session.refs.value
         let current = session.currentBranch
@@ -230,7 +240,7 @@ enum PaletteCommands {
             break
         }
         // The open diff's file: the header's File History and Blame (`DiffHeaderCard`).
-        if let target = session.openFile, !target.isConflict, target.file.kind != .untracked {
+        if let target = session.openFile, !target.isConflict, target.file.kind != .untracked, !target.file.isSubmodule {
             let rev: String? = switch target.source {
             case .wip: nil
             case .commit(let hash): hash
@@ -251,7 +261,7 @@ enum PaletteCommands {
         }
         for branch in refs.localBranches where branch.name != current {
             snapshot.add(RepoMenus.ref(.local(branch.name), session), detail: "Branch \(branch.name)",
-                         systemImage: "lucide-git-branch", submenus: false, skip: isCheckout)
+                         systemImage: "lucide-git-branch", submenus: RepoMenus.isMergeSubmenu, skip: isCheckout)
         }
         for branch in refs.remoteBranches {
             snapshot.add(RepoMenus.ref(.remote(branch.name), session), detail: "Remote branch \(branch.name)",
