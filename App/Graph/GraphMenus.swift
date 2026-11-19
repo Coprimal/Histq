@@ -396,9 +396,6 @@ enum RepoMenus {
         entries += pull(name, isCurrent: isCurrent, upstream: upstream, session)
         entries += [
             .action("Push \(name)", enabled: session.pushTarget(of: name) != nil) { session.push(branch: name) },
-            .action("Create Pull Request…", enabled: pullReason == nil, toolTip: pullReason) {
-                openCreatePullRequest(head: .local(name), base: nil, session)
-            },
             .submenu("Set Upstream", (refs?.remoteBranches ?? []).map { remote in
                 .action(remote.name, checked: branch?.upstream == remote.name) {
                     session.run(.setUpstream(branch: name, upstream: remote.name),
@@ -407,6 +404,11 @@ enum RepoMenus {
             }),
             .action("Add Worktree for \(name)…") {
                 session.worktreeForm = WorktreeForm(source: .branch(name), label: name)
+            },
+            // In its own group, so it is not lost among Pull / Push.
+            .separator,
+            .action("Create Pull Request…", enabled: pullReason == nil, toolTip: pullReason) {
+                openCreatePullRequest(head: .local(name), base: nil, session)
             },
         ]
         if let current, !isCurrent {
