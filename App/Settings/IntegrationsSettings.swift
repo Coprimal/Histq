@@ -124,6 +124,12 @@ struct IntegrationsSettings: View {
                     ForEach(store.profiles) { profile in
                         Text(profile.name.isEmpty ? "Unnamed" : profile.name).tag(profile.id)
                     }
+                } footer: {
+                    // Adds a profile and opens it on the Profiles page to fill in.
+                    Button("Add New Profile") {
+                        if let id = library.addProfile() { profileID = id }
+                        onShowProfiles()
+                    }
                 }
             } label: {
                 HStack(spacing: 8) {

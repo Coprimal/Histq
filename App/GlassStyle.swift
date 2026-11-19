@@ -620,18 +620,23 @@ struct MenuChevron: View {
 /// `RowTextButtonStyle(formRow:)` showing `title` (the current choice) and a `MenuChevron`, opening a menu of `content`
 /// with a check on the selected entry. Replaces `Picker(.menu)`, whose AppKit pop-up button is a rounded rectangle on
 /// every macOS, so every button of the app is a capsule (user, 2026-11-13). `content` is the picker's entries, each
-/// `.tag`ged with its value as in a `Picker`.
-struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
+/// `.tag`ged with its value as in a `Picker`; `footer` (actions, not choices) goes below them after a divider.
+struct CapsuleMenuPicker<Value: Hashable, Content: View, Footer: View>: View {
     let label: String
     @Binding var selection: Value
     let title: Text
     @ViewBuilder let content: () -> Content
+    @ViewBuilder var footer: () -> Footer
 
     var body: some View {
         Menu {
             Picker(label, selection: $selection, content: content)
                 .pickerStyle(.inline)
                 .labelsHidden()
+            if Footer.self != EmptyView.self {
+                Divider()
+                footer()
+            }
         } label: {
             HStack(spacing: MenuChevron.gap) {
                 title.lineLimit(1)
@@ -644,6 +649,12 @@ struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
         .fixedSize()
         .accessibilityLabel(Text(label))
         .accessibilityValue(title)
+    }
+}
+
+extension CapsuleMenuPicker where Footer == EmptyView {
+    init(label: String, selection: Binding<Value>, title: Text, @ViewBuilder content: @escaping () -> Content) {
+        self.init(label: label, selection: selection, title: title, content: content, footer: { EmptyView() })
     }
 }
 
