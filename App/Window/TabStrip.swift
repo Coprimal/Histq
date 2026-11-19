@@ -846,11 +846,12 @@ private struct TabListPopover: View {
                 .textFieldStyle(.settings)
                 .labelsHidden()
                 .focused($searchFocused)
+                .padding(.horizontal, 10)
             if matches.isEmpty {
                 Text("No matching tabs")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 20)
                     .frame(minHeight: SidebarItemStyle.height)
             } else {
                 ScrollView {
@@ -868,11 +869,13 @@ private struct TabListPopover: View {
                             .help(tab.repoURL?.path ?? tab.title)
                         }
                     }
+                    .padding(.horizontal, 10)
                 }
                 .frame(height: min(320, CGFloat(matches.count) * (SidebarItemStyle.height + SidebarItemStyle.spacing)))
             }
         }
-        .padding(10)
+        // Vertical only: the rows' inset is inside the scroll view, so its scroller runs along the popover's edge.
+        .padding(.vertical, 10)
         .frame(width: 280)
         // Next run-loop turn, once the popover's window exists.
         .onAppear { DispatchQueue.main.async { searchFocused = true } }
@@ -946,12 +949,13 @@ private struct ArchiveListPopover: View {
                 .textFieldStyle(.settings)
                 .labelsHidden()
                 .focused($searchFocused)
+                .padding(.horizontal, 10)
             if matches.isEmpty {
                 // Only the popped-out tab is archived: the list has no other.
                 Text(model.archivedTabs.isEmpty ? "No other archived tabs" : "No matching archived tabs")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 20)
                     .frame(minHeight: SidebarItemStyle.height)
             } else {
                 ScrollView {
@@ -965,11 +969,13 @@ private struct ArchiveListPopover: View {
                                        onRemove: { model.removeArchived(at: match.offset) })
                         }
                     }
+                    .padding(.horizontal, 10)
                 }
                 .frame(height: min(320, CGFloat(matches.count) * (SidebarItemStyle.height + SidebarItemStyle.spacing)))
             }
         }
-        .padding(10)
+        // Vertical only: the rows' inset is inside the scroll view, so its scroller runs along the popover's edge.
+        .padding(.vertical, 10)
         .frame(width: 280)
         // Next run-loop turn, once the popover's window exists.
         .onAppear { DispatchQueue.main.async { searchFocused = true } }

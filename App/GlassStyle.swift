@@ -711,11 +711,12 @@ private struct FilterPickerList: View {
                 .onSubmit(pickHighlighted)
                 .onKeyPress(.downArrow) { move(by: 1, in: matches) }
                 .onKeyPress(.upArrow) { move(by: -1, in: matches) }
+                .padding(.horizontal, 10)
             if matches.isEmpty {
                 Text(items.isEmpty ? "None" : "No match for \"\(query)\"")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 20)
                     .frame(minHeight: SidebarItemStyle.height)
             } else {
                 ScrollViewReader { proxy in
@@ -738,6 +739,7 @@ private struct FilterPickerList: View {
                                 .id(item)
                             }
                         }
+                        .padding(.horizontal, 10)
                     }
                     .frame(height: min(Self.maxHeight, CGFloat(matches.count) * (SidebarItemStyle.height + 2)))
                     .onChange(of: highlighted) { _, item in
@@ -749,7 +751,8 @@ private struct FilterPickerList: View {
                 }
             }
         }
-        .padding(10)
+        // Vertical only: the rows' inset is inside the scroll view, so its scroller runs along the popover's edge.
+        .padding(.vertical, 10)
         .frame(width: 300)
         .onAppear {
             highlighted = items.contains(selection) ? selection : items.first
