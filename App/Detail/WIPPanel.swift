@@ -21,6 +21,11 @@ struct WIPPanel: View {
     /// The controls whose write is running.
     @State private var busy: Set<Busy> = []
     @State private var errors: [Part: String] = [:]
+    /// Stages and unstages drawn in the click's frame, before git ran them, by path. The status read after the write
+    /// replaces them.
+    @State private var moves: [String: Move] = [:]
+    /// Numbers the writes that moved files, so one ending keeps the moves of a later click.
+    @State private var moveWrites = 0
     /// The unstaged files' sizes on disk, by path (read off the main actor).
     @State private var sizes: [String: Int64] = [:]
     @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showsSizes = true
@@ -37,11 +42,15 @@ struct WIPPanel: View {
         case conflicted, unstaged, staged, commit
     }
 
+    /// A file moved to Staged (`toStaged`) or back to Unstaged while write `write` runs; `file` as it was clicked.
+    fileprivate struct Move {
+        let file: FileChange
+        let toStaged: Bool
+        let write: Int
+    }
+
     var body: some View {
-        let status = session.status.value
-        let conflicted = status.map(Self.conflicted) ?? []
-        let unstaged = status.map(Self.unstaged) ?? []
-        let staged = status.map(Self.staged) ?? []
+        let (conflicted, unstaged, staged) = Self.lists(session.status.value, moves: moves)
         // The panel's height is always used: a card with files scrolls inside and shares the free height equally with
         // the other cards that have files; an empty card fits its text; the commit box stays at the bottom, or at the
         // top (`PrefKey.commitBoxPosition`).
@@ -79,12 +88,12 @@ struct WIPPanel: View {
                 FilesScroll {
                     FileListView(files: files, repoURL: session.url, card: .conflicted) { file in
                         rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
-                            run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
+                            stage([file], part: .conflicted)
                         }
                     }
                     .fileMenu { file in
                         [menuAction("Mark as Resolved (Stage File)", busy: [.stage(file.path)]) {
-                            run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
+                            stage([file], part: .conflicted)
                         }] + fileTools(file)
                     }
                     .folderButtons { _, files in
@@ -119,7 +128,7 @@ struct WIPPanel: View {
                                       help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                       busy: .discard(file.path)) { confirmDiscard(file) }
                             rowButton("plus.circle", help: "Stage File", busy: .stage(file.path)) {
-                                run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
+                                stage([file], part: .unstaged)
                             }
                         }
                     }
@@ -136,7 +145,7 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [
                             menuAction("Stage File", busy: [.stage(file.path)]) {
-                                run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
+                                stage([file], part: .unstaged)
                             },
                             menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                        busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
@@ -161,7 +170,7 @@ struct WIPPanel: View {
             HStack(spacing: 10) {
                 FileListModeToggle(card: .unstaged)
                 headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty, fill: Palette.stageAllFill) {
-                    run(.stageAll, busy: .stageAll, part: .unstaged)
+                    run([.stageAll], busy: [.stageAll], part: .unstaged, moving: files, toStaged: true)
                 }
             }
         }
@@ -179,12 +188,12 @@ struct WIPPanel: View {
                 FilesScroll {
                     FileListView(files: files, repoURL: session.url, card: .staged) { file in
                         rowButton("minus.circle", help: "Unstage File", busy: .unstage(file.path)) {
-                            run(.unstage(Self.unstagePaths(file)), busy: .unstage(file.path), part: .staged)
+                            unstage([file])
                         }
                     }
                     .fileMenu { file in
                         [menuAction("Unstage File", busy: [.unstage(file.path)]) {
-                            run([.unstage(Self.unstagePaths(file))], busy: [.unstage(file.path)], part: .staged)
+                            unstage([file])
                         }] + wipExtras(file) + fileTools(file)
                     }
                     .folderButtons { _, files in
@@ -207,7 +216,7 @@ struct WIPPanel: View {
                 FileListModeToggle(card: .staged)
                 headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty,
                              fill: Palette.unstageAllFill) {
-                    run(.unstageAll, busy: .unstageAll, part: .staged)
+                    run([.unstageAll], busy: [.unstageAll], part: .staged, moving: files, toStaged: false)
                 }
             }
         }
@@ -265,10 +274,18 @@ struct WIPPanel: View {
         run([write], busy: [key], part: part)
     }
 
-    /// Shows `keys` busy now, then runs the writes in order (stopping at the first error, which goes to `part`'s card).
-    private func run(_ writes: [RepoSession.Write], busy keys: [Busy], part: Part) {
+    /// Shows `keys` busy and `files` in Staged (`toStaged`) or Unstaged now, then runs the writes in order (stopping at
+    /// the first error, which goes to `part`'s card). The moves end with the writes, whose status read (or, after an
+    /// error, the status as it was) then lists the files.
+    private func run(
+        _ writes: [RepoSession.Write], busy keys: [Busy], part: Part, moving files: [FileChange] = [],
+        toStaged: Bool = false
+    ) {
         busy.formUnion(keys)
         errors[part] = nil
+        moveWrites &+= 1
+        let write = moveWrites
+        for file in files { moves[file.path] = Move(file: file, toStaged: toStaged, write: write) }
         Task {
             do {
                 for write in writes { try await session.perform(write) }
@@ -276,6 +293,7 @@ struct WIPPanel: View {
                 errors[part] = RepoSession.writeMessage(for: error)
             }
             busy.subtract(keys)
+            if !files.isEmpty { moves = moves.filter { $0.value.write != write } }
         }
     }
 
@@ -305,14 +323,16 @@ struct WIPPanel: View {
                             untracked: files.allSatisfy { $0.kind == .untracked }, isFolder: true, session: session)
     }
 
-    /// Stages `files` (a folder's), each showing busy.
+    /// Stages `files` (a file, or a folder's), moving them to Staged at once.
     private func stage(_ files: [FileChange], part: Part) {
-        run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: part)
+        run([.stage(files.map(\.path))], busy: files.map { .stage($0.path) }, part: part, moving: files,
+            toStaged: true)
     }
 
-    /// Unstages `files` (a folder's), each showing busy.
+    /// Unstages `files` (a file, or a folder's), moving them to Unstaged at once.
     private func unstage(_ files: [FileChange]) {
-        run([.unstage(files.flatMap(Self.unstagePaths))], busy: files.map { .unstage($0.path) }, part: .staged)
+        run([.unstage(files.flatMap(Self.unstagePaths))], busy: files.map { .unstage($0.path) }, part: .staged,
+            moving: files, toStaged: false)
     }
 
     /// A rename's old path too, or its deletion stays staged.
@@ -369,6 +389,64 @@ struct WIPPanel: View {
             }
             return sizes
         }.value
+    }
+
+    /// The conflicted, unstaged and staged files of `status` with `moves` drawn: a staged file leaves the other cards
+    /// and shows staged (an untracked one as added, a conflicted one as modified); an unstaged one leaves Staged and
+    /// shows unstaged (an added or copied one as untracked, a rename as its path untracked and its old path deleted).
+    fileprivate static func lists(_ status: WorkingStatus?, moves: [String: Move])
+        -> (conflicted: [FileChange], unstaged: [FileChange], staged: [FileChange])
+    {
+        var conflicted = status.map(Self.conflicted) ?? []
+        var unstaged = status.map(Self.unstaged) ?? []
+        var staged = status.map(Self.staged) ?? []
+        guard !moves.isEmpty else { return (conflicted, unstaged, staged) }
+        var toStaged: [FileChange] = []
+        var toUnstaged: [FileChange] = []
+        for move in moves.values {
+            let file = move.file
+            if move.toStaged {
+                let kind: FileChange.Kind = switch file.kind {
+                case .untracked: .added
+                case .conflicted: .modified
+                default: file.kind
+                }
+                toStaged.append(FileChange(kind: kind, path: file.path))
+            } else {
+                switch file.kind {
+                case .added, .copied:
+                    toUnstaged.append(FileChange(kind: .untracked, path: file.path))
+                case .renamed:
+                    toUnstaged.append(FileChange(kind: .untracked, path: file.path))
+                    if let original = file.originalPath { toUnstaged.append(FileChange(kind: .deleted, path: original)) }
+                default:
+                    toUnstaged.append(FileChange(kind: file.kind, path: file.path))
+                }
+            }
+        }
+        let leaving = Set(toStaged.map(\.path))
+        conflicted.removeAll { leaving.contains($0.path) }
+        unstaged.removeAll { leaving.contains($0.path) }
+        let unstaging = Set(moves.values.filter { !$0.toStaged }.map(\.file.path))
+        staged.removeAll { unstaging.contains($0.path) }
+        return (conflicted, merge(toUnstaged, into: unstaged), merge(toStaged, into: staged))
+    }
+
+    /// `files` with `added` (those whose path it does not list) at their place in status order: tracked files, then
+    /// untracked ones, each by path. One pass, so a Stage All of thousands of files stays cheap in the click's frame.
+    private static func merge(_ added: [FileChange], into files: [FileChange]) -> [FileChange] {
+        var listed = Set(files.map(\.path))
+        let key = { (file: FileChange) in (file.kind == .untracked ? 1 : 0, file.path) }
+        var new = added.filter { listed.insert($0.path).inserted }.sorted { key($0) < key($1) }[...]
+        guard !new.isEmpty else { return files }
+        var result: [FileChange] = []
+        result.reserveCapacity(files.count + new.count)
+        for file in files {
+            while let first = new.first, key(first) < key(file) { result.append(new.removeFirst()) }
+            result.append(file)
+        }
+        result.append(contentsOf: new)
+        return result
     }
 
     /// Paths with unmerged index entries, in status order.

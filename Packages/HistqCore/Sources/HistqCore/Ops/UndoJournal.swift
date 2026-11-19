@@ -66,6 +66,9 @@ public struct UndoJournal: Sendable {
         case createBranch, deleteBranch, renameBranch, discard
         case createTag, deleteTag, stage, unstage
         case stashSave, stashDrop, stashApply, stashPop, resolve
+
+        /// Stage and unstage change the index alone: no ref, no HEAD, no operation in progress.
+        var changesIndexOnly: Bool { self == .stage || self == .unstage }
     }
 
     /// Operations that change something the journal cannot take back, with the reason for the greyed Undo tooltip.
@@ -305,16 +308,18 @@ public struct UndoJournal: Sendable {
     func begin(
         _ ops: GitOperations, refs: [String], content scope: ContentScope?, completesOperation: Bool
     ) async -> Start? {
-        guard let state = try? await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env) else { return nil }
-        if state.isOperationInProgress {
-            return .continuing(operation: String(describing: state.operation), completes: completesOperation)
+        guard let operation = try? await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env)
+        else { return nil }
+        if operation != .none {
+            return .continuing(operation: String(describing: operation), completes: completesOperation)
         }
         do {
             var names = refs
-            if let headRef = try await Self.headRef(ops), headRef.hasPrefix("refs/heads/"), !names.contains(headRef) {
+            let headRef = try await Self.headRef(ops)
+            if let headRef, headRef.hasPrefix("refs/heads/"), !names.contains(headRef) {
                 names.append(headRef)
             }
-            let before = try await Self.capture(ops, names: names, upstreamOf: Set(refs))
+            let before = try await Self.capture(ops, names: names, upstreamOf: Set(refs), headRef: .some(headRef))
             var content: Content?
             if let scope { content = try await Self.captureContent(ops, scope: scope) }
             return .fresh(names: names, before: before, content: content)
@@ -328,7 +333,22 @@ public struct UndoJournal: Sendable {
     func finish(
         _ start: Start, kind: Kind, title: String, mode: Mode, refs: [String], succeeded: Bool, ops: GitOperations
     ) async {
-        guard let operation = try? await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation else {
+        // A fresh stage or unstage moved the index alone: only the index is read again (`after` keeps HEAD and refs).
+        if case .fresh(_, let before, _) = start, kind.changesIndexOnly {
+            guard succeeded,
+                  let index = try? await ops.exec(["write-tree"]).text.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return }
+            var after = before
+            after.index = index
+            guard !after.matches(before) else { return }
+            var state = (try? load()) ?? State()
+            append(Entry(
+                id: UUID(), kind: kind, title: title, date: Date(), mode: mode, before: before, after: after,
+                content: nil), to: &state)
+            try? save(state)
+            return
+        }
+        guard let operation = try? await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env) else {
             return
         }
         var state = (try? load()) ?? State()
@@ -398,7 +418,7 @@ public struct UndoJournal: Sendable {
     /// after it; a superset). nil when it cannot be taken: the push still runs, not undoable.
     func beginStashSave(_ cwdOps: GitOperations) async -> StashStart? {
         guard let ops = try? await Self.topLevel(cwdOps).ops,
-            let operation = try? await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation,
+            let operation = try? await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env),
             let stashes = try? await ops.stashList(),
             let changed = try? await Self.changedPaths(ops),
             let states = try? await Self.pathStates(changed, write: true, ops: ops)
@@ -414,7 +434,7 @@ public struct UndoJournal: Sendable {
         guard let ops = try? await Self.topLevel(cwdOps).ops,
             let stashes = try? await ops.stashList(), let stash = stashes.first,
             stashes.dropFirst().map(\.hash) == start.stashes,
-            (try? await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation) == start.operation,
+            (try? await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env)) == start.operation,
             let touched = try? await Self.stashTouched(stash.hash, ops: ops), !touched.isEmpty,
             let after = try? await Self.pathStates(Array(touched), write: true, ops: ops)
         else { return }
@@ -746,7 +766,7 @@ public struct UndoJournal: Sendable {
 
     /// The operation in progress (`OperationKey`); nil when there is none.
     static func operationKey(_ ops: GitOperations) async throws -> OperationKey? {
-        let operation = try await RepoState.read(runner: ops.runner, cwd: ops.cwd, env: ops.env).operation
+        let operation = try await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env)
         guard operation != .none else { return nil }
         func oid(_ name: String) async throws -> String? {
             trimmed(try await ops.exec(["rev-parse", "-q", "--verify", name], allowedExitCodes: [0, 1]).text)
@@ -764,9 +784,12 @@ public struct UndoJournal: Sendable {
     }
 
     /// HEAD, the branches `names` (in that order) and the index. `upstreamOf` lists the branches whose upstream is
-    /// recorded too. Throws when the index has conflicts (`write-tree` refuses).
-    static func capture(_ ops: GitOperations, names: [String], upstreamOf: Set<String>) async throws -> Snapshot {
-        let headRef = try await headRef(ops)
+    /// recorded too. `headRef`: HEAD's ref when the caller just read it (`.some(nil)` when detached), else read here.
+    /// Throws when the index has conflicts (`write-tree` refuses).
+    static func capture(
+        _ ops: GitOperations, names: [String], upstreamOf: Set<String>, headRef knownHeadRef: String?? = nil
+    ) async throws -> Snapshot {
+        let headRef = if let knownHeadRef { knownHeadRef } else { try await headRef(ops) }
         let headCommit = trimmed(
             try await ops.exec(["rev-parse", "-q", "--verify", "HEAD"], allowedExitCodes: [0, 1]).text)
         var oids: [String: String] = [:]

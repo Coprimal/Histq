@@ -1,7 +1,8 @@
 // Finds the git binary Histq runs: the path set in Settings, else the first `git` in a fixed list of folders
 // (Homebrew on Apple silicon, then Intel, then `/usr/bin`), so no read waits for the login shell (see
 // `LoginShellPath`). `/usr/bin/git` is only a shim: without the Command Line Tools it pops the
-// installer, so it is never run before `xcode-select -p` succeeds. Git older than 2.36 is rejected:
+// installer, so it is never run before `xcode-select -p` succeeds; then the real binary in the developer folder it
+// names runs instead (the shim's own `xcrun` lookup costs ~10 ms per git process). Git older than 2.36 is rejected:
 // `GIT_CONFIG_COUNT` needs 2.31, `worktree list --porcelain -z` and a boolean `core.fsmonitor` need 2.36.
 import Foundation
 
@@ -90,11 +91,15 @@ public struct GitExecutable: Sendable, Equatable {
         throw toolsMissing ? GitExecutableError.commandLineToolsMissing : GitExecutableError.notFound
     }
 
-    /// Checks the git at `url`: the Command Line Tools first when it is `/usr/bin/git` (symlinks resolved),
-    /// then `git --version` against `minimumVersion`.
+    /// Checks the git at `url`: the Command Line Tools first when it is `/usr/bin/git` (symlinks resolved), which
+    /// is then replaced by the git of the developer folder `xcode-select -p` names when there is one; then
+    /// `git --version` against `minimumVersion`.
     public static func validate(at url: URL) async throws -> GitExecutable {
-        if url.resolvingSymlinksInPath().path == appleGitPath, !(await commandLineToolsInstalled()) {
-            throw GitExecutableError.commandLineToolsMissing
+        var url = url
+        if url.resolvingSymlinksInPath().path == appleGitPath {
+            guard let developer = await developerDirectory() else { throw GitExecutableError.commandLineToolsMissing }
+            let real = URL(filePath: developer).appending(path: "usr/bin/git")
+            if isExecutable(real.path) { url = real }
         }
         guard let outcome = await ChildProcess.capture(
             url, arguments: ["--version"], environment: minimalEnvironment, timeout: .seconds(5))
@@ -111,14 +116,15 @@ public struct GitExecutable: Sendable, Equatable {
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSHomeDirectory(), "LC_ALL": "C",
     ]
 
-    /// `xcode-select -p` exits 0 when the Command Line Tools (or Xcode) are installed. It never runs the
-    /// installer, unlike the `/usr/bin/git` shim.
-    static func commandLineToolsInstalled() async -> Bool {
+    /// The developer folder `xcode-select -p` prints (the Command Line Tools' or Xcode's); nil when neither is
+    /// installed. It never runs the installer, unlike the `/usr/bin/git` shim.
+    static func developerDirectory() async -> String? {
         let outcome = await ChildProcess.capture(
             URL(filePath: "/usr/bin/xcode-select"), arguments: ["-p"], environment: minimalEnvironment,
             timeout: .seconds(5))
-        guard let outcome else { return false }
-        return outcome.reason == .exit && outcome.status == 0 && !outcome.timedOut
+        guard let outcome, outcome.reason == .exit, outcome.status == 0, !outcome.timedOut else { return nil }
+        let path = String(decoding: outcome.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.hasPrefix("/") ? path : nil
     }
 
     private static func isExecutable(_ path: String) -> Bool {

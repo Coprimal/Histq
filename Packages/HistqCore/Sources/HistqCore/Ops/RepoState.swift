@@ -28,27 +28,14 @@ public struct RepoState: Sendable, Equatable {
 
     /// Reads the state of the worktree at `cwd`. `env` must be the read environment for `cwd`.
     public static func read(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> RepoState {
-        let names = ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
-        // Per-worktree paths (`.git` is a file in a linked worktree), absolute.
-        let pathsResult = try await runner.run(
-            ["rev-parse", "--path-format=absolute"] + names.flatMap { ["--git-path", $0] }, cwd: cwd, env: env)
-        let paths = pathsResult.text.split(separator: "\n").map { URL(filePath: String($0)) }
-        guard paths.count == names.count else {
-            throw GitError.other(exit: 0, stderrTail: "unexpected rev-parse --git-path output")
-        }
+        let paths = try await operationPaths(runner: runner, cwd: cwd, env: env)
         let mergeHead = paths[0], rebaseMerge = paths[1], rebaseApply = paths[2]
         let cherryPickHead = paths[3], revertHead = paths[4]
-        let fm = FileManager.default
 
         let conflicted = try await conflictedPaths(runner: runner, cwd: cwd, env: env)
         let head = try await headLabel(runner: runner, cwd: cwd, env: env)
 
-        // A rebase may leave REBASE_HEAD/MERGE_MSG next to its folder: check it first.
-        if fm.fileExists(atPath: rebaseMerge.path)
-            || (fm.fileExists(atPath: rebaseApply.path)
-                && !fm.fileExists(atPath: rebaseApply.appending(path: "applying").path))
-        {
-            let folder = fm.fileExists(atPath: rebaseMerge.path) ? rebaseMerge : rebaseApply
+        if let folder = rebaseFolder(merge: rebaseMerge, apply: rebaseApply) {
             let onto = firstLine(folder.appending(path: "onto"))
             let replayed = firstLine(folder.appending(path: "stopped-sha"))
                 ?? firstLine(folder.deletingLastPathComponent().appending(path: "REBASE_HEAD"))
@@ -73,7 +60,42 @@ public struct RepoState: Sendable, Equatable {
         return RepoState(operation: .none, conflictedPaths: conflicted, labels: ConflictLabels(a: head, b: "Incoming"))
     }
 
+    /// The operation in progress alone, as `read` finds it, in one git process (`read` takes three or more): for
+    /// callers that need neither its labels nor the conflicted paths.
+    public static func readOperation(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> Operation {
+        let paths = try await operationPaths(runner: runner, cwd: cwd, env: env)
+        if rebaseFolder(merge: paths[1], apply: paths[2]) != nil { return .rebase }
+        if firstLine(paths[0]) != nil { return .merge }
+        if firstLine(paths[3]) != nil { return .cherryPick }
+        if firstLine(paths[4]) != nil { return .revert }
+        return .none
+    }
+
     // MARK: - Helpers
+
+    /// MERGE_HEAD, rebase-merge, rebase-apply, CHERRY_PICK_HEAD and REVERT_HEAD: per-worktree paths (`.git` is a
+    /// file in a linked worktree), absolute.
+    private static func operationPaths(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [URL] {
+        let names = ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+        let result = try await runner.run(
+            ["rev-parse", "--path-format=absolute"] + names.flatMap { ["--git-path", $0] }, cwd: cwd, env: env)
+        let paths = result.text.split(separator: "\n").map { URL(filePath: String($0)) }
+        guard paths.count == names.count else {
+            throw GitError.other(exit: 0, stderrTail: "unexpected rev-parse --git-path output")
+        }
+        return paths
+    }
+
+    /// The folder of a rebase in progress; nil when there is none. Checked before the other operations: a rebase may
+    /// leave REBASE_HEAD/MERGE_MSG next to its folder.
+    private static func rebaseFolder(merge: URL, apply: URL) -> URL? {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: merge.path) { return merge }
+        if fm.fileExists(atPath: apply.path), !fm.fileExists(atPath: apply.appending(path: "applying").path) {
+            return apply
+        }
+        return nil
+    }
 
     /// Unique paths of `ls-files -u -z` records (`<mode> <object> <stage>\t<path>\0`), in order.
     static func conflictedPaths(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [String] {
