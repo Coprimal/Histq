@@ -167,10 +167,10 @@ final class RefBadgeCellView: NSView {
             return style
         }()
         /// The name's attributes by text size: normal weight, 12 pt at Regular (user, 2026-11-18: a bit smaller than
-        /// the body text), in the muted badge text color.
+        /// the body text), in pure white like the checked-out branch's so it reads sharp (user, 2026-11-18).
         static let text: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
             uniqueKeysWithValues: TextSize.allCases.map {
-                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12)), .foregroundColor: Palette.graphBadgeTextMuted,
+                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12)), .foregroundColor: Palette.graphBadgeText,
                       .paragraphStyle: paragraph])
             })
         /// The checked-out branch's name: the body text (13 pt at Regular) in pure white, so it stands out from the
@@ -213,36 +213,34 @@ final class RefBadgeCellView: NSView {
     /// The check of the branch checked out (or of a detached HEAD): always drawn, in front of the name.
     private static let headIcon = "checkmark.circle.fill"
 
-    /// SF Symbols in the badge text color (pure white when `bright`: the checked-out branch's badge and the pull
-    /// request chip; else muted), drawn at a size that fills their slot (the cloud and tag are 16 pt wide at 12 pt,
-    /// scaled down to 15; at 10.5 pt they stayed 14). A Lucide icon (24 pt) is tinted the same color.
-    @MainActor private static func symbol(_ name: String, bright: Bool) -> NSImage? {
-        let key = "\(name)|\(bright)"
-        if let cached = symbols[key] { return cached }
-        let text = bright ? Palette.graphBadgeText : Palette.graphBadgeTextMuted
+    /// SF Symbols in the badge text color (pure white on every badge, like its name: user, 2026-11-18), drawn at a
+    /// size that fills their slot (the cloud and tag are 16 pt wide at 12 pt, scaled down to 15; at 10.5 pt they
+    /// stayed 14). A Lucide icon (24 pt) is tinted the same color.
+    @MainActor private static func symbol(_ name: String) -> NSImage? {
+        if let cached = symbols[name] { return cached }
         if name.hasPrefix("lucide-") {
-            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map { tinted($0, text) }
-            symbols[key] = image
+            let image = NSImage.icon(name, accessibilityDescription: nil, size: 24).map(tinted)
+            symbols[name] = image
             return image
         }
         let isCheck = name == headIcon
         // HEAD's check stands out: a solid white disc with a bold check in the graph's dark surface.
-        let colors = isCheck ? [Palette.graphSurface, text] : [text]
+        let colors = isCheck ? [Palette.graphSurface, Palette.graphBadgeText] : [Palette.graphBadgeText]
         let configuration = NSImage.SymbolConfiguration(pointSize: isCheck ? 13.5 : 12, weight: isCheck ? .bold : .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: colors))
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration)
-        symbols[key] = image
+        symbols[name] = image
         return image
     }
 
     @MainActor private static var symbols: [String: NSImage?] = [:]
 
-    /// A template image (Lucide, or a monochrome symbol) filled with a badge text color: it would draw black.
-    private static func tinted(_ template: NSImage, _ color: NSColor) -> NSImage {
+    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color: it would draw black.
+    private static func tinted(_ template: NSImage) -> NSImage {
         NSImage(size: template.size, flipped: false) { rect in
             template.draw(in: rect)
-            color.setFill()
+            Palette.graphBadgeText.setFill()
             rect.fill(using: .sourceAtop)
             return true
         }
@@ -662,14 +660,14 @@ final class RefBadgeCellView: NSView {
         context.restoreGState()
     }
 
-    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, bright: Bool) {
-        drawIcon(name, x: x, midY: midY, slot: Self.iconWidth(name), bright: bright)
+    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat) {
+        drawIcon(name, x: x, midY: midY, slot: Self.iconWidth(name))
     }
 
     /// `badge`'s icon `name`; the cloud gives way to the logo of its remote's owner once loaded (`remoteAvatars`).
     private func drawIcon(_ name: String, of badge: RefBadge, x: CGFloat, midY: CGFloat) {
         guard name == "cloud", let image = badge.remote.flatMap({ remoteAvatars[$0] }) else {
-            return drawIcon(name, x: x, midY: midY, bright: badge.isHead)
+            return drawIcon(name, x: x, midY: midY)
         }
         let side = Style.refIcon
         let rect = CGRect(x: x, y: (midY - side / 2).rounded(), width: side, height: side)
@@ -680,8 +678,8 @@ final class RefBadgeCellView: NSView {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, slot: CGFloat, bright: Bool = true) {
-        guard let image = Self.symbol(name, bright: bright) else { return }
+    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, slot: CGFloat) {
+        guard let image = Self.symbol(name) else { return }
         let size = image.size
         let scale = min(1, slot / max(size.width, size.height))
         let width = size.width * scale
