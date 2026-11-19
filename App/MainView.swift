@@ -174,7 +174,7 @@ private struct TabContent: View {
     }
 }
 
-/// The row under the page, on the window glass: Sidebar and the selected repo's running operation (one started from a
+/// The row under the page, on the window glass: Sidebar, the selected repo's folder and its running operation (one started from a
 /// menu or the automatic fetch, which has no toolbar button to show its progress on) at the leading edge, Histq's
 /// version and Detail at the trailing edge. A fixed height, so a status coming and going never moves the page.
 struct WindowFooter: View {
@@ -194,9 +194,20 @@ struct WindowFooter: View {
         HStack(spacing: 12) {
             toggle("Sidebar", systemImage: "sidebar.left", shown: $sidebarShown)
                 .disabled(session == nil || preset == .focus)
-            if let session { RunningStatus(session: session) }
+            if let session {
+                // The repo's folder, shortened in the middle before the running status gives way.
+                let path = (session.url.path as NSString).abbreviatingWithTildeInPath
+                Text(path)
+                    .font(.settingsCaption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(path)
+                    .layoutPriority(-2)
+                RunningStatus(session: session)
+            }
             Spacer(minLength: 0)
-            Text("Histq \(Self.version)")
+            Text("Histq v\(Self.version)")
                 .font(.settingsCaption)
                 .foregroundStyle(.tertiary)
             toggle("Detail", systemImage: "sidebar.right", shown: $detailShown)
