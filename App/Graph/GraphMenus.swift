@@ -514,7 +514,8 @@ enum RepoMenus {
             },
         ]
         if let current, !isCurrent {
-            entries += [.separator] + integrate(name, ref: ref, commit: branch?.commit, into: current, session)
+            entries += [.separator] + integrate(name, ref: ref, commit: branch?.commit, into: current,
+                                                twoWay: true, session)
         }
         entries += [
             .separator,
@@ -597,17 +598,28 @@ enum RepoMenus {
 
     /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current` (each merge mode), fast-forward
     /// `current` to it (git refuses when they diverged), rebase `current` onto it (plain or interactive), compare with it.
+    /// `twoWay` (a local branch) also offers the other direction next to each: merge `current` into `name` (checked
+    /// out first) and fast-forward `name` to `current` (no checkout), e.g. a branch `current` was started from.
     private static func integrate(_ name: String, ref: String, commit: String?, into current: String,
-                                  _ session: RepoSession) -> [MenuEntry] {
+                                  twoWay: Bool = false, _ session: RepoSession) -> [MenuEntry] {
         let rebaseReason = commit == nil ? "\(name) has no commit." : session.rebaseOntoUnavailableReason()
+        let currentRef = "refs/heads/\(current)"
+        let mergeBack = mergeSubmenu("Merge \(current) into \(name)") { mode in
+            session.run(.merge(currentRef, checkoutFirst: name, mode: mode), title: "Merge \(current) into \(name)")
+        }
+        let fastForwardBack = MenuEntry.action("Fast-forward \(name) to \(current)") {
+            session.run(.fastForward(name, to: currentRef), title: "Fast-forward \(name) to \(current)")
+        }
         return [
             mergeSubmenu("Merge \(name) into \(current)") { mode in
                 session.run(.merge(ref, checkoutFirst: nil, mode: mode), title: "Merge \(name) into \(current)")
             },
+        ] + (twoWay ? [mergeBack] : []) + [
             .action("Fast-forward \(current) to \(name)") {
                 session.run(.merge(ref, checkoutFirst: nil, mode: .fastForwardOnly),
                             title: "Fast-forward \(current) to \(name)")
             },
+        ] + (twoWay ? [fastForwardBack] : []) + [
             .action("Rebase \(current) onto \(name)") {
                 session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
             },
