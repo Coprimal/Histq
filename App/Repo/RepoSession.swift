@@ -785,6 +785,9 @@ final class RepoSession: Identifiable {
     /// The graph's selected rows, in row order. The graph follows it (a parent jump, the default selection), and a
     /// click in the graph sets it through `selectGraph(_:)`.
     private(set) var graphSelection: [GraphItem] = []
+    /// Where the graph was scrolled when its view went away (a switch to another tab): it comes back there. In memory
+    /// only: a relaunch opens on the WIP or HEAD row.
+    @ObservationIgnored var graphScroll: GraphScrollPosition?
     /// The WIP panel's commit box, kept while other rows are selected.
     var commitDraft = CommitDraft()
     private(set) var status: Loadable<WorkingStatus> = .idle

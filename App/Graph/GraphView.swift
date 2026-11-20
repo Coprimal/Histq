@@ -21,6 +21,17 @@ enum GraphItem: Hashable, Sendable {
     case worktree(String)
 }
 
+/// Where a tab's graph was scrolled when its view went away (a switch to another tab), kept by its session: the tab's
+/// graph shows the same rows when it comes back. `anchor` is the first row wholly below the column titles and `offset`
+/// how far below them it was; `atTop` when the list was at its top (a new WIP row then shows). `selection` is the
+/// selection it was saved with: another selection meanwhile is revealed instead.
+struct GraphScrollPosition: Equatable {
+    var anchor: GraphItem?
+    var offset: CGFloat
+    var atTop: Bool
+    var selection: [GraphItem]
+}
+
 /// The graph's columns, left to right. Widths are resizable and saved in `PrefKey.graphColumnWidths`; the message
 /// column takes what the others leave. Settings › Appearance can hide the message, author and date columns.
 enum GraphColumn: String, CaseIterable {
@@ -154,8 +165,16 @@ struct GraphView: NSViewRepresentable {
     var hiddenColumns: Set<GraphColumn> = []
     /// Esc while the table has the focus; true when it was used (the open search bar closed).
     var onEscape: @MainActor () -> Bool = { false }
+    /// Where the tab's graph was when its last view went away (`GraphScrollPosition`): a new view starts there, else on
+    /// the top with the selection revealed. `onScroll` gets the position when the view goes away.
+    var scrollPosition: GraphScrollPosition?
+    var onScroll: @MainActor (GraphScrollPosition) -> Void = { _ in }
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: GraphTableController) {
+        coordinator.saveScroll()
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = GraphTableView()
@@ -496,6 +515,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The last `GraphView.selection`; a new one is scrolled to once its rows exist.
     private var wanted: [GraphItem] = []
     private var needsScroll = false
+    /// The view's first scroll position is set (`placeInitially`): only once it has rows and its clip has its size.
+    private var isPlaced = false
     /// The search's dimmed rows, and its last reveal request.
     private var dimming = GraphDimming()
     private var revealToken = 0
@@ -530,6 +551,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             clip.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self, selector: #selector(scrolled(_:)), name: NSView.boundsDidChangeNotification, object: clip)
+            // The clip has no size at the first `update`: the first position waits for it.
+            clip.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(clipResized(_:)), name: NSView.frameDidChangeNotification, object: clip)
         }
         #if DEBUG
         if let request = AppState.launchFlag("-HistqColumnDrag") { debugColumnDrag(request) }
@@ -684,6 +709,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             if let item = view.selection.first, let row = row(of: item) { centerIfHidden(row) }
         }
         syncSelection(view.selection)
+        placeInitially()
         isUpdating = false
         // The map may arrive after the selection (a launch selection, a new log): the selected row follows it here.
         refreshGhost()
@@ -759,7 +785,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // A new load (or a new layout): every row may have changed. A reload of a log already on screen keeps the
             // top visible row where it was (rows above it may have come or gone) and does not scroll to the selection.
             let start = DispatchTime.now().uptimeNanoseconds
-            let anchor = old.rowCount > 0 ? scrollAnchor(table) : nil
+            let anchor = old.rowCount > 0 && isPlaced ? scrollAnchor(table) : nil
             log = new
             // A load's first pages may need fewer lanes than the whole log: the column keeps the last log's until the
             // load completes, so it does not narrow and widen again on every refresh.
@@ -882,6 +908,58 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         origin.y = rect.midY - (bounds.height + top - bottom) / 2
         clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: bounds.size)).origin)
         scroll.reflectScrolledClipView(clip)
+    }
+
+    /// The view's first position, once it has rows and its clip has its size (before, every row would count as hidden
+    /// and the column titles' inset is still 0): where the tab's last view was (`GraphView.scrollPosition`) when the
+    /// selection is the same and its anchor row is still there, else the top with the selection revealed.
+    private func placeInitially() {
+        guard !isPlaced, let view, let table, let scroll = table.enclosingScrollView, rowCount > 0 else { return }
+        let clip = scroll.contentView
+        guard clip.bounds.height > 0 else { return }
+        isPlaced = true
+        wanted = view.selection
+        let top = clip.contentInsets.top
+        var bounds = clip.bounds
+        bounds.origin.y = -top
+        var restored = false
+        if let saved = view.scrollPosition, saved.selection == view.selection {
+            if saved.atTop {
+                restored = true
+            } else if let anchor = saved.anchor, let row = row(of: anchor) {
+                bounds.origin.y = table.rect(ofRow: row).minY - saved.offset - top
+                restored = true
+            }
+        }
+        clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+        scroll.reflectScrolledClipView(clip)
+        if restored {
+            needsScroll = false
+        } else if let row = table.selectedRowIndexes.first {
+            centerIfHidden(row)
+            needsScroll = false
+        } else {
+            // The selection's row is not loaded yet: `syncSelection` reveals it once it is.
+            needsScroll = !view.selection.isEmpty
+        }
+        #if DEBUG
+        UITiming.probe("graph-place", "restored=\(restored) inset=\(Int(top)) h=\(Int(clip.bounds.height)) "
+            + "y=\(Int(clip.bounds.minY))")
+        #endif
+    }
+
+    @objc private func clipResized(_ notification: Notification) { placeInitially() }
+
+    /// Sends where the graph is (`GraphScrollPosition`) to `GraphView.onScroll`; nothing before its first position.
+    func saveScroll() {
+        guard isPlaced, let view, let table, let clip = table.enclosingScrollView?.contentView else { return }
+        let visibleTop = clip.bounds.minY + clip.contentInsets.top
+        var row = table.row(at: NSPoint(x: 1, y: max(visibleTop, 0) + 0.5))
+        if row >= 0, table.rect(ofRow: row).minY < visibleTop - 0.5 { row += 1 }
+        let anchor = row >= 0 && row < table.numberOfRows ? item(at: row) : nil
+        let offset = anchor == nil ? 0 : table.rect(ofRow: row).minY - visibleTop
+        view.onScroll(GraphScrollPosition(anchor: anchor, offset: offset, atTop: visibleTop <= 0.5,
+                                          selection: view.selection))
     }
 
     /// The rows on screen before a reload, top first, with their items; `atTop` when the list is scrolled to its top.
@@ -1244,7 +1322,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         let rows = IndexSet(selection.compactMap(row(of:)))
         table.selectRowIndexes(rows, byExtendingSelection: false)
-        if needsScroll, let first = rows.first {
+        // Before the first position, `placeInitially` reveals it.
+        if needsScroll, isPlaced, let first = rows.first {
             centerIfHidden(first)
             needsScroll = false
         }

@@ -616,7 +616,9 @@ private struct CommitListPanel: View {
                               guard search.isOpen else { return false }
                               search.close()
                               return true
-                          })
+                          },
+                          scrollPosition: session.graphScroll,
+                          onScroll: { [session] position in session.graphScroll = position })
                     .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
             case .failed(let message):
                 Label(message, systemImage: "exclamationmark.triangle")

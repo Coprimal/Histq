@@ -171,6 +171,9 @@ private struct TabContent: View {
                 WelcomeView(model: model.welcome(for: id)).id(id)
             }
         }
+        #if DEBUG
+        .task { await model.debugTabWalk() }
+        #endif
     }
 }
 
