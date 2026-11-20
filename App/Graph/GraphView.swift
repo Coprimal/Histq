@@ -1030,7 +1030,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.isItalic = true
             } else if let worktree = worktree(synthetic) {
                 // This tab's own WIP row stays "// WIP"; another worktree's says whose it is.
-                cell.text = "// WIP (another worktree)"
+                cell.text = "// WIP (on worktree \(worktree.name))"
                 cell.changes = worktree.changes
                 cell.tone = .secondary
                 cell.isItalic = true
