@@ -54,13 +54,15 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     /// What the client remembers between calls: the token's user id, the merge request of each head sha it mapped
     /// (for `checkRuns(for:in:)`, which gets a sha only), the last head of each merge request (for approving), and
-    /// the merge request of each thread it mapped (for `setReviewThread(_:resolved:)`, which gets the thread only).
-    /// Shared by copies of the client.
+    /// the merge request of each thread it mapped (for `setReviewThread(_:resolved:)`, which gets the thread only),
+    /// and the discussion of each diff note it mapped (for `reply(to:on:in:body:)` without a `hostKey`). Shared by
+    /// copies of the client.
     private final class Memo: Sendable {
         let userID = Mutex<Int?>(nil)
         let mergeRequestByHead = Mutex<[String: Int]>([:])
         let headByMergeRequest = Mutex<[String: String]>([:])
         let mergeRequestByDiscussion = Mutex<[String: (projectID: String, iid: Int)]>([:])
+        let discussionByNote = Mutex<[String: String]>([:])
     }
 
     // MARK: - Hosts and remote URLs
@@ -482,12 +484,15 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     }
 
     /// `POST .../discussions/:discussion_id/notes`: `thread.hostKey` is the discussion id (the id of
-    /// `reviewThreadStates(of:in:)`); a ref without one is refused.
+    /// `reviewThreadStates(of:in:)`); without one, the discussion of `rootCommentID` this client mapped in
+    /// `reviewComments(of:in:)`. A ref with neither is refused.
     public func reply(to thread: HostedThreadRef, on number: Int, in repo: HostedRepository, body: String)
         async throws -> HostedReviewComment
     {
-        guard let discussion = thread.hostKey, !discussion.isEmpty else {
-            throw HostingError.validationFailed(message: "a reply to a GitLab thread needs its discussion id")
+        let key = try projectID(repo) + "\u{0}\(number)\u{0}\(thread.rootCommentID)"
+        let mapped = memo.discussionByNote.withLock { $0[key] }
+        guard let discussion = thread.hostKey.flatMap({ $0.isEmpty ? nil : $0 }) ?? mapped else {
+            throw HostingError.validationFailed(message: "an unknown GitLab thread: reload the merge request")
         }
         let note: GitLabNote = try await send(
             "POST", url(try itemPath(.pullRequest(number), in: repo) + ["discussions", discussion, "notes"]),
@@ -656,15 +661,23 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return try await currentUser().id
     }
 
-    /// The merge request's diff threads, as discussion id and non-system notes, in GitLab's order.
+    /// The merge request's diff threads, as discussion id and non-system notes, in GitLab's order. Also remembers
+    /// the discussion of each of their notes, for a reply without a `hostKey`.
     private func diffThreads(of number: Int, in repo: HostedRepository) async throws -> [(String, [GitLabNote])] {
         let discussions: [GitLabDiscussion] = try await list(
             url(try projectPath(repo) + ["merge_requests", String(number), "discussions"]))
-        return discussions.compactMap { discussion in
+        let threads = discussions.compactMap { discussion -> (String, [GitLabNote])? in
             let notes = discussion.notes.filter { $0.system != true }
             guard notes.first?.isDiffNote == true else { return nil }
             return (discussion.id, notes)
         }
+        let prefix = try projectID(repo) + "\u{0}\(number)\u{0}"
+        memo.discussionByNote.withLock { memo in
+            for (id, notes) in threads {
+                for note in notes { memo[prefix + String(note.id)] = id }
+            }
+        }
+        return threads
     }
 
     /// `opened`, and `locked` (a merge request being merged), are open; `closed` and `merged` are not.

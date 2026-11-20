@@ -15,6 +15,8 @@ struct HostedRow: Identifiable, Equatable, Sendable {
     let title: String
     let authorLogin: String?
     let authorID: Int?
+    /// The API's avatar URL of the author (`HostAvatars.gitlab` loads it).
+    let authorAvatarURL: String?
     let isDraft: Bool
     /// A pull request's head commit, whose check runs give the row's checks state; nil for an issue, or a search hit
     /// that is not in the All open list.
@@ -27,13 +29,14 @@ struct HostedRow: Identifiable, Equatable, Sendable {
 extension HostedRow {
     init(pull: HostedPullRequest) {
         self.init(item: .pullRequest(pull.number), title: pull.title, authorLogin: pull.user?.login,
-                  authorID: pull.user?.id, isDraft: pull.draft ?? false, headSHA: pull.head.sha)
+                  authorID: pull.user?.id, authorAvatarURL: pull.user?.avatarURL, isDraft: pull.draft ?? false,
+                  headSHA: pull.head.sha)
     }
 
     /// A search hit (issue-shaped): the pull request, when All open has it, gives the head commit.
     init(searchHit hit: HostedIssue, pull: HostedPullRequest?) {
         self.init(item: hit.isPullRequest ? .pullRequest(hit.number) : .issue(hit.number), title: hit.title,
-                  authorLogin: hit.user?.login, authorID: hit.user?.id,
+                  authorLogin: hit.user?.login, authorID: hit.user?.id, authorAvatarURL: hit.user?.avatarURL,
                   isDraft: hit.draft ?? pull?.draft ?? false, headSHA: pull?.head.sha)
     }
 }
@@ -269,9 +272,11 @@ final class HostingStore {
         let generation = resolveGeneration
         #if DEBUG
         if source.isStub {
-            client = GitHubStub.client()
-            // The fixtures' origin names no GitHub repository; a stub checkout fetches from it (and fails there).
-            return connect(Identity(profileID: nil, account: nil, repository: GitHubStub.repository, remote: "origin"))
+            // GitHub's stub, or GitLab's with `-HistqHostingStubKind gitlab`.
+            let stub = GitHubStub.hosting()
+            client = stub.client
+            // The fixtures' origin names no hosted repository; a stub checkout fetches from it (and fails there).
+            return connect(Identity(profileID: nil, account: nil, repository: stub.repository, remote: "origin"))
         }
         #endif
         guard source.profilesLoaded else { return setConnection(.resolving) }
@@ -340,15 +345,17 @@ final class HostingStore {
     }
 
     /// `origin` when it names a repository on the host of one of `profile`'s accounts, else the first remote that
-    /// does, with that repository and account.
+    /// does, with that repository and account. The account on the remote's host decides how its URL is read (its
+    /// kind, and a GitLab account's base path).
     static func remote(
         in remotes: [RemoteInfo], profile: Profile
     ) -> (name: String, repository: HostedRepository, account: HostingAccount)? {
         let ordered = remotes.filter { $0.name == "origin" } + remotes.filter { $0.name != "origin" }
         return ordered.lazy
             .compactMap { remote in
-                GitHubClient.repository(fromRemoteURL: remote.url).flatMap { repository in
-                    profile.account(forHost: repository.host).map { (remote.name, repository, $0) }
+                RemoteURL(remote.url).flatMap { profile.account(forHost: $0.host) }.flatMap { account in
+                    account.kind.repository(fromRemoteURL: remote.url, basePath: account.basePath)
+                        .map { (remote.name, $0, account) }
                 }
             }
             .first
@@ -391,10 +398,26 @@ final class HostingStore {
         profileID: UUID, account: HostingAccount
     ) async -> (any HostingProvider)? {
         guard let token = await HostingTokens.token(for: account, profileID: profileID) else { return nil }
+        return try? client(for: account, profileID: profileID, token: token)
+    }
+
+    /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab asks
+    /// `HostingTokens` on each request (off the main actor, cached; a forced refresh after a 401 reads the Keychain
+    /// again), so a token saved again in Settings is used at once. Throws `HostingError` for a bad host or token.
+    nonisolated static func client(
+        for account: HostingAccount, profileID: UUID, token: String
+    ) throws -> any HostingProvider {
         switch account.kind {
-        case .github: return try? GitHubClient(host: account.host, token: token)
-        // Not connected in the app yet (Phase 7).
-        case .gitlab: return nil
+        case .github:
+            return try GitHubClient(host: account.host, token: token)
+        case .gitlab:
+            let host = account.host
+            return try GitLabClient(host: host, basePath: account.basePath) { forceRefresh in
+                guard let token = try await HostingTokens.read(
+                    profileID: profileID, kind: .gitlab, host: host, refresh: forceRefresh)
+                else { throw HostingError.unauthorized }
+                return token
+            }
         }
     }
 
@@ -465,19 +488,26 @@ final class HostingStore {
             .map { state in "\(state):\(commits.count { checks[$0] == state })" }.joined(separator: " "))
     }
 
+    /// The error's text in the words of this tab's host ("GitLab", "merge request").
+    private func hostText(_ error: HostingError) -> String {
+        error.description(host: kind.name, pullRequest: kind.pullRequestNoun.lowercased())
+    }
+
     /// The card's text for a failed read; a rate limit also pauses the refreshes until it ends.
     private func listError(_ error: any Error) -> ListError {
         switch error {
         case HostingError.unauthorized:
-            return ListError(message: "GitHub refused the token (revoked or expired).", reconnect: true)
+            let host = identity?.account?.providerName ?? "GitHub"
+            return ListError(message: "\(host) refused the token (revoked or expired).", reconnect: true)
         case HostingError.rateLimited(let resetsAt):
             pausedUntil = resetsAt ?? Date.now.addingTimeInterval(60)
-            return ListError(message: "\(error) Histq tries again then.", reconnect: false)
+            return ListError(message: "\(hostText(.rateLimited(resetsAt: resetsAt))) Histq tries again then.",
+                             reconnect: false)
         case HostingError.secondaryRateLimited(let seconds):
             pausedUntil = Date.now.addingTimeInterval(TimeInterval(seconds ?? 60))
-            return ListError(message: String(describing: error), reconnect: false)
+            return ListError(message: hostText(.secondaryRateLimited(retryAfterSeconds: seconds)), reconnect: false)
         case let error as HostingError:
-            return ListError(message: String(describing: error), reconnect: false)
+            return ListError(message: hostText(error), reconnect: false)
         default:
             return ListError(message: error.localizedDescription, reconnect: false)
         }

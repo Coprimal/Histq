@@ -210,7 +210,8 @@ enum HostingTokens {
 
     /// What git gets for `profile` (`GitInvocation`, which trusts the set): one credential per account of the profile
     /// itself that has a token, for the account's host; empty without a profile. The username is the account's
-    /// `gitUsername`, else `x-access-token` for GitHub and the login for other kinds.
+    /// `gitUsername`, else `x-access-token` for GitHub and `oauth2` for GitLab (any name works with a personal access
+    /// token; OAuth tokens need `oauth2`).
     @concurrent
     static func credentials(for profile: Profile?) async -> [GitCredential] {
         guard let profile else { return [] }
@@ -219,7 +220,11 @@ enum HostingTokens {
             guard let token = await token(profileID: profile.id, kind: account.kind, host: account.host) else {
                 continue
             }
-            let username = account.gitUsername ?? (account.kind == .github ? "x-access-token" : account.login)
+            let kindUsername = switch account.kind {
+            case .github: "x-access-token"
+            case .gitlab: "oauth2"
+            }
+            let username = account.gitUsername ?? kindUsername
             credentials.append(GitCredential(kind: account.kind, host: account.host, username: username, token: token))
         }
         return credentials

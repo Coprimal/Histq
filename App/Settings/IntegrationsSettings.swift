@@ -1,7 +1,9 @@
 // Settings › Integrations, per profile: the profile's code host accounts, one per host. Add Account connects GitHub
 // (github.com) or a GitHub Enterprise Server host by signing in with GitHub (OAuth device flow, github.com only), by
-// pasting a personal access token, or by importing the GitHub CLI's token; each token is checked with `GET /user`
-// before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the host and the login.
+// pasting a personal access token, or by importing the GitHub CLI's token; GitLab (gitlab.com) or a GitLab
+// Self-Managed host (with an optional base path) by pasting a personal access token. Each token is checked with
+// `GET /user` before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the host (and base
+// path) and the login.
 // Disconnect deletes that account's Keychain item. Tokens are never logged, shown or kept in the page's state longer
 // than the check.
 import AppKit
@@ -16,8 +18,10 @@ struct IntegrationsSettings: View {
     @Environment(WindowModel.self) private var model
     /// The account being added (Add Account), nil when no connect form shows.
     @State private var adding: AddKind?
-    /// The GitHub Enterprise Server host typed for the next connection.
+    /// The GitHub Enterprise Server or GitLab Self-Managed host typed for the next connection.
     @State private var hostDraft = ""
+    /// The GitLab Self-Managed base path typed for the next connection (`gitlab` for `https://example.com/gitlab`).
+    @State private var basePathDraft = ""
     @State private var pastedToken = ""
     /// Whether the Keychain holds each account's token (by host), read off the main thread at each select of the page.
     @State private var tokenStored: [String: Loadable<Bool>] = [:]
@@ -46,27 +50,38 @@ struct IntegrationsSettings: View {
 
     /// The entries of the Add Account menu.
     private enum AddKind: CaseIterable {
-        case github, enterprise
+        case github, enterprise, gitlab, gitlabSelfManaged
 
         var title: String {
             switch self {
             case .github: "GitHub"
             case .enterprise: "GitHub Enterprise Server"
+            case .gitlab: "GitLab"
+            case .gitlabSelfManaged: "GitLab Self-Managed"
             }
         }
 
-        /// The OAuth App exists on github.com only; Enterprise hosts connect with a token or the GitHub CLI.
+        var kind: HostingKind {
+            switch self {
+            case .github, .enterprise: .github
+            case .gitlab, .gitlabSelfManaged: .gitlab
+            }
+        }
+
+        /// The OAuth App exists on github.com only; Enterprise hosts connect with a token or the GitHub CLI, GitLab
+        /// hosts with a token.
         var methods: [ConnectMethod] {
             switch self {
             case .github: ConnectMethod.allCases
             case .enterprise: [.token, .cli]
+            case .gitlab, .gitlabSelfManaged: [.token]
             }
         }
     }
 
     private enum Activity: Equatable {
         case idle
-        /// Waiting on GitHub or the GitHub CLI; the text says for what.
+        /// Waiting on the host or the GitHub CLI; the text says for what.
         case working(String)
         /// The device flow's code is shown; polling until the user approves it.
         case deviceCode(GitHubDeviceFlow.DeviceCode, host: String)
@@ -215,7 +230,7 @@ struct IntegrationsSettings: View {
                 .buttonStyle(RowTextButtonStyle(formRow: true))
         } label: {
             HStack(spacing: 8) {
-                Image("logo-github")
+                Image(account.kind == .gitlab ? "logo-gitlab" : "logo-github")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 16, height: 16)
@@ -226,7 +241,7 @@ struct IntegrationsSettings: View {
                 Text(account.login)
                     .foregroundStyle(.secondary)
             }
-            SettingsHint("Connected to \(account.host)")
+            SettingsHint("Connected to \(account.address)")
             tokenStatus(tokenStored[account.host] ?? .idle)
         }
     }
@@ -251,7 +266,8 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// The Add Account menu: GitHub (github.com) or a GitHub Enterprise Server host.
+    /// The Add Account menu: GitHub (github.com), a GitHub Enterprise Server host, GitLab (gitlab.com) or a GitLab
+    /// Self-Managed host.
     private func addAccountRow(_ profile: Profile) -> some View {
         LabeledContent {
             Menu {
@@ -271,7 +287,7 @@ struct IntegrationsSettings: View {
             .disabled(isBusy)
         } label: {
             Text(profile.accounts.isEmpty ? "No accounts yet" : "Add account")
-            SettingsHint("GitHub, or GitHub Enterprise Server on your own host: one account per host.")
+            SettingsHint("GitHub or GitLab, on their own sites or on your own host: one account per host.")
         }
     }
 
@@ -324,19 +340,31 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// The host of the account being added, lowercased: github.com for GitHub, the typed host for GitHub Enterprise
-    /// Server; nil when nothing is added or the typed text is empty or not a host name.
+    /// The host of the account being added, lowercased: github.com for GitHub, gitlab.com for GitLab, the typed host
+    /// for GitHub Enterprise Server and GitLab Self-Managed; nil when nothing is added or the typed text is empty or
+    /// not a host name.
     private var draftHost: String? {
         switch adding {
         case .github: return "github.com"
-        case .enterprise: return HostingHTTP.validatedHost(hostDraft.trimmingCharacters(in: .whitespacesAndNewlines))
+        case .gitlab: return "gitlab.com"
+        case .enterprise, .gitlabSelfManaged:
+            return HostingHTTP.validatedHost(hostDraft.trimmingCharacters(in: .whitespacesAndNewlines))
         case nil: return nil
         }
     }
 
-    /// `draftHost` when the profile has no account there yet (one account per host), else nil.
+    /// The GitLab Self-Managed base path as GitLab's client reads it (outer `/` trimmed, "" at the root); "" for the
+    /// other kinds, nil when the typed text is not a plain path.
+    private var draftBasePath: String? {
+        guard adding == .gitlabSelfManaged else { return "" }
+        let text = basePathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (try? GitLabClient(basePath: text) { _ in "" })?.basePath.joined(separator: "/")
+    }
+
+    /// `draftHost` when the profile has no account there yet (one account per host) and the base path is plain, else
+    /// nil.
     private func connectableHost(_ profile: Profile) -> String? {
-        guard let host = draftHost, profile.account(forHost: host) == nil else { return nil }
+        guard let host = draftHost, draftBasePath != nil, profile.account(forHost: host) == nil else { return nil }
         return host
     }
 
@@ -351,13 +379,15 @@ struct IntegrationsSettings: View {
         cancelConnection()
         adding = nil
         hostDraft = ""
+        basePathDraft = ""
         pastedToken = ""
         if case .failed = activity { activity = .idle }
     }
 
     private func connectGroup(_ profile: Profile, kind: AddKind) -> some View {
         SettingsGroup("Add \(kind.title) account", description: "Fetch, pull, push and clone over HTTPS use the token "
-            + "for this host; nothing else gets it. It is checked with GitHub, then kept in your login Keychain.") {
+            + "for this host; nothing else gets it. It is checked with \(kind.kind.name), then kept in your login "
+            + "Keychain.") {
             LabeledContent {
                 HStack(spacing: 8) {
                     CapsuleMenuPicker(label: "Method", selection: $method, title: Text(method.title)) {
@@ -371,13 +401,17 @@ struct IntegrationsSettings: View {
                 Text("Method")
             }
             SettingsDivider()
-            if kind == .enterprise {
-                hostRow
+            if kind == .enterprise || kind == .gitlabSelfManaged {
+                hostRow(kind)
+                SettingsDivider()
+            }
+            if kind == .gitlabSelfManaged {
+                basePathRow
                 SettingsDivider()
             }
             switch method {
             case .signIn: signInRow(profile: profile, host: connectableHost(profile))
-            case .token: tokenRow(profile)
+            case .token: tokenRow(profile, kind: kind)
             case .cli: cliRow(profile)
             }
             if let host = draftHost, profile.account(forHost: host) != nil {
@@ -387,9 +421,10 @@ struct IntegrationsSettings: View {
         }
     }
 
-    private var hostRow: some View {
-        LabeledContent {
-            TextField("Host", text: $hostDraft, prompt: Text(verbatim: "github.example.com"))
+    private func hostRow(_ kind: AddKind) -> some View {
+        let example = kind == .gitlabSelfManaged ? "gitlab.example.com" : "github.example.com"
+        return LabeledContent {
+            TextField("Host", text: $hostDraft, prompt: Text(verbatim: example))
                 .textFieldStyle(.settings)
                 .frame(maxWidth: 240)
                 .labelsHidden()
@@ -397,19 +432,40 @@ struct IntegrationsSettings: View {
         } label: {
             Text("Host")
             if draftHost == nil, !hostDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Enter a host name such as github.example.com, without https://.")
+                Text("Enter a host name such as \(example), without https://.")
                     .font(.settingsCaption)
                     .foregroundStyle(.red)
             } else {
-                SettingsHint("Your GitHub Enterprise Server host.")
+                SettingsHint("Your \(kind.title) host.")
             }
         }
     }
 
-    private func tokenRow(_ profile: Profile) -> some View {
+    private var basePathRow: some View {
+        LabeledContent {
+            TextField("Base path", text: $basePathDraft, prompt: Text(verbatim: "gitlab"))
+                .textFieldStyle(.settings)
+                .frame(maxWidth: 240)
+                .labelsHidden()
+                .disabled(isBusy)
+        } label: {
+            Text("Base path")
+            if draftBasePath == nil {
+                Text("Enter only the path, such as gitlab or tools/gitlab: letters, digits, -, _, . and ~.")
+                    .font(.settingsCaption)
+                    .foregroundStyle(.red)
+            } else {
+                SettingsHint("Optional: only when GitLab lives under a path, such as gitlab for "
+                    + "https://example.com/gitlab.")
+            }
+        }
+    }
+
+    private func tokenRow(_ profile: Profile, kind: AddKind) -> some View {
         LabeledContent {
             HStack(spacing: 8) {
-                SecureField("Token", text: $pastedToken, prompt: Text(verbatim: "ghp_…"))
+                SecureField("Token", text: $pastedToken,
+                            prompt: Text(verbatim: kind.kind == .gitlab ? "glpat-…" : "ghp_…"))
                     .textFieldStyle(.settings)
                     .frame(maxWidth: 240)
                     .labelsHidden()
@@ -422,8 +478,13 @@ struct IntegrationsSettings: View {
             .disabled(isBusy)
         } label: {
             Text("Personal access token")
-            SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
-                + "read and write.")
+            if kind.kind == .gitlab {
+                SettingsHint("Scopes api, read_user, read_repository and write_repository. A fine-grained token with "
+                    + "the same access works too.")
+            } else {
+                SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
+                    + "read and write.")
+            }
         }
     }
 
@@ -584,8 +645,11 @@ struct IntegrationsSettings: View {
 
     private func savePasted(_ profile: Profile) {
         let token = pastedToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty, let host = connectableHost(profile), !isBusy else { return }
-        connect(profile.id, host: host, status: "Checking the token with GitHub…") { token }
+        guard !token.isEmpty, let host = connectableHost(profile), let kind = adding?.kind,
+              let basePath = draftBasePath, !isBusy
+        else { return }
+        connect(profile.id, kind: kind, host: host, basePath: basePath.isEmpty ? nil : basePath,
+                status: "Checking the token with \(kind.name)…") { token }
     }
 
     /// `user`: the gh account to import, nil for the host's active one.
@@ -625,7 +689,8 @@ struct IntegrationsSettings: View {
 
     /// The paste and import paths: `source` gives the token, then it is checked and saved.
     private func connect(
-        _ id: UUID, host: String, status: String, source: @escaping @Sendable () async throws -> String
+        _ id: UUID, kind: HostingKind = .github, host: String, basePath: String? = nil, status: String,
+        source: @escaping @Sendable () async throws -> String
     ) {
         connectTask?.cancel()
         activity = .working(status)
@@ -633,38 +698,50 @@ struct IntegrationsSettings: View {
             do {
                 let token = try await source()
                 try Task.checkCancellation()
-                activity = .working("Checking the token with GitHub…")
-                try await finishConnect(id, host: host, token: token)
+                activity = .working("Checking the token with \(kind.name)…")
+                try await finishConnect(id, kind: kind, host: host, basePath: basePath, token: token)
             } catch {
-                fail(error)
+                fail(error, kind: kind)
             }
         }
     }
 
-    /// Checks `token` with `GET /user`, saves it in the Keychain, then adds the profile's account (host and login).
-    private func finishConnect(_ id: UUID, host: String, token: String) async throws {
-        let login = try await Self.login(token: token, host: host)
+    /// Checks `token` with `GET /user`, saves it in the Keychain, then adds the profile's account (host, base path and
+    /// login).
+    private func finishConnect(
+        _ id: UUID, kind: HostingKind = .github, host: String, basePath: String? = nil, token: String
+    ) async throws {
+        let login = try await Self.login(token: token, kind: kind, host: host, basePath: basePath)
         try Task.checkCancellation()
-        try await HostingTokens.save(token, profileID: id, host: host)
-        library.setAccount(HostingAccount(kind: .github, host: host, login: login), of: id)
+        try await HostingTokens.save(token, profileID: id, kind: kind, host: host)
+        library.setAccount(HostingAccount(kind: kind, host: host, basePath: basePath, login: login), of: id)
         activity = .idle
         connectTask = nil
         closeAdd()
     }
 
-    private func fail(_ error: Error) {
+    private func fail(_ error: Error, kind: HostingKind = .github) {
         // As the header says, a token stays in the page's state no longer than its check, a failed one included.
         pastedToken = ""
         if error is CancellationError || Task.isCancelled { return }
-        activity = .failed(Self.message(for: error))
+        activity = .failed(Self.message(for: error, kind: kind))
         connectTask = nil
     }
 
     // MARK: Off the main thread
 
     @concurrent
-    private nonisolated static func login(token: String, host: String) async throws -> String {
-        try await GitHubClient(host: host, token: token).currentUser().login
+    private nonisolated static func login(
+        token: String, kind: HostingKind, host: String, basePath: String?
+    ) async throws -> String {
+        switch kind {
+        case .github:
+            return try await GitHubClient(host: host, token: token).currentUser().login
+        case .gitlab:
+            // GitHubClient checks this itself; GitLabClient takes a provider, so the pasted text is checked here.
+            guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
+            return try await GitLabClient(host: host, basePath: basePath) { _ in token }.currentUser().login
+        }
     }
 
     enum CLIError: Error, CustomStringConvertible {
@@ -733,8 +810,11 @@ struct IntegrationsSettings: View {
         return token
     }
 
-    private static func message(for error: Error) -> String {
-        switch error {
+    private static func message(for error: Error, kind: HostingKind) -> String {
+        if kind == .gitlab, let error = error as? HostingError, let message = gitLabMessage(for: error) {
+            return message
+        }
+        return switch error {
         case HostingError.unauthorized: "GitHub refused the token: it is wrong, expired or revoked."
         case HostingError.invalidToken: "That is not a token: it has spaces or other characters a token never has."
         case GitError.timeout: "gh did not answer within a minute."
@@ -743,6 +823,23 @@ struct IntegrationsSettings: View {
         case let error as CLIError: error.description
         case let error as KeychainError: "The token could not be saved: \(error)"
         default: error.localizedDescription
+        }
+    }
+
+    /// GitLab's wording of the errors a token check can get (`HostingError`'s own copy names GitHub); nil for the
+    /// others. A 403 shows the server's text: a group or instance that requires fine-grained tokens says so there.
+    private static func gitLabMessage(for error: HostingError) -> String? {
+        switch error {
+        case .unauthorized: "GitLab refused the token: it is wrong, expired or revoked."
+        case .forbidden(let message):
+            "GitLab refused the token: " + (message.isEmpty ? "access denied (403)." : message)
+        case .notFound: "GitLab's API was not found there: check the host and the base path."
+        case .rateLimited, .secondaryRateLimited: "GitLab asks to slow down: try again in a minute."
+        case .http(let status, let message): "GitLab answered \(status)" + (message.isEmpty ? "." : ": \(message)")
+        case .invalidResponse(let detail): "Unexpected answer from GitLab: \(detail)"
+        case .transport(let detail): "Could not reach GitLab: \(detail)"
+        case .invalidHost(let host): "Not a valid GitLab host or base path: \(host)"
+        default: nil
         }
     }
 
@@ -801,16 +898,44 @@ struct IntegrationsSettings: View {
     #endif
 }
 
+extension HostingKind {
+    /// The host's product name: "GitHub" or "GitLab".
+    var name: String {
+        switch self {
+        case .github: "GitHub"
+        case .gitlab: "GitLab"
+        }
+    }
+}
+
 extension HostingAccount {
-    /// The product name shown for the account: "GitHub" on github.com, "GitHub Enterprise Server" on any other host.
-    var providerName: String {
-        host.lowercased() == "github.com" ? "GitHub" : "GitHub Enterprise Server"
+    /// Whether the account is on the kind's public site (github.com, gitlab.com) rather than a host of its own.
+    private var isPublicSite: Bool {
+        switch kind {
+        case .github: host.lowercased() == "github.com"
+        case .gitlab: host.lowercased() == "gitlab.com"
+        }
     }
 
-    /// "GitHub · login" on github.com, "GitHub Enterprise Server · login @ host" on any other host.
+    /// The product name shown for the account: "GitHub" on github.com, "GitHub Enterprise Server" on any other host;
+    /// "GitLab" on gitlab.com, "GitLab Self-Managed" on any other host.
+    var providerName: String {
+        switch kind {
+        case .github: isPublicSite ? "GitHub" : "GitHub Enterprise Server"
+        case .gitlab: isPublicSite ? "GitLab" : "GitLab Self-Managed"
+        }
+    }
+
+    /// The host, with the base path when there is one (`example.com/gitlab`).
+    var address: String {
+        basePath.map { $0.isEmpty ? host : "\(host)/\($0)" } ?? host
+    }
+
+    /// "GitHub · login" on github.com (GitLab on gitlab.com), "<provider> · login @ host[/base path]" on any other
+    /// host.
     var accountTitle: String {
-        host.lowercased() == "github.com"
+        isPublicSite
             ? "\(providerName) · \(login)"
-            : "\(providerName) · \(login) @ \(host)"
+            : "\(providerName) · \(login) @ \(address)"
     }
 }

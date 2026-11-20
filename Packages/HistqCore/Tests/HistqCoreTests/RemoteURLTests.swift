@@ -100,6 +100,26 @@ struct RemoteURLTests {
         #expect(GitLabClient.repository(fromRemoteURL: url, basePath: basePath) == expected)
     }
 
+    @Test("an account's kind resolves its remotes: GitLab subgroups and base paths, GitHub's two segments as before",
+          arguments: [
+        (HostingKind.gitlab, "https://gitlab.com/group/sub/proj.git", nil,
+         HostedRepository(host: "gitlab.com", path: ["group", "sub", "proj"])),
+        (.gitlab, "https://example.com/gitlab/group/sub/proj.git", "gitlab",
+         HostedRepository(host: "example.com", path: ["group", "sub", "proj"])),
+        (.gitlab, "git@example.com:group/sub/proj.git", "gitlab",
+         HostedRepository(host: "example.com", path: ["group", "sub", "proj"])),
+        (.gitlab, "https://example.com/group/proj.git", "gitlab", nil),
+        (.github, "https://github.com/octo/hello.git", nil,
+         HostedRepository(host: "github.com", owner: "octo", name: "hello")),
+        (.github, "git@ghe.example.com:Team/app.git", "ignored",
+         HostedRepository(host: "ghe.example.com", owner: "Team", name: "app")),
+        (.github, "https://gitlab.com/group/sub/proj.git", nil, nil),
+    ] as [(HostingKind, String, String?, HostedRepository?)])
+    func kindRepository(kind: HostingKind, url: String, basePath: String?, expected: HostedRepository?) {
+        #expect(kind.repository(fromRemoteURL: url, basePath: basePath) == expected)
+        if kind == .github { #expect(expected == GitHubClient.repository(fromRemoteURL: url)) }
+    }
+
     @Test("a repository's path splits into owner and name, and the owner/name init round-trips")
     func repositoryPath() {
         let repo = HostedRepository(host: "gitlab.com", path: ["group", "sub", "proj"])

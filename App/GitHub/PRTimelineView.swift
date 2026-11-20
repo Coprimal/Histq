@@ -223,7 +223,7 @@ struct PRTimelinePage: View {
     var threads: PRThreads?
     /// The timing log's word for the page (`pr 1 conversation html`, `issue 2 conversation html`).
     var kind = "pr"
-    let realAvatars: Bool
+    let avatars: HostAvatars
     @State private var slots: [HostedHTMLSlot] = []
     /// Each reply row's height with its margins, by slot id: its slot takes it, so a field grown to more lines pushes
     /// the rest of the page down instead of covering it.
@@ -268,7 +268,8 @@ struct PRTimelinePage: View {
     ) -> some View {
         if slot.id.hasPrefix("avatar-") {
             let user = timeline.avatars[slot.id]
-            GitHubUserAvatar(login: user?.login ?? "ghost", id: user?.id, size: slot.frame.width, real: realAvatars)
+            GitHubUserAvatar(login: user?.login ?? "ghost", id: user?.id, avatarURL: user?.avatarURL,
+                             size: slot.frame.width, avatars: avatars)
         } else if let thread = Self.thread(of: slot, "chevron-", in: threads) {
             chevron(thread, collapsed: PRTimeline.isCollapsed(thread, expanded: expanded))
         } else if let thread = Self.thread(of: slot, "reply-", in: threads),

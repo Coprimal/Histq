@@ -87,7 +87,9 @@ struct CreatePRView: View {
     private static let editorHeights: ClosedRange<CGFloat> = 48...96
 
     var body: some View {
-        ModalCard(title: "Create a pull request", subtitle: subtitle, systemImage: "lucide-git-pull-request-arrow", width: 540) {
+        let kind = session.github.kind
+        ModalCard(title: "Create a \(kind.pullRequestNoun.lowercased())", subtitle: subtitle,
+                  systemImage: "lucide-git-pull-request-arrow", width: 540) {
             // The sections scroll when the window is too short for them, so the buttons below always show: never
             // taller than their content (`FitHeight`), never taller than the card leaves them.
             FitHeight {
@@ -111,7 +113,7 @@ struct CreatePRView: View {
             } label: {
                 HStack(spacing: 6) {
                     if creating { ProgressView().controlSize(.mini) }
-                    Text(draft ? "Create Draft" : "Create Pull Request")
+                    Text(draft ? "Create Draft" : "Create \(kind.pullRequestNoun.capitalized)")
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
@@ -376,7 +378,8 @@ struct CreatePRView: View {
         guard generateUnavailable == nil, let remote = session.github.api?.remote else { return }
         let baseRef = "refs/remotes/\(remote)/\(base)"
         let templateRef = choices.defaultBranch.map { "refs/remotes/\(remote)/\($0)" } ?? baseRef
-        let job = AIJob.pullRequest(base: baseRef, head: "refs/remotes/\(remote)/\(head)", templateRef: templateRef)
+        let job = AIJob.pullRequest(base: baseRef, head: "refs/remotes/\(remote)/\(head)", templateRef: templateRef,
+                                    kind: session.github.kind)
         session.startAI(job) { answer in
             var lines = answer.split(separator: "\n", omittingEmptySubsequences: false).map {
                 $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
@@ -415,9 +418,9 @@ struct CreatePRView: View {
     {
         async let info = try? client.repositoryInfo(repository)
         async let me = try? client.currentUser()
-        async let collaborators = choice { try await client.collaborators(in: repository) }
-        async let assignable = choice { try await client.assignableUsers(in: repository) }
-        async let labels = choice { try await client.labels(in: repository).map(\.name) }
+        async let collaborators = choice(client.kind) { try await client.collaborators(in: repository) }
+        async let assignable = choice(client.kind) { try await client.assignableUsers(in: repository) }
+        async let labels = choice(client.kind) { try await client.labels(in: repository).map(\.name) }
         let (user, reviewers, assignees) = await (me, collaborators, assignable)
         let others: Loadable<[HostedUser]> = switch reviewers {
         case .loaded(let users): .loaded(users.filter { $0.login != user?.login })
@@ -439,15 +442,16 @@ struct CreatePRView: View {
     }
 
     /// A list, or why it is left out: a 403 or 404 means this token may not read it, which is not an error of the form.
-    private nonisolated static func choice<Item: Sendable>(_ body: () async throws -> [Item]) async
-        -> Loadable<[Item]>
+    private nonisolated static func choice<Item: Sendable>(
+        _ kind: HostingKind, _ body: () async throws -> [Item]
+    ) async -> Loadable<[Item]>
     {
         do {
             return .loaded(try await body())
         } catch HostingError.forbidden, HostingError.notFound {
             return .failed("Not available to this account.")
         } catch {
-            return .failed(PullRequestDetailModel.message(for: error))
+            return .failed(PullRequestDetailModel.message(for: error, kind: kind))
         }
     }
 
@@ -462,7 +466,7 @@ struct CreatePRView: View {
     private var submitHelp: String {
         if session.github.api == nil { return "No account is connected for this tab." }
         if head == base { return "The head and the base are the same branch." }
-        if trimmedTitle.isEmpty { return "A pull request needs a title." }
+        if trimmedTitle.isEmpty { return "A \(session.github.kind.pullRequestNoun.lowercased()) needs a title." }
         return ""
     }
 
@@ -492,13 +496,14 @@ struct CreatePRView: View {
             } ?? "failed"))
             switch result {
             case .failure(let failure):
-                error = "GitHub did not create it: \(PullRequestDetailModel.message(for: failure))"
+                let kind = api.client.kind
+                error = "\(kind.name) did not create it: \(PullRequestDetailModel.message(for: failure, kind: kind))"
             case .success(let created):
                 if session.pullRequestForm?.id == formID { session.pullRequestForm = nil }
                 session.github.refreshNow()
                 if !created.problems.isEmpty {
-                    session.postToast(.warning("Created pull request #\(created.number)",
-                                               detail: created.problems.joined(separator: "; ")))
+                    let reference = session.github.kind.reference(.pullRequest(created.number))
+                    session.postToast(.warning("Created \(reference)", detail: created.problems.joined(separator: "; ")))
                 }
             }
         }
@@ -529,7 +534,7 @@ struct CreatePRView: View {
         var problems: [String] = []
         func followUp(_ what: String, _ body: () async throws -> Void) async {
             do { try await body() } catch {
-                problems.append("\(what): \(PullRequestDetailModel.message(for: error))")
+                problems.append("\(what): \(PullRequestDetailModel.message(for: error, kind: client.kind))")
             }
         }
         if !extras.reviewers.isEmpty {

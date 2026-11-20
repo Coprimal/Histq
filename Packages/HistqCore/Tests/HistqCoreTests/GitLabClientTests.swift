@@ -595,6 +595,41 @@ struct GitLabClientTests {
         #expect(stub.requests.count == 1)
     }
 
+    @Test("a reply without a discussion id goes to the discussion of its root note, once the client mapped the threads")
+    func replyFindsDiscussionOfRoot() async throws {
+        let discussion = "6a9c1750b37d513a43987b574953fceb50b03ce7"
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            if request.httpMethod == "GET", path == Self.mrPath + "/5/discussions" {
+                return .init(body: """
+                    [{"id": "\(discussion)", "notes": [{"id": 10, "type": "DiffNote", "body": "x", "resolvable": false,
+                      "position": {"new_path": "a.swift", "old_path": "a.swift", "new_line": 1}}]}]
+                    """)
+            }
+            if request.httpMethod == "POST" {
+                return .init(
+                    status: 201, body: #"{"id": 77, "type": "DiffNote", "body": "ok", "author": \#(Self.user(7, "me"))}"#)
+            }
+            return .init(status: 404, body: "{}")
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        await #expect(throws: HostingError.self) {
+            try await client.reply(to: HostedThreadRef(rootCommentID: 10), on: 5, in: Self.writeRepo, body: "ok")
+        }
+        #expect(stub.requests.isEmpty, "an unknown thread is refused unsent")
+
+        _ = try await client.reviewComments(of: 5, in: Self.writeRepo)
+        let reply = try await client.reply(
+            to: HostedThreadRef(rootCommentID: 10), on: 5, in: Self.writeRepo, body: "ok")
+
+        #expect(reply.id == 77 && reply.inReplyToID == 10)
+        let post = try #require(stub.requests.first { $0.httpMethod == "POST" })
+        #expect(post.url?.path(percentEncoded: true) == Self.mrPath + "/5/discussions/\(discussion)/notes")
+        await #expect(throws: HostingError.self) {
+            try await client.reply(to: HostedThreadRef(rootCommentID: 10), on: 6, in: Self.writeRepo, body: "ok")
+        }
+    }
+
     @Test("resolving PUTs the discussion with resolved=, for a thread the client mapped")
     func resolveThread() async throws {
         let discussion = "87805b7c09016a7058e91bdbe7b29d1f284a39e6"

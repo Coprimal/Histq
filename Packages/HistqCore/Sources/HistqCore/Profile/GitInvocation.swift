@@ -204,13 +204,15 @@ public enum GitInvocation {
     /// The credentials git may get, in order, each with its host as `HostingHTTP.validatedHost` gives it (lowercase,
     /// with its port if it has one); the position in this list is the `<n>` of its variables. A credential is dropped
     /// when its host could widen or bend the config key (`*`, `/`, `@`, whitespace), its token could break the
-    /// helper's output lines (`HostingHTTP.isUsableToken`) or its username is not `GitCredential.isSafeUsername`; a
-    /// second credential for a host already listed is dropped too.
+    /// helper's output lines (`HostingHTTP.isUsableToken`) or its username, or the one the helper answers
+    /// (`gitUsername`), is not `GitCredential.isSafeUsername`; a second credential for a host already listed is
+    /// dropped too.
     static func usableCredentials(_ credentials: [GitCredential]) -> [GitCredential] {
         var usable: [GitCredential] = []
         for var credential in credentials {
             guard let host = HostingHTTP.validatedHost(credential.host), HostingHTTP.isUsableToken(credential.token),
-                  GitCredential.isSafeUsername(credential.username), !usable.contains(where: { $0.host == host })
+                  GitCredential.isSafeUsername(credential.username), GitCredential.isSafeUsername(credential.gitUsername),
+                  !usable.contains(where: { $0.host == host })
             else { continue }
             credential.host = host
             usable.append(credential)

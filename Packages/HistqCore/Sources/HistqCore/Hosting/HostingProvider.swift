@@ -51,6 +51,42 @@ public enum HostedMergeMethod: String, Sendable {
 public enum HostingKind: String, Codable, Sendable, Hashable {
     case github
     case gitlab
+
+    /// The repository a remote URL names on this kind's host: GitHub's `owner/repo` (`basePath` unused), GitLab's
+    /// whole path after the instance's `basePath`, subgroups included. nil when the URL names none.
+    public func repository(fromRemoteURL url: String, basePath: String?) -> HostedRepository? {
+        switch self {
+        case .github: GitHubClient.repository(fromRemoteURL: url)
+        case .gitlab: GitLabClient.repository(fromRemoteURL: url, basePath: basePath)
+        }
+    }
+
+    /// What the host calls a pull request: "Pull request" on GitHub, "Merge request" on GitLab.
+    public var pullRequestNoun: String {
+        switch self {
+        case .github: "Pull request"
+        case .gitlab: "Merge request"
+        }
+    }
+
+    /// `pullRequestNoun`'s plural: "Pull requests", "Merge requests".
+    public var pullRequestsNoun: String { pullRequestNoun + "s" }
+
+    /// The short form: "PR" on GitHub, "MR" on GitLab.
+    public var shortNoun: String {
+        switch self {
+        case .github: "PR"
+        case .gitlab: "MR"
+        }
+    }
+
+    /// What goes before a pull request's number: `#12` on GitHub, `!12` on GitLab. Issues keep `#` on both.
+    public var numberPrefix: String {
+        switch self {
+        case .github: "#"
+        case .gitlab: "!"
+        }
+    }
 }
 
 /// The id rule of `HostedReview` for values a host gives no stable numeric id: a 63-bit FNV-1a hash of the kind and

@@ -124,10 +124,11 @@ final class IssueDetailModel {
                 }
                 #endif
             case .failure(let error):
+                let message = PullRequestDetailModel.message(for: error, kind: api.client.kind)
                 if quiet, state.value != nil {
-                    actionError = "Could not reload the issue: \(PullRequestDetailModel.message(for: error))"
+                    actionError = "Could not reload the issue: \(message)"
                 } else {
-                    state = .failed(PullRequestDetailModel.message(for: error))
+                    state = .failed(message)
                 }
             }
         }
@@ -162,7 +163,7 @@ final class IssueDetailModel {
             UITiming.content("issue \(number) action \(action.timingName) \(error == nil ? "ok" : "failed")")
             let showing = isShowing(number)
             if let error {
-                let message = PullRequestDetailModel.message(for: error)
+                let message = PullRequestDetailModel.message(for: error, kind: api.client.kind)
                 if showing {
                     actionError = "\(action.failureTitle): \(message)"
                 } else {
@@ -308,8 +309,8 @@ private struct IssueHeaderCard: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(RowIconButtonStyle())
-                        .help("Open on GitHub")
-                        .accessibilityLabel("Open on GitHub")
+                        .help("Open on \(session.github.kind.name)")
+                        .accessibilityLabel("Open on \(session.github.kind.name)")
                     } else {
                         SkeletonLine(width: 56, height: 20)
                     }
@@ -397,7 +398,7 @@ private struct IssueContent: View {
                 // The page fits its content and never scrolls itself: a wheel over it scrolls this column.
                 PRTimelinePage(session: session, number: detail.issue.number, timeline: detail.timeline,
                                loadID: detail.loadID, kind: "issue",
-                               realAvatars: GitHubUserAvatar.allowsReal(session.github))
+                               avatars: .of(session.github))
                     .frame(maxWidth: .infinity)
             }
             IssueCommentCard(session: session)
@@ -490,10 +491,10 @@ private struct IssueSideColumn: View {
                         PRSideEmpty(text: "No one assigned")
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
-                            let realAvatars = GitHubUserAvatar.allowsReal(session.github)
+                            let avatars = HostAvatars.of(session.github)
                             ForEach(assignees, id: \.id) {
-                                PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
-                                            showsState: false)
+                                PRPersonRow(login: $0.login, userID: $0.id, avatarURL: $0.avatarURL, avatars: avatars,
+                                            state: nil, showsState: false)
                             }
                         }
                     }
@@ -516,9 +517,11 @@ private struct IssueSideColumn: View {
 
     private func confirmSetOpen(_ open: Bool) {
         let number = detail.issue.number
+        let host = session.github.kind.name
         model.presentModal(.confirmation(ModalConfirmation(
             title: open ? "Reopen #\(number)?" : "Close #\(number)?",
-            message: open ? "The issue opens again on GitHub." : "The issue closes on GitHub; it can be reopened later.",
+            message: open
+                ? "The issue opens again on \(host)." : "The issue closes on \(host); it can be reopened later.",
             button: open ? "Reopen" : "Close Issue", isDestructive: !open,
             perform: { [session] in session.issueDetail.perform(.setOpen(open), on: number, github: session.github) })))
     }

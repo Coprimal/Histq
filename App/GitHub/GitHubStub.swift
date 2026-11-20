@@ -12,6 +12,11 @@
 // with 1 comment, the repository's labels, assignable users and collaborators (`stub`, `reviewer`), default branch
 // `main`, and the Welcome clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has GitHub's shapes (search
 // results are issue-shaped), so the stub exercises the same decoding as the real API.
+//
+// DEBUG `-HistqHostingStubKind gitlab` (with `-HistqGitHubStub YES`): the PRs tab and the details talk to `GitLabStub`
+// instead, the same data in GitLab's v4 shapes through `GitLabClient` (the repository `stub/stub` on gitlab.com), on
+// the same session (`GitHubStubProtocol` answers gitlab.com from `GitLabStub`). The Welcome clone picker stays
+// GitHub's.
 import Foundation
 import HistqCore
 
@@ -35,6 +40,14 @@ enum GitHubStub {
 
     static func client() -> GitHubClient? {
         try? GitHubClient(host: repository.host, token: token, session: session)
+    }
+
+    /// DEBUG `-HistqHostingStubKind gitlab`: the PRs tab's stub serves GitLab's JSON (`GitLabStub`), not GitHub's.
+    static let kind: HostingKind = AppState.launchFlag("-HistqHostingStubKind") == "gitlab" ? .gitlab : .github
+
+    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's with `-HistqHostingStubKind gitlab`.
+    static func hosting() -> (client: (any HostingProvider)?, repository: HostedRepository) {
+        kind == .gitlab ? (GitLabStub.client(), GitLabStub.repository) : (client(), repository)
     }
 
     /// The status and JSON body for a request of the stub session (`body`: the request's).
@@ -338,6 +351,235 @@ enum GitHubStub {
     }
 }
 
+/// `GitHubStub`'s data in GitLab's REST v4 shapes, for `GitLabClient` (`-HistqHostingStubKind gitlab`): user `stub`,
+/// open merge request !1 "Add feature" (`feature` into `main` of the same project, 2 commits, 1 changed file, a comment
+/// and a system note, approved by `reviewer`, a head pipeline and 1 commit status) with two diff discussions on
+/// `feature.txt` (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10, resolved), its `detailed_merge_status`
+/// as `-HistqPRMergeable true|false|null` says (`mergeable`, `conflict`, `checking`), open issue #2 assigned to `stub`
+/// with 1 note, the project's labels and users. The writes answer as GitLab does and change nothing: a note, a reply
+/// to A or B, resolve/unresolve of A or B, approve, a merge (409 unless pinned to the head), close/reopen, and a
+/// create that always makes !3. Anything else is 404.
+enum GitLabStub {
+    static let repository = HostedRepository(host: "gitlab.com", owner: "stub", name: "stub")
+
+    static func client() -> GitLabClient? {
+        try? GitLabClient(host: repository.host, session: GitHubStub.session) { _ in GitHubStub.token }
+    }
+
+    /// The status and JSON body for a request of the stub session to gitlab.com (`body`: the request's).
+    static func reply(method: String, url: URL, body: Data?) -> (status: Int, body: String) {
+        let project = "/api/v4/projects/stub%2Fstub"
+        let mr1 = "\(project)/merge_requests/1", mr3 = "\(project)/merge_requests/3"
+        let query = url.query() ?? ""
+        let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let path = url.path(percentEncoded: true)
+        switch (method, path) {
+        case ("PUT", "\(mr1)/merge"):
+            guard json["sha"] as? String == GitHubStub.headSHA else {
+                return (409, #"{"message": "SHA does not match HEAD of source branch"}"#)
+            }
+            return (200, mergeRequest(1, full: true))
+        case ("POST", "\(mr1)/approve"):
+            guard json["sha"].map({ $0 as? String == GitHubStub.headSHA }) ?? true else {
+                return (409, #"{"message": "SHA does not match HEAD of source branch"}"#)
+            }
+            return (201, #"{"approved": true, "approved_by": [\#(approver(reviewer)), \#(approver(user))]}"#)
+        case ("POST", "\(mr1)/notes"): return (201, note(803, by: user, body: "Thanks.", at: "17:00"))
+        case ("PUT", mr1): return (200, mergeRequest(1, full: true))
+        case ("POST", "\(project)/issues/2/notes"): return (201, note(804, by: user, body: "Thanks.", at: "17:00"))
+        case ("PUT", "\(project)/issues/2"): return (200, issue)
+        // A create always makes !3, whatever the form sent; its follow-ups (reviewers, labels, assignees) succeed.
+        case ("POST", "\(project)/merge_requests"): return (201, mergeRequest(3, full: true))
+        case ("PUT", mr3): return (200, mergeRequest(3, full: true))
+        case let ("POST", path) where path.hasPrefix("\(mr1)/discussions/") && path.hasSuffix("/notes"):
+            let id = path.split(separator: "/").dropLast().last.map(String.init)
+            guard let id, [threadA, threadB].contains(id) else { return notFound }
+            return (201, diffNote(814, by: user, body: "Thanks, done.", onList: id == threadA, resolved: id == threadB,
+                                  at: "17:00"))
+        case let ("PUT", path) where path.hasPrefix("\(mr1)/discussions/"):
+            let id = String(path.dropFirst("\(mr1)/discussions/".count))
+            guard [threadA, threadB].contains(id) else { return notFound }
+            return (200, discussion(id, resolved: query.contains("resolved=true")))
+        case ("GET", _): break
+        default: return notFound
+        }
+        switch path {
+        case "/api/v4/user": return (200, user)
+        case project:
+            return (200, #"{"id": 3001, "name": "stub", "path_with_namespace": "stub/stub", "default_branch": "main", "#
+                + #""visibility": "private", "http_url_to_repo": "https://gitlab.com/stub/stub.git"}"#)
+        case "\(project)/labels": return (200, "[\(labels)]")
+        case "\(project)/users": return (200, "[\(user), \(reviewer)]")
+        // The open list and My MRs (`author_id`) have !1; no merge request asks `stub` for a review.
+        case "\(project)/merge_requests":
+            let open = query.contains("state=opened") && !query.contains("reviewer_id=")
+            return (200, open ? "[\(mergeRequest(1, full: false))]" : "[]")
+        case mr1: return (200, mergeRequest(1, full: true))
+        case "\(mr1)/notes":
+            return (200, "[\(note(801, by: reviewer, body: "Nice work.", at: "14:00")), \(systemNote)]")
+        case "\(mr1)/discussions":
+            return (200, "[\(discussion(threadA, resolved: false)), \(discussion(threadB, resolved: true)), "
+                + #"{"id": "0000000000000000000000000000000000000801", "individual_note": true, "notes": ["#
+                + note(801, by: reviewer, body: "Nice work.", at: "14:00") + "]}]")
+        case "\(mr1)/approvals": return (200, #"{"approved": true, "approved_by": [\#(approver(reviewer))]}"#)
+        case "\(mr1)/reviewers":
+            return (200, #"[{"user": \#(reviewer), "state": "approved", "created_at": "2026-11-10T09:00:00Z"}]"#)
+        // GitLab lists a merge request's commits newest first.
+        case "\(mr1)/commits":
+            return (200, "[\(commit(GitHubStub.headSHA, "Finish the feature", "2026-11-12T16:20:00Z")), "
+                + "\(commit("3333333333333333333333333333333333333333", "Start the feature", "2026-11-10T08:50:00Z"))]")
+        case "\(mr1)/diffs": return (200, diffs)
+        case mr3: return (200, mergeRequest(3, full: true))
+        case "\(mr3)/notes", "\(mr3)/discussions", "\(mr3)/diffs", "\(mr3)/reviewers": return (200, "[]")
+        case "\(mr3)/approvals": return (200, #"{"approved": false, "approved_by": []}"#)
+        case "\(mr3)/commits":
+            return (200, "[\(commit(createdSHA, "Polish feature (pushed)", "2026-11-12T17:00:00Z"))]")
+        case "\(project)/repository/commits/\(GitHubStub.headSHA)/statuses":
+            return (200, """
+                [{"id": 901, "name": "build", "status": "success", "allow_failure": false,
+                  "target_url": "https://gitlab.com/stub/stub/-/jobs/901",
+                  "started_at": "2026-11-12T16:31:00Z", "finished_at": "2026-11-12T16:35:00Z"}]
+                """)
+        case let path where path.hasPrefix("\(project)/repository/commits/") && path.hasSuffix("/statuses"):
+            return (200, "[]")
+        case "\(project)/issues": return (200, "[\(issue)]")
+        case "\(project)/issues/2": return (200, issue)
+        case "\(project)/issues/2/notes":
+            return (200, "[\(note(802, by: user, body: "I can reproduce it on 0.1.", at: "11:00"))]")
+        default: return notFound
+        }
+    }
+
+    private static let notFound = (404, #"{"message": "404 Not Found"}"#)
+
+    private static let user = """
+        {"id": 1001, "username": "stub", "name": "Stub User", "web_url": "https://gitlab.com/stub",
+         "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/1001/avatar.png"}
+        """
+
+    private static let reviewer = """
+        {"id": 1002, "username": "reviewer", "name": "Reviewer", "web_url": "https://gitlab.com/reviewer",
+         "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/1002/avatar.png"}
+        """
+
+    private static func approver(_ user: String) -> String {
+        #"{"user": \#(user), "approved_at": "2026-11-12T15:00:00Z"}"#
+    }
+
+    /// `-HistqPRMergeable` (default true) as `detailed_merge_status`: `mergeable`, `conflict`, or `checking`.
+    private static let mergeStatus = switch AppState.launchFlag("-HistqPRMergeable") {
+    case "false": "conflict"
+    case "null": "checking"
+    default: "mergeable"
+    }
+
+    /// !3's head commit.
+    private static let createdSHA = "5555555555555555555555555555555555555555"
+
+    /// !1, or !3 as a create makes it; `full` is the single merge request (`render_html`, label names, the head
+    /// pipeline), else a list's row (labels with details).
+    private static func mergeRequest(_ iid: Int, full: Bool) -> String {
+        let created = iid == 3
+        let title = created ? "Polish feature (pushed)" : "Add feature"
+        let body = created ? "Polishes the feature." : "Adds the feature branch's work."
+        let head = created ? createdSHA : GitHubStub.headSHA
+        let labels = created ? "" : full ? #""enhancement""#
+            : ##"{"name": "enhancement", "color": "#a2eeef", "description": "New feature"}"##
+        let pipeline = !full || created ? "" : """
+            , "head_pipeline": {"id": 9001, "status": "success", "ref": "refs/merge-requests/1/head", "sha": "\(head)",
+             "web_url": "https://gitlab.com/stub/stub/-/pipelines/9001", "created_at": "2026-11-12T16:30:00Z",
+             "started_at": "2026-11-12T16:31:00Z", "finished_at": "2026-11-12T16:36:00Z"}
+            """
+        return """
+            {"id": \(500 + iid), "iid": \(iid), "title": "\(title)", "description": "\(body)",
+             "description_html": "<p>\(body)</p>", "state": "opened", "draft": false, "author": \(user),
+             "assignees": [\(user)], "reviewers": [\(reviewer)], "labels": [\(labels)],
+             "web_url": "https://gitlab.com/stub/stub/-/merge_requests/\(iid)", "source_branch": "feature",
+             "target_branch": "main", "source_project_id": 3001, "target_project_id": 3001, "sha": "\(head)",
+             "diff_refs": {"base_sha": "\(GitHubStub.baseSHA)", "head_sha": "\(head)",
+                           "start_sha": "\(GitHubStub.baseSHA)"},
+             "created_at": "2026-11-10T09:00:00Z", "updated_at": "2026-11-12T16:30:00Z",
+             "detailed_merge_status": "\(created ? "mergeable" : mergeStatus)", "changes_count": "1",
+             "user_notes_count": 4\(pipeline)}
+            """
+    }
+
+    private static let labels = """
+        {"id": 1, "name": "enhancement", "color": "#a2eeef", "description": "New feature"},
+        {"id": 2, "name": "bug", "color": "#d73a4a", "description": "Something is not working"},
+        {"id": 3, "name": "documentation", "color": "#0075ca"}
+        """
+
+    private static let issue = """
+        {"id": 602, "iid": 2, "title": "Crash when opening an empty repository", "state": "opened",
+         "description": "Steps: open an empty folder.", "author": \(reviewer), "assignees": [\(user)],
+         "labels": [{"name": "bug", "color": "#d73a4a"}], "web_url": "https://gitlab.com/stub/stub/-/issues/2",
+         "user_notes_count": 1, "created_at": "2026-11-11T08:00:00Z", "updated_at": "2026-11-12T10:00:00Z"}
+        """
+
+    /// A plain note (a comment) at `time` on 2026-11-12.
+    private static func note(_ id: Int, by author: String, body: String, at time: String) -> String {
+        """
+        {"id": \(id), "type": null, "body": "\(body)", "author": \(author), "created_at": "2026-11-12T\(time):00Z",
+         "system": false, "resolvable": false}
+        """
+    }
+
+    /// GitLab's own note of a push: never a comment.
+    private static let systemNote = """
+        {"id": 850, "type": null, "body": "added 1 commit", "author": \(user), "created_at": "2026-11-12T16:20:00Z",
+         "system": true, "resolvable": false}
+        """
+
+    /// The ids of diff discussions A and B.
+    private static let threadA = "a811a811a811a811a811a811a811a811a811a811"
+    private static let threadB = "b813b813b813b813b813b813b813b813b813b813"
+
+    /// Discussion A (root 811 by `reviewer` on lines 4-6 with `stub`'s reply 812) or B (root 813 on line 10), every
+    /// note `resolved` as given.
+    private static func discussion(_ id: String, resolved: Bool) -> String {
+        let notes = id == threadA
+            ? [diffNote(811, by: reviewer, body: "Could the three steps be one sentence?", onList: true,
+                        resolved: resolved, at: "14:55"),
+               diffNote(812, by: user, body: "I kept the list: it reads better.", onList: true, resolved: resolved,
+                        at: "16:00")]
+            : [diffNote(813, by: reviewer, body: "Show the output flag in the usage too.", onList: false,
+                        resolved: resolved, at: "14:57")]
+        return #"{"id": "\#(id)", "individual_note": false, "notes": [\#(notes.joined(separator: ", "))]}"#
+    }
+
+    /// A note on `feature.txt` at the head: new lines 4-6 (the numbered list) or new line 10 (the usage line).
+    private static func diffNote(
+        _ id: Int, by author: String, body: String, onList: Bool, resolved: Bool, at time: String
+    ) -> String {
+        let range = !onList ? "" : #", "line_range": {"start": {"type": "new", "old_line": null, "new_line": 4}, "#
+            + #""end": {"type": "new", "old_line": null, "new_line": 6}}"#
+        return """
+            {"id": \(id), "type": "DiffNote", "body": "\(body)", "author": \(author),
+             "created_at": "2026-11-12T\(time):00Z", "system": false, "resolvable": true, "resolved": \(resolved),
+             "position": {"base_sha": "\(GitHubStub.baseSHA)", "start_sha": "\(GitHubStub.baseSHA)",
+              "head_sha": "\(GitHubStub.headSHA)", "old_path": "feature.txt", "new_path": "feature.txt",
+              "position_type": "text", "old_line": null, "new_line": \(onList ? 6 : 10)\(range)}}
+            """
+    }
+
+    private static func commit(_ sha: String, _ title: String, _ date: String) -> String {
+        """
+        {"id": "\(sha)", "short_id": "\(sha.prefix(8))", "title": "\(title)", "message": "\(title)",
+         "author_name": "Stub User", "author_email": "stub@histq.invalid", "authored_date": "\(date)",
+         "web_url": "https://gitlab.com/stub/stub/-/commit/\(sha)"}
+        """
+    }
+
+    /// `feature.txt`'s diff, the same patch as `GitHubStub`'s `files`.
+    private static let diffs = """
+        [{"old_path": "feature.txt", "new_path": "feature.txt", "a_mode": "100644", "b_mode": "100644",
+          "new_file": false, "renamed_file": false, "deleted_file": false, "generated_file": false,
+          "collapsed": false, "too_large": false,
+          "diff": "@@ -1,5 +1,14 @@\\n # Feature\\n-TODO: write the feature\\n-old line\\n-another old line\\n+The feature does three things:\\n+\\n+1. reads the input\\n+2. checks it\\n+3. writes the output\\n+\\n+Usage:\\n+\\n+    feature --input file\\n+\\n+See the docs for details.\\n+Done.\\n End."}]
+        """
+}
+
 /// Answers every request of `GitHubStub.session` itself: never passes one on to the network.
 final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -364,9 +606,12 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
     }()
 
     override func startLoading() {
-        let reply = request.url.map {
-            GitHubStub.reply(method: request.httpMethod ?? "GET", url: $0,
-                             body: request.httpBody ?? request.httpBodyStream.map(Self.read))
+        let reply = request.url.map { url in
+            let method = request.httpMethod ?? "GET"
+            let body = request.httpBody ?? request.httpBodyStream.map(Self.read)
+            return url.host() == GitLabStub.repository.host
+                ? GitLabStub.reply(method: method, url: url, body: body)
+                : GitHubStub.reply(method: method, url: url, body: body)
         }
         guard let url = request.url, let reply,
               let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1",

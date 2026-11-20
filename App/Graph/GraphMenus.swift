@@ -741,12 +741,25 @@ enum RepoMenus {
     }
 
     /// The web page of `target` (a branch, a commit) of the repository `remote`'s URL names: the connected provider's
-    /// page when `remote` is its remote, else in GitHub's URL layout; nil when the URL names no host/owner/repo.
+    /// page when `remote` is its remote, else in GitLab's URL layout when the profile has a GitLab account on the
+    /// remote's host, else in GitHub's; nil when the URL names no host/owner/repo.
     private static func webLink(remote: String, _ target: HostedWebTarget, _ session: RepoSession) -> String? {
         if let api = session.github.api, api.remote == remote {
             return api.client.webURL(target, in: api.repository)?.absoluteString
         }
-        guard let url = session.remotes.first(where: { $0.name == remote })?.url, let repo = RemoteURL(url),
+        guard let url = session.remotes.first(where: { $0.name == remote })?.url else { return nil }
+        if let host = RemoteURL(url)?.host, let account = session.profile?.account(forHost: host),
+           account.kind == .gitlab
+        {
+            // No request is made: the client only lays out the URL, so it gets no token.
+            guard let repo = account.kind.repository(fromRemoteURL: url, basePath: account.basePath),
+                  let client = try? GitLabClient(host: host, basePath: account.basePath, token: { _ in
+                      throw HostingError.unauthorized
+                  })
+            else { return nil }
+            return client.webURL(target, in: repo)?.absoluteString
+        }
+        guard let repo = RemoteURL(url),
               repo.segments.count == 2, isSafeSegment(repo.segments[0], extra: "-_"),
               isSafeSegment(repo.segments[1], extra: "-_.")
         else { return nil }

@@ -39,25 +39,29 @@ public enum HostingError: Error, Equatable, Sendable, CustomStringConvertible {
     /// The request did not complete (offline, timeout, TLS).
     case transport(String)
 
-    public var description: String {
+    public var description: String { description(host: "GitHub", pullRequest: "pull request") }
+
+    /// The description with `host` as the host's product name ("GitLab") and `pullRequest` as what it calls a pull
+    /// request ("merge request"): `description` is GitHub's.
+    public func description(host: String, pullRequest: String) -> String {
         switch self {
-        case .invalidHost(let host): "Not a valid GitHub host: \(host)"
-        case .invalidToken: "The GitHub token has characters a token cannot have."
-        case .wrongHost(let host): "The repository is on \(host), not on this account's host."
-        case .unauthorized: "GitHub refused the token (revoked or expired). Connect the account again."
-        case .forbidden(let message): "GitHub refused the request: \(message)"
-        case .notFound: "Not found on GitHub (or the account cannot see it)."
+        case .invalidHost(let name): "Not a valid \(host) host: \(name)"
+        case .invalidToken: "The \(host) token has characters a token cannot have."
+        case .wrongHost(let other): "The repository is on \(other), not on this account's host."
+        case .unauthorized: "\(host) refused the token (revoked or expired). Connect the account again."
+        case .forbidden(let message): "\(host) refused the request: \(message)"
+        case .notFound: "Not found on \(host) (or the account cannot see it)."
         case .rateLimited(let resetsAt):
-            if let resetsAt { "GitHub's rate limit is used up until \(resetsAt.formatted(date: .omitted, time: .shortened))." }
-            else { "GitHub's rate limit is used up." }
+            if let resetsAt { "\(host)'s rate limit is used up until \(resetsAt.formatted(date: .omitted, time: .shortened))." }
+            else { "\(host)'s rate limit is used up." }
         case .secondaryRateLimited(let seconds):
-            if let seconds { "GitHub asks to slow down; retry in \(seconds) s." } else { "GitHub asks to slow down." }
-        case .validationFailed(let message): "GitHub refused the request: \(message)"
-        case .headChanged: "The pull request's head changed: reload and review it again."
-        case .graphQL(let message): "GitHub refused the request: \(message)"
-        case .http(let status, let message): "GitHub answered \(status): \(message)"
-        case .invalidResponse(let detail): "Unexpected answer from GitHub: \(detail)"
-        case .transport(let detail): "Could not reach GitHub: \(detail)"
+            if let seconds { "\(host) asks to slow down; retry in \(seconds) s." } else { "\(host) asks to slow down." }
+        case .validationFailed(let message): "\(host) refused the request: \(message)"
+        case .headChanged: "The \(pullRequest)'s head changed: reload and review it again."
+        case .graphQL(let message): "\(host) refused the request: \(message)"
+        case .http(let status, let message): "\(host) answered \(status): \(message)"
+        case .invalidResponse(let detail): "Unexpected answer from \(host): \(detail)"
+        case .transport(let detail): "Could not reach \(host): \(detail)"
         }
     }
 }

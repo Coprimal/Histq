@@ -4,8 +4,7 @@
 // the actions, reviewers, assignees and labels), Commits, Files changed (the file list and the selected file's patch in
 // a read-only `DiffLineTable`, parsed from GitHub's `patch` with git's diff parser, so no local git is needed) and
 // Checks. The row click shows the header and skeleton cards in the same frame (`PlaceholderCard`); everything loads
-// off the main actor (`PullRequestDetailModel`): the Conversation's parts first, then commits, files and checks as each
-// arrives. The actions call GitHub through the tab's `HostingStore`
+// off the main actor in one go (`PullRequestDetailModel`). The actions call GitHub through the tab's `HostingStore`
 // client; Merge and Close/Reopen ask first; Checkout locally is a repo write (`RepoSession.Write.checkoutPullRequest`).
 import AppKit
 import HistqCore
@@ -51,6 +50,8 @@ struct PRReviewer: Identifiable, Sendable {
     let login: String
     /// The account's user id, for its avatar.
     let userID: Int?
+    /// The API's avatar URL of the account (`HostAvatars.gitlab` loads it).
+    let avatarURL: String?
     /// nil while the review is only requested.
     let state: String?
 
@@ -80,8 +81,7 @@ struct PRThreads: Sendable {
 }
 
 /// Everything the detail shows, read in one load. Commits, files, checks and threads may fail on their own (a token
-/// without the checks permission still reads the pull request): their tab or part then says why. Commits, files and
-/// checks are `.loading` until they fill in, after the Conversation's parts.
+/// without the checks permission still reads the pull request): their tab or part then says why.
 struct PullRequestDetail: Sendable {
     let loadID: Int
     /// Replaced alone by the model's re-poll while GitHub still computes whether the branch merges.
@@ -91,9 +91,9 @@ struct PullRequestDetail: Sendable {
     /// (`PRTimeline.page`).
     let timeline: PRTimelineHTML
     let reviewers: [PRReviewer]
-    var commits: Loadable<[HostedCommit]>
-    var files: Loadable<[PRFile]>
-    var checks: Loadable<[HostedCheckRun]>
+    let commits: Loadable<[HostedCommit]>
+    let files: Loadable<[PRFile]>
+    let checks: Loadable<[HostedCheckRun]>
     let threads: Loadable<PRThreads>
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
@@ -134,15 +134,15 @@ enum PullRequestAction: Equatable, Sendable {
         }
     }
 
-    /// The failure's title when another pull request shows by the time it returns: it names `number`.
-    func failureTitle(of number: Int) -> String {
+    /// The failure's title when another pull request shows by the time it returns: it names `number` (`#12`, `!12`).
+    func failureTitle(of number: String) -> String {
         switch self {
-        case .merge: "Merge of #\(number) failed"
-        case .review: "The review of #\(number) was not submitted"
-        case .comment: "The comment on #\(number) was not posted"
-        case .setOpen(let open): open ? "Reopen of #\(number) failed" : "Close of #\(number) failed"
-        case .reply: "The reply on #\(number) was not posted"
-        case .resolve(_, let resolved): resolved ? "Resolve on #\(number) failed" : "Unresolve on #\(number) failed"
+        case .merge: "Merge of \(number) failed"
+        case .review: "The review of \(number) was not submitted"
+        case .comment: "The comment on \(number) was not posted"
+        case .setOpen(let open): open ? "Reopen of \(number) failed" : "Close of \(number) failed"
+        case .reply: "The reply on \(number) was not posted"
+        case .resolve(_, let resolved): resolved ? "Resolve on \(number) failed" : "Unresolve on \(number) failed"
         }
     }
 
@@ -209,9 +209,7 @@ final class PullRequestDetailModel {
     }
 
     private(set) var number: Int?
-    private(set) var state: Loadable<PullRequestDetail> = .idle {
-        didSet { if let detail = state.value, let repository { remember(detail, of: repository) } }
-    }
+    private(set) var state: Loadable<PullRequestDetail> = .idle
     var tab: PRTab = .conversation
     /// The Files changed tab's file (its `filename`).
     var selectedFile: String?
@@ -234,17 +232,9 @@ final class PullRequestDetailModel {
     /// The shown pull request's running action.
     var running: PullRequestAction? { number.flatMap { busy[$0] } }
 
-    /// Shows an action in the tab's footer until the returned closure is called (`RepoSession.beginOperation`). Set by
-    /// the session.
-    @ObservationIgnored var beginOperation: @MainActor (String) -> @MainActor () -> Void = { _ in {} }
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadCount = 0
-    /// The repository of the load that is shown or on its way, for `cache`.
-    @ObservationIgnored private var repository: HostedRepository?
-    /// The last 8 loaded details, newest last, one per pull request, so a revisit shows at once while it loads
-    /// again. Memory only, for this session: third-party content, never written to disk.
-    @ObservationIgnored private var cache: [(repository: HostedRepository, detail: PullRequestDetail)] = []
 
     /// DEBUG `-HistqPRTab commits|files|checks`: the tab a pull request opens on (QA shots of each tab).
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
@@ -308,12 +298,7 @@ final class PullRequestDetailModel {
             actionError = nil
         }
         self.number = number
-        repository = github.api?.repository
-        if !quiet || state.value == nil {
-            // A detail loaded before in this session shows at once, until this load replaces it.
-            state = cache.last { $0.repository == repository && $0.detail.pull.number == number }
-                .map { .loaded($0.detail) } ?? .loading
-        }
+        if !quiet || state.value == nil { state = .loading }
         guard let api = github.api else {
             state = .failed("No account is connected for this tab: connect one in Settings › Integrations.")
             return
@@ -323,50 +308,36 @@ final class PullRequestDetailModel {
         let loadID = loadCount
         // The page is built with the threads the user expanded or collapsed by now.
         let expanded = threadExpanded
-        let rowSHA = github.row(for: .pullRequest(number))?.headSHA
-        let warmsUp = state.value == nil
         task = Task { [weak self] in
-            let (client, repository) = (api.client, api.repository)
-            await withTaskGroup(of: Part?.self) { [weak self] group in
-                // Commits, files and checks load beside the Conversation's parts and fill in as each arrives; the
-                // checks start with the row's head, asked again below only when the pull request's is another one.
-                group.addTask { await Self.fetchCommits(client, repository, number: number) }
-                group.addTask { await Self.fetchFiles(client, repository, number: number) }
-                if let rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: rowSHA) } }
-                async let fetched = Self.fetch(
-                    client, repository, number: number, loadID: loadID, expanded: expanded)
-                // A first visit's page takes a web view started meanwhile: the main actor is free while GitHub answers.
-                // It starts after the placeholder's frame, never in front of it.
-                if warmsUp {
-                    try? await Task.sleep(for: .milliseconds(20))
-                    if !Task.isCancelled { HostedHTMLView.warmUp() }
-                }
-                let result = await fetched
-                guard let self, generation == self.generation, !Task.isCancelled else {
-                    group.cancelAll()
-                    return
-                }
-                switch result {
-                case .success(var detail):
-                    let sha = detail.pull.head.sha
-                    if sha != rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: sha) } }
-                    // The parts shown for the same head stay until this load's arrive (a revisit, a reload after an
-                    // action), so their tabs do not go back to loading.
-                    if let shown = state.value, shown.pull.number == number, shown.pull.head.sha == sha {
-                        detail.commits = shown.commits
-                        detail.files = shown.files
-                        detail.checks = shown.checks
+            let result = await Self.fetch(
+                api.client, api.repository, number: number, loadID: loadID, expanded: expanded)
+            guard let self, generation == self.generation, !Task.isCancelled else { return }
+            switch result {
+            case .success(let detail):
+                state = .loaded(detail)
+                Self.logMergeable(detail.pull)
+                Self.logThreads(detail)
+                if quiet { UITiming.content("pr \(number) reloaded") }
+                #if DEBUG
+                if let action = Self.launchAction {
+                    Self.launchAction = nil
+                    if GitHubHTMLProbe.slotsEnabled {
+                        // The slot probe's reload comes after its passes at both widths, so the page is laid out
+                        // and the reload measures it again (`measureKey`).
+                        Task { [weak self] in
+                            try? await Task.sleep(for: .seconds(6))
+                            self?.perform(action, on: number, github: github)
+                        }
+                    } else {
+                        perform(action, on: number, github: github)
                     }
-                    state = .loaded(detail)
-                    Self.logMergeable(detail.pull)
-                    Self.logThreads(detail)
-                    if quiet { UITiming.content("pr \(number) reloaded") }
-                    #if DEBUG
-                    if let action = Self.launchAction {
-                        Self.launchAction = nil
+                    if Self.closesAfterLaunchAction { close() }
+                }
+                if let name = Self.threadLaunchActionName {
+                    Self.threadLaunchActionName = nil
+                    if let action = Self.threadLaunchAction(name, in: detail) {
                         if GitHubHTMLProbe.slotsEnabled {
-                            // The slot probe's reload comes after its passes at both widths, so the page is laid out
-                            // and the reload measures it again (`measureKey`).
+                            // Like `launchAction`: after the slot probe's passes at both widths.
                             Task { [weak self] in
                                 try? await Task.sleep(for: .seconds(6))
                                 self?.perform(action, on: number, github: github)
@@ -374,83 +345,34 @@ final class PullRequestDetailModel {
                         } else {
                             perform(action, on: number, github: github)
                         }
-                        if Self.closesAfterLaunchAction { close() }
                     }
-                    if let name = Self.threadLaunchActionName {
-                        Self.threadLaunchActionName = nil
-                        if let action = Self.threadLaunchAction(name, in: detail) {
-                            if GitHubHTMLProbe.slotsEnabled {
-                                // Like `launchAction`: after the slot probe's passes at both widths.
-                                Task { [weak self] in
-                                    try? await Task.sleep(for: .seconds(6))
-                                    self?.perform(action, on: number, github: github)
-                                }
-                            } else {
-                                perform(action, on: number, github: github)
-                            }
-                        }
-                    }
-                    #endif
-                    group.addTask {
-                        await self.pollMergeable(client, repository, number: number, generation: generation)
-                        return nil
-                    }
-                    // Each part as it arrives, into the detail as it is now (the re-poll may have replaced its pull).
-                    for await part in group {
-                        guard generation == self.generation, !Task.isCancelled else {
-                            group.cancelAll()
-                            return
-                        }
-                        guard let part, case .loaded(var shown) = state else { continue }
-                        switch part {
-                        case .commits(let commits):
-                            shown.commits = commits
-                        case .files(let files):
-                            shown.files = files
-                            let names = files.value?.map(\.id) ?? []
-                            if selectedFile.map({ !names.contains($0) }) ?? true { selectedFile = names.first }
-                            #if DEBUG || HISTQ_PERF
-                            UITiming.content("pr \(number) files loaded")
-                            #endif
-                        case .checks(let sha, let checks):
-                            // The row's head, when the pull request has moved on since the list was read.
-                            guard sha == shown.pull.head.sha else { continue }
-                            shown.checks = checks
-                            #if DEBUG || HISTQ_PERF
-                            UITiming.content("pr \(number) checks loaded")
-                            #endif
-                        }
-                        state = .loaded(shown)
-                    }
-                case .failure(let error):
-                    group.cancelAll()
-                    if quiet, state.value != nil {
-                        actionError = "Could not reload the pull request: \(Self.message(for: error))"
-                    } else {
-                        state = .failed(Self.message(for: error))
-                    }
+                }
+                #endif
+                let names = detail.files.value?.map(\.id) ?? []
+                if selectedFile.map({ !names.contains($0) }) ?? true { selectedFile = names.first }
+                await pollMergeable(api.client, api.repository, number: number, generation: generation)
+            case .failure(let error):
+                let kind = api.client.kind
+                if quiet, state.value != nil {
+                    actionError = "Could not reload the \(kind.pullRequestNoun.lowercased()): "
+                        + Self.message(for: error, kind: kind)
+                } else {
+                    state = .failed(Self.message(for: error, kind: kind))
                 }
             }
         }
     }
 
-    /// Keeps `detail` as the newest of `cache`.
-    private func remember(_ detail: PullRequestDetail, of repository: HostedRepository) {
-        cache.removeAll { $0.repository == repository && $0.detail.pull.number == detail.pull.number }
-        cache.append((repository, detail))
-        if cache.count > 8 { cache.removeFirst() }
-    }
-
     /// GitHub answers `mergeable` null while it still computes whether the branch merges (right after an open or a
-    /// push): asks again for the pull request alone, 1, 2 then 3 s apart, so "Checking…" clears without a reload. It
-    /// runs in the load's task, so a newer load or `close` stops it. An answer with another head than the shown one is
-    /// dropped and ends it: Merge pins the head the user reviewed, and GitHub refuses it once it moved.
+    /// push): asks again for the pull request alone, 3 s apart and at most 3 times, so "Checking…" clears without a
+    /// reload. It runs in the load's task, so a newer load or `close` stops it. An answer with another head than the
+    /// shown one is dropped and ends it: Merge pins the head the user reviewed, and GitHub refuses it once it moved.
     private func pollMergeable(
         _ client: any HostingProvider, _ repository: HostedRepository, number: Int, generation: Int
     ) async {
-        for delay in [1, 2, 3] {
+        for _ in 0..<3 {
             guard case .loaded(let shown) = state, shown.isOpen, shown.pull.mergeable == nil else { return }
-            try? await Task.sleep(for: .seconds(delay))
+            try? await Task.sleep(for: .seconds(3))
             guard generation == self.generation, !Task.isCancelled else { return }
             // A failed fetch only uses up a try: the box keeps saying it checks.
             guard let pull = await Self.fetchPull(client, repository, number: number) else { continue }
@@ -498,21 +420,25 @@ final class PullRequestDetailModel {
         }
         busy[number] = action
         if self.number == number { actionError = nil }
-        // "#12 Merging…" in the footer.
-        let endOperation = beginOperation("#\(number) \(action.progressTitle.dropLast())")
+        // A reply also names its thread's host key (the thread state's id): GitLab posts it to that discussion.
+        var hostKey: String?
+        if case .reply(let rootID, _) = action, self.number == number {
+            hostKey = state.value?.threads.value?.all.first(where: { $0.id == rootID })?.state?.id
+        }
         Task { [weak self] in
-            let error = await Self.run(action, api.client, api.repository, number: number)
-            endOperation()
+            let error = await Self.run(action, hostKey: hostKey, api.client, api.repository, number: number)
             guard let self else { return }
             busy[number] = nil
             UITiming.content("pr \(number) action \(action.timingName) \(error == nil ? "ok" : "failed")")
             let showing = isShowing(number)
             if let error {
-                UITiming.content("pr \(number) action error \(Self.message(for: error))")
+                let message = Self.message(for: error, kind: api.client.kind)
+                UITiming.content("pr \(number) action error \(message)")
                 if showing {
-                    actionError = "\(action.failureTitle): \(Self.message(for: error))"
+                    actionError = "\(action.failureTitle): \(message)"
                 } else {
-                    github.actionNotice = "\(action.failureTitle(of: number)): \(Self.message(for: error))"
+                    let reference = github.kind.reference(.pullRequest(number))
+                    github.actionNotice = "\(action.failureTitle(of: reference)): \(message)"
                 }
                 // The head moved since the user reviewed it: show the new one, so they review it before merging.
                 if case HostingError.headChanged = error {
@@ -531,29 +457,10 @@ final class PullRequestDetailModel {
                    let root = state.value?.threads.value?.all.first(where: { $0.state?.id == thread.id })?.id {
                     threadExpanded[root] = false
                 }
-            case .merge, .setOpen:
-                // The result shows at once (pill, Actions box); the reload below confirms it and, since it bumps the
-                // generation, drops an older load's answer that would bring the old state back.
-                if showing, case .loaded(var shown) = state, shown.pull.number == number {
-                    if case .setOpen(let open) = action {
-                        shown.pull.state = open ? "open" : "closed"
-                    } else {
-                        shown.pull.state = "closed"
-                        shown.pull.merged = true
-                        shown.pull.mergedAt = .now
-                    }
-                    state = .loaded(shown)
-                    let result = shown.isMerged ? "merged" : shown.isOpen ? "open" : "closed"
-                    UITiming.content("pr \(number) state \(result)")
-                }
+            case .merge, .setOpen: break
             }
             github.refreshNow()
-            if showing {
-                load(number, github: github, quiet: true)
-            } else {
-                // Its kept detail is from before the action.
-                cache.removeAll { $0.detail.pull.number == number }
-            }
+            if showing { load(number, github: github, quiet: true) }
         }
     }
 
@@ -571,57 +478,31 @@ final class PullRequestDetailModel {
         async let pullRequest = client.pullRequest(number, in: repository)
         async let comments = client.comments(on: .pullRequest(number), in: repository)
         async let reviews = client.reviews(of: number, in: repository)
-        async let reviewComments = part { try await client.reviewComments(of: number, in: repository) }
-        async let threadStates = part { try await client.reviewThreadStates(of: number, in: repository) }
+        async let commits = part(client.kind) { try await client.pullRequestCommits(number, in: repository) }
+        async let files = part(client.kind) { try await client.pullRequestFiles(number, in: repository) }
+        async let reviewComments = part(client.kind) { try await client.reviewComments(of: number, in: repository) }
+        async let threadStates = part(client.kind) { try await client.reviewThreadStates(of: number, in: repository) }
         do {
             let pull = try await pullRequest
+            async let checks = part(client.kind) { try await client.checkRuns(for: pull.head.sha, in: repository) }
             let (comments, reviews) = try await (comments, reviews)
-            let threads = Self.threads(await reviewComments, await threadStates)
+            let fileList: Loadable<[PRFile]> = switch await files {
+            case .loaded(let files): .loaded(files.map(prFile))
+            case .failed(let message): .failed(message)
+            case .idle, .loading: .idle
+            }
+            let threads = Self.threads(await reviewComments, await threadStates, hostName: client.kind.name)
             let timeline = PRTimeline.page(
-                author: pull.user, action: "opened this pull request", date: pull.createdAt, html: pull.bodyHTML,
+                author: pull.user, action: "opened this \(client.kind.pullRequestNoun.lowercased())",
+                date: pull.createdAt, html: pull.bodyHTML,
                 markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded)
             return .success(PullRequestDetail(
                 loadID: loadID, pull: pull, timelineCount: timeline.count, timeline: timeline,
-                reviewers: reviewers(pull, reviews), commits: .loading, files: .loading, checks: .loading,
+                reviewers: reviewers(pull, reviews), commits: await commits, files: fileList, checks: await checks,
                 threads: threads))
         } catch {
             return .failure(error)
         }
-    }
-
-    /// A part the Conversation does not need, read beside it (`load`).
-    private enum Part: Sendable {
-        case commits(Loadable<[HostedCommit]>)
-        case files(Loadable<[PRFile]>)
-        /// The check runs of head `sha`.
-        case checks(sha: String, Loadable<[HostedCheckRun]>)
-    }
-
-    @concurrent
-    private nonisolated static func fetchCommits(
-        _ client: GitHubClient, _ repository: HostedRepository, number: Int
-    ) async -> Part? {
-        .commits(await part { try await client.pullRequestCommits(number, in: repository) })
-    }
-
-    @concurrent
-    private nonisolated static func fetchFiles(
-        _ client: GitHubClient, _ repository: HostedRepository, number: Int
-    ) async -> Part? {
-        let read = await part { try await client.pullRequestFiles(number, in: repository) }
-        let files: Loadable<[PRFile]> = switch read {
-        case .loaded(let files): .loaded(files.map(prFile))
-        case .failed(let message): .failed(message)
-        case .idle, .loading: .idle
-        }
-        return .files(files)
-    }
-
-    @concurrent
-    private nonisolated static func fetchChecks(
-        _ client: GitHubClient, _ repository: HostedRepository, sha: String
-    ) async -> Part? {
-        .checks(sha: sha, await part { try await client.checkRuns(for: sha, in: repository) })
     }
 
     /// Joins the threads' comments (REST) and states (GraphQL): without the comments there are no threads, so their
@@ -629,7 +510,7 @@ final class PullRequestDetailModel {
     /// loaded but joined none of the threads make it unavailable too, with a reason, instead of Resolve going
     /// missing without one.
     private nonisolated static func threads(
-        _ comments: Loadable<[HostedReviewComment]>, _ states: Loadable<[HostedReviewThreadState]>
+        _ comments: Loadable<[HostedReviewComment]>, _ states: Loadable<[HostedReviewThreadState]>, hostName: String
     ) -> Loadable<PRThreads> {
         switch comments {
         case .loaded(let comments):
@@ -642,7 +523,7 @@ final class PullRequestDetailModel {
             } else if states.value != nil {
                 let all = grouped.threadsByReview.values.flatMap { $0 } + grouped.unattached
                 if !all.isEmpty, all.allSatisfy({ $0.state == nil }) {
-                    unavailable = "GitHub did not say which conversations these comments belong to."
+                    unavailable = "\(hostName) did not say which conversations these comments belong to."
                 }
             }
             return .loaded(PRThreads(
@@ -660,11 +541,13 @@ final class PullRequestDetailModel {
         try? await client.pullRequest(number, in: repository)
     }
 
-    private nonisolated static func part<T: Sendable>(_ body: () async throws -> T) async -> Loadable<T> {
+    private nonisolated static func part<T: Sendable>(
+        _ kind: HostingKind, _ body: () async throws -> T
+    ) async -> Loadable<T> {
         do {
             return .loaded(try await body())
         } catch {
-            return .failed(message(for: error))
+            return .failed(message(for: error, kind: kind))
         }
     }
 
@@ -694,13 +577,16 @@ final class PullRequestDetailModel {
             if review.state != "COMMENTED" || latest[user.login] == nil { latest[user.login] = review.state }
         }
         let requested = (pull.requestedReviewers ?? []).filter { latest[$0.login] == nil }
-        return requested.map { PRReviewer(login: $0.login, userID: $0.id, state: nil) }
-            + order.map { PRReviewer(login: $0.login, userID: $0.id, state: latest[$0.login]) }
+        return requested.map { PRReviewer(login: $0.login, userID: $0.id, avatarURL: $0.avatarURL, state: nil) }
+            + order.map {
+                PRReviewer(login: $0.login, userID: $0.id, avatarURL: $0.avatarURL, state: latest[$0.login])
+            }
     }
 
     @concurrent
     private nonisolated static func run(
-        _ action: PullRequestAction, _ client: any HostingProvider, _ repository: HostedRepository, number: Int
+        _ action: PullRequestAction, hostKey: String?, _ client: any HostingProvider, _ repository: HostedRepository,
+        number: Int
     ) async -> (any Error)? {
         do {
             switch action {
@@ -711,7 +597,8 @@ final class PullRequestDetailModel {
             case .setOpen(let open): try await client.setOpen(open, item: .pullRequest(number), in: repository)
             case .reply(let rootID, let body):
                 _ = try await client.reply(
-                    to: HostedThreadRef(rootCommentID: rootID), on: number, in: repository, body: body)
+                    to: HostedThreadRef(rootCommentID: rootID, hostKey: hostKey), on: number, in: repository,
+                    body: body)
             case .resolve(let thread, let resolved):
                 _ = try await client.setReviewThread(thread, resolved: resolved)
             }
@@ -721,12 +608,13 @@ final class PullRequestDetailModel {
         }
     }
 
-    nonisolated static func message(for error: any Error) -> String {
+    /// The error's text in the words of the host `kind` ("GitLab", "merge request").
+    nonisolated static func message(for error: any Error, kind: HostingKind) -> String {
         switch error {
         case HostingError.unauthorized:
-            "GitHub refused the token (revoked or expired). Reconnect in Settings › Integrations."
+            "\(kind.name) refused the token (revoked or expired). Reconnect in Settings › Integrations."
         case let error as HostingError:
-            String(describing: error)
+            error.description(host: kind.name, pullRequest: kind.pullRequestNoun.lowercased())
         default:
             error.localizedDescription
         }
@@ -763,10 +651,9 @@ struct PRDetailView: View {
                 case .loaded(let value):
                     PRContent(session: session, detail: value)
                         .onAppear { UITiming.content("pr \(number)") }
-                        // A kept detail replaces another pull request's in one frame: a new page, as after a load.
-                        .id(number)
                 case .failed(let message):
-                    DiffNoticeCard(title: "Pull request", systemImage: "exclamationmark.triangle", message: message)
+                    DiffNoticeCard(title: session.github.kind.pullRequestNoun, systemImage: "exclamationmark.triangle",
+                                   message: message)
                         .onAppear { UITiming.content("pr \(number) failed") }
                 }
             }
@@ -791,6 +678,7 @@ private struct PRHeaderCard: View {
         @Bindable var detail = session.pullDetail
         let value = detail.state.value
         let title = value?.pull.title ?? session.github.row(for: .pullRequest(number))?.title
+        let kind = session.github.kind
         SectionCard(nil, contentPadding: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
@@ -812,15 +700,15 @@ private struct PRHeaderCard: View {
                         .accessibilityHidden(true)
                     if let title {
                         Text(title)
-                            .font(.title3.weight(.semibold))
+                            .font(.body.weight(.semibold))
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .help(title)
                     } else {
-                        SkeletonLine(width: 180, height: 14)
+                        SkeletonLine(width: 180, height: 12)
                     }
-                    Text("#\(number)")
-                        .font(.title3.weight(.semibold))
+                    Text(kind.reference(.pullRequest(number)))
+                        .font(.body.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
@@ -835,8 +723,8 @@ private struct PRHeaderCard: View {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(RowIconButtonStyle())
-                            .help("Open on GitHub")
-                            .accessibilityLabel("Open on GitHub")
+                            .help("Open on \(kind.name)")
+                            .accessibilityLabel("Open on \(kind.name)")
                         } else {
                             // Labelled, so it reads at a glance (user, 2026-11-17); the title gives way first.
                             Button {
@@ -845,12 +733,12 @@ private struct PRHeaderCard: View {
                                 HStack(spacing: 6) {
                                     Image(systemName: "safari")
                                         .accessibilityHidden(true)
-                                    Text("Open on GitHub")
+                                    Text("Open on \(kind.name)")
                                 }
                             }
                             .buttonStyle(RowTextButtonStyle(formRow: true))
                             .fixedSize()
-                            .help("Open the pull request in the browser")
+                            .help("Open the \(kind.pullRequestNoun.lowercased()) in the browser")
                         }
                     } else {
                         SkeletonLine(width: 56, height: 20)
@@ -1040,14 +928,13 @@ private struct PRContent: View {
             PRFilesTab(session: session, detail: detail)
                 .onAppear { UITiming.content("pr \(number) files \(Self.count(detail.files))") }
         case .checks:
-            PRChecksTab(checks: detail.checks)
+            PRChecksTab(checks: detail.checks, hostName: session.github.kind.name)
                 .onAppear { UITiming.content("pr \(number) checks \(Self.count(detail.checks))") }
         }
     }
 
     private static func count<T>(_ part: Loadable<[T]>) -> String {
-        if case .loading = part { return "loading" }
-        return part.value.map { "\($0.count)" } ?? "failed"
+        part.value.map { "\($0.count)" } ?? "failed"
     }
 }
 
@@ -1095,7 +982,7 @@ struct PRConversationTab: View {
                 // the page scrolls this column.
                 PRTimelinePage(session: session, number: detail.pull.number, timeline: detail.timeline,
                                loadID: detail.loadID, threads: detail.threads.value,
-                               realAvatars: GitHubUserAvatar.allowsReal(session.github))
+                               avatars: .of(session.github))
                     .frame(maxWidth: .infinity)
             }
             PRActionsCard(session: session, detail: detail)
@@ -1205,7 +1092,7 @@ private struct PRSideColumn: View {
     let detail: PullRequestDetail
 
     var body: some View {
-        let realAvatars = GitHubUserAvatar.allowsReal(session.github)
+        let avatars = HostAvatars.of(session.github)
         VStack(spacing: SectionCardMetrics.spacing) {
             SectionCard("Reviewers", systemImage: "person.2", count: detail.reviewers.count) {
                 if detail.reviewers.isEmpty {
@@ -1213,7 +1100,8 @@ private struct PRSideColumn: View {
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(detail.reviewers) { reviewer in
-                            PRPersonRow(login: reviewer.login, userID: reviewer.userID, realAvatar: realAvatars,
+                            PRPersonRow(login: reviewer.login, userID: reviewer.userID,
+                                        avatarURL: reviewer.avatarURL, avatars: avatars,
                                         state: reviewer.state, showsState: true)
                         }
                     }
@@ -1227,8 +1115,8 @@ private struct PRSideColumn: View {
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(assignees, id: \.id) {
-                                PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
-                                            showsState: false)
+                                PRPersonRow(login: $0.login, userID: $0.id, avatarURL: $0.avatarURL, avatars: avatars,
+                                            state: nil, showsState: false)
                             }
                         }
                     }
@@ -1329,8 +1217,9 @@ private struct PRActionsCard: View {
                     "Resolve the conflicts with \(base) to merge it.")
         }
         if pull.draft == true {
-            return (nil, "circle.dashed", "This pull request is still a draft",
-                    "Mark it ready for review on GitHub to merge it.")
+            let kind = session.github.kind
+            return (nil, "circle.dashed", "This \(kind.pullRequestNoun.lowercased()) is still a draft",
+                    "Mark it ready for review on \(kind.name) to merge it.")
         }
         switch pull.mergeableState {
         case "blocked":
@@ -1403,7 +1292,9 @@ private struct PRActionsCard: View {
     /// progress, and nothing else running (another resolve, or a write its checks would miss).
     private var resolveBlocked: String? {
         let pull = detail.pull
-        guard session.github.api?.remote != nil else { return "No remote of this repository is on GitHub" }
+        guard session.github.api?.remote != nil else {
+            return "No remote of this repository is on \(session.github.kind.name)"
+        }
         let headOwner = pull.head.label?.split(separator: ":").first
         guard let headOwner, headOwner == pull.base.label?.split(separator: ":").first else {
             return "The branch is in a fork: resolve its conflicts there"
@@ -1486,7 +1377,7 @@ private struct PRActionsCard: View {
                           title: Text(pullDetail.mergeMethod.title)) {
             ForEach(session.github.mergeMethods, id: \.self) { Text($0.title).tag($0) }
         }
-        Button("Merge") { confirmMerge(pullDetail.mergeMethod) }
+        Button("Merge…") { confirmMerge(pullDetail.mergeMethod) }
             .buttonStyle(RowTextButtonStyle(
                 formRow: true,
                 fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
@@ -1504,7 +1395,9 @@ private struct PRActionsCard: View {
         case .ref(let ref): "Fetch \(ref) into the branch pr/\(pull.number) and check it out"
         case .branch(let remote, let name): "Fetch \(remote)/\(name) into the branch pr/\(pull.number) and check it out"
         case .unavailable(let reason): reason
-        case nil: "Fetch the pull request's head into the branch pr/\(pull.number) and check it out"
+        case nil:
+            "Fetch the \(session.github.kind.pullRequestNoun.lowercased())'s head into the branch pr/\(pull.number) "
+                + "and check it out"
         }
         Button { checkout() } label: {
             HStack(spacing: 6) {
@@ -1524,7 +1417,8 @@ private struct PRActionsCard: View {
                     IconImage(open ? "lucide-git-pull-request-closed" : "lucide-git-pull-request-arrow")
                         .foregroundStyle(Color(nsColor: open ? Palette.diffRemovedSign : Palette.diffAddedSign))
                         .accessibilityHidden(true)
-                    Text(open ? "Close Pull Request" : "Reopen Pull Request")
+                    let noun = session.github.kind.pullRequestNoun.capitalized
+                    Text(open ? "Close \(noun)…" : "Reopen \(noun)…")
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -1542,10 +1436,11 @@ private struct PRActionsCard: View {
         case .squash: "squashed into one commit"
         case .rebase: "rebased onto \(pull.base.ref)"
         }
+        let kind = session.github.kind
         model.presentModal(.confirmation(ModalConfirmation(
-            title: "\(method.buttonTitle) #\(pull.number)?",
-            message: "GitHub merges \(count) \(count == 1 ? "commit" : "commits") of \(pull.head.ref) into "
-                + "\(pull.base.ref), \(how). Histq cannot undo a merge on GitHub.",
+            title: "\(method.buttonTitle) \(kind.reference(.pullRequest(pull.number)))?",
+            message: "\(kind.name) merges \(count) \(count == 1 ? "commit" : "commits") of \(pull.head.ref) into "
+                + "\(pull.base.ref), \(how). Histq cannot undo a merge on \(kind.name).",
             button: method.buttonTitle, isDestructive: false,
             perform: { [session, sha = pull.head.sha, number = pull.number] in
                 session.pullDetail.perform(.merge(method, sha: sha), on: number, github: session.github)
@@ -1554,12 +1449,15 @@ private struct PRActionsCard: View {
 
     private func confirmSetOpen(_ open: Bool) {
         let number = detail.pull.number
+        let kind = session.github.kind
+        let reference = kind.reference(.pullRequest(number))
+        let noun = kind.pullRequestNoun.lowercased()
         model.presentModal(.confirmation(ModalConfirmation(
-            title: open ? "Reopen #\(number)?" : "Close #\(number)?",
+            title: open ? "Reopen \(reference)?" : "Close \(reference)?",
             message: open
-                ? "The pull request opens again on GitHub."
-                : "The pull request closes on GitHub without merging; it can be reopened later.",
-            button: open ? "Reopen" : "Close Pull Request", isDestructive: !open,
+                ? "The \(noun) opens again on \(kind.name)."
+                : "The \(noun) closes on \(kind.name) without merging; it can be reopened later.",
+            button: open ? "Reopen" : "Close \(kind.pullRequestNoun.capitalized)", isDestructive: !open,
             perform: { [session] in session.pullDetail.perform(.setOpen(open), on: number, github: session.github) })))
     }
 
@@ -1578,17 +1476,20 @@ private struct PRActionsCard: View {
             }
             model.presentModal(.confirmation(ModalConfirmation(
                 title: "\(branch) already exists",
-                message: "The local branch \(branch) points at another commit than the pull request's head "
+                message: "The local branch \(branch) points at another commit than the "
+                    + "\(session.github.kind.pullRequestNoun.lowercased())'s head "
                     + "(\(String(pull.head.sha.prefix(7)))). Histq does not overwrite it. Check out the existing branch?",
                 button: "Checkout \(branch)", isDestructive: false,
                 perform: { [session] in session.run(.checkoutBranch(branch), title: "Checkout \(branch)") })))
             return
         }
         guard let remote = session.github.api?.remote, let way else {
-            session.pullDetail.actionError = "No remote of this repository is on GitHub: nothing to fetch from."
+            session.pullDetail.actionError =
+                "No remote of this repository is on \(session.github.kind.name): nothing to fetch from."
             return
         }
-        session.run(.checkoutPullRequest(way, number: pull.number, remote: remote), title: "Checkout #\(pull.number)")
+        session.run(.checkoutPullRequest(way, number: pull.number, remote: remote),
+                    title: "Checkout \(session.github.kind.reference(.pullRequest(pull.number)))")
     }
 }
 
@@ -1606,14 +1507,15 @@ struct PRSideEmpty: View {
 struct PRPersonRow: View {
     let login: String
     let userID: Int?
-    /// `GitHubUserAvatar.allowsReal` of the repository.
-    let realAvatar: Bool
+    let avatarURL: String?
+    /// `HostAvatars.of` the repository.
+    let avatars: HostAvatars
     let state: String?
     let showsState: Bool
 
     var body: some View {
         HStack(spacing: 6) {
-            GitHubUserAvatar(login: login, id: userID, size: 16, real: realAvatar)
+            GitHubUserAvatar(login: login, id: userID, avatarURL: avatarURL, size: 16, avatars: avatars)
             Text(login)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -1656,30 +1558,64 @@ struct PRPersonRow: View {
     }
 }
 
-/// A GitHub account's avatar: with `real`, its GitHub avatar whatever the commit avatars' mode (user, 2026-11-17),
-/// the mode's generated or initials avatar until it arrives or when it cannot load; without `real`, that drawn avatar
-/// only, and no request. Redrawn when `AvatarStore` has a new image for the account or the mode changed, like the PRs
+/// Where the accounts of a repository's PRs tab and pull request and issue pages get their avatars.
+enum HostAvatars: Equatable {
+    /// Drawn from the login, no request: the stub, Enterprise hosts, a tab still connecting.
+    case drawn
+    /// The account's GitHub avatar whatever the commit avatars' mode (user, 2026-11-17): github.com.
+    case github
+    /// The API's `avatar_url` of the account, in the real avatar mode only, from the repository's `host`
+    /// (`AvatarStore.hostedAvatar`): GitLab.
+    case gitlab(host: String)
+
+    /// The avatars of `store`'s repository. Drawn in a stub run, whose repository names a real host but must not
+    /// reach it.
+    @MainActor static func of(_ store: HostingStore) -> HostAvatars {
+        #if DEBUG
+        if GitHubStub.isEnabled { return .drawn }
+        #endif
+        guard case .connected(let repository) = store.connection else { return .drawn }
+        switch store.kind {
+        case .github: return repository.host == "github.com" ? .github : .drawn
+        case .gitlab: return .gitlab(host: repository.host)
+        }
+    }
+
+    /// The avatar to draw now for an account: the mode's drawn avatar until a loaded one arrives.
+    @MainActor func image(login: String, id: Int?, avatarURL: String?, pixels: Int) -> NSImage? {
+        switch self {
+        case .drawn: AvatarStore.shared.avatar(email: "", name: login, pixels: pixels)
+        case .github: AvatarStore.shared.gitHubAvatar(login: login, id: id, pixels: pixels)
+        case .gitlab(let host):
+            AvatarStore.shared.hostedAvatar(url: avatarURL, host: host, name: login, pixels: pixels)
+        }
+    }
+
+    /// Whether `changed`, the identity `AvatarStore.didChange` named, is the account's avatar.
+    @MainActor func matches(_ changed: String, login: String, id: Int?, avatarURL: String?) -> Bool {
+        switch self {
+        case .drawn: false
+        case .github: AvatarStore.matches(email: AvatarStore.gitHubEmail(login: login, id: id), name: login,
+                                          changed: changed)
+        case .gitlab(let host): AvatarStore.hostedIdentity(url: avatarURL, host: host) == changed
+        }
+    }
+}
+
+/// An account's avatar as `avatars` says (`HostAvatars`), the mode's generated or initials avatar until it arrives or
+/// when it cannot load. Redrawn when `AvatarStore` has a new image for the account or the mode changed, like the PRs
 /// tab's rows. Shared with the issue page.
 struct GitHubUserAvatar: View {
     let login: String
     let id: Int?
+    /// The API's avatar URL of the account (`HostAvatars.gitlab` loads it).
+    let avatarURL: String?
     let size: CGFloat
-    /// `allowsReal` of the repository.
-    let real: Bool
+    /// `HostAvatars.of` the repository.
+    let avatars: HostAvatars
     /// Bumped when `AvatarStore` has a new image for this account (or the avatar mode changed).
     @State private var revision = 0
     @Environment(\.displayScale) private var displayScale
-
-    /// Whether the accounts of `store`'s repository show their GitHub avatars: only on github.com (an Enterprise host
-    /// has its avatars elsewhere), and never in a stub run, whose repository names github.com but must not reach it.
-    static func allowsReal(_ store: HostingStore) -> Bool {
-        guard case .connected(let repository) = store.connection, repository.host == "github.com" else { return false }
-        #if DEBUG
-        return !GitHubStub.isEnabled
-        #else
-        return true
-        #endif
-    }
 
     var body: some View {
         Group {
@@ -1696,17 +1632,12 @@ struct GitHubUserAvatar: View {
         .accessibilityHidden(true)
         .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
             guard let changed = note.userInfo?[AvatarStore.emailKey] as? String else { return revision &+= 1 }
-            if real, AvatarStore.matches(email: AvatarStore.gitHubEmail(login: login, id: id), name: login,
-                                         changed: changed) {
-                revision &+= 1
-            }
+            if avatars.matches(changed, login: login, id: id, avatarURL: avatarURL) { revision &+= 1 }
         }
     }
 
     private var image: NSImage? {
-        let pixels = Int((size * displayScale).rounded(.up))
-        return real ? AvatarStore.shared.gitHubAvatar(login: login, id: id, pixels: pixels)
-            : AvatarStore.shared.avatar(email: "", name: login, pixels: pixels)
+        avatars.image(login: login, id: id, avatarURL: avatarURL, pixels: Int((size * displayScale).rounded(.up)))
     }
 }
 
@@ -1751,16 +1682,16 @@ private struct PRCommitsTab: View {
             SectionCard("Commits", systemImage: PRTab.commits.systemImage, count: commits.count, contentPadding: 6) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(commits) { PRCommitRow(commit: $0, url: github.webURL(.commit($0.sha))) }
+                        ForEach(commits) {
+                            PRCommitRow(commit: $0, url: github.webURL(.commit($0.sha)), hostName: github.kind.name)
+                        }
                     }
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }
         case .failed(let message):
             DiffNoticeCard(title: "Commits", systemImage: "exclamationmark.triangle", message: message)
-        case .loading:
-            PRPartLoading(tab: .commits)
-        case .idle:
+        case .idle, .loading:
             DiffNoticeCard(title: "Commits", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
@@ -1771,6 +1702,8 @@ private struct PRCommitRow: View {
     let commit: HostedCommit
     /// The commit's page on the host.
     let url: URL?
+    /// The host's product name ("GitHub", "GitLab").
+    let hostName: String
     @State private var hovered = false
 
     var body: some View {
@@ -1803,7 +1736,7 @@ private struct PRCommitRow: View {
                     .font(.settingsCaption.monospaced())
             }
             .buttonStyle(RowTextButtonStyle())
-            .help("Open this commit on GitHub")
+            .help("Open this commit on \(hostName)")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -1826,7 +1759,8 @@ private struct PRFilesTab: View {
     var body: some View {
         switch detail.files {
         case .loaded(let files) where files.isEmpty:
-            DiffNoticeCard(title: "Files changed", systemImage: "checkmark.circle", message: "This pull request changes no file.")
+            DiffNoticeCard(title: "Files changed", systemImage: "checkmark.circle",
+                           message: "This \(session.github.kind.pullRequestNoun.lowercased()) changes no file.")
         case .loaded(let files):
             HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
                 SectionCard("Files", systemImage: PRTab.files.systemImage, count: files.count, contentPadding: 6) {
@@ -1849,9 +1783,7 @@ private struct PRFilesTab: View {
             }
         case .failed(let message):
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: message)
-        case .loading:
-            PRPartLoading(tab: .files)
-        case .idle:
+        case .idle, .loading:
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
@@ -1860,7 +1792,6 @@ private struct PRFilesTab: View {
         if let section = file.section, !section.rows(.diff).isEmpty {
             SectionCard(file.change.name, systemImage: file.change.systemImage, contentPadding: 0) {
                 DiffLineTable(section: section, mode: .diff, loadID: detail.loadID,
-                              repo: session.url.lastPathComponent,
                               onApply: { _, _, _ in }, onClose: { [session] in session.closeFile() })
                     .frame(maxHeight: .infinity)
             } accessory: {
@@ -1871,10 +1802,12 @@ private struct PRFilesTab: View {
             DiffNoticeCard(
                 title: file.change.name, systemImage: file.change.systemImage,
                 message: file.file.patch == nil
-                    ? "GitHub shows no patch for this file (a binary file, or a diff too large for the API)."
+                    ? "\(session.github.kind.name) shows no patch for this file (a binary file, or a diff too large "
+                        + "for the API)."
                     : "No line changes.")
             {
-                Button("Open on GitHub") { GitHubLinks.open(detail.pull.htmlURL + "/files") }
+                let kind = session.github.kind
+                Button("Open on \(kind.name)") { GitHubLinks.open(detail.pull.htmlURL + kind.filesPagePath) }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
         }
@@ -1952,6 +1885,8 @@ private struct PRFileRow: View {
 
 private struct PRChecksTab: View {
     let checks: Loadable<[HostedCheckRun]>
+    /// The host's product name ("GitHub", "GitLab").
+    let hostName: String
 
     var body: some View {
         switch checks {
@@ -1965,7 +1900,7 @@ private struct PRChecksTab: View {
                         .padding(.top, 2)
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(runs) { PRCheckRow(run: $0) }
+                            ForEach(runs) { PRCheckRow(run: $0, hostName: hostName) }
                         }
                     }
                 }
@@ -1973,9 +1908,7 @@ private struct PRChecksTab: View {
             }
         case .failed(let message):
             DiffNoticeCard(title: "Checks", systemImage: "exclamationmark.triangle", message: message)
-        case .loading:
-            PRPartLoading(tab: .checks)
-        case .idle:
+        case .idle, .loading:
             DiffNoticeCard(title: "Checks", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
@@ -1993,6 +1926,7 @@ private struct PRChecksTab: View {
 /// A check run: its state glyph, name, conclusion and duration; a click opens it on GitHub.
 private struct PRCheckRow: View {
     let run: HostedCheckRun
+    let hostName: String
     @State private var hovered = false
 
     var body: some View {
@@ -2015,8 +1949,8 @@ private struct PRCheckRow: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(RowIconButtonStyle())
-            .help("Open this check on GitHub")
-            .accessibilityLabel("Open \(run.name) on GitHub")
+            .help("Open this check on \(hostName)")
+            .accessibilityLabel("Open \(run.name) on \(hostName)")
         }
         .padding(.horizontal, 8)
         .frame(minHeight: SidebarItemStyle.height)
@@ -2054,18 +1988,6 @@ private struct PRCheckRow: View {
 }
 
 // MARK: Skeleton
-
-/// A tab's part while it still loads (the Conversation shows first): its card, with a spinner once that takes a while.
-private struct PRPartLoading: View {
-    let tab: PRTab
-
-    var body: some View {
-        SectionCard(tab.title, systemImage: tab.systemImage, countIsLoading: true) {
-            DelayedSpinner(detail: "pr \(tab.rawValue)")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
 
 /// The loading detail in the loaded Conversation's arrangement: the Conversation card's lines, the merge box and the
 /// comment box under it, and the side column's cards on the right, or at the end of the column when panel2 is narrow.
@@ -2113,7 +2035,6 @@ private struct PRSkeleton: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
                                     .fill(Palette.skeletonFill)
-                                    .skeletonPulse()
                                     .frame(height: 64)
                                 HStack {
                                     Spacer(minLength: 0)
@@ -2144,6 +2065,16 @@ private struct PRSkeleton: View {
                     SkeletonLine(fraction: 0.5, height: 11)
                 }
             }
+        }
+    }
+}
+
+private extension HostingKind {
+    /// What follows a pull request's web URL for its changed files: GitHub's `/files`, GitLab's `/diffs`.
+    var filesPagePath: String {
+        switch self {
+        case .github: "/files"
+        case .gitlab: "/diffs"
         }
     }
 }

@@ -582,7 +582,9 @@ final class WelcomeModel {
         let account = chosen.account
         let token = await HostingTokens.token(for: account, profileID: chosen.profile.id)
         guard let token else { return (chosen, .notConnected(account: account)) }
-        return (chosen, await repoList(account) { try GitHubClient(host: account.host, token: token) })
+        return (chosen, await repoList(account) {
+            try HostingStore.client(for: account, profileID: chosen.profile.id, token: token)
+        })
     }
 
     /// The first listed account (the default profile's first one when it has any) has its token in the Keychain
@@ -603,18 +605,20 @@ final class WelcomeModel {
         _ account: HostingAccount, client makeClient: () throws -> (any HostingProvider)?
     ) async -> RepoList {
         do {
-            guard let client = try makeClient() else { return .failed(message: "No GitHub client.", reconnect: false) }
+            guard let client = try makeClient() else {
+                return .failed(message: "No \(account.providerName) client.", reconnect: false)
+            }
             return .loaded(account: account, repos: try await client.userRepositories())
         } catch {
-            return repoListError(error)
+            return repoListError(error, account: account)
         }
     }
 
-    private nonisolated static func repoListError(_ error: any Error) -> RepoList {
+    private nonisolated static func repoListError(_ error: any Error, account: HostingAccount) -> RepoList {
         switch error {
         case HostingError.unauthorized:
-            .failed(message: "GitHub refused the token (revoked or expired). Reconnect the account in Settings › "
-                + "Integrations.", reconnect: true)
+            .failed(message: "\(account.providerName) refused the token (revoked or expired). Reconnect the account "
+                + "in Settings › Integrations.", reconnect: true)
         case let error as HostingError:
             .failed(message: String(describing: error), reconnect: false)
         default:

@@ -23,9 +23,9 @@ enum AIJob: Equatable, Sendable {
     case improveMessage(hash: String, message: String)
     case resolution(AIResolutionTarget)
     /// The Create Pull Request form's Generate: `base` and `head` are the remote-tracking refs GitHub compares (full
-    /// refs); the template is read at `templateRef` (the default branch's, else the base). Apply (the form's
-    /// `onApply`) fills the title and the description.
-    case pullRequest(base: String, head: String, templateRef: String)
+    /// refs); the template is read at `templateRef` (the default branch's, else the base), where `kind`'s host looks
+    /// for it. Apply (the form's `onApply`) fills the title and the description.
+    case pullRequest(base: String, head: String, templateRef: String, kind: HostingKind)
 
     var title: String {
         switch self {

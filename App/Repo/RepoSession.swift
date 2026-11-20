@@ -4550,7 +4550,7 @@ final class RepoSession: Identifiable {
             return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b,
                                                intent: await resolutionIntent(target, backend: backend, cwd: cwd),
                                                instructions: instructions)
-        case .pullRequest(let base, let head, let templateRef):
+        case .pullRequest(let base, let head, let templateRef, let kind):
             let env = try await backend.readEnvironment(cwd: cwd)
             let log = try await backend.runner.run(
                 ["log", "-z", "--no-show-signature", "--format=%B", "--max-count=50", "--end-of-options",
@@ -4562,7 +4562,8 @@ final class RepoSession: Identifiable {
                 .branch(base: base, head: head), runner: backend.runner, cwd: cwd, env: env)
             let filtered = try aiFiltered(diff, worktree: worktree)
             let template = await PullRequestTemplate.read(
-                ref: templateRef, runner: backend.runner, cwd: cwd, env: env, ignore: try aiIgnore(worktree: worktree))
+                ref: templateRef, runner: backend.runner, cwd: cwd, env: env, ignore: try aiIgnore(worktree: worktree),
+                kind: kind)
             return AIPrompts.pullRequest(commitMessages: messages, diff: filtered, template: template,
                                          language: languages.commit, instructions: instructions)
         }

@@ -729,6 +729,21 @@ struct GitInvocationTests {
         #expect(!FileManager.default.fileExists(atPath: userMarker.path), "the user's helper ran")
     }
 
+    @Test("a GitLab credential's helper answers the username it was given (oauth2) with its token")
+    func gitLabCredentialAnswersOAuth2() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let credential = GitCredential(kind: .gitlab, host: Self.tokenHost, username: "oauth2", token: Self.token)
+        let env = GitInvocation.environment(
+            profile: Self.tokenProfile, base: sandbox.base, access: .network(.fetch), credentials: [credential])
+        #expect(env["HISTQ_GIT_USER_0"] == "oauth2")
+        let fill = try await sandbox.runner.run(
+            ["credential", "fill"], cwd: sandbox.root, env: env,
+            stdin: Data("protocol=https\nhost=\(Self.tokenHost)\n\n".utf8), timeout: .seconds(30))
+        let answered = fill.text == "protocol=https\nhost=\(Self.tokenHost)\nusername=oauth2\npassword=\(Self.token)\n"
+        #expect(answered, "the helper did not answer username=oauth2 with the token")
+    }
+
     @Test(
         "a host that could widen or bend the config key, or a token that could break the helper, adds nothing",
         arguments: [

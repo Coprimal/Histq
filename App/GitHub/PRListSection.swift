@@ -78,7 +78,7 @@ struct PullRequestSections: View {
             switch store.connection {
             case .resolving:
                 ForEach(lists, id: \.self) { list in
-                    ListCard(session: session, list: list, realAvatars: false)
+                    ListCard(session: session, list: list, avatars: .drawn)
                 }
             case .notConnected(let account):
                 ConnectGitHubCard(account: account, host: session.hostedRemoteHost)
@@ -103,22 +103,13 @@ struct PullRequestSections: View {
                         }
                     }
                 }
-            case .connected(let repository):
+            case .connected:
                 // A provider without issues has no Issues list (`HostingStore` does not read it either).
                 ForEach(lists.filter { $0 != .assigned || store.offers(.issues) }, id: \.self) { list in
-                    ListCard(session: session, list: list,
-                             realAvatars: repository.host == "github.com" && !isStub)
+                    ListCard(session: session, list: list, avatars: .of(store))
                 }
             }
         }
-    }
-
-    private var isStub: Bool {
-        #if DEBUG
-        GitHubStub.isEnabled
-        #else
-        false
-        #endif
     }
 }
 
@@ -127,8 +118,8 @@ struct PullRequestSections: View {
 private struct ListCard: View {
     let session: RepoSession
     let list: HostingStore.List
-    /// The authors' GitHub avatars load (github.com, not the stub), whatever `AvatarStore`'s mode.
-    let realAvatars: Bool
+    /// Where the authors' avatars come from (`HostAvatars.of` the repository).
+    let avatars: HostAvatars
     /// The header's search (`CardSearchButton`): the field above the rows, which then show only the matching ones.
     @State private var isSearching = false
     @State private var query = ""
@@ -143,7 +134,8 @@ private struct ListCard: View {
                                      guard !isEmpty else { return }
                                      if $0 { store.collapsed.remove(list) } else { store.collapsed.insert(list) }
                                  })
-        SectionCard(list.title, systemImage: list.systemImage, count: state?.rows?.count,
+        let kind = store.kind
+        SectionCard(list.title(kind), systemImage: list.systemImage, count: state?.rows?.count,
                     countIsLoading: state?.rows == nil && state?.error == nil,
                     isExpanded: isExpanded, contentPadding: SidebarMetrics.cardPadding) {
             VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
@@ -155,11 +147,11 @@ private struct ListCard: View {
                 }
                 if let rows = state?.rows {
                     let shown = isSearching ? rows.filter { matches($0) } : rows
-                    if rows.isEmpty, state?.error == nil { EmptyRow(text: list.emptyText) }
+                    if rows.isEmpty, state?.error == nil { EmptyRow(text: list.emptyText(kind)) }
                     if shown.isEmpty, !rows.isEmpty { EmptyRow(text: "No matches") }
                     ForEach(shown) { row in
                         HostedRowView(session: session, row: row, checks: row.headSHA.flatMap { store.checks[$0] },
-                                      realAvatars: realAvatars)
+                                      avatars: avatars)
                     }
                 } else if state?.error == nil {
                     SkeletonRows(fractions: list == .allOpen ? [0.7, 0.5, 0.6] : [0.6, 0.45])
@@ -167,14 +159,46 @@ private struct ListCard: View {
             }
         } accessory: {
             if state?.rows != nil, !isEmpty {
-                CardSearchButton(title: list.title, isSearching: $isSearching, query: $query, isExpanded: isExpanded)
+                CardSearchButton(title: list.title(kind), isSearching: $isSearching, query: $query,
+                                 isExpanded: isExpanded)
             }
         }
     }
 
-    /// By its title or its number (`#12` or `12`).
+    /// By its title or its number (`#12` or `12`; GitLab's merge requests `!12`).
     private func matches(_ row: HostedRow) -> Bool {
-        FileSearch.matches("#\(row.number) \(row.title)", query: query)
+        FileSearch.matches("\(session.github.kind.reference(row.item)) \(row.title)", query: query)
+    }
+}
+
+extension HostingStore {
+    /// The connected provider's kind, whose words the PRs tab and the detail use; GitHub while none is connected.
+    var kind: HostingKind { api?.client.kind ?? .github }
+}
+
+extension HostingKind {
+    /// `#12` for an issue, the kind's `numberPrefix` for a pull request (`!12` on GitLab).
+    func reference(_ item: HostedItem) -> String {
+        switch item {
+        case .pullRequest(let number): numberPrefix + String(number)
+        case .issue(let number): "#\(number)"
+        }
+    }
+}
+
+extension HostingStore.List {
+    /// `title` in the kind's words ("My MRs" on GitLab).
+    func title(_ kind: HostingKind) -> String {
+        self == .mine ? "My \(kind.shortNoun)s" : title
+    }
+
+    /// `emptyText` in the kind's words ("No open merge requests" on GitLab).
+    func emptyText(_ kind: HostingKind) -> String {
+        switch self {
+        case .mine: "No open \(kind.pullRequestsNoun.lowercased()) of yours"
+        case .allOpen: "No open \(kind.pullRequestsNoun.lowercased())"
+        case .reviewRequested, .assigned: emptyText
+        }
     }
 }
 
@@ -251,7 +275,7 @@ extension RepoSession {
     var hostedRemoteHost: String? {
         let accountNames = Set((profile?.accounts ?? []).map { Self.hostName($0.host) })
         return orderedRemotes.lazy.filter { $0.url.lowercased().hasPrefix("https://") }
-            .compactMap { GitHubClient.repository(fromRemoteURL: $0.url)?.host }
+            .compactMap { Self.hostedHost($0.url) }
             .first { !accountNames.contains(Self.hostName($0)) }
     }
 
@@ -259,8 +283,14 @@ extension RepoSession {
     /// does.
     var sshRemoteHint: (name: String, host: String)? {
         orderedRemotes.lazy.filter { !$0.url.lowercased().hasPrefix("https://") }
-            .compactMap { remote in GitHubClient.repository(fromRemoteURL: remote.url).map { (remote.name, $0.host) } }
+            .compactMap { remote in Self.hostedHost(remote.url).map { (remote.name, $0) } }
             .first
+    }
+
+    /// The host of a remote URL whose path can name a hosted repository (at least two segments: GitHub's
+    /// `owner/repo`, GitLab's `group/sub/project`); nil otherwise.
+    private static func hostedHost(_ url: String) -> String? {
+        RemoteURL(url).flatMap { $0.segments.count >= 2 ? $0.host : nil }
     }
 
     private var orderedRemotes: [RemoteInfo] {
@@ -279,7 +309,7 @@ private struct HostedRowView: View {
     let session: RepoSession
     let row: HostedRow
     let checks: ChecksState?
-    let realAvatars: Bool
+    let avatars: HostAvatars
     @State private var hovered = false
     /// Bumped when `AvatarStore` has a new image for this author (or the avatar mode changed).
     @State private var avatarRevision = 0
@@ -290,12 +320,13 @@ private struct HostedRowView: View {
 
     var body: some View {
         let selected = session.openHosted == row.item
+        let reference = session.github.kind.reference(row.item)
         HStack(spacing: SidebarMetrics.iconGap) {
             avatar
                 .id(avatarRevision)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
-                Text("#\(row.number)")
+                Text(reference)
                     .font(textSize.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -329,9 +360,11 @@ private struct HostedRowView: View {
         .onTapGesture { session.selectHosted(row.item) }
         .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
             guard let changed = note.userInfo?[AvatarStore.emailKey] as? String else { return avatarRevision &+= 1 }
-            if AvatarStore.matches(email: email, name: login, changed: changed) { avatarRevision &+= 1 }
+            if authorAvatars.matches(changed, login: login, id: row.authorID, avatarURL: row.authorAvatarURL) {
+                avatarRevision &+= 1
+            }
         }
-        .help(row.authorLogin.map { "\(row.title)\n#\(row.number) by \($0)" } ?? "\(row.title)\n#\(row.number)")
+        .help(row.authorLogin.map { "\(row.title)\n\(reference) by \($0)" } ?? "\(row.title)\n\(reference)")
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityLabel(accessibilityText)
@@ -340,18 +373,13 @@ private struct HostedRowView: View {
 
     private var login: String { row.authorLogin ?? "?" }
 
-    /// GitHub's noreply address of the author: `AvatarStore.gitHubAvatar` loads its GitHub avatar in every mode, so
-    /// an account looks the same here and on the pull request page. Empty (a drawn avatar from the login, never a
-    /// request) for the stub and for Enterprise hosts, whose avatars are elsewhere.
-    private var email: String {
-        guard realAvatars, let login = row.authorLogin else { return "" }
-        return AvatarStore.gitHubEmail(login: login, id: row.authorID)
-    }
+    /// The repository's avatars (GitHub's load in every mode, so an account looks the same here and on the pull
+    /// request page); a drawn avatar, never a request, without an author.
+    private var authorAvatars: HostAvatars { row.authorLogin == nil ? .drawn : avatars }
 
     @ViewBuilder private var avatar: some View {
         let pixels = Int((Self.avatarSize * displayScale).rounded())
-        let image = email.isEmpty ? AvatarStore.shared.avatar(email: "", name: login, pixels: pixels)
-            : AvatarStore.shared.gitHubAvatar(login: login, id: row.authorID, pixels: pixels)
+        let image = authorAvatars.image(login: login, id: row.authorID, avatarURL: row.authorAvatarURL, pixels: pixels)
         if let image {
             Image(nsImage: image)
                 .resizable()
@@ -364,7 +392,7 @@ private struct HostedRowView: View {
     }
 
     private var accessibilityText: String {
-        let kind = if case .issue = row.item { "Issue" } else { "Pull request" }
+        let kind = if case .issue = row.item { "Issue" } else { session.github.kind.pullRequestNoun }
         var parts = ["\(kind) \(row.number)", row.title]
         if let author = row.authorLogin { parts.append("by \(author)") }
         if row.isDraft { parts.append("draft") }
