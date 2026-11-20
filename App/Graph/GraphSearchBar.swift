@@ -65,6 +65,11 @@ final class GraphSearch {
     @ObservationIgnored weak var session: RepoSession?
     /// The graph table, which takes the focus back when the bar closes.
     @ObservationIgnored weak var table: NSView?
+    /// The open bar's field anchor (`GraphSearchBar`), from which `field` finds its text field.
+    @ObservationIgnored fileprivate weak var fieldAnchor: FieldAnchor.Box?
+    /// The open bar's text field: the keyboard goes to it when the tab shows (`WindowModel.focusShownTab`). nil while
+    /// closed or not in a window yet.
+    var field: NSTextField? { isOpen ? fieldAnchor?.textField() : nil }
 
     private struct LogKey: Equatable {
         let generation: Int
@@ -343,7 +348,10 @@ struct GraphSearchBar: View {
         .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius, raised: true))
         .environment(\.cardSurface, Palette.surface)
         .padding(8)
-        .onAppear { focusField() }
+        .onAppear {
+            search.fieldAnchor = anchor
+            focusField()
+        }
         .onChange(of: search.focusToken) { focusField() }
     }
 
@@ -375,15 +383,18 @@ struct GraphSearchBar: View {
         .focusEffectDisabled()
     }
 
-    /// Focuses the field and selects its text, so ⌘F then typing replaces the query.
+    /// Focuses the field and selects its text, so ⌘F then typing replaces the query. Not in a hidden tab (a kept-alive
+    /// layout rebuilt by a layout change): checked when it runs.
     private func focusField() {
         // The bar is installed on this turn: ask for the focus on the next one, as the palette does.
         DispatchQueue.main.async {
+            guard search.session?.isShown != false else { return }
             fieldFocused = true
             // SwiftUI can hold the request until its next update (the next key or mouse event, so the graph kept the
             // focus after ⌘F): on the turn after, AppKit focuses the field itself when it still has not got it.
             DispatchQueue.main.async {
-                guard let field = anchor.textField(), let window = field.window else { return }
+                guard search.session?.isShown != false, let field = anchor.textField(), let window = field.window
+                else { return }
                 if field.currentEditor() == nil || window.firstResponder !== field.currentEditor() {
                     window.makeFirstResponder(field)
                 }

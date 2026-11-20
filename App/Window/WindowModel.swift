@@ -1,6 +1,6 @@
 // One window's tabs: each is a repo, or a Welcome tab (no repo), with the selection, the page the window shows and
 // the Settings modal over it.
-import Foundation
+import AppKit
 import HistqCore
 import os
 
@@ -62,8 +62,20 @@ final class WindowModel {
             guard oldValue != selectedTabID else { return }
             oldValue.flatMap { sessions[$0] }?.isShown = false
             selectedTabID.flatMap { sessions[$0] }?.isShown = true
+            // The new tab's session may not exist yet (`activateSelectedTab` makes it next): it goes first anyway.
+            if let selectedTabID {
+                let older = recentlyShown.filter { $0 != selectedTabID && sessions[$0] != nil }
+                recentlyShown = [selectedTabID] + older.prefix(Self.keptLayouts - 1)
+            }
         }
     }
+    /// The tabs shown last, most recent first: `TabContent` keeps the layouts of those with a session mounted (hidden
+    /// but the selected one), so a switch back shows the tab as it was without building it again. Pruned when a tab
+    /// closes or is archived (`remove(at:)`).
+    private(set) var recentlyShown: [Tab.ID] = []
+    /// At most this many repo layouts stay mounted: each holds its graph table, diff and detail views, so the memory
+    /// a window takes stays bounded however many tabs it has. 4 covers going back and forth between a few repos.
+    private static let keptLayouts = 4
     /// The tab groups (by key) collapsed with a click on their name, as Chrome's: only the name shows. The selected
     /// tab is never in one: a group opens again when one of its tabs is selected (the tab list, ⇧⌘T, a worktree).
     private(set) var collapsedGroups: Set<String> = []
@@ -93,6 +105,8 @@ final class WindowModel {
     private(set) var modal: WindowModal?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
+    /// The window; set by the AppDelegate. A tab switch moves its keyboard focus (`focusShownTab`).
+    @ObservationIgnored weak var window: NSWindow?
     /// The terminal drawer's height in this window's tabs (dragged with its handle); each tab has its own terminal.
     var terminalHeight: CGFloat = TerminalDrawerMetrics.defaultHeight
     /// The operation toasts at the window's bottom right (`ToastHost`), oldest first. Read only by `ToastHost`.
@@ -109,6 +123,8 @@ final class WindowModel {
 
     init() {
         selectedTabID = tabs.first?.id
+        // `didSet` does not run in `init`: a repo opened in this first tab must be kept when another tab shows.
+        recentlyShown = tabs.first.map { [$0.id] } ?? []
     }
 
     var selectedIndex: Int? { tabs.firstIndex { $0.id == selectedTabID } }
@@ -321,6 +337,50 @@ final class WindowModel {
         if session.detail.value == nil { session.select(session.selection) }
         // Another worktree may have changed in its own tab meanwhile; a new session reads them after its first page.
         if !isNew { session.refreshWorktrees() }
+    }
+
+    /// After a tab switch (`TabContent`, in the view update's turn): the shown tab's view takes the keyboard, so no
+    /// hidden tab's view keeps it (its arrows, Esc, ⌘Z and typing would act on a repo not shown). The open graph
+    /// search, else panel 2's diff or blame, else the graph while panel 2 shows it, else nothing (the window). A target
+    /// not in the window or not shown yet gets one main-queue hop, the window holding the focus meanwhile. Logs
+    /// `focus <repo> <kind>` once.
+    func focusShownTab(repo: String) {
+        guard let window else { return }
+        let targets = focusTargets()
+        if let first = targets.first, take(first.view, in: window) { return UITiming.focus(repo, first.kind) }
+        let resigned = window.makeFirstResponder(nil)
+        guard !targets.isEmpty else { return UITiming.focus(repo, "none") }
+        let id = selectedTabID
+        DispatchQueue.main.async { [weak self, weak window] in
+            // A newer switch moves the focus itself.
+            guard let self, let window, selectedTabID == id else { return }
+            // The old responder refused to resign: ask again before taking the target.
+            if !resigned { window.makeFirstResponder(nil) }
+            for target in focusTargets() where take(target.view, in: window) {
+                return UITiming.focus(repo, target.kind)
+            }
+            UITiming.focus(repo, "none")
+        }
+    }
+
+    /// The shown tab's focus targets, best first, from what it shows (a tool stays mounted under the diff opened from
+    /// it, so a live view alone says nothing). The graph only while panel 2 shows it, not under a file, a pull
+    /// request or a tool. None under the tab's own modal (one opened while it was hidden), which takes the keyboard.
+    private func focusTargets() -> [(kind: String, view: NSView?)] {
+        guard let session = selectedSession, !session.hasModal else { return [] }
+        let showsGraph = session.openFile == nil && session.openHosted == nil && session.openTool == nil
+        var targets: [(kind: String, view: NSView?)] = []
+        if showsGraph, session.graphSearch.isOpen { targets.append(("search", session.graphSearch.field)) }
+        if let file = session.openFile, !file.isConflict { targets.append(("diff", session.diffTable)) }
+        if session.openFile == nil, case .blame? = session.openTool { targets.append(("blame", session.blameTable)) }
+        if showsGraph, session.log.value != nil { targets.append(("graph", session.graphSearch.table)) }
+        return targets
+    }
+
+    /// Gives `view` the keyboard when it is in `window` and shown; false when it is not (yet), or refuses.
+    private func take(_ view: NSView?, in window: NSWindow) -> Bool {
+        guard let view, view.window === window, !view.isHiddenOrHasHiddenAncestor else { return false }
+        return window.firstResponder === view || window.makeFirstResponder(view)
     }
 
     /// A tab's session, with the profile and commit a restored tab had in the saved session.
@@ -734,6 +794,7 @@ final class WindowModel {
         }
         restored.removeValue(forKey: tab.id)
         sessions.removeValue(forKey: tab.id)?.close()
+        recentlyShown.removeAll { $0 == tab.id }
         welcomes.removeValue(forKey: tab.id)?.cancel()
     }
 

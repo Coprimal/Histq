@@ -146,8 +146,9 @@ private extension CGFloat {
 }
 
 /// A repo tab: sidebar | commit list | detail (a failed operation shows in its toast). Each
-/// panel waits for its own data (the refs, the log, the selected detail) and shows its placeholder until then; a tab
-/// switch shows the detail's placeholder in the same frame.
+/// panel waits for its own data (the refs, the log, the selected detail) and shows its placeholder until then. It stays
+/// mounted while another tab shows, among the last tabs shown (`TabContent`, `tabIsShown` false), so a switch back
+/// shows it as it was.
 struct RepoLayoutView: View {
     let session: RepoSession
     @AppStorage(PrefKey.panelWidths.rawValue, store: Preferences.defaults) private var storedWidths = ""
@@ -617,7 +618,7 @@ private struct CommitListPanel: View {
                               search.close()
                               return true
                           })
-                    .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
+                    .modifier(CommitsShownLog(repo: session.url.lastPathComponent))
             case .failed(let message):
                 Label(message, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
@@ -711,6 +712,27 @@ private struct GraphHeaderPlaceholder: View {
     }
 }
 
+/// Its only input is its session: a tab switch, which re-evaluates `TabContent`, skips the body of every kept-alive
+/// layout (`.equatable()`). Its own state, observed reads and environment still update it.
+extension RepoLayoutView: Equatable {
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.session === rhs.session }
+}
+
+/// Logs `content commits <repo>` when the graph shows: as it appears in the shown tab, and each time its kept-alive tab
+/// shows again (the tab switch's content line). Reads `tabIsShown` itself, so a switch does not run the graph card's
+/// body.
+private struct CommitsShownLog: ViewModifier {
+    let repo: String
+    @Environment(\.tabIsShown) private var tabIsShown
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: tabIsShown, initial: true) { _, shown in
+                if shown { UITiming.content("commits \(repo)") }
+            }
+    }
+}
+
 // MARK: - Panel 3: the detail
 
 /// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection, a compare, or
@@ -732,8 +754,25 @@ private struct DetailPanel: View {
         VStack(spacing: SectionCardMetrics.spacing) {
             // Reads the status itself, so a status read redraws the notice and not the detail.
             WorkingChangesNotice(session: session)
+            // The tab showed with a change it held: the old status is not shown while the new one is read. The
+            // detail stays mounted under the placeholder (the WIP panel keeps its state), hidden and inert.
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .opacity(coversHeldStatus ? 0 : 1)
+                .allowsHitTesting(!coversHeldStatus)
+                .accessibilityHidden(coversHeldStatus)
+                .disabled(coversHeldStatus)
+                .overlay(alignment: .topLeading) {
+                    if coversHeldStatus {
+                        PlaceholderCard(
+                            token: session.selectToken, detail: session.selectDetail,
+                            isCurrent: { [model, session] in model.selectedSession === session && session.statusHeld }
+                        ) {
+                            placeholder
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .coordinateSpace(.named(FilesLayoutLog.coordinateSpace))
@@ -741,39 +780,39 @@ private struct DetailPanel: View {
 
     @ViewBuilder private var content: some View {
         Group {
-            if showsHeldStatus {
-                // The tab showed with a change it held: the old status is not shown while the new one is read.
+            switch session.detail {
+            case .idle, .loading:
                 PlaceholderCard(
                     token: session.selectToken, detail: session.selectDetail,
-                    isCurrent: { [model, session] in model.selectedSession === session && session.statusHeld }
+                    isCurrent: { [model, session] in model.selectedSession === session }
                 ) {
                     placeholder
                 }
-            } else {
-                switch session.detail {
-                case .idle, .loading:
-                    PlaceholderCard(
-                        token: session.selectToken, detail: session.selectDetail,
-                        isCurrent: { [model, session] in model.selectedSession === session }
-                    ) {
-                        placeholder
+            case .loaded(let detail):
+                // Keyed on the select, not on appearing: a switch between two loaded commits can keep this view.
+                // A commit's header shows before its files: `content` waits for them (`content-info` is the
+                // header's), and for the held status's read (it stays mounted under that placeholder).
+                loaded(detail)
+                    .onChange(of: ContentKey(token: session.selectToken,
+                                             isReady: detail.isReady && !showsHeldStatus), initial: true) {
+                        _, key in
+                        if key.isReady { UITiming.content(session.selectDetail) }
                     }
-                case .loaded(let detail):
-                    // Keyed on the select, not on appearing: a switch between two loaded commits can keep this view.
-                    // A commit's header shows before its files: `content` waits for them (`content-info` is the
-                    // header's).
-                    loaded(detail)
-                        .onChange(of: ContentKey(token: session.selectToken, isReady: detail.isReady), initial: true) {
-                            _, key in
-                            if key.isReady { UITiming.content(session.selectDetail) }
-                        }
-                case .failed(let message):
-                    FailedCard(message: message, path: session.url.path)
-                        .onChange(of: session.selectToken, initial: true) {
-                            UITiming.content("\(session.selectDetail) failed")
-                        }
-                }
+            case .failed(let message):
+                FailedCard(message: message, path: session.url.path)
+                    .onChange(of: session.selectToken, initial: true) {
+                        UITiming.content("\(session.selectDetail) failed")
+                    }
             }
+        }
+    }
+
+    /// The held status's placeholder covers the detail (`showsHeldStatus`). Not a loading detail, which already shows
+    /// the same placeholder.
+    private var coversHeldStatus: Bool {
+        switch session.detail {
+        case .idle, .loading: false
+        case .loaded, .failed: showsHeldStatus
         }
     }
 

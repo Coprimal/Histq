@@ -439,7 +439,8 @@ enum UITiming {
         #endif
     }
     /// A tab's view took the keyboard focus on purpose: `focus <repo> <kind>`, `kind` `search`, `diff`, `blame` or
-    /// `graph`; `none` when its terminal closed and the focus stayed where it was.
+    /// `graph`; `none` when its terminal closed and the focus stayed where it was, or a tab switch left it on the window
+    /// (`WindowModel.focusShownTab`, once per switch).
     static func focus(_ repo: String, _ kind: String) {
         #if DEBUG || HISTQ_PERF
         record("focus", "\(repo) \(kind)")

@@ -1,8 +1,8 @@
 // One tab's repository: its git runner, what it has read (status, refs, the log and its graph layout), the selected
 // detail with its loading state, and the watcher that keeps them current. Every git call runs off the main actor;
 // the main actor only publishes results.
+import AppKit
 import CryptoKit
-import Foundation
 import HistqCore
 import os
 
@@ -797,6 +797,10 @@ final class RepoSession: Identifiable {
     }
     /// The graph's ⌘F search (`GraphSearch`): searched again with every new log snapshot.
     let graphSearch = GraphSearch()
+    /// The open diff's first table and the open blame's table, set by their views: the keyboard goes to them when the
+    /// tab shows (`WindowModel.focusShownTab`).
+    @ObservationIgnored weak var diffTable: NSView?
+    @ObservationIgnored weak var blameTable: NSView?
     /// The branch each commit of `log` is on, computed off the main actor for each log snapshot and refs change.
     private(set) var branchMap = BranchMap()
     /// The merge, rebase, cherry-pick or revert in progress (the operation banner), read with every status read; nil

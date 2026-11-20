@@ -349,6 +349,8 @@ struct DiffLineTable: NSViewRepresentable {
     /// file (`isFirst`) when none has it.
     var jump: DiffJump?
     var isFirst = true
+    /// Gets the table once made (the session's `diffTable`, the keyboard's target when the tab shows).
+    var onTable: @MainActor (NSView) -> Void = { _ in }
     var onApply: @MainActor (PatchBuilder.Action, Set<DiffLineID>, FileDiff) -> Void = { _, _, _ in }
     var onClose: @MainActor () -> Void = {}
     /// The code font size: a new one reloads the rows at it.
@@ -387,14 +389,13 @@ struct DiffLineTable: NSViewRepresentable {
         scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
+        onTable(table)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        if scroll.isHidden == tabIsShown {
-            scroll.isHidden = !tabIsShown
-            if tabIsShown { (scroll.documentView as? DiffTableView)?.focusWhenShown() }
-        }
+        // The tab showing again moves the keyboard itself (`WindowModel.focusShownTab`).
+        if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         context.coordinator.update(self)
     }
 }
@@ -591,23 +592,12 @@ final class DiffTableView: NSTableView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // In a hidden tab it waits until the tab shows (`focusWhenShown`).
+        // In a hidden tab it waits until the tab shows (`WindowModel.focusShownTab`).
         guard let window, !tookFocus, !isHiddenOrHasHiddenAncestor else { return }
         tookFocus = true
         // The other tables of the same diff do not steal it; a hidden tab's table does not keep it.
         if let focused = window.firstResponder as? DiffTableView, !focused.isHiddenOrHasHiddenAncestor { return }
         if window.makeFirstResponder(self) { UITiming.focus(repo, "diff") }
-    }
-
-    /// Its tab shows again: on the next turn (once the other tab is hidden), it takes the keyboard when no shown view
-    /// has it.
-    func focusWhenShown() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let window, !isHiddenOrHasHiddenAncestor else { return }
-            if let focused = window.firstResponder as? NSView, !focused.isHiddenOrHasHiddenAncestor { return }
-            tookFocus = true
-            if window.makeFirstResponder(self) { UITiming.focus(repo, "diff") }
-        }
     }
 
     override func keyDown(with event: NSEvent) {

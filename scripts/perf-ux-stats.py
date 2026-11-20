@@ -15,9 +15,11 @@ probes and are dropped.
 Click windows: `select commit|wip|file|tab|pr …` (reads; after `walk start` when the run walks) and `op-click` (writes).
 A window runs to the next click. Feedback and content lines are matched to their click by detail (`select file X` ->
 `placeholder file X`, `content file X`), up to the next click of the same detail, so a late line is never given to
-the wrong click. Writes: pre = op-start - op-click, end = op-end - op-click, settled = op-settled - op-click,
-O1 = end - the main git command (the longest line of the scenario's main verb inside op-start..op-end), O2 = op-settled -
-op-end, O3 = first graph-reload after op-end - op-end, unaccounted = op-end - op-start - the serial git ms inside it.
+the wrong click. A tab click's content is `content commits <repo>` of the repo its `tab-shown` names (logged when a
+layout becomes shown, on revisits too; none in the window: no content). Writes: pre = op-start - op-click, end =
+op-end - op-click, settled = op-settled - op-click, O1 = end - the main git command (the longest line of the scenario's
+main verb inside op-start..op-end), O2 = op-settled - op-end, O3 = first graph-reload after op-end - op-end,
+unaccounted = op-end - op-start - the serial git ms inside it.
 Serial ms is the union of the processes' intervals (what a strictly one-after-the-other run would add up to).
 """
 import os
@@ -265,8 +267,10 @@ def read_window(run, t, detail, stop, same):
                 break
         w["repo"] = shown[1] if shown else None
         w["F"] = shown[0] - t if shown else None
-        commits = run.first(t, stop, lambda e, d: e == "content" and d.startswith("commits "))
-        w["content"] = commits - t if commits is not None else w["F"]
+        commits = None
+        if shown:
+            commits = run.first(t, stop, lambda e, d: e == "content" and d == "commits " + shown[1])
+        w["content"] = commits - t if commits is not None else None
         frame = None
         for tt, event, d in run.events:
             if t <= tt < stop and event == "tab-frame" and d.split(" ")[0] == index:
@@ -414,6 +418,39 @@ def proof(run, scenario):
     return f"pass({last - t0:.0f}/{last - refresh:.0f}ms)"
 
 
+def is_tabs(scenario):
+    return scenario == "tabs" or scenario.startswith("tabs-")
+
+
+def focus_check(run, scenario):
+    """`tabs*`: each `select tab <i>` is followed, before the next click, by `tab-shown <i> <repo>` and exactly one
+    `focus <repo> <kind>` naming that repo (`WindowModel.focusShownTab`). fail(<detail>) names the first bad switch."""
+    if not is_tabs(scenario):
+        return None
+    cs = clicks(run, scenario)
+    for i, (t, _, detail) in enumerate(cs):
+        if not detail.startswith("tab "):
+            continue
+        index = detail[4:]
+        stop = cs[i + 1][0] if i + 1 < len(cs) else run.end + 1
+        inside = [(e, d) for tt, e, d in run.events if t <= tt < stop]
+        shown = next(
+            (d.split(" ", 1)[1] for e, d in inside if e == "tab-shown" and d.split(" ")[0] == index and " " in d), None
+        )
+        where = f"{detail} at {t:.0f}"
+        if shown is None:
+            return f"fail({where}: no tab-shown)"
+        focus = [d.rsplit(" ", 1)[0] for e, d in inside if e == "focus"]
+        if not focus:
+            return f"fail({where}: no focus line)"
+        wrong = next((repo for repo in focus if repo != shown), None)
+        if wrong is not None:
+            return f"fail({where}: focus {wrong}, shown {shown})"
+        if len(focus) > 1:
+            return f"fail({where}: {len(focus)} focus lines)"
+    return "pass" if cs else "fail(no select tab)"
+
+
 def pr_extras(run):
     out = {}
     for t, event, detail in run.events:
@@ -501,6 +538,9 @@ def row(scenario, timing):
     p = proof(run, scenario)
     if p:
         parts.append(f"proof={p}")
+    f = focus_check(run, scenario)
+    if f:
+        parts.append(f"focus={f}")
     if not ws:
         parts.append("no click window")
     return " | ".join(parts)
@@ -533,6 +573,9 @@ def table(scenario, timings):
         p = proof(run, scenario)
         if p:
             extras["proof"].append(p)
+        f = focus_check(run, scenario)
+        if f:
+            extras["focus"].append(f"focus={f}")
         wall = walk_wall(run)
         if wall is not None:
             extras["walk ms"].append(fmt(wall))

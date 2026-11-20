@@ -28,9 +28,10 @@ struct GitHubDriver: View {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 if windowState.isVisible, tabIsShown, listsShown { session.github.refreshIfStale() }
             }
-            // The store reads only the shown lists: a list shown again loads now, not at the next refresh.
+            // The store reads only the shown lists: a list shown again loads now, not at the next refresh. Only in the
+            // shown tab: the setting is app-wide, and the kept-alive tabs must not all read GitHub at once.
             .onChange(of: layout.pullRequestLists) { old, new in
-                if new.contains(where: { !old.contains($0) }) { session.github.refreshNow() }
+                if tabIsShown, new.contains(where: { !old.contains($0) }) { session.github.refreshNow() }
             }
     }
 

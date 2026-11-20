@@ -100,7 +100,8 @@ dated up to 2027), a minute apart, with `maintenance.auto` and `gc.auto` off.
 `scripts/perf-ux.sh` times what a click does: how soon the app shows a reaction, when the content is in, and which git
 processes each click or operation runs. It reads the timing lines a Debug build or the measurement build writes to
 `timing.log` in its state folder (`select`, `placeholder`, `content`, `op-click` / `op-start` / `op-end` /
-`op-settled`, `op-feedback`, one `git <verb> <ms> <repo>` line per git process, `tab-frame`, `walk …`). Everything
+`op-settled`, `op-feedback`, one `git <verb> <ms> <repo>` line per git process, `tab-shown`, `focus`, `tab-frame`,
+`walk …`). Everything
 lives under `build/qa/perf/ux/`: the fixtures in `fx` and `base`, a fresh APFS copy per run in `run` (removed after
 the run), the logs in `results/<label>/`, the measurement app and its stamp in `app-perf`.
 
@@ -171,7 +172,18 @@ front app is a warning: someone switched apps meanwhile, or the launch came to f
   before the next click; `git/click` and `serial/click` = git processes per click and their serial time (the union of
   their intervals); `sig` = processes ended by a signal (a cancelled read); `spinner` when a load took long enough to
   show one; `frame-max` = the longest main-thread gap after a tab switch; `tail-same reread` = status, ref or log
-  processes of a revisited tab whose repo did not change (0 is right); `walk` = the walk's wall time.
+  processes of a revisited tab whose repo did not change (0 is right); `walk` = the walk's wall time. A tab click's
+  `content` is the `content commits <repo>` line of the repo its `tab-shown <i> <repo>` names, logged when a layout
+  becomes shown (on revisits too, never for a graph that appears while its tab is hidden); a window without it has no
+  `content` (older logs logged it on every rebuild, so their numbers still compare). A window keeps the last 4 shown
+  tabs alive: switching back to one rebuilds nothing, so a revisit window has no `content sidebar` or
+  `content overview`.
+- `focus` (`tabs`, `tabs-ignored`, `tabs-tracked`): `pass` when each `select tab <i>` is followed, before the next
+  click, by `tab-shown <i> <repo>` and exactly one `focus <repo> <kind>` naming that repo (`WindowModel.focusShownTab`
+  logs it once per switch; `kind` is where the keyboard went: `search`, `diff`, `blame`, `graph` or `none`, the
+  window itself); `fail(tab <i> at <t>: …)` names the first bad switch: no `tab-shown`, no focus line, a focus
+  line of another repo, or more than one. A diff or blame table that takes the focus when it mounts in the shown tab
+  logs `focus <repo> diff|blame` too, which counts as a second line in a switch window.
 - Writes: `op <kind> ok|fail`, `F` (the first `op-feedback` and which one), `pre` (`op-start` − `op-click`), `end`,
   `settled`, `O1` = `end` minus the main git command (named in brackets: `checkout`, `commit`, `stash`, `rebase`,
   `fetch`, `fetch` + `merge` or `rebase` for a pull, `push`), `O2` = `op-settled` − `op-end`, `O3` = the first

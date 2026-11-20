@@ -144,9 +144,10 @@ final class RepoTerminal: NSObject {
 
     // MARK: Focus
 
-    /// Gives the terminal the keyboard focus when an open asked for it and the view is in a window now.
+    /// Gives the terminal the keyboard focus when an open asked for it and the view is in a window now, shown (a hidden
+    /// tab's request waits).
     func focusIfRequested() {
-        guard wantsFocus, let window = view.window else { return }
+        guard wantsFocus, let window = view.window, !view.isHiddenOrHasHiddenAncestor else { return }
         wantsFocus = false
         window.makeFirstResponder(view)
     }

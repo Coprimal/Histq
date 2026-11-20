@@ -181,7 +181,8 @@ private struct BlameLines: View {
             BlameTable(blame: blame, selectedHash: selectedHash, dateFormat: dateFormat, wrapLines: wrapLines,
                        repo: session.url.lastPathComponent,
                        onSelect: { [session] hash in session.selectKeepingTool(hash) },
-                       onClose: { [session] in session.closeFile() })
+                       onClose: { [session] in session.closeFile() },
+                       onTable: { [session] table in session.blameTable = table })
                 .frame(maxHeight: .infinity)
         }
     }
@@ -281,6 +282,8 @@ private struct BlameTable: NSViewRepresentable {
     let repo: String
     let onSelect: @MainActor (String) -> Void
     let onClose: @MainActor () -> Void
+    /// Gets the table once made (the session's `blameTable`, the keyboard's target when the tab shows).
+    var onTable: @MainActor (NSView) -> Void = { _ in }
     /// The code font size: a new one lays the rows out again at it.
     @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
     @Environment(\.tabIsShown) private var tabIsShown
@@ -317,14 +320,13 @@ private struct BlameTable: NSViewRepresentable {
         scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
+        onTable(table)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        if scroll.isHidden == tabIsShown {
-            scroll.isHidden = !tabIsShown
-            if tabIsShown { (scroll.documentView as? BlameTableView)?.focusWhenShown() }
-        }
+        // The tab showing again moves the keyboard itself (`WindowModel.focusShownTab`).
+        if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         context.coordinator.update(self)
     }
 }
@@ -403,21 +405,10 @@ private final class BlameTableView: NSTableView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // In a hidden tab it waits until the tab shows (`focusWhenShown`).
+        // In a hidden tab it waits until the tab shows (`WindowModel.focusShownTab`).
         guard let window, !tookFocus, !isHiddenOrHasHiddenAncestor else { return }
         tookFocus = true
         if window.makeFirstResponder(self) { UITiming.focus(repo, "blame") }
-    }
-
-    /// Its tab shows again: on the next turn (once the other tab is hidden), it takes the keyboard when no shown view
-    /// has it.
-    func focusWhenShown() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let window, !isHiddenOrHasHiddenAncestor else { return }
-            if let focused = window.firstResponder as? NSView, !focused.isHiddenOrHasHiddenAncestor { return }
-            tookFocus = true
-            if window.makeFirstResponder(self) { UITiming.focus(repo, "blame") }
-        }
     }
 
     /// A new card width fits the column again (and measures wrapped rows again): the table is not told otherwise.
