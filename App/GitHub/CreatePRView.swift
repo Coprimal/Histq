@@ -6,8 +6,9 @@
 // remote-tracking branches, the commits GitHub compares), while the user has not typed one. The body has Write and a
 // local Preview (inline markdown only, no request: `POST /markdown` would send the draft to GitHub on every switch).
 // Reviewers, assignees and labels come from the API off the main actor; a list the token may not read (403, 404) only
-// leaves its picker out. Create opens the pull request, then asks for the reviewers, labels and assignees; the new
-// pull request's detail opens in panel2 even when one of those follow-ups fails (the failure shows above its tabs).
+// leaves its picker out. Create opens the pull request, then asks for the reviewers, labels and assignees, and closes
+// the form: the pull requests are refreshed, so the head's badge shows the new one (its detail is not opened); a
+// follow-up that failed shows in a warning toast.
 // Generate (AI) opens its card over the form; its Apply fills the title and the description.
 import AppKit
 import HistqCore
@@ -440,7 +441,8 @@ struct CreatePRView: View {
         return ""
     }
 
-    /// Creates the pull request off the main actor, then its reviewers, labels and assignees; opens it once created.
+    /// Creates the pull request off the main actor, then its reviewers, labels and assignees; closes the form once
+    /// created.
     /// A refused create stays in the form (GitHub's reason, e.g. one already exists). Never while the AI card is over
     /// the form: Return in a field that kept the focus must not create the pull request.
     private func submit() {
@@ -466,10 +468,9 @@ struct CreatePRView: View {
             case .success(let created):
                 if session.pullRequestForm?.id == formID { session.pullRequestForm = nil }
                 session.github.refreshNow()
-                session.selectHosted(.pullRequest(created.number))
                 if !created.problems.isEmpty {
-                    session.pullDetail.actionError = "Created #\(created.number), but "
-                        + created.problems.joined(separator: "; ")
+                    session.postToast(.warning("Created pull request #\(created.number)",
+                                               detail: created.problems.joined(separator: "; ")))
                 }
             }
         }
