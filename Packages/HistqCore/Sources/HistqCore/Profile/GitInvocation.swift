@@ -52,7 +52,7 @@ public enum GitInvocation {
         /// plus the hardened block of `kind` and the profile's token helper.
         case network(NetworkKind)
         /// An automatic read in a folder whose config names `filterDrivers` and `diffDrivers` (see
-        /// `filterDrivers(runner:cwd:env:)` and `diffDrivers(runner:cwd:env:)`).
+        /// `drivers(runner:cwd:env:)`).
         case read(filterDrivers: [String], diffDrivers: [String] = [])
         /// A fetch nobody clicked, with the user's own `credentialHelpers` (see
         /// `credentialHelpers(runner:cwd:env:)`).
@@ -706,31 +706,42 @@ public enum GitInvocation {
         return stride(from: 0, to: fields.count - 1, by: 2).allSatisfy { userScopes.contains(fields[$0]) }
     }
 
-    /// The read environment for a read run in `cwd`: lists the filter and diff drivers configured there first (both
-    /// listings at once).
-    public static func readEnvironment(profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL)
-        async throws -> [String: String]
-    {
+    /// The read environment for a read run in `cwd`: lists the filter and diff drivers configured there first (one
+    /// listing), or takes them from `cache` while none of the files that listing read has changed (see
+    /// `ReadEnvironmentCache`).
+    public static func readEnvironment(
+        profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL, cache: ReadEnvironmentCache? = nil
+    ) async throws -> [String: String] {
         let listingEnv = environment(profile: profile, base: base, access: .read(filterDrivers: []))
-        async let filters = filterDrivers(runner: runner, cwd: cwd, env: listingEnv)
-        async let diffs = diffDrivers(runner: runner, cwd: cwd, env: listingEnv)
-        return try await environment(
-            profile: profile, base: base, access: .read(filterDrivers: filters, diffDrivers: diffs))
+        let listed = if let cache {
+            try await cache.drivers(runner: runner, cwd: cwd, env: listingEnv)
+        } else {
+            try await drivers(runner: runner, cwd: cwd, env: listingEnv)
+        }
+        return environment(
+            profile: profile, base: base, access: .read(filterDrivers: listed.filters, diffDrivers: listed.diffs))
     }
 
-    /// The filter driver names (`filter.<name>.*`) of every config scope git reads in `cwd`, including
-    /// includes and the worktree's `config.worktree`. `git config` itself runs nothing. The names come
-    /// from the repo, so they are parsed as bytes (no Unicode normalization or grapheme merging) and a
-    /// name that is not valid UTF-8 (which no environment string can carry) throws. Any git failure but
-    /// "no match" (exit 1) throws too, so a read never runs without its overrides.
-    public static func filterDrivers(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [String] {
-        try await subsections(of: "filter", runner: runner, cwd: cwd, env: env, notUTF8: .filterDriverNotUTF8)
+    /// The filter driver names (`filter.<name>.*`) and diff driver names (`diff.<name>.*`) of every config
+    /// scope git reads in `cwd`, including includes and the worktree's `config.worktree`, from one listing.
+    /// `git config` itself runs nothing. Any git failure but "no match" (exit 1) throws, so a read never runs
+    /// without its overrides.
+    public static func drivers(runner: GitRunner, cwd: URL, env: [String: String]) async throws
+        -> (filters: [String], diffs: [String])
+    {
+        let result = try await runner.run(
+            ["config", "-z", "--name-only", "--get-regexp", #"^(filter|diff)\."#], cwd: cwd, env: env,
+            timeout: .seconds(10), allowedExitCodes: [0, 1])
+        return try drivers(in: result.stdout.split(separator: 0))
     }
 
-    /// The diff driver names (`diff.<name>.*`), listed as `filterDrivers(runner:cwd:env:)` lists filters.
-    /// Two-part keys such as `diff.external` name no driver and are skipped.
-    public static func diffDrivers(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [String] {
-        try await subsections(of: "diff", runner: runner, cwd: cwd, env: env, notUTF8: .diffDriverNotUTF8)
+    /// The filter and diff driver names among the config `keys` git listed. The names come from the repo, so they
+    /// are parsed as bytes (no Unicode normalization or grapheme merging) and a name that is not valid UTF-8 (which
+    /// no environment string can carry) throws. Two-part keys such as `diff.external` name no driver and are
+    /// skipped.
+    static func drivers(in keys: [Data.SubSequence]) throws -> (filters: [String], diffs: [String]) {
+        try (subsections(of: "filter", in: keys, notUTF8: .filterDriverNotUTF8),
+             subsections(of: "diff", in: keys, notUTF8: .diffDriverNotUTF8))
     }
 
     public enum ReadSafetyError: Error, Equatable, Sendable {
@@ -740,18 +751,18 @@ public enum GitInvocation {
         case diffDriverNotUTF8
         /// The user's config has a credential helper entry that is not valid UTF-8, so it cannot be passed on.
         case credentialHelperNotUTF8
+        /// `git config --show-origin --list` printed something that is not `<origin>\0<key>[\n<value>]\0` records,
+        /// so its driver names cannot be trusted.
+        case configListingMalformed
     }
 
-    /// The subsection names of `section` (`<section>.<name>.<variable>` keys) in every config scope of `cwd`.
-    private static func subsections(
-        of section: String, runner: GitRunner, cwd: URL, env: [String: String], notUTF8: ReadSafetyError
-    ) async throws -> [String] {
-        let result = try await runner.run(
-            ["config", "-z", "--name-only", "--get-regexp", "^\(section)\\."], cwd: cwd, env: env,
-            timeout: .seconds(10), allowedExitCodes: [0, 1])
+    /// The subsection names of `section` (`<section>.<name>.<variable>` keys) among the listed `keys`.
+    private static func subsections(of section: String, in keys: [Data.SubSequence], notUTF8: ReadSafetyError)
+        throws -> [String]
+    {
         let prefix = Array("\(section).".utf8)
         var names: [String] = []
-        for key in result.stdout.split(separator: 0) {
+        for key in keys {
             // `<section>.<name>.<variable>`: the name is everything between the first and the last dot.
             guard key.starts(with: prefix), let lastDot = key.lastIndex(of: UInt8(ascii: ".")) else { continue }
             let start = key.startIndex + prefix.count

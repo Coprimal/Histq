@@ -1089,12 +1089,18 @@ final class RepoSession: Identifiable {
         let view: RepoViewState
 
         /// The read environment for this folder, built once per load: it lists the repo's filter and diff drivers
-        /// first, so they can be disabled. Never with the tab's profile: a read needs no identity, signing or SSH key,
-        /// and a profile's signing settings have no business in an automatic read of an untrusted repo.
+        /// first, so they can be disabled, or takes them from `readEnvironmentCache` while no config file it read
+        /// changed. Never with the tab's profile: a read needs no identity, signing or SSH key, and a profile's signing
+        /// settings have no business in an automatic read of an untrusted repo.
         func readEnvironment(cwd: URL) async throws -> [String: String] {
-            try await GitInvocation.readEnvironment(profile: nil, base: base, runner: runner, cwd: cwd)
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: base, runner: runner, cwd: cwd, cache: RepoSession.readEnvironmentCache)
         }
     }
+
+    /// The driver listings of every tab's folders (`Backend.readEnvironment(cwd:)`), checked against the config files
+    /// they came from on each use.
+    nonisolated static let readEnvironmentCache = ReadEnvironmentCache()
 
     init(url: URL) {
         self.url = url
