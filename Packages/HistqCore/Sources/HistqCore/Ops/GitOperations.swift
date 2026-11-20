@@ -1348,7 +1348,7 @@ public struct GitOperations: Sendable {
             // `RepoState.readOperation`: when none exists no operation is in progress, and `begin` need not read it.
             let stashes = Self.autostashFiles.count
             let files = Self.autostashFiles
-                + ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+                + RepoState.operationMarkers
             let found = before != nil ? nil : (try? await ops.exec(
                 ["rev-parse", "--path-format=absolute"] + files.flatMap { ["--git-path", $0] }))?.text
                 .split(separator: "\n").map { FileManager.default.fileExists(atPath: String($0)) }

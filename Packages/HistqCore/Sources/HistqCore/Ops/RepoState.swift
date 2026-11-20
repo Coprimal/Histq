@@ -79,13 +79,15 @@ public struct RepoState: Sendable, Equatable {
 
     // MARK: - Helpers
 
+    /// The files and folders whose presence `readOperation` reads as an operation in progress (`rebase-apply/applying`,
+    /// a `git am`, lives inside `rebase-apply`): none of them present means none is in progress.
+    static let operationMarkers = ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+
     /// MERGE_HEAD, rebase-merge, rebase-apply, CHERRY_PICK_HEAD, REVERT_HEAD and rebase-apply/applying (a `git am`
     /// in progress, checked before merge, cherry-pick and revert): per-worktree paths (`.git` is a file in a linked
     /// worktree), absolute.
     private static func operationPaths(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [URL] {
-        let names = [
-            "MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-apply/applying",
-        ]
+        let names = operationMarkers + ["rebase-apply/applying"]
         let result = try await runner.run(
             ["rev-parse", "--path-format=absolute"] + names.flatMap { ["--git-path", $0] }, cwd: cwd, env: env)
         let paths = result.text.split(separator: "\n").map { URL(filePath: String($0)) }
