@@ -40,18 +40,16 @@ enum Palette {
     /// Text and glyphs on the blue accent fill: primary buttons, the selected tab (user decision 2026-11-13: white).
     /// The accent (`AccentColor`, the logo's mid blue #2F86FB) holds white at 3.54:1, enough for its pills' labels.
     static let onAccent = color(.white)
-    /// The fill of primary buttons (Commit, Save, Keep File): the logo's deep blue, so their white label reads at
-    /// 5.82:1 (WCAG AA for body text). Not the accent: #2F86FB under white text is only 3.54:1, enough for the
-    /// selected pills, but not for a button's body text. #115CDE
-    static let primaryFill = color(srgb(0x115CDE))
-    /// The fill of a destructive confirmation's button (Delete Branch, Discard): a deep red, so its white label reads
-    /// at 5.9:1 like the primary blue's. #C0282D
-    static let destructiveFill = color(srgb(0xC0282D))
-    /// The WIP panel's Stage All button: a green, under a white label. #2E9E5B
-    static let stageAllFill = color(srgb(0x2E9E5B))
-    /// The WIP panel's Discard All and Unstage All buttons: a mid red (between `destructiveFill` and the old light
-    /// red #E0706C), under a white label. #D04C4D
-    static let wipRedFill = color(srgb(0xD04C4D))
+    /// The fill of primary buttons (Commit, Save, Keep File): the accent itself, the same blue as the selected tab and
+    /// the sidebar's pill, so the app has one blue (user, 2026-11-20; it was the deeper #115CDE, which stood out too
+    /// much). White on it reads at 3.54:1, the selected pills' contrast.
+    static let primaryFill = Color.accentColor
+    /// The fill of red buttons (Delete Branch, Discard, the WIP panel's Discard All and Unstage All): a muted red at
+    /// the accent's lightness (OKLCH 0.61 0.135 25), so it sits beside the blue without shouting. White 4.06:1. #C75E59
+    static let destructiveFill = color(srgb(0xC75E59))
+    /// The WIP panel's Stage All button: a muted green at the accent's lightness (OKLCH 0.61 0.115 152), under a
+    /// white label at 3.59:1. #469760
+    static let stageAllFill = color(srgb(0x469760))
     /// The WIP panel's Conflicted card: its title and icon, and the tint of its fill and edge (`SectionCard.tone`). The
     /// conflict editor's gold. #F2B630
     static let conflictTone = color(srgb(0xF2B630))
