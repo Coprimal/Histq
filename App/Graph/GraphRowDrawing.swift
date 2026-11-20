@@ -15,18 +15,18 @@ struct GraphMetrics: Equatable {
     /// of `textSize`'s body text and 5 pt above and below it: the same heights as before at Regular and Small, Compact
     /// 28 at Large.
     init(density: String, textSize: TextSize = .regular) {
-        // More row spacing (user, 2026-11-13): regular 28 -> 32, the others scaled with it.
+        // Regular 32 -> 30 and Comfortable 38 -> 34 (user, 2026-11-19): a little tighter, still above Compact.
         let height: CGFloat = switch density {
         case "compact": 26
-        case "comfortable": 38
-        default: 32
+        case "comfortable": 34
+        default: 30
         }
         rowHeight = max(height, textSize.lineHeight + 10)
         self.textSize = textSize
     }
 
     /// The height shared by the band, its edge bar, the selection and the node (the avatar), centered in the row: a
-    /// 3 pt gap above and below, where the lane lines run between two rows (20 / 26 / 32 pt).
+    /// 3 pt gap above and below, where the lane lines run between two rows (20 / 24 / 28 pt).
     var bandHeight: CGFloat { rowHeight - 6 }
     /// A commit's node (its avatar's circle): as tall as the band.
     var nodeDiameter: CGFloat { bandHeight }
