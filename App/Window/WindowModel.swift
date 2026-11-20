@@ -471,6 +471,61 @@ final class WindowModel {
             defaults.removeObject(forKey: key)
         }
     }
+
+    /// DEBUG `-HistqTabWalk <rounds>[,<ms>]` (timing of tab switches; started once per launch by the app): once the
+    /// open sessions' logs are complete, selects each tab in turn through `selectTab(at:)`, the click path, `ms` apart
+    /// (default 1500), `rounds` times (the first visits create the sessions). After the rounds it selects tab 0, logs
+    /// `walk tail` (the harness changes tab 2's repo now), waits 3 s, selects tab 1 and then tab 2 once more, and logs
+    /// `walk done`. Each switch logs a `tab-frame` line (`tabWalkSelect`).
+    func runTabWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let rounds = parts.first ?? nil, rounds > 0 else {
+            return Self.logger.error("-HistqTabWalk: expected <rounds>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 1 ? parts[1] : nil) ?? 1500
+        for _ in 0..<600 {
+            if !sessions.isEmpty, sessions.values.allSatisfy({ $0.log.value?.isComplete == true }) { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        // Lets the launch's last frames go by, so the first switch is not timed against them.
+        try? await Task.sleep(for: .milliseconds(500))
+        UITiming.walk("start tabs \(tabs.count) rounds \(rounds) every \(interval) ms")
+        for round in 1...rounds {
+            UITiming.walk("round \(round)")
+            for index in tabs.indices where tabs[index].id != selectedTabID {
+                await tabWalkSelect(index, interval: interval)
+            }
+        }
+        await tabWalkSelect(0, interval: 0)
+        UITiming.walk("tail")
+        try? await Task.sleep(for: .seconds(3))
+        await tabWalkSelect(1, interval: interval)
+        await tabWalkSelect(2, interval: 0)
+        UITiming.walk("done")
+    }
+
+    /// Selects tab `index` as a click does, then ticks every 5 ms on the main actor for 500 ms and logs `tab-frame
+    /// <index> max=<ms> over16=<ms>`: the largest gap between two ticks (from just before the select) and the sum of
+    /// the gaps longer than 16 ms (the main thread's holds, the switch's later runloop turns included). Then waits
+    /// until `interval` ms after the select.
+    private func tabWalkSelect(_ index: Int, interval: Int) async {
+        let start = ContinuousClock.now
+        var last = start
+        var longest = Duration.zero
+        var over16 = Duration.zero
+        selectTab(at: index)
+        while last - start < .milliseconds(500) {
+            try? await Task.sleep(for: .milliseconds(5))
+            let now = ContinuousClock.now
+            let gap = now - last
+            longest = max(longest, gap)
+            if gap > .milliseconds(16) { over16 += gap }
+            last = now
+        }
+        let ms: (Duration) -> String = { String(format: "%.1f", Double($0 / .microseconds(1)) / 1000) }
+        UITiming.tabFrame("\(index) max=\(ms(longest)) over16=\(ms(over16))")
+        try? await Task.sleep(for: .milliseconds(interval) - (ContinuousClock.now - start))
+    }
     #endif
 
     // MARK: Session restore

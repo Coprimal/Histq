@@ -39,6 +39,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let profileItem = ToolbarDropdown(ID.profile, label: "Profile", width: nil, image: nil)
     /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
     private var profileDot: String?
+    #if DEBUG || HISTQ_PERF
+    /// The branch button's last `<title> busy=<0|1>`, for its `op-feedback branch` timing line.
+    private var branchFeedback: String?
+    #endif
     /// The space between the profile chip's dot and its title.
     private static let profileDotGap: CGFloat = 5
     private let undoItem = NSToolbarItem(itemIdentifier: ID.undo)
@@ -353,6 +357,13 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             branchItem.isEnabled = !isBusy && session.refs.value != nil
             // The full name, as the title may be cut.
             branchItem.toolTip = isBusy ? "Checking out…" : "\(title): check out another branch"
+            #if DEBUG || HISTQ_PERF
+            let feedback = "\(title) busy=\(isBusy ? 1 : 0)"
+            if branchFeedback != feedback {
+                branchFeedback = feedback
+                UITiming.opFeedback("branch \(feedback)")
+            }
+            #endif
         }
 
         // Hidden, like the branch menu, where no repo tab shows (Welcome).
@@ -436,6 +447,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         guard let image = NSImage.icon(systemImage, accessibilityDescription: label, size: 20) else { return }
         item.image = image
         hoverButtons[ObjectIdentifier(item)]?.image = image
+        if systemImage == Self.busySymbol { UITiming.opFeedback("toolbar \(label)") }
     }
 
     /// In place of a running action's icon (there is no spinner in a toolbar button without a custom view).

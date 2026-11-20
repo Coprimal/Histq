@@ -1188,9 +1188,17 @@ final class RepoSession: Identifiable {
         if undos + redos > 0 {
             Task { [weak self] in await self?.runLaunchHistory(undos: undos, redos: redos) }
         }
-        // `-HistqSelectWalk <n>[,<ms>]`: times switches between commits (`runSelectWalk`).
+        // `-HistqSelectWalk <n>[,<ms>[,<stride>[,wip]]]`: times switches between commits (`runSelectWalk`).
         if let spec = AppState.launchFlag("-HistqSelectWalk") {
             Task { [weak self] in await self?.runSelectWalk(spec) }
+        }
+        // `-HistqFileWalk <n>[,<ms>]`: times switches between the selected commit's or the WIP's files (`runFileWalk`).
+        if let spec = AppState.launchFlag("-HistqFileWalk") {
+            Task { [weak self] in await self?.runFileWalk(spec) }
+        }
+        // `-HistqPRWalk <number>,<n>[,<ms>]`: times opening a pull request and going back to HEAD (`runPRWalk`).
+        if let spec = AppState.launchFlag("-HistqPRWalk") {
+            Task { [weak self] in await self?.runPRWalk(spec) }
         }
         // `-HistqHistoryWalk <n>[,<ms>]` (with `-HistqSelect history:<path>`): times switches between history rows.
         if let spec = AppState.launchFlag("-HistqHistoryWalk") {
@@ -3415,12 +3423,15 @@ final class RepoSession: Identifiable {
                 runner: runner, cwd: cwd, env: env, paths: paths, ignoringWhitespace: ignoresWhitespace)
             async let stagedFull = DiffReader.staged(
                 runner: runner, cwd: cwd, env: env, paths: paths, context: full, ignoringWhitespace: ignoresWhitespace)
+            let picked = (pick(try await unstaged, file), pick(try await unstagedFull, file), pick(try await staged, file),
+                          pick(try await stagedFull, file))
+            steps.lap("diff")
             let sections = [
-                DiffSection(side: .unstaged, diff: pick(try await unstaged, file), full: pick(try await unstagedFull, file),
-                            language: language),
-                DiffSection(side: .staged, diff: pick(try await staged, file), full: pick(try await stagedFull, file),
-                            language: language),
+                DiffSection(side: .unstaged, diff: picked.0, full: picked.1, language: language),
+                DiffSection(side: .staged, diff: picked.2, full: picked.3, language: language),
             ]
+            steps.lap("rows")
+            UITiming.fileLoad("\(file.path) \(steps.description) lines=\(lineCount(sections))")
             return FileDiffDetail(loadID: loadID, sections: sections.compactMap { $0 })
         case .commit(let hash) where file.kind == .unchanged:
             // A file the commit did not change ("View all files"): its blob at that commit, every line as context.
@@ -3439,7 +3450,7 @@ final class RepoSession: Identifiable {
             steps.lap("diff")
             let section = DiffSection(side: .commit, diff: picked.0, full: picked.1, language: language)
             steps.lap("rows")
-            UITiming.fileLoad("\(file.path) \(steps.description)")
+            UITiming.fileLoad("\(file.path) \(steps.description) lines=\(lineCount([section]))")
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         case .compare(let base, let head):
             // Read-only (no hunk buttons).
@@ -3449,10 +3460,18 @@ final class RepoSession: Identifiable {
             async let diffFull = DiffReader.compare(
                 base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths, context: full,
                 ignoringWhitespace: ignoresWhitespace)
-            let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
-                                      language: language)
+            let picked = (pick(try await diff, file), pick(try await diffFull, file))
+            steps.lap("diff")
+            let section = DiffSection(side: .commit, diff: picked.0, full: picked.1, language: language)
+            steps.lap("rows")
+            UITiming.fileLoad("\(file.path) \(steps.description) lines=\(lineCount([section]))")
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         }
+    }
+
+    /// The file's line count for a `file-load` timing line: the last new-side line number of the sections' full rows.
+    private nonisolated static func lineCount(_ sections: [DiffSection?]) -> Int {
+        sections.compactMap { $0?.fullRows.last { $0.newLine != nil }?.newLine }.max() ?? 0
     }
 
     /// A submodule row's pointer change, one per side that has one: a commit's or a stash's against its first parent
@@ -4638,27 +4657,111 @@ final class RepoSession: Identifiable {
         RepoMenus.debugLog("done history")
     }
 
-    /// DEBUG `-HistqSelectWalk <n>[,<ms>]` (timing of commit switches): once the whole log is laid out and the launch's
-    /// detail is loaded, selects the log's first n commit rows one by one (the WIP and stash rows are not commits)
-    /// through `selectGraph`, the click path, `ms` apart (default 250), then walks back up from row n-1 to row 1
-    /// (revisits), and logs `walk done`. Each select logs its own `select`, `content-info` (a commit of the log; else
-    /// `placeholder`) and `content` lines.
+    /// DEBUG `-HistqSelectWalk <n>[,<ms>[,<stride>[,wip]]]` (timing of commit switches): once the whole log is laid out
+    /// and the launch's detail is loaded, selects the log's first n commit rows one by one (the WIP and stash rows are
+    /// not commits) through `selectGraph`, the click path, `ms` apart (default 250), then walks back up from row n-1 to
+    /// row 1 (revisits), and logs `walk done`. A `stride` above 1 selects every stride-th commit row instead, n of them,
+    /// down only (rows the neighbour prefetch never read: cold selects). `wip` selects the WIP row after each commit,
+    /// `ms` later. Each select logs its own `select`, `content-info` (a commit of the log; else `placeholder`) and
+    /// `content` lines.
     private func runSelectWalk(_ spec: String) async {
-        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let tokens = spec.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let parts = tokens.prefix(3).map { Int($0) }
         guard let count = parts.first ?? nil, count > 0 else {
-            return Self.logger.error("-HistqSelectWalk: expected <n>[,<ms>], got \(spec, privacy: .public)")
+            return Self.logger.error(
+                "-HistqSelectWalk: expected <n>[,<ms>[,<stride>[,wip]]], got \(spec, privacy: .public)")
         }
         let interval = (parts.count > 1 ? parts[1] : nil) ?? 250
+        let step = max((parts.count > 2 ? parts[2] : nil) ?? 1, 1)
+        let walksWIP = tokens.count > 3 && tokens[3] == "wip"
         for _ in 0..<600 {
             if log.value?.isComplete == true, detail.value != nil { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
         // Lets the launch's last frames go by, so the first select is not timed against them.
         try? await Task.sleep(for: .milliseconds(500))
-        let hashes = (log.value?.commits ?? []).prefix(count).map(\.hash)
-        UITiming.walk("start \(hashes.count) every \(interval) ms")
-        for hash in hashes + hashes.dropLast().reversed() {
+        let commits = log.value?.commits ?? []
+        let hashes = stride(from: 0, to: commits.count, by: step).prefix(count).map { commits[$0].hash }
+        UITiming.walk("start \(hashes.count) every \(interval) ms" + (step > 1 ? " stride \(step)" : "")
+            + (walksWIP ? " wip" : ""))
+        for hash in step > 1 ? hashes : hashes + hashes.dropLast().reversed() {
             selectGraph([.commit(hash)])
+            try? await Task.sleep(for: .milliseconds(interval))
+            if walksWIP {
+                selectGraph([.wip])
+                try? await Task.sleep(for: .milliseconds(interval))
+            }
+        }
+        UITiming.walk("done")
+    }
+
+    /// DEBUG `-HistqFileWalk <n>[,<ms>]` (timing of file switches, with `-HistqSelect commit:<sha>|wip`): once the whole
+    /// log is laid out and the selected row's detail is ready, clicks its first n files one every `ms` (default 250),
+    /// down and back up: a commit's through `selectFile`, the WIP's through `selectWIPFile`, as a click on their row
+    /// does. On the WIP row it then keeps the last file open, selects the WIP row again 5 times 300 ms apart with
+    /// `keepsPanel2` (the Stacked and Columns click path: Classic's would close the file), logs `walk tail` (the
+    /// harness changes the open file now) and 3 s later `walk done`.
+    private func runFileWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let count = parts.first ?? nil, count > 0 else {
+            return Self.logger.error("-HistqFileWalk: expected <n>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 1 ? parts[1] : nil) ?? 250
+        for _ in 0..<600 {
+            if log.value?.isComplete == true, detail.value?.isReady == true { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        // Lets the launch's `-HistqSelect` and last frames go by, then waits for that row's files.
+        try? await Task.sleep(for: .milliseconds(500))
+        for _ in 0..<150 {
+            if detail.value?.isReady == true { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let isWIP = if case .wip? = detail.value { true } else { false }
+        let paths = isWIP ? (status.value?.entries ?? []).prefix(count).map(\.path) : []
+        let targets: [FileTarget] = if case .commit(let commit)? = detail.value {
+            (commit.files ?? []).prefix(count).map { FileTarget(source: .commit(commit.hash), file: $0) }
+        } else { [] }
+        let rows = Array(0..<(isWIP ? paths.count : targets.count))
+        guard !rows.isEmpty else { return Self.logger.error("-HistqFileWalk: no commit or WIP files") }
+        UITiming.walk("start files \(rows.count) every \(interval) ms")
+        for row in rows + rows.dropLast().reversed() {
+            if isWIP { selectWIPFile(paths[row]) } else { selectFile(targets[row]) }
+            try? await Task.sleep(for: .milliseconds(interval))
+        }
+        if isWIP {
+            for _ in 0..<5 {
+                selectGraph([.wip], keepsPanel2: true)
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            UITiming.walk("tail")
+            try? await Task.sleep(for: .seconds(3))
+        }
+        UITiming.walk("done")
+    }
+
+    /// DEBUG `-HistqPRWalk <number>,<n>[,<ms>]` (timing of the pull request page, with `-HistqGitHubStub YES`): once
+    /// the whole log is laid out and the PRs tab's lists are read, clicks pull request `number`'s row (`selectHosted`),
+    /// then HEAD's graph row, each `ms` apart (default 2500), n times (a first open, then revisits), and logs
+    /// `walk done`.
+    private func runPRWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count > 1, let number = parts[0], let count = parts[1], count > 0 else {
+            return Self.logger.error("-HistqPRWalk: expected <number>,<n>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 2 ? parts[2] : nil) ?? 2500
+        selectSidebarTab(.prs)
+        for _ in 0..<600 {
+            if log.value?.isComplete == true, github.isRead(.allOpen), detail.value != nil { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        guard let head = refs.value?.head.commit else { return Self.logger.error("-HistqPRWalk: no HEAD commit") }
+        UITiming.walk("start pr \(number) \(count) every \(interval) ms")
+        for _ in 0..<count {
+            selectHosted(github.item(numbered: number))
+            try? await Task.sleep(for: .milliseconds(interval))
+            selectGraph([.commit(head)])
             try? await Task.sleep(for: .milliseconds(interval))
         }
         UITiming.walk("done")
@@ -4853,7 +4956,16 @@ final class RepoSession: Identifiable {
     /// or an interactive rebase's outcome (`.autostashPending`: it stopped, on conflicts or at an `edit`, with git
     /// holding the local changes) or a stash apply's.
     @discardableResult
-    func perform(_ write: Write) async throws -> WriteOutcome {
+    func perform(_ write: Write, timingID: Int? = nil) async throws -> WriteOutcome {
+        let id: Int
+        if let timingID {
+            id = timingID
+        } else {
+            id = UITiming.nextOpID()
+            UITiming.opClick(id, write, repo: url.lastPathComponent)
+        }
+        UITiming.opStart(id, write, repo: url.lastPathComponent)
+        defer { UITiming.opSettled(id) }
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
@@ -4874,11 +4986,14 @@ final class RepoSession: Identifiable {
         let outcome: WriteOutcome
         do {
             outcome = try await Self.run(write, profile: profile, backend: backend, cwd: url)
+            UITiming.opEnd(id, ok: true)
         } catch GitError.autostashKept(let hash) where { if case .commit = write { true } else { false } }() {
+            UITiming.opEnd(id, ok: false)
             // A commit that concluded a stopped pull is made (the WIP panel calls `perform`, not `run`).
             postToast(.warning("Commit", detail: "Changes kept in stash \(hash.prefix(7))."))
             outcome = .done
         } catch {
+            UITiming.opEnd(id, ok: false)
             // A pull or an interactive rebase whose local changes stayed in a stash still ran.
             let ran = switch write { case .pull, .interactiveRebase: true; default: false }
             if case GitError.autostashKept = error, ran, lastNotUndoable != write.notUndoable {
@@ -5057,6 +5172,8 @@ final class RepoSession: Identifiable {
     /// when this returns (with `key`, the action bar button that shows it). Its outcome shows as a toast
     /// (`postToast`); a failure also goes to `failure` (`report`), which a new operation clears.
     func run(_ write: Write, title: String, key: ActionBarAction? = nil) {
+        let timingID = UITiming.nextOpID()
+        UITiming.opClick(timingID, write, repo: url.lastPathComponent)
         nextOperationID &+= 1
         let operation = RunningOperation(id: nextOperationID, title: title, key: key)
         running.append(operation)
@@ -5069,7 +5186,7 @@ final class RepoSession: Identifiable {
             // The commits HEAD records for the submodules, when this write may move them (`autoUpdateSubmodules`).
             let submodulesBefore = movesSubmodules(write) ? await recordedSubmodules() : nil
             do {
-                let outcome = try await perform(write)
+                let outcome = try await perform(write, timingID: timingID)
                 if case .removeWorktree(let path, _) = write { worktreeRemoved(path) }
                 // Started one (a rebase at an `edit` step), or Continue / Skip went on to the next stop.
                 let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }

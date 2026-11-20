@@ -731,6 +731,20 @@ private struct CommitBox: View {
         }
         #if DEBUG
         .task {
+            // `-HistqCommitBox "<message>"`: types the message into the box and clicks Commit, once, after the launch's
+            // reads (refs, whole log, worktrees, as `-HistqRun` waits) (the click path; `-HistqCommit` skips the box).
+            if let message = AppState.launchFlag("-HistqCommitBox"), !Self.commitBoxSeamTaken {
+                Self.commitBoxSeamTaken = true
+                for _ in 0..<100 {
+                    if session.refs.value != nil, session.log.value?.isComplete == true, session.worktrees.value != nil {
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard !Task.isCancelled else { return }
+                session.commitDraft.summary = message
+                return commit()
+            }
             // `-HistqAI generate,amend`: Amend on as the toggle does, so the last message loads before the click.
             guard AIStub.seamHook == "generate", AIStub.seamOptions.contains("amend"), !session.commitDraft.amend
             else { return }
@@ -739,6 +753,11 @@ private struct CommitBox: View {
         }
         #endif
     }
+
+    #if DEBUG
+    /// `-HistqCommitBox` typed and clicked once.
+    private static var commitBoxSeamTaken = false
+    #endif
 
     /// Why Generate Message cannot run: nothing staged (Amend covers the last commit), or the amended message still
     /// loading, so a click never takes a stale one.
@@ -813,12 +832,15 @@ private struct CommitBox: View {
         guard canCommit else { return }
         let write: RepoSession.Write = session.commitDraft.amend ? .amend(message: message) : .commit(message: message)
         let title = session.commitDraft.amend ? "Amend" : "Commit"
+        let timingID = UITiming.nextOpID()
+        UITiming.opClick(timingID, write, repo: session.url.lastPathComponent)
         busy.insert(.commit)
         error = nil
         Task {
             do {
-                try await session.perform(write)
+                try await session.perform(write, timingID: timingID)
                 session.commitDraft = CommitDraft()
+                UITiming.opFeedback("commit-box cleared")
                 session.postToast(.success(title))
             } catch {
                 // Only in its toast, not in the card too.

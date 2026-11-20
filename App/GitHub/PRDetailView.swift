@@ -313,6 +313,11 @@ final class PullRequestDetailModel {
             switch result {
             case .success(let detail):
                 state = .loaded(detail)
+                #if DEBUG || HISTQ_PERF
+                // Each part as it fills in (today all of them at once, with the page).
+                UITiming.content("pr \(number) files loaded")
+                UITiming.content("pr \(number) checks loaded")
+                #endif
                 Self.logMergeable(detail.pull)
                 Self.logThreads(detail)
                 if quiet { UITiming.content("pr \(number) reloaded") }

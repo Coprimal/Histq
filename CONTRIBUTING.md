@@ -95,6 +95,95 @@ The script refuses a repo outside `build/qa/perf/` or with uncommitted changes, 
 the end (`git reset --hard`), so its test commits are dropped. They are dated after the fixture's tip (its commits are
 dated up to 2027), a minute apart, with `maintenance.auto` and `gc.auto` off.
 
+## UX latency benchmark
+
+`scripts/perf-ux.sh` times what a click does: how soon the app shows a reaction, when the content is in, and which git
+processes each click or operation runs. It reads the timing lines a Debug build or the measurement build writes to
+`timing.log` in its state folder (`select`, `placeholder`, `content`, `op-click` / `op-start` / `op-end` /
+`op-settled`, `op-feedback`, one `git <verb> <ms> <repo>` line per git process, `tab-frame`, `walk …`). Everything
+lives under `build/qa/perf/ux/`: the fixtures in `fx` and `base`, a fresh APFS copy per run in `run` (removed after
+the run), the logs in `results/<label>/`, the measurement app and its stamp in `app-perf`.
+
+Set up the fixtures once (they are only read; each run works on its own copy):
+
+```sh
+scripts/make-fixtures.sh build/qa/perf/ux/fx --big 50000
+mkdir -p build/qa/perf/ux/base && cp -cR build/qa/perf/ux/fx/big build/qa/perf/ux/base/big-cg
+git -C build/qa/perf/ux/base/big-cg -c maintenance.auto=false -c gc.auto=0 commit-graph write --reachable
+git clone -q . build/qa/perf/ux/base/self && git -C build/qa/perf/ux/base/self checkout -q --detach 399b9ee
+```
+
+Measure on the measurement build: Release with the DEBUG launch seams on the app target only (`HISTQ_SEAMS`, which no
+package target reads), copied to `app-perf` and stamped with the source state it was built from. Scenario mode refuses
+an app under `app-perf` whose stamp no longer matches `App`, `Packages` and `project.yml` (`scripts/perf-ux.sh
+check-stamp` exits 1: build it again). After measuring, always build plain Release again, so DerivedData never keeps
+the measurement build:
+
+```sh
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation \
+  HISTQ_SEAMS='HISTQ_PERF DEBUG' build
+# the app: <BUILT_PRODUCTS_DIR of -configuration Release -showBuildSettings>/Histq.app
+ditto <that Histq.app> build/qa/perf/ux/app-perf/Histq.app && scripts/perf-ux.sh stamp
+scripts/perf-ux.sh "$PWD/build/qa/perf/ux/app-perf/Histq.app" all 3 baseline   # or one scenario
+xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Release -skipPackagePluginValidation build
+```
+
+`scripts/perf-ux.sh <Histq.app> <scenario|all> [runs=3] [label] [-- <extra app args…>]` runs each scenario `runs`
+times. A Debug app passed by path works too (smoke runs; not stamp-checked); never pass the plain Release build (it
+ignores `-HistqBackground` and would come to front, so the script refuses a build without the launch seams). Each run
+copies the fixture, sets the scenario's state with plain git, launches the app in the background (`open -g`,
+`-HistqBackground YES`, its own state folder, `-HistqLayout classic`), waits for the scenario's end line and then 2 s
+without a new line, quits only that instance, and copies `timing.log`, `refresh.log`, `operations.txt`, the load
+average (`uptime`), the shared QA preferences (`com.math2it.histq.qa`; autoStash, pullMode and pruneOnFetch also go
+to the `.meta` file) and the front app check to `results/<label>/<scenario>-<run>.*`; `results/<label>/HEAD` records
+the commit and source stamp of each invocation. The script waits while any `xcodebuild` runs: no measurement during a
+build. The machine is often busy: compare minimums over runs, taken at a 1-minute load average below 15.
+
+Scenarios (27):
+
+- Reads: `sel-adjacent` (60 adjacent commits of `big-cg`, 300 ms apart, down and back), `sel-repeat` (120 at 30 ms,
+  as a held arrow key), `sel-far` (40 commits 97 rows apart: cold), `sel-wip` (the WIP row between commits),
+  `file-commit` (the 6 files of d8b266d in `self`, up to the 5520-line `RepoSession.swift`), `file-wip` (3 changed
+  files; then the open file is changed from outside), `tabs` (tabs on `self`, `graph` and `big-cg`, 2 rounds; then
+  `big-cg` is changed from outside while hidden, and tabs 1 and 2 are shown once more).
+- Writes, on `graph` unless noted: `checkout-clean`, `checkout-dirty` (autostash), `checkout-big` (`big-cg`),
+  `checkout-fail` (a change that conflicts with the target, autostash off: must fail), `commit` (through the WIP
+  panel's commit box), `commit-fail` (a pre-commit hook that exits 1: must fail), `outside-edit` (`commit`, then a
+  tracked file is changed from outside 1 s after the operation settled), `stash`, `stash-many` (300 changed files),
+  `stash-pop`, `rebase`, `rebase-interactive`, `rebase-abort` (`conflict-rebase`), `fetch` (a new commit in the origin
+  copy), `pull` (`feature`, behind 1), `push` (`develop`, ahead 1).
+- Pull requests, on `conflict-pr` with the GitHub stub answering 300 ms late: `pr-open` (opens pull request #1
+  twice), `pr-open-slow` (files 900 ms, checks 600 ms late), `pr-action` (merge), `pr-mergeable` (GitHub still
+  computing mergeability: the first answer and 3 re-asks).
+
+Each run prints one row: `<scenario> <run> | <end> | exercised: … | front app: unchanged (…) | <stats>`. `exercised`
+says the operation really ran (a write's `op-click` and its `op-end`, `fail` for the two failing scenarios). Any other
+front app is a warning: someone switched apps meanwhile, or the launch came to front. The stats, in ms from the click:
+
+- Reads: `clicks` = timed selects; `F`, `content`, `settled` = min/median/max over the run's clicks of the first
+  reaction (placeholder, info card, content or `tab-shown`), of the content of that selection and of the last line
+  before the next click; `git/click` and `serial/click` = git processes per click and their serial time (the union of
+  their intervals); `sig` = processes ended by a signal (a cancelled read); `spinner` when a load took long enough to
+  show one; `frame-max` = the longest main-thread gap after a tab switch; `tail-same reread` = status, ref or log
+  processes of a revisited tab whose repo did not change (0 is right); `walk` = the walk's wall time.
+- Writes: `op <kind> ok|fail`, `F` (the first `op-feedback` and which one), `pre` (`op-start` − `op-click`), `end`,
+  `settled`, `O1` = `end` minus the main git command (named in brackets: `checkout`, `commit`, `stash`, `rebase`,
+  `fetch`, `fetch` + `merge` or `rebase` for a pull, `push`), `O2` = `op-settled` − `op-end`, `O3` = the first
+  `graph-reload` after `op-end`, `git` = count / total / serial ms from the click on, `unacc` = `op-end` − `op-start`
+  minus the serial git time inside it, `top` = the 3 costliest verbs (`<verb>*<count>:<ms>`).
+- `proof` (`outside-edit`, `file-wip`, `tabs`): `pass(<ms>)` when the outside change was read: a watcher `refresh`, a
+  `refresh-read` and a `git status` of that repo, then the graph's reload (the WIP row appeared; in `tabs` a log read
+  while the tab is still hidden) or, for `file-wip`, a new `file-load` of the open file; the second number is the time
+  from the watcher's `refresh` line, the first one from the edit is an upper bound (the edit is timed by the last log
+  line before it, up to 1 s early in `outside-edit`); `fail(no …)` names what is missing.
+- Pull requests: `action <name> ok ->reloaded` (from the action's answer to the reloaded page), `mergeable lines` and
+  the gaps between the re-asks.
+
+`scripts/perf-ux-stats.py build/qa/perf/ux/results/<label>` prints the tables over all runs of a label (min, median,
+p90 and max per metric; reads split into first visits and revisits, files by size, tabs into first visits, revisits
+and the two windows after the outside change, each with its git verbs per repo); `scripts/perf-ux-stats.py <scenario> <timing.log>…` does the same for
+some logs, and `--row <scenario> <timing.log>` prints one run's row.
+
 ## Screenshots
 
 `scripts/shot.sh <out.png> [--keep-state] [--wait <s>] [repo paths...] [-- app args...]` launches the Debug app (build

@@ -185,6 +185,7 @@ struct RunningStatus: View {
             }
             .padding(.trailing, 6)
             .layoutPriority(-1)
+            .onChange(of: operation.id, initial: true) { UITiming.opFeedback("status \(operation.title)") }
         }
     }
 }

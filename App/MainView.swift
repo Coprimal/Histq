@@ -171,6 +171,13 @@ private struct TabContent: View {
                 WelcomeView(model: model.welcome(for: id)).id(id)
             }
         }
+        #if DEBUG || HISTQ_PERF
+        // Every switch, whether or not the tab's view is rebuilt.
+        .onChange(of: model.selectedTabID) {
+            UITiming.tabShown("\(model.selectedIndex ?? -1) "
+                + (model.selectedIndex.flatMap { model.tabs[$0].repoURL?.lastPathComponent } ?? "-"))
+        }
+        #endif
     }
 }
 

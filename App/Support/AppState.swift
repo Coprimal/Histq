@@ -1,6 +1,7 @@
 // App-wide state locations and DEBUG test seams: where files and preferences live, every preference key with its
 // default, the Keychain service, launch flags, the `-HistqSelect` request and the timing log.
 import Foundation
+import HistqCore
 import os
 
 /// DEBUG launch flags and the values that depend on them (also honoured by a `HISTQ_PERF` measurement build). In
@@ -431,8 +432,65 @@ enum UITiming {
     static func probe(_ event: String, _ detail: String) { record(event, detail) }
     /// DEBUG `-HistqSelectWalk`: `walk start <n> every <ms> ms`, then `walk done`.
     static func walk(_ detail: String) { record("walk", detail) }
-    /// A commit's file diff was read: `file-load <path> env=<ms> size=<ms> diff=<ms> rows=<ms>`.
-    static func fileLoad(_ detail: String) { record("file-load", detail) }
+    /// The selected tab's area changed to another tab: `tab-shown <index> <repo>`.
+    static func tabShown(_ detail: @autoclosure () -> String) {
+        #if DEBUG || HISTQ_PERF
+        record("tab-shown", detail())
+        #endif
+    }
+    /// DEBUG `-HistqTabWalk`: the main actor's holds in the 500 ms after a tab switch: `tab-frame <index> max=<ms>
+    /// over16=<ms>`.
+    static func tabFrame(_ detail: String) { record("tab-frame", detail) }
+    /// A file diff (commit, WIP or compare) was read: `file-load <path> env=<ms> size=<ms> diff=<ms> rows=<ms>
+    /// lines=<n>`, `n` the file's line count.
+    static func fileLoad(_ detail: @autoclosure () -> String) {
+        #if DEBUG || HISTQ_PERF
+        record("file-load", detail())
+        #endif
+    }
+    /// A new id for an operation's `op-*` lines, unique across tabs (the first is 1).
+    @MainActor static func nextOpID() -> Int {
+        lastOpID &+= 1
+        return lastOpID
+    }
+    @MainActor private static var lastOpID = 0
+    /// A user operation was clicked, before any state change: `op-click <id> <kind> <repo>`, `kind` the `Write` case.
+    static func opClick(_ id: Int, _ write: @autoclosure () -> Any, repo: @autoclosure () -> String) {
+        #if DEBUG || HISTQ_PERF
+        record("op-click", "\(id) \(kind(of: write())) \(repo())")
+        #endif
+    }
+    /// The operation's `perform` started: `op-start <id> <kind> <repo>`.
+    static func opStart(_ id: Int, _ write: @autoclosure () -> Any, repo: @autoclosure () -> String) {
+        #if DEBUG || HISTQ_PERF
+        record("op-start", "\(id) \(kind(of: write())) \(repo())")
+        #endif
+    }
+    /// The operation's git work returned or threw: `op-end <id> ok|fail`.
+    static func opEnd(_ id: Int, ok: Bool) {
+        #if DEBUG || HISTQ_PERF
+        record("op-end", "\(id) " + (ok ? "ok" : "fail"))
+        #endif
+    }
+    /// The reread after the operation published the status and the refs: `op-settled <id>`.
+    static func opSettled(_ id: Int) {
+        #if DEBUG || HISTQ_PERF
+        record("op-settled", "\(id)")
+        #endif
+    }
+    /// The UI showed an operation's first feedback: `op-feedback status <title>`, `op-feedback toolbar <label>`, ….
+    static func opFeedback(_ detail: @autoclosure () -> String) {
+        #if DEBUG || HISTQ_PERF
+        record("op-feedback", detail())
+        #endif
+    }
+    /// A child git process finished (`GitRunner.processObserver`): `git <verb> <ms> <repo>[ exit=<code>][ signal=<n>]`.
+    static func git(_ verb: String, ms: Double, repo: String, exit: Int32, signal: Int32?) {
+        #if DEBUG || HISTQ_PERF
+        let end = signal.map { " signal=\($0)" } ?? (exit != 0 ? " exit=\(exit)" : "")
+        record("git", "\(verb) " + String(format: "%.1f", ms) + " \(repo)" + end)
+        #endif
+    }
     /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
     static func toolbar(_ detail: String) { record("toolbar", detail) }
     /// The graph search (⌘F) landed on a result or moved to a match: `find <query> matches=<m> current=<n>
@@ -453,6 +511,11 @@ enum UITiming {
         let mb: (UInt64) -> String = { String(format: "%.1f", Double($0) / 1_048_576) }
         record("mem", "footprint=\(mb(info.phys_footprint)) peak=\(mb(UInt64(info.ledger_phys_footprint_peak)))")
         #endif
+    }
+
+    /// A `Write`'s case name (`stashPush` of `stashPush(…)`).
+    private static func kind(of write: Any) -> String {
+        String(String(describing: write).prefix { $0 != "(" })
     }
 
     /// The ms since `start` (uptime nanoseconds), for a timing line.
@@ -493,6 +556,9 @@ enum UITiming {
     static func markLaunch() {
         #if DEBUG || HISTQ_PERF
         launchNanos = DispatchTime.now().uptimeNanoseconds
+        GitRunner.processObserver = { verb, ms, repo, exit, signal in
+            git(verb, ms: ms, repo: repo, exit: exit, signal: signal)
+        }
         #endif
     }
 
