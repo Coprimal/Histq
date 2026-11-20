@@ -186,7 +186,8 @@ def git_summary(gits):
 def clicks(run, scenario):
     """(t, kind, detail) of each click: reads after `walk start` (when there is one), writes on op-click."""
     walk = run.first(0, float("inf"), lambda e, d: e == "walk" and d.startswith("start"))
-    is_read, is_pr = scenario in READS, scenario in PRS
+    # The checks tabs-ignored and tabs-tracked are `tabs` walks.
+    is_read, is_pr = scenario in READS or scenario.startswith("tabs-"), scenario in PRS
     is_write = not is_read and not is_pr and scenario != "-"
     out = []
     for t, event, detail in run.events:
@@ -366,6 +367,8 @@ def proof(run, scenario):
     `tabs`, from the `select tab`) to the last of those lines; the first number is an upper bound (the edit's time is
     the last log line before it, which can be up to 1 s earlier after `op-settled`), the second is the watcher's own
     latency (in `tabs`, the select's)."""
+    # The checks tabs-ignored and tabs-tracked are `tabs` walks.
+    scenario = "tabs" if scenario.startswith("tabs-") else scenario
     anchor = edit_anchor(run)
     if anchor is None:
         return None

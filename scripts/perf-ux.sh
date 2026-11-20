@@ -19,7 +19,8 @@
 # Scenarios (CONTRIBUTING.md, "UX latency benchmark"): reads sel-adjacent sel-repeat sel-far sel-wip file-commit
 # file-wip tabs; writes checkout-clean checkout-dirty checkout-big checkout-fail commit commit-fail outside-edit stash
 # stash-many stash-pop rebase rebase-interactive rebase-abort fetch pull push; pull requests pr-open pr-open-slow
-# pr-action pr-mergeable. Fixtures: build/qa/perf/ux/fx (make-fixtures.sh) and build/qa/perf/ux/base (big-cg, self).
+# pr-action pr-mergeable; checks (not in all) tabs-ignored tabs-tracked. Fixtures: build/qa/perf/ux/fx
+# (make-fixtures.sh) and build/qa/perf/ux/base (big-cg, self).
 #
 # The source state is HEAD's trees of App, Packages and project.yml, the uncommitted diff of those paths and the
 # untracked files under App and Packages (scripts and docs do not count: editing the harness never forces a rebuild).
@@ -240,6 +241,9 @@ WRITE_SCENARIOS="checkout-clean checkout-dirty checkout-big checkout-fail commit
 WRITE_SCENARIOS+=" stash-many stash-pop rebase rebase-interactive rebase-abort fetch pull push"
 PR_SCENARIOS="pr-open pr-open-slow pr-action pr-mergeable"
 SCENARIOS="$(echo $READ_SCENARIOS $WRITE_SCENARIOS $PR_SCENARIOS)"
+# Checks, not in `all`: `tabs` with tab 2 (big-cg) on its WIP, where an ignored file (tabs-ignored) or a tracked file
+# (tabs-tracked) changes while it is hidden.
+CHECK_SCENARIOS="tabs-ignored tabs-tracked"
 # The stub's answer delay of the pull request scenarios (pr-open-slow sets its own per part).
 PR_DELAY=300
 
@@ -290,7 +294,7 @@ prepare_scenario() {
     sel-*|checkout-big) copy_big; S_REPOS=("$S_DIR/big-cg") ;;
     file-*) copy_self; S_REPOS=("$S_DIR/self") ;;
     # Tab 1 (graph, WIP selected) is the revisit without a change, tab 2 (big-cg, clean) gets the outside edit.
-    tabs) copy_graph; copy_self; copy_big; S_REPOS=("$S_DIR/self" "$g" "$S_DIR/big-cg") ;;
+    tabs|tabs-*) copy_graph; copy_self; copy_big; S_REPOS=("$S_DIR/self" "$g" "$S_DIR/big-cg") ;;
     pr-*) copy_pr; S_REPOS=("$S_DIR/conflict-pr") ;;
     rebase-abort) cp -cR "$FX/conflict-rebase" "$S_DIR/"; S_REPOS=("$S_DIR/conflict-rebase") ;;
     *) copy_graph ;;
@@ -309,6 +313,12 @@ prepare_scenario() {
       for i in README.md App/Detail/WIPPanel.swift App/Repo/RepoSession.swift; do append_line "$S_DIR/self" "$i"; done
       S_END=walk; S_EDIT=tail; S_EDIT_REPO="$S_DIR/self"; S_ARGS=(-HistqSelect wip -HistqFileWalk 3,500) ;;
     tabs) S_END=walk; S_EDIT=tail; S_ARGS=(-HistqTabWalk 2,1500) ;;
+    tabs-ignored|tabs-tracked)
+      # A tracked edit puts big-cg on its WIP; tabs-ignored writes perf-ignored/out.txt, which info/exclude ignores.
+      append_line "$S_DIR/big-cg" "$(edit_target "$S_DIR/big-cg")"
+      echo "perf-ignored/" >> "$S_DIR/big-cg/.git/info/exclude"
+      mkdir -p "$S_DIR/big-cg/perf-ignored"; : > "$S_DIR/big-cg/perf-ignored/out.txt"
+      S_END=walk; S_EDIT=tail; S_ARGS=(-HistqTabWalk 2,1500) ;;
     checkout-clean) clean_tree "$g"; S_ARGS=(-HistqRun "branches|develop") ;;
     # The fixture's own changes (staged, unstaged, untracked) go along through the autostash.
     checkout-dirty) S_ARGS=(-autoStash always -HistqRun "branches|develop") ;;
@@ -377,11 +387,12 @@ edit_tick() {
   case "$S_EDIT" in
     tail)
       grep -q " walk tail$" "$tl" || return 0
-      if [ "$SCENARIO" = tabs ]; then
+      if [[ "$SCENARIO" == tabs* ]]; then
         name="$(awk '$2 == "tab-shown" && $3 == "2" { n = $4 } END { print n }' "$tl")"
         [ -n "$name" ] && [ -d "$S_DIR/$name" ] || die "tabs: no tab-shown line for tab 2 before walk tail"
         S_EDIT_REPO="$S_DIR/$name"
-        S_EDIT_FILE="$(edit_target "$S_EDIT_REPO")"
+        if [ "$SCENARIO" = tabs-ignored ]; then S_EDIT_FILE=perf-ignored/out.txt
+        else S_EDIT_FILE="$(edit_target "$S_EDIT_REPO")"; fi
       else
         S_EDIT_FILE="$(awk '$2 == "walk" && $3 == "tail" { exit }
           $2 == "select" && $3 == "file" { f = substr($0, index($0, " select file ") + 13) } END { print f }' "$tl")"
@@ -534,7 +545,10 @@ scenarios() {
   [[ "$label" =~ ^[A-Za-z0-9._-]+$ ]] || die "label must be letters, digits, '.', '_' or '-', got '$label'"
   if [ "$which" = all ]; then list="$SCENARIOS"
   else
-    case " $SCENARIOS " in *" $which "*) list="$which" ;; *) die "unknown scenario '$which' (one of: $SCENARIOS)" ;; esac
+    case " $SCENARIOS $CHECK_SCENARIOS " in
+      *" $which "*) list="$which" ;;
+      *) die "unknown scenario '$which' (one of: $SCENARIOS $CHECK_SCENARIOS)" ;;
+    esac
   fi
   case "$APP/" in
     "$UX"/app-perf/*) stamp_matches || die "refusing $APP: its STAMP does not match the source tree (run the PERF chain)" ;;

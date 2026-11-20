@@ -953,12 +953,14 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var refreshStart: (scope: RefreshScope, time: UInt64) = ([], 0)
     /// The watcher's changes seen while the tab is hidden, read once it shows again (`isShown`).
     @ObservationIgnored private var heldScope: RefreshScope = []
+    /// The `git check-ignore` runs of `hold(_:paths:)` in flight: a tab shown meanwhile reads its status as held.
+    @ObservationIgnored private var ignoreChecks = 0
     /// Whether the tab is its window's selected one (in a background window too); set by the window. A hidden tab's
     /// watcher refreshes wait in `heldScope`: showing it again reads them in one refresh.
     @ObservationIgnored var isShown = true {
         didSet {
-            guard isShown, !heldScope.isEmpty else { return }
-            let held = heldScope
+            guard isShown, !heldScope.isEmpty || ignoreChecks > 0 else { return }
+            let held = ignoreChecks > 0 ? heldScope.union(.status) : heldScope
             heldScope = []
             if held.contains(.status) { statusHeld = true }
             refresh(scope: held)
@@ -1890,12 +1892,13 @@ final class RepoSession: Identifiable {
     /// Rereads what `scope` names. A refresh in flight is cancelled and its scope added to this one. `refs` also
     /// reloads the log when a ref moved. `changed`: when the watcher's last change was made; what the last refresh
     /// covers is dropped from `scope` when that refresh started after it (its read sees the change), and a refresh in
-    /// flight is not cancelled for it. A watcher change in a hidden tab is held until the tab shows (`isShown`).
-    func refresh(scope: RefreshScope, changed: UInt64? = nil) {
+    /// flight is not cancelled for it. A watcher change in a hidden tab is held until the tab shows (`isShown`);
+    /// `paths`: the worktree files behind its `status`, when known (`hold(_:paths:)`).
+    func refresh(scope: RefreshScope, changed: UInt64? = nil, paths: [String]? = nil) {
         let covered = if let changed, changed < refreshStart.time { refreshStart.scope } else { RefreshScope() }
         let uncovered = scope.subtracting(covered)
         guard !uncovered.isEmpty else { return }
-        guard changed == nil || isShown else { return heldScope.formUnion(uncovered) }
+        guard changed == nil || isShown else { return hold(uncovered, paths: paths) }
         // A refresh that starts now reads every held change in its scope: all were made before it.
         heldScope.subtract(uncovered)
         let scope = refreshTask == nil ? uncovered : uncovered.union(refreshScope)
@@ -1905,6 +1908,39 @@ final class RepoSession: Identifiable {
         refreshTask = Task { [weak self] in
             await self?.performRefresh(scope)
         }
+    }
+
+    /// Holds a hidden tab's watcher change until the tab shows. A `status` from worktree files only (`paths`) is held
+    /// only when git does not ignore one of them: a build or an editor writing ignored files leaves the status as it
+    /// was, and the tab comes back with its WIP as it was instead of a placeholder (`statusHeld`). A tab shown while
+    /// git answers reads its status as held.
+    private func hold(_ scope: RefreshScope, paths: [String]?) {
+        guard scope.contains(.status), let paths, !paths.isEmpty, !heldScope.contains(.status) else {
+            return heldScope.formUnion(scope)
+        }
+        heldScope.formUnion(scope.subtracting(.status))
+        ignoreChecks += 1
+        Task { [weak self] in
+            guard let self else { return }
+            let ignored = await allIgnored(paths)
+            ignoreChecks -= 1
+            // Shown meanwhile: its refresh read the status already (`isShown`).
+            if !ignored, !isShown { heldScope.insert(.status) }
+        }
+    }
+
+    /// Whether git ignores every one of `paths` (relative to the worktree; a tracked file never is). Any failure is
+    /// read as not ignored.
+    private func allIgnored(_ paths: [String]) async -> Bool {
+        guard let backend = try? await backend() else { return false }
+        let cwd = backend.directories.worktree
+        guard let env = try? await backend.readEnvironment(cwd: cwd),
+              let result = try? await backend.runner.run(
+                ["check-ignore", "-z", "--stdin"], cwd: cwd, env: env,
+                stdin: Data(paths.map { $0 + "\0" }.joined().utf8), allowedExitCodes: [0, 1])
+        else { return false }
+        let ignored = Set(result.stdout.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
+        return paths.allSatisfy(ignored.contains)
     }
 
     private func performRefresh(_ scope: RefreshScope) async {
@@ -5661,8 +5697,9 @@ final class RepoSession: Identifiable {
         if setUpTask == nil {
             let cwd = url
             let watcher = watcher
-            let onChange: @MainActor @Sendable (RefreshScope, UInt64) -> Void = { [weak self] scope, changed in
-                self?.refresh(scope: scope, changed: changed)
+            let onChange: @MainActor @Sendable (RefreshScope, UInt64, [String]?) -> Void = {
+                [weak self] scope, changed, paths in
+                self?.refresh(scope: scope, changed: changed, paths: paths)
             }
             setUpTask = Task.detached(priority: .userInitiated) {
                 let toolchain = try await GitToolchain.resolve()

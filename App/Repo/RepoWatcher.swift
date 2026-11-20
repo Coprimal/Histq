@@ -62,12 +62,15 @@ struct RepoDirectories: Sendable {
 final class RepoWatcher: @unchecked Sendable {
     // Every mutable property is only touched on `queue`.
     private let queue = DispatchQueue(label: "com.math2it.histq.watcher", qos: .utility)
-    private var onChange: (@MainActor @Sendable (RefreshScope, UInt64) -> Void)?
+    private var onChange: (@MainActor @Sendable (RefreshScope, UInt64, [String]?) -> Void)?
     private var stream: FSEventStreamRef?
     private var directories: RepoDirectories?
     private var pending: RefreshScope = []
     /// The latest change time of the paths `pending` holds (`changeTime(_:)`).
     private var pendingChange: UInt64 = 0
+    /// The worktree paths (relative to it) behind `pending`'s `status`; nil when a `status` came from anything else
+    /// (the index, a submodule's state, a rescan) or more than `maxPaths` paths changed.
+    private var pendingPaths: Set<String>? = []
     /// Whether every watched root is on APFS, whose change times are exact and from this Mac's clock (other file
     /// systems may round them, a network volume takes the server's): else every change time is `.max`.
     private var exactTimes = false
@@ -76,11 +79,15 @@ final class RepoWatcher: @unchecked Sendable {
 
     /// The quiet time after the last change before the refresh runs.
     static let debounceInterval: DispatchTimeInterval = .milliseconds(250)
+    /// The most worktree paths handed on with a change; more are not listed (nil).
+    static let maxPaths = 200
 
-    /// Starts watching `directories` (once; later calls are ignored). `onChange` gets each coalesced scope and the time
-    /// of its last change, in ns since 1970 (`.max` when unknown).
+    /// Starts watching `directories` (once; later calls are ignored). `onChange` gets each coalesced scope, the time
+    /// of its last change, in ns since 1970 (`.max` when unknown), and the worktree paths behind its `status` (nil
+    /// when not only worktree paths, or too many).
     func start(
-        _ directories: RepoDirectories, onChange: @escaping @MainActor @Sendable (RefreshScope, UInt64) -> Void
+        _ directories: RepoDirectories,
+        onChange: @escaping @MainActor @Sendable (RefreshScope, UInt64, [String]?) -> Void
     ) {
         queue.async { [self] in
             guard !stopped, stream == nil else { return }
@@ -145,10 +152,25 @@ final class RepoWatcher: @unchecked Sendable {
             if flag & (kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged) != 0 {
                 scope.formUnion([.status, .refs])
                 changed = .max
+                pendingPaths = nil
             } else {
                 let found = Self.scope(of: path, in: directories)
                 scope.formUnion(found)
                 if !found.isEmpty, changed != .max { changed = max(changed, exactTimes ? Self.changeTime(path) : .max) }
+                if found.contains(.status), let count = pendingPaths?.count {
+                    // A worktree file, not the index or a submodule's state in a git dir. An ignore or attributes
+                    // file changes other paths' status even when it is ignored itself, and a leading `:` would be
+                    // read as pathspec magic by `git check-ignore`: these are not listed.
+                    let inGitDir = [directories.gitDir, directories.commonDir].contains { Self.isInside(path, $0.path) }
+                    let name = (path as NSString).lastPathComponent
+                    if !inGitDir, name != ".gitignore", name != ".gitattributes",
+                       let relative = Self.relativePath(path, in: directories.worktree.path),
+                       !relative.isEmpty, !relative.hasPrefix(":"), count < Self.maxPaths {
+                        pendingPaths?.insert(relative)
+                    } else {
+                        pendingPaths = nil
+                    }
+                }
             }
         }
         guard !scope.isEmpty else { return }
@@ -165,12 +187,14 @@ final class RepoWatcher: @unchecked Sendable {
         guard !stopped, !pending.isEmpty, let onChange else { return }
         let scope = pending
         let changed = pendingChange
+        let paths = pendingPaths.map { $0.sorted() }
         pending = []
         pendingChange = 0
+        pendingPaths = []
         debounce = nil
         Task { @MainActor in
             UITiming.refresh(scope.description)
-            onChange(scope, changed)
+            onChange(scope, changed, paths)
         }
     }
 

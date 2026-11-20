@@ -139,7 +139,7 @@ to the `.meta` file) and the front app check to `results/<label>/<scenario>-<run
 the commit and source stamp of each invocation. The script waits while any `xcodebuild` runs: no measurement during a
 build. The machine is often busy: compare minimums over runs, taken at a 1-minute load average below 15.
 
-Scenarios (27):
+Scenarios (27 in `all`, plus 2 checks):
 
 - Reads: `sel-adjacent` (60 adjacent commits of `big-cg`, 300 ms apart, down and back), `sel-repeat` (120 at 30 ms,
   as a held arrow key), `sel-far` (40 commits 97 rows apart: cold), `sel-wip` (the WIP row between commits),
@@ -155,6 +155,12 @@ Scenarios (27):
 - Pull requests, on `conflict-pr` with the GitHub stub answering 300 ms late: `pr-open` (opens pull request #1
   twice), `pr-open-slow` (files 900 ms, checks 600 ms late), `pr-action` (merge), `pr-mergeable` (GitHub still
   computing mergeability: the first answer and 3 re-asks).
+- Checks, not in `all` (name them): `tabs-ignored` and `tabs-tracked`, the `tabs` walk with `big-cg` on its WIP (one
+  tracked file changed before launch). While it is hidden, a file that `info/exclude` ignores (`perf-ignored/out.txt`)
+  or a tracked file is changed. The hidden tab asks `git check-ignore` about the changed files: an ignored file holds
+  nothing and the tab comes back with its WIP as it was (no `placeholder` after its `select tab`); a tracked one holds
+  the status, and the tab comes back on the WIP placeholder until the status is read. Their `proof` column fails by
+  design (the WIP row was already there, so no graph line follows).
 
 Each run prints one row: `<scenario> <run> | <end> | exercised: … | front app: unchanged (…) | <stats>`. `exercised`
 says the operation really ran (a write's `op-click` and its `op-end`, `fail` for the two failing scenarios). Any other
