@@ -110,9 +110,11 @@ struct GeneralSettings: View {
 
     // MARK: Pull
 
-    private static let pullModes = ["fastForward", "fastForwardOnly", "rebase"]
+    /// The pull modes offered, the default first.
+    static let pullModes = ["fastForward", "fastForwardOnly", "rebase"]
 
-    private static func pullTitle(_ mode: String) -> String {
+    /// The pull mode's name in the menu.
+    static func pullTitle(_ mode: String) -> String {
         switch mode {
         case "fastForwardOnly": "Fast-forward only"
         case "rebase": "Rebase"
@@ -120,7 +122,8 @@ struct GeneralSettings: View {
         }
     }
 
-    private static func autoStashTitle(_ value: String) -> String {
+    /// The auto-stash choice's name in Settings.
+    static func autoStashTitle(_ value: String) -> String {
         switch value {
         case "always": "Always stash"
         case "never": "Never stash"

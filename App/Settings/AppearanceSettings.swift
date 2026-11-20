@@ -298,7 +298,7 @@ struct AppearanceSettings: View {
 
     /// A section's row: up and down (inside its tab, `ids`; none for a tab of one section), then its switch.
     private func sidebarRow(_ id: SidebarSectionID, in ids: [SidebarSectionID], isHidden: Bool) -> some View {
-        let title = Self.sectionTitle(id)
+        let title = id.title
         return LabeledContent {
             HStack(spacing: 8) {
                 if ids.count > 1 {
@@ -307,7 +307,7 @@ struct AppearanceSettings: View {
                         moveButton(id, title: title, up: false, disabled: id == ids.last)
                     }
                 }
-                Toggle(title, isOn: Binding(get: { !isHidden }, set: { setHidden(id, !$0) }))
+                Toggle(title, isOn: Binding(get: { !isHidden }, set: { SidebarSections.setHidden(id, !$0) }))
                     .toggleStyle(CompactSwitch())
                     .labelsHidden()
             }
@@ -343,24 +343,6 @@ struct AppearanceSettings: View {
         sectionOrder = order.map(\.rawValue).joined(separator: ",")
     }
 
-    private func setHidden(_ id: SidebarSectionID, _ hides: Bool) {
-        var hidden = hiddenSidebarIDs
-        if hides { hidden.insert(id) } else { hidden.remove(id) }
-        hiddenSections = SidebarSectionID.allCases.filter(hidden.contains).map(\.rawValue).joined(separator: ",")
-    }
-
-    /// The section's title in the sidebar.
-    private static func sectionTitle(_ id: SidebarSectionID) -> String {
-        switch id {
-        case .local: "Local"
-        case .remote: "Remote"
-        case .worktrees: "Worktrees"
-        case .submodules: "Submodules"
-        case .tags: "Tags"
-        case .mine, .reviewRequested, .allOpen, .assigned: GitHubStore.List(rawValue: id.rawValue)?.title ?? id.rawValue
-        }
-    }
-
     private var formats: [String] {
         Self.dateFormats.contains(dateFormat) ? Self.dateFormats : Self.dateFormats + [dateFormat]
     }
@@ -377,7 +359,8 @@ struct AppearanceSettings: View {
         return Text("\(Image(nsImage: ProfilePicker.dot(hex: ProfileColors.hexes[index], gap: 4)))\(TabIcon.colorName(index))")
     }
 
-    private static func avatarTitle(_ mode: String) -> String {
+    /// The avatar mode's name in Settings.
+    static func avatarTitle(_ mode: String) -> String {
         switch mode {
         case "real": "Real"
         case "initials": "Initials"

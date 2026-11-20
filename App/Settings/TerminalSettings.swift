@@ -22,7 +22,7 @@ struct TerminalSettings: View {
     @State private var shellError: String?
 
     private static let offeredSizes = Array(10...20).map(Double.init)
-    private static let offeredScrollbacks = [1_000, 5_000, 10_000, 50_000]
+    static let offeredScrollbacks = [1_000, 5_000, 10_000, 50_000]
 
     var body: some View {
         SettingsPageGate(section: .terminal, isLoaded: true) {

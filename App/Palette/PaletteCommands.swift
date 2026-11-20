@@ -1,6 +1,7 @@
 // The command palette's rows for one window, copied when it opens (task 8.5): Undo / Redo, the toolbar's repo actions and their
 // Pull ▾ / Push ▾ menus, the repo menu and each submodule's menu, Show All Branches and Hide / Show Stale Branches,
-// "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…, the Settings pages, the tab position and the layout presets, then
+// "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…, the Settings pages, the
+// tab position and the layout presets, the Settings switches and short choices (`PaletteSettings`), then
 // the repo's menu operations (working tree, the selected commit, the stashes, each branch, remote branch and tag, the
 // remotes). Every repo row runs the same `MenuEntry` or `ToolbarAction` the menus and buttons run, so its
 // confirmations, forms and enabled state are theirs.
@@ -13,6 +14,7 @@ enum PaletteSection: String, Sendable {
     case checkout = "Checkout"
     case tabs = "Tabs"
     case app = "Histq"
+    case settings = "Settings"
     case operations = "Operations"
     /// The File History… and Blame… modal's rows (`FileSearchModal`), not the palette's.
     case files = "Files"
@@ -103,6 +105,7 @@ enum PaletteCommands {
         }
         tabs(model, into: &snapshot)
         app(model, into: &snapshot)
+        settings(into: &snapshot)
         if let session { operations(session, into: &snapshot) }
         return snapshot
     }

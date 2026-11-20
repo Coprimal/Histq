@@ -14,6 +14,18 @@ enum SidebarSectionID: String, CaseIterable, Sendable {
         case .mine, .reviewRequested, .allOpen, .assigned: .prs
         }
     }
+
+    /// The section's title in the sidebar.
+    var title: String {
+        switch self {
+        case .local: "Local"
+        case .remote: "Remote"
+        case .worktrees: "Worktrees"
+        case .submodules: "Submodules"
+        case .tags: "Tags"
+        case .mine, .reviewRequested, .allOpen, .assigned: GitHubStore.List(rawValue: rawValue)?.title ?? rawValue
+        }
+    }
 }
 
 /// The visible sidebar sections in their order, parsed from the two prefs.
@@ -38,6 +50,19 @@ struct SidebarSections: Equatable, Sendable {
     static var current: SidebarSections {
         SidebarSections(order: Preferences.defaults.string(forKey: PrefKey.sidebarSectionOrder.rawValue) ?? "",
                         hidden: Preferences.defaults.string(forKey: PrefKey.hiddenSidebarSections.rawValue) ?? "")
+    }
+
+    /// The sections hidden in `Preferences.defaults` now: every id not visible in `current`.
+    static var hiddenIDs: Set<SidebarSectionID> {
+        Set(SidebarSectionID.allCases).subtracting(current.visible)
+    }
+
+    /// Hides or shows `id`: writes the hidden ids back in `SidebarSectionID.allCases` order, comma-separated.
+    static func setHidden(_ id: SidebarSectionID, _ hides: Bool) {
+        var hidden = hiddenIDs
+        if hides { hidden.insert(id) } else { hidden.remove(id) }
+        let list = SidebarSectionID.allCases.filter(hidden.contains).map(\.rawValue).joined(separator: ",")
+        Preferences.defaults.set(list, forKey: PrefKey.hiddenSidebarSections.rawValue)
     }
 
     /// The visible sections of `tab`, in order.
