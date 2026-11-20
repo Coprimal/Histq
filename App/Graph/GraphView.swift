@@ -1306,11 +1306,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private func ownerAvatars() -> [String: NSImage] {
         let scale = table?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let pixels = Int((16 * scale).rounded(.up))
-        return remoteURLs.compactMapValues { url in
-            GitHubClient.repository(fromRemoteURL: url).flatMap {
-                AvatarStore.shared.ownerAvatar(of: $0, pixels: pixels)
-            }
-        }
+        return remoteURLs.compactMapValues { AvatarStore.shared.ownerAvatar(ofRemoteURL: $0, pixels: pixels) }
     }
 
     /// A remote owner's logo arrived, or the avatar mode changed: the visible badges (and the hover stack) redraw.

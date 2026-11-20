@@ -368,7 +368,7 @@ private struct PRReplyRow: View {
                 .keyboardShortcut(focused ? KeyboardShortcut(.return, modifiers: .command) : nil)
                 .disabled(text.isEmpty || running != nil)
                 .help("Reply (⌘↩)")
-                resolveControl(running)
+                if session.github.offers(.resolveThreads) { resolveControl(running) }
             }
             .fixedSize()
         }

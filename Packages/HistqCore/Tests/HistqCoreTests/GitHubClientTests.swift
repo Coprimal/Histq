@@ -596,6 +596,48 @@ struct GitHubClientTests {
 
         await #expect(throws: expected) { try await flow.waitForToken(code) }
     }
+
+    // MARK: - Web URLs
+
+    @Test("web URLs keep GitHub's layout on the client's host")
+    func webURLs() throws {
+        let client = try GitHubClient(token: nil)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello.world")
+        let sha = "0123456789abcdef0123456789ABCDEF01234567"
+        let expected: [(HostedWebTarget, String)] = [
+            (.repository, "https://github.com/octo/hello.world"),
+            (.branch("main"), "https://github.com/octo/hello.world/tree/main"),
+            (.branch("feature/a-b_c.d"), "https://github.com/octo/hello.world/tree/feature/a-b_c.d"),
+            (.branch("my fix#2"), "https://github.com/octo/hello.world/tree/my%20fix%232"),
+            (.commit(sha), "https://github.com/octo/hello.world/commit/\(sha)"),
+            (.pullRequest(12), "https://github.com/octo/hello.world/pull/12"),
+            (.issue(7), "https://github.com/octo/hello.world/issues/7"),
+        ]
+        for (target, url) in expected {
+            #expect(client.webURL(target, in: repo)?.absoluteString == url)
+        }
+        let enterprise = try GitHubClient(host: "GHE.example.com:8443", token: nil)
+        let enterpriseRepo = HostedRepository(host: "ghe.example.com:8443", owner: "team", name: "app")
+        #expect(enterprise.webURL(.pullRequest(3), in: enterpriseRepo)?.absoluteString
+            == "https://ghe.example.com:8443/team/app/pull/3")
+    }
+
+    @Test("no web URL for another host, a dot segment or a sha that is not hex")
+    func webURLRejects() throws {
+        let client = try GitHubClient(token: nil)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+        #expect(client.webURL(.repository, in: HostedRepository(host: "evil.example", owner: "octo", name: "hello"))
+            == nil)
+        #expect(client.webURL(.repository, in: HostedRepository(host: "github.com", owner: "octo", name: "..")) == nil)
+        #expect(client.webURL(.repository, in: HostedRepository(host: "github.com", owner: ".", name: "x")) == nil)
+        #expect(client.webURL(.repository, in: HostedRepository(host: "github.com", path: ["a", "..", "x"])) == nil)
+        for branch in ["..", "../../evil", "a/../b", "a/./b", "a//b", ""] {
+            #expect(client.webURL(.branch(branch), in: repo) == nil, "\(branch)")
+        }
+        for sha in ["", "xyz", "abc/def", "../abc", "\u{FF10}\u{FF11}"] {
+            #expect(client.webURL(.commit(sha), in: repo) == nil, "\(sha)")
+        }
+    }
 }
 
 /// Serves every request of its own `URLSession` through `StubURLProtocol` and records them (body included).

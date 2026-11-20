@@ -385,7 +385,7 @@ enum RepoMenus {
             },
         ]
         if let remote = linkRemote(session) {
-            let link = webLink(remote: remote, "commit/" + hash, session)
+            let link = webLink(remote: remote, .commit(hash), session)
             copies.append(.action("Link on \(remote)", enabled: link != nil, toolTip: link == nil ? noWebLink(remote) : nil) {
                 if let link { copy(link) }
             })
@@ -740,13 +740,31 @@ enum RepoMenus {
         session.worktrees.value?.first { !$0.isCurrent && $0.worktree.branch == "refs/heads/\(name)" }
     }
 
-    /// The web page at `path` (`tree/<branch>`, `commit/<sha>`) of the repository `remote`'s URL names, in GitHub's
-    /// URL layout; nil when the URL names no host/owner/repo.
-    private static func webLink(remote: String, _ path: String, _ session: RepoSession) -> String? {
-        guard let url = session.remotes.first(where: { $0.name == remote })?.url,
-              let repo = GitHubClient.repository(fromRemoteURL: url)
+    /// The web page of `target` (a branch, a commit) of the repository `remote`'s URL names: the connected provider's
+    /// page when `remote` is its remote, else in GitHub's URL layout; nil when the URL names no host/owner/repo.
+    private static func webLink(remote: String, _ target: HostedWebTarget, _ session: RepoSession) -> String? {
+        if let api = session.github.api, api.remote == remote {
+            return api.client.webURL(target, in: api.repository)?.absoluteString
+        }
+        guard let url = session.remotes.first(where: { $0.name == remote })?.url, let repo = RemoteURL(url),
+              repo.segments.count == 2, isSafeSegment(repo.segments[0], extra: "-_"),
+              isSafeSegment(repo.segments[1], extra: "-_.")
         else { return nil }
-        return "https://\(repo.host)/\(repo.owner)/\(repo.name)/\(path)"
+        let path = switch target {
+        case .repository: ""
+        case .branch(let name): "/tree/" + (name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)
+        case .commit(let sha): "/commit/" + sha
+        case .pullRequest(let number): "/pull/\(number)"
+        case .issue(let number): "/issues/\(number)"
+        }
+        return "https://\(repo.host)/\(repo.segments[0])/\(repo.segments[1])\(path)"
+    }
+
+    /// ASCII letters, digits and `extra`: an owner (`-_`) or repository name (`-_.`) put into a link as it is.
+    private static func isSafeSegment(_ text: String, extra: String) -> Bool {
+        !text.isEmpty && text.unicodeScalars.allSatisfy {
+            $0.isASCII && (CharacterSet.alphanumerics.contains($0) || extra.unicodeScalars.contains($0))
+        }
     }
 
     private static func noWebLink(_ remote: String) -> String {
@@ -755,16 +773,14 @@ enum RepoMenus {
 
     /// Copy › "Link to <remote branch>": its page on the remote's host.
     private static func copyLink(to branch: RemoteBranch, _ session: RepoSession) -> MenuEntry {
-        let name = localName(of: branch)
-        let path = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-        let link = webLink(remote: branch.remote, "tree/" + path, session)
+        let link = webLink(remote: branch.remote, .branch(localName(of: branch)), session)
         return .action("Link to \(branch.name)", enabled: link != nil,
                        toolTip: link == nil ? noWebLink(branch.remote) : nil) {
             if let link { copy(link) }
         }
     }
 
-    /// The remote a commit's link points at: the GitHub remote, else `origin`, else the first one.
+    /// The remote a commit's link points at: the connected provider's remote, else `origin`, else the first one.
     private static func linkRemote(_ session: RepoSession) -> String? {
         session.github.api?.remote ?? session.remotes.first { $0.name == "origin" }?.name ?? session.remotes.first?.name
     }

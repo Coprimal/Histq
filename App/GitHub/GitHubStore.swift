@@ -4,7 +4,7 @@
 // `GitHubDriver`): a first load for the badges, a load when the window shows again and the last one is older than
 // `staleAfter`, and one every `refreshInterval` only while the PRs tab shows; none once the repo tab closes or there is
 // no connected account. Every request runs off the main actor; the token is read there too and only lives inside the
-// `GitHubClient`, never in observable state.
+// provider client (`HostingProvider`), never in observable state.
 import Foundation
 import HistqCore
 import os
@@ -174,7 +174,7 @@ final class HostingStore {
     /// tab's lists, naming the number, until dismissed or replaced by the next one.
     var actionNotice: String?
 
-    @ObservationIgnored private var client: GitHubClient?
+    @ObservationIgnored private var client: (any HostingProvider)?
     /// The source `client`'s token was read for, without the polling flags: the same one again keeps the client, so
     /// the window showing or the PRs tab opening does not read the Keychain.
     @ObservationIgnored private var clientSource: Source?
@@ -295,7 +295,7 @@ final class HostingStore {
             forgetLists()
             setConnection(.resolving)
         }
-        let client = await Self.makeClient(profile: profile, host: account.host)
+        let client = await Self.makeClient(profile: profile, kind: .github, host: account.host)
         guard generation == resolveGeneration, !Task.isCancelled else { return }
         guard let client else { return disconnect(.notConnected(account: account)) }
         self.client = client
@@ -349,9 +349,26 @@ final class HostingStore {
     }
 
     /// The client, the repository and its remote while connected: the PR detail loads and acts through them.
-    var api: (client: GitHubClient, repository: HostedRepository, remote: String)? {
+    var api: (client: any HostingProvider, repository: HostedRepository, remote: String)? {
         guard case .connected = connection, let client, let identity else { return nil }
         return (client, identity.repository, identity.remote)
+    }
+
+    /// Whether the connected provider offers `capability`; true while none is connected, as before providers had
+    /// capabilities (an action then says the tab is not connected).
+    func offers(_ capability: HostingCapabilities) -> Bool {
+        api?.client.capabilities.contains(capability) ?? true
+    }
+
+    /// The connected provider's merge methods in the picker's order; all of them while none is connected.
+    var mergeMethods: [HostedMergeMethod] {
+        HostedMergeMethod.all.filter { api?.client.mergeMethods.contains($0) ?? true }
+    }
+
+    /// The web page of `target` in the connected repository; nil while not connected.
+    func webURL(_ target: HostedWebTarget) -> URL? {
+        guard let api else { return nil }
+        return api.client.webURL(target, in: api.repository)
     }
 
     /// Reloads the lists now (after an action changed a pull request), unless a rate limit holds.
@@ -361,12 +378,16 @@ final class HostingStore {
         refreshTask = Task { [weak self] in await self?.refresh() }
     }
 
-    /// Reads the profile's token (the Keychain, off the main actor) and builds its client; nil without a usable
-    /// token. The token stays inside the client.
+    /// Reads the profile's token (the Keychain, off the main actor) and builds the client of the account's `kind`; nil
+    /// without a usable token. The token stays inside the client.
     @concurrent
-    private nonisolated static func makeClient(profile: Profile, host: String) async -> GitHubClient? {
+    private nonisolated static func makeClient(
+        profile: Profile, kind: HostingKind, host: String
+    ) async -> (any HostingProvider)? {
         guard let token = await HostingTokens.token(for: profile) else { return nil }
-        return try? GitHubClient(host: host, token: token)
+        switch kind {
+        case .github: return try? GitHubClient(host: host, token: token)
+        }
     }
 
     // MARK: Loading
@@ -378,7 +399,9 @@ final class HostingStore {
         if let pausedUntil, pausedUntil > .now { return }
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        let shown = Set(SidebarSections.current.pullRequestLists)
+        var shown = Set(SidebarSections.current.pullRequestLists)
+        // A provider without issues reads no Issues list (the PRs tab leaves its card out too).
+        if !client.capabilities.contains(.issues) { shown.remove(.assigned) }
         let (results, heads) = await Self.fetchLists(client, repository, remote: remote, shown: shown)
         guard generation == refreshGeneration, !Task.isCancelled else { return }
         // A failed All open keeps the badges it last gave.
@@ -405,7 +428,7 @@ final class HostingStore {
         if generation == refreshGeneration, !Task.isCancelled { lastRefresh = .now }
     }
 
-    private func refreshChecks(_ client: GitHubClient, _ repository: HostedRepository, generation: Int) async {
+    private func refreshChecks(_ client: any HostingProvider, _ repository: HostedRepository, generation: Int) async {
         var commits: [String] = []
         let rows = [List.mine, .reviewRequested, .allOpen].flatMap { lists[$0]?.rows ?? [] }
         for sha in rows.compactMap(\.headSHA) where !commits.contains(sha) && !settledChecks.contains(sha) {
@@ -457,7 +480,7 @@ final class HostingStore {
     /// graph's badges by remote branch (`branchPullRequests`, nil when it failed) and the other lists need it.
     @concurrent
     private nonisolated static func fetchLists(
-        _ client: GitHubClient, _ repository: HostedRepository, remote: String, shown: Set<List>
+        _ client: any HostingProvider, _ repository: HostedRepository, remote: String, shown: Set<List>
     ) async -> (lists: [List: Result<[HostedRow], any Error>], heads: [String: RefBadge.PullRequest]?) {
         async let open = capture { try await client.pullRequests(in: repository, state: .open) }
         async let mine = capture(if: shown.contains(.mine)) { try await client.myOpenPullRequests(in: repository) }
@@ -499,7 +522,7 @@ final class HostingStore {
     /// The checks state of each commit (nil: no check runs).
     @concurrent
     private nonisolated static func fetchChecks(
-        _ client: GitHubClient, _ repository: HostedRepository, commits: [String]
+        _ client: any HostingProvider, _ repository: HostedRepository, commits: [String]
     ) async -> [String: Result<ChecksState?, any Error>] {
         await withTaskGroup(of: (String, Result<ChecksState?, any Error>).self) { group in
             for sha in commits {

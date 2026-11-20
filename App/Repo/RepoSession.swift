@@ -661,9 +661,10 @@ final class RepoSession: Identifiable {
         /// A detached HEAD.
         case checkoutCommit(String)
         case checkoutFiles([String], from: String)
-        /// A GitHub pull request's Checkout locally: fetches `pull/<n>/head` from `remote` into the new branch `pr/<n>`
-        /// (never over an existing one: the PR detail checks that first), then checks it out.
-        case checkoutPullRequest(number: Int, remote: String)
+        /// A pull request's Checkout locally: fetches the head the provider names (a ref such as GitHub's
+        /// `pull/<n>/head` from `remote`, or a branch of its own remote) into the new branch `pr/<n>` (never over an
+        /// existing one: the PR detail checks that first), then checks it out.
+        case checkoutPullRequest(HostedCheckout, number: Int, remote: String)
 
         case fetchAll(prune: Bool)
         /// `autostash`: `--autostash` (git stashes the local changes and puts them back after the pull).
@@ -780,7 +781,9 @@ final class RepoSession: Identifiable {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
                  .deleteRemoteBranch(_, let remote), .deleteBranchAndRemote(_, let remote, _),
-                 .deleteRemoteTag(_, let remote), .checkoutPullRequest(_, let remote), .pullBranch(_, let remote, _):
+                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _):
+                remote
+            case .checkoutPullRequest(.branch(let remote, _), _, _), .checkoutPullRequest(_, _, let remote):
                 remote
             default:
                 nil
@@ -5588,8 +5591,14 @@ final class RepoSession: Identifiable {
             try await ops.checkoutTracking(remoteBranch: remoteBranch, as: localName, autostash: autostash)
         case .checkoutCommit(let revision): try await ops.checkout(commit: revision)
         case .checkoutFiles(let paths, let revision): try await ops.checkoutFiles(paths, from: revision)
-        case .checkoutPullRequest(let number, let remote):
-            try await ops.fetchRefspec(remote: remote, refspec: "pull/\(number)/head:pr/\(number)")
+        case .checkoutPullRequest(let checkout, let number, let remote):
+            switch checkout {
+            case .ref(let ref): try await ops.fetchRefspec(remote: remote, refspec: "\(ref):pr/\(number)")
+            case .branch(let branchRemote, let name):
+                try await ops.fetchRefspec(remote: branchRemote, refspec: "heads/\(name):pr/\(number)")
+            // The PR detail disables Checkout then; only a stale click could get here.
+            case .unavailable(let reason): throw GitError.other(exit: 1, stderrTail: reason)
+            }
             try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)

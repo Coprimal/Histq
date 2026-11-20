@@ -590,7 +590,7 @@ final class WelcomeModel {
 
     @concurrent
     private nonisolated static func repoList(
-        _ account: Profile.GitHubAccount, client makeClient: () throws -> GitHubClient?
+        _ account: Profile.GitHubAccount, client makeClient: () throws -> (any HostingProvider)?
     ) async -> RepoList {
         do {
             guard let client = try makeClient() else { return .failed(message: "No GitHub client.", reconnect: false) }

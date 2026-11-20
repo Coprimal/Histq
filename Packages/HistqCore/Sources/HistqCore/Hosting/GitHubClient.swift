@@ -139,20 +139,28 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         .ref("pull/\(pullRequest.number)/head")
     }
 
-    /// `https://<host>/<owner>/<name>`, then `tree/<branch>`, `commit/<sha>`, `pull/<n>` or `issues/<n>`, on the
-    /// repository's own host.
+    /// `https://<host>/<owner>/<name>`, then `tree/<branch>` (a `/` in the branch splits it into segments, as on
+    /// GitHub), `commit/<sha>`, `pull/<n>` or `issues/<n>`, each segment percent-encoded. Nil for a repository on
+    /// another host than the client's, an empty, `.` or `..` segment, or a sha that is not hex.
     public func webURL(_ target: HostedWebTarget, in repo: HostedRepository) -> URL? {
-        let base = "https://\(repo.host)/\(repo.owner)/\(repo.name)"
-        let path: String
+        guard repo.host.lowercased() == host else { return nil }
+        var segments = [repo.owner, repo.name]
         switch target {
-        case .repository: return URL(string: base)
+        case .repository: break
         case .branch(let name):
-            path = "tree/" + (name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)
-        case .commit(let sha): path = "commit/\(sha)"
-        case .pullRequest(let number): path = "pull/\(number)"
-        case .issue(let number): path = "issues/\(number)"
+            segments += ["tree"] + name.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        case .commit(let sha):
+            guard !sha.isEmpty, sha.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+            segments += ["commit", sha]
+        case .pullRequest(let number): segments += ["pull", String(number)]
+        case .issue(let number): segments += ["issues", String(number)]
         }
-        return URL(string: "\(base)/\(path)")
+        guard !(repo.path + segments).contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return nil }
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove("/")
+        let encoded = segments.compactMap { $0.addingPercentEncoding(withAllowedCharacters: allowed) }
+        guard encoded.count == segments.count else { return nil }
+        return URL(string: "https://\(host)/" + encoded.joined(separator: "/"))
     }
 
     public func currentUser() async throws -> HostedUser {

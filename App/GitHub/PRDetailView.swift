@@ -446,7 +446,7 @@ final class PullRequestDetailModel {
     /// runs in the load's task, so a newer load or `close` stops it. An answer with another head than the shown one is
     /// dropped and ends it: Merge pins the head the user reviewed, and GitHub refuses it once it moved.
     private func pollMergeable(
-        _ client: GitHubClient, _ repository: HostedRepository, number: Int, generation: Int
+        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, generation: Int
     ) async {
         for delay in [1, 2, 3] {
             guard case .loaded(let shown) = state, shown.isOpen, shown.pull.mergeable == nil else { return }
@@ -566,7 +566,7 @@ final class PullRequestDetailModel {
 
     @concurrent
     private nonisolated static func fetch(
-        _ client: GitHubClient, _ repository: HostedRepository, number: Int, loadID: Int, expanded: [Int: Bool]
+        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, loadID: Int, expanded: [Int: Bool]
     ) async -> Result<PullRequestDetail, any Error> {
         async let pullRequest = client.pullRequest(number, in: repository)
         async let comments = client.comments(on: .pullRequest(number), in: repository)
@@ -655,7 +655,7 @@ final class PullRequestDetailModel {
 
     @concurrent
     private nonisolated static func fetchPull(
-        _ client: GitHubClient, _ repository: HostedRepository, number: Int
+        _ client: any HostingProvider, _ repository: HostedRepository, number: Int
     ) async -> HostedPullRequest? {
         try? await client.pullRequest(number, in: repository)
     }
@@ -700,7 +700,7 @@ final class PullRequestDetailModel {
 
     @concurrent
     private nonisolated static func run(
-        _ action: PullRequestAction, _ client: GitHubClient, _ repository: HostedRepository, number: Int
+        _ action: PullRequestAction, _ client: any HostingProvider, _ repository: HostedRepository, number: Int
     ) async -> (any Error)? {
         do {
             switch action {
@@ -829,7 +829,7 @@ private struct PRHeaderCard: View {
                             .fixedSize()
                         if narrow {
                             Button {
-                                GitHubLinks.open(value.pull.htmlURL)
+                                GitHubLinks.open(session.github.webURL(.pullRequest(value.pull.number)))
                             } label: {
                                 Image(systemName: "safari")
                                     .foregroundStyle(.secondary)
@@ -840,7 +840,7 @@ private struct PRHeaderCard: View {
                         } else {
                             // Labelled, so it reads at a glance (user, 2026-11-17); the title gives way first.
                             Button {
-                                GitHubLinks.open(value.pull.htmlURL)
+                                GitHubLinks.open(session.github.webURL(.pullRequest(value.pull.number)))
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: "safari")
@@ -1034,7 +1034,7 @@ private struct PRContent: View {
             PRConversationTab(session: session, detail: detail)
                 .onAppear { UITiming.content("pr \(number) conversation \(detail.timelineCount)") }
         case .commits:
-            PRCommitsTab(commits: detail.commits)
+            PRCommitsTab(commits: detail.commits, github: session.github)
                 .onAppear { UITiming.content("pr \(number) commits \(Self.count(detail.commits))") }
         case .files:
             PRFilesTab(session: session, detail: detail)
@@ -1134,7 +1134,7 @@ private struct PRComposerCard: View {
                     if isReview {
                         CapsuleMenuPicker(label: "Review", selection: $model.reviewEvent,
                                           title: Text(model.reviewEvent.title)) {
-                            ForEach(HostedReviewEvent.all, id: \.self) { Text($0.title).tag($0) }
+                            ForEach(reviewEvents, id: \.self) { Text($0.title).tag($0) }
                         }
                     }
                     Spacer(minLength: 8)
@@ -1159,6 +1159,11 @@ private struct PRComposerCard: View {
                         title: { Text($0.title) }, compact: true, small: true, raisedTrack: true)
                 .fixedSize()
         }
+    }
+
+    /// The review events the provider takes: Request changes only where it has them.
+    private var reviewEvents: [HostedReviewEvent] {
+        HostedReviewEvent.all.filter { $0 != .requestChanges || session.github.offers(.requestChanges) }
     }
 
     private func placeholder(_ model: PullRequestDetailModel) -> String {
@@ -1214,26 +1219,30 @@ private struct PRSideColumn: View {
                     }
                 }
             }
-            SectionCard("Assignees", systemImage: "person.crop.circle", count: detail.pull.assignees?.count ?? 0) {
-                let assignees = detail.pull.assignees ?? []
-                if assignees.isEmpty {
-                    PRSideEmpty(text: "No one assigned")
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(assignees, id: \.id) {
-                            PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
-                                        showsState: false)
+            if session.github.offers(.assignees) {
+                SectionCard("Assignees", systemImage: "person.crop.circle", count: detail.pull.assignees?.count ?? 0) {
+                    let assignees = detail.pull.assignees ?? []
+                    if assignees.isEmpty {
+                        PRSideEmpty(text: "No one assigned")
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(assignees, id: \.id) {
+                                PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
+                                            showsState: false)
+                            }
                         }
                     }
                 }
             }
-            SectionCard("Labels", systemImage: "tag", count: detail.pull.labels?.count ?? 0) {
-                let labels = detail.pull.labels ?? []
-                if labels.isEmpty {
-                    PRSideEmpty(text: "None yet")
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
+            if session.github.offers(.labels) {
+                SectionCard("Labels", systemImage: "tag", count: detail.pull.labels?.count ?? 0) {
+                    let labels = detail.pull.labels ?? []
+                    if labels.isEmpty {
+                        PRSideEmpty(text: "None yet")
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
+                        }
                     }
                 }
             }
@@ -1287,6 +1296,12 @@ private struct PRActionsCard: View {
                         otherButtons(busy: busy)
                     }
                 }
+                if case .unavailable(let reason) = checkoutWay {
+                    Text(reason)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let busy {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
@@ -1298,6 +1313,9 @@ private struct PRActionsCard: View {
             }
         }
     }
+
+    /// How the provider fetches this pull request's head (GitHub: `pull/<n>/head`); nil without a connected remote.
+    private var checkoutWay: HostedCheckout? { session.github.api?.client.checkout(of: detail.pull) }
 
     /// GitHub's answer for an open pull request, from `mergeable` and `mergeable_state`: conflicts first, then a draft,
     /// a blocked or out-of-date branch, then a clean merge. `mergeable` true with any other state (`clean`, `unstable`,
@@ -1466,7 +1484,7 @@ private struct PRActionsCard: View {
         let pull = detail.pull
         CapsuleMenuPicker(label: "Merge method", selection: $pullDetail.mergeMethod,
                           title: Text(pullDetail.mergeMethod.title)) {
-            ForEach(HostedMergeMethod.all, id: \.self) { Text($0.title).tag($0) }
+            ForEach(session.github.mergeMethods, id: \.self) { Text($0.title).tag($0) }
         }
         Button("Merge") { confirmMerge(pullDetail.mergeMethod) }
             .buttonStyle(RowTextButtonStyle(
@@ -1481,6 +1499,13 @@ private struct PRActionsCard: View {
     @ViewBuilder
     private func otherButtons(busy: PullRequestAction?) -> some View {
         let pull = detail.pull
+        let way = checkoutWay
+        let help = switch way {
+        case .ref(let ref): "Fetch \(ref) into the branch pr/\(pull.number) and check it out"
+        case .branch(let remote, let name): "Fetch \(remote)/\(name) into the branch pr/\(pull.number) and check it out"
+        case .unavailable(let reason): reason
+        case nil: "Fetch the pull request's head into the branch pr/\(pull.number) and check it out"
+        }
         Button { checkout() } label: {
             HStack(spacing: 6) {
                 IconImage("lucide-laptop-minimal")
@@ -1490,8 +1515,9 @@ private struct PRActionsCard: View {
         }
         .buttonStyle(RowTextButtonStyle(formRow: true))
         .fixedSize()
-        .help("Fetch pull/\(pull.number)/head into the branch pr/\(pull.number) and check it out")
-        if !detail.isMerged {
+        .disabled({ if case .unavailable = way { true } else { false } }())
+        .help(help)
+        if !detail.isMerged, detail.isOpen || session.github.offers(.reopen) {
             let open = detail.isOpen
             Button { confirmSetOpen(!open) } label: {
                 HStack(spacing: 6) {
@@ -1543,6 +1569,8 @@ private struct PRActionsCard: View {
     private func checkout() {
         let pull = detail.pull
         let branch = "pr/\(pull.number)"
+        let way = checkoutWay
+        if case .unavailable = way { return }
         if let local = session.refs.value?.localBranches.first(where: { $0.name == branch }) {
             if local.commit == pull.head.sha {
                 session.run(.checkoutBranch(branch), title: "Checkout \(branch)")
@@ -1556,11 +1584,11 @@ private struct PRActionsCard: View {
                 perform: { [session] in session.run(.checkoutBranch(branch), title: "Checkout \(branch)") })))
             return
         }
-        guard let remote = session.github.api?.remote else {
+        guard let remote = session.github.api?.remote, let way else {
             session.pullDetail.actionError = "No remote of this repository is on GitHub: nothing to fetch from."
             return
         }
-        session.run(.checkoutPullRequest(number: pull.number, remote: remote), title: "Checkout #\(pull.number)")
+        session.run(.checkoutPullRequest(way, number: pull.number, remote: remote), title: "Checkout #\(pull.number)")
     }
 }
 
@@ -1715,6 +1743,7 @@ struct PRLabelChip: View {
 
 private struct PRCommitsTab: View {
     let commits: Loadable<[HostedCommit]>
+    let github: HostingStore
 
     var body: some View {
         switch commits {
@@ -1722,7 +1751,7 @@ private struct PRCommitsTab: View {
             SectionCard("Commits", systemImage: PRTab.commits.systemImage, count: commits.count, contentPadding: 6) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(commits) { PRCommitRow(commit: $0) }
+                        ForEach(commits) { PRCommitRow(commit: $0, url: github.webURL(.commit($0.sha))) }
                     }
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -1740,6 +1769,8 @@ private struct PRCommitsTab: View {
 /// A commit: its subject, author and date, and its short id, which opens it on GitHub.
 private struct PRCommitRow: View {
     let commit: HostedCommit
+    /// The commit's page on the host.
+    let url: URL?
     @State private var hovered = false
 
     var body: some View {
@@ -1766,7 +1797,7 @@ private struct PRCommitRow: View {
             }
             Spacer(minLength: 8)
             Button {
-                GitHubLinks.open(commit.htmlURL)
+                GitHubLinks.open(url)
             } label: {
                 Text(String(commit.sha.prefix(7)))
                     .font(.settingsCaption.monospaced())

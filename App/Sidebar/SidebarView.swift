@@ -971,17 +971,13 @@ private struct RemoteRow: View {
         .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
             // No identity: the avatar mode changed.
             let changed = note.userInfo?[AvatarStore.emailKey] as? String
-            if changed == nil || changed == repository.map(AvatarStore.ownerIdentity) { loadAvatar() }
+            if changed == nil || changed == url.flatMap(AvatarStore.ownerIdentity(ofRemoteURL:)) { loadAvatar() }
         }
     }
 
-    private var repository: HostedRepository? {
-        url.flatMap(GitHubClient.repository(fromRemoteURL:))
-    }
-
     private func loadAvatar() {
-        ownerAvatar = repository.flatMap {
-            AvatarStore.shared.ownerAvatar(of: $0, pixels: Int((Self.avatarSide * scale).rounded(.up)))
+        ownerAvatar = url.flatMap {
+            AvatarStore.shared.ownerAvatar(ofRemoteURL: $0, pixels: Int((Self.avatarSide * scale).rounded(.up)))
         }
     }
 }

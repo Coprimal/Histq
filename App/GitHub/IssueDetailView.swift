@@ -186,7 +186,7 @@ final class IssueDetailModel {
     /// `loadID` is the load's generation: a new one measures the page again, even when its HTML did not change.
     @concurrent
     private nonisolated static func fetch(
-        _ client: GitHubClient, _ repository: HostedRepository, number: Int, loadID: Int
+        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, loadID: Int
     ) async -> Result<IssueDetail, any Error> {
         async let issue = client.issue(number, in: repository)
         async let comments = client.comments(on: .issue(number), in: repository)
@@ -204,7 +204,7 @@ final class IssueDetailModel {
 
     @concurrent
     private nonisolated static func run(
-        _ action: IssueAction, _ client: GitHubClient, _ repository: HostedRepository, number: Int
+        _ action: IssueAction, _ client: any HostingProvider, _ repository: HostedRepository, number: Int
     ) async -> (any Error)? {
         do {
             switch action {
@@ -302,7 +302,7 @@ private struct IssueHeaderCard: View {
                     if let value {
                         IssueStatePill(isOpen: value.isOpen)
                         Button {
-                            GitHubLinks.open(value.issue.htmlURL)
+                            GitHubLinks.open(session.github.webURL(.issue(value.issue.number)))
                         } label: {
                             Image(systemName: "safari")
                                 .foregroundStyle(.secondary)
@@ -468,9 +468,11 @@ private struct IssueSideColumn: View {
         VStack(spacing: SectionCardMetrics.spacing) {
             SectionCard("Actions", systemImage: "bolt") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Button(detail.isOpen ? "Close Issue" : "Reopen Issue") { confirmSetOpen(!detail.isOpen) }
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                        .disabled(busy != nil)
+                    if detail.isOpen || session.github.offers(.reopen) {
+                        Button(detail.isOpen ? "Close Issue" : "Reopen Issue") { confirmSetOpen(!detail.isOpen) }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .disabled(busy != nil)
+                    }
                     if let busy {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.mini)
@@ -481,27 +483,31 @@ private struct IssueSideColumn: View {
                     }
                 }
             }
-            SectionCard("Assignees", systemImage: "person.crop.circle", count: detail.issue.assignees?.count ?? 0) {
-                let assignees = detail.issue.assignees ?? []
-                if assignees.isEmpty {
-                    PRSideEmpty(text: "No one assigned")
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        let realAvatars = GitHubUserAvatar.allowsReal(session.github)
-                        ForEach(assignees, id: \.id) {
-                            PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
-                                        showsState: false)
+            if session.github.offers(.assignees) {
+                SectionCard("Assignees", systemImage: "person.crop.circle", count: detail.issue.assignees?.count ?? 0) {
+                    let assignees = detail.issue.assignees ?? []
+                    if assignees.isEmpty {
+                        PRSideEmpty(text: "No one assigned")
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            let realAvatars = GitHubUserAvatar.allowsReal(session.github)
+                            ForEach(assignees, id: \.id) {
+                                PRPersonRow(login: $0.login, userID: $0.id, realAvatar: realAvatars, state: nil,
+                                            showsState: false)
+                            }
                         }
                     }
                 }
             }
-            SectionCard("Labels", systemImage: "tag", count: detail.issue.labels?.count ?? 0) {
-                let labels = detail.issue.labels ?? []
-                if labels.isEmpty {
-                    PRSideEmpty(text: "None yet")
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
+            if session.github.offers(.labels) {
+                SectionCard("Labels", systemImage: "tag", count: detail.issue.labels?.count ?? 0) {
+                    let labels = detail.issue.labels ?? []
+                    if labels.isEmpty {
+                        PRSideEmpty(text: "None yet")
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
+                        }
                     }
                 }
             }

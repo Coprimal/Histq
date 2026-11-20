@@ -94,7 +94,8 @@ struct PullRequestSections: View {
                     }
                 }
             case .connected(let repository):
-                ForEach(lists, id: \.self) { list in
+                // A provider without issues has no Issues list (`HostingStore` does not read it either).
+                ForEach(lists.filter { $0 != .assigned || store.offers(.issues) }, id: \.self) { list in
                     ListCard(session: session, list: list,
                              realAvatars: repository.host == "github.com" && !isStub)
                 }

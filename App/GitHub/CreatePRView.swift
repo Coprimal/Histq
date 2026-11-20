@@ -202,18 +202,26 @@ struct CreatePRView: View {
                 .frame(height: editorHeight)
                 .onGeometryChange(for: CGFloat.self, of: \.size.height) { fit.editor = $0 }
             }
-            HStack(spacing: 8) {
-                Toggle("Draft", isOn: $draft)
-                    .toggleStyle(CompactSwitch())
-                Text("Create as a draft")
-                    .foregroundStyle(.secondary)
+            if session.github.offers(.draft) {
+                HStack(spacing: 8) {
+                    Toggle("Draft", isOn: $draft)
+                        .toggleStyle(CompactSwitch())
+                    Text("Create as a draft")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         ModalSection(spacing: 10) {
-            multiPicker("Reviewers", systemImage: "person.2", list: choices.reviewers, selection: $reviewers)
-            multiPicker("Assignees", systemImage: "person.crop.circle", list: choices.assignees,
-                        selection: $assignees)
-            multiPicker("Labels", systemImage: "tag", list: choices.labels, selection: $labels)
+            if session.github.offers(.reviewRequests) {
+                multiPicker("Reviewers", systemImage: "person.2", list: choices.reviewers, selection: $reviewers)
+            }
+            if session.github.offers(.assignees) {
+                multiPicker("Assignees", systemImage: "person.crop.circle", list: choices.assignees,
+                            selection: $assignees)
+            }
+            if session.github.offers(.labels) {
+                multiPicker("Labels", systemImage: "tag", list: choices.labels, selection: $labels)
+            }
         }
     }
 
@@ -402,7 +410,7 @@ struct CreatePRView: View {
     }
 
     @concurrent
-    private nonisolated static func fetchChoices(_ client: GitHubClient, _ repository: HostedRepository) async
+    private nonisolated static func fetchChoices(_ client: any HostingProvider, _ repository: HostedRepository) async
         -> Choices
     {
         async let info = try? client.repositoryInfo(repository)
@@ -510,7 +518,7 @@ struct CreatePRView: View {
 
     @concurrent
     private nonisolated static func create(
-        _ request: NewPullRequest, extras: Extras, _ client: GitHubClient, _ repository: HostedRepository
+        _ request: NewPullRequest, extras: Extras, _ client: any HostingProvider, _ repository: HostedRepository
     ) async -> Result<Created, any Error> {
         let pull: HostedPullRequest
         do {
