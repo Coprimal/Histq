@@ -1431,6 +1431,7 @@ enum ModalMetrics {
 struct ModalCard<Content: View, Actions: View>: View {
     let title: String
     var subtitle: String?
+    /// The header's icon: an SF Symbol or a Lucide asset (`IconImage`).
     var systemImage: String?
     var width: CGFloat = 440
     var takesFocus = false
@@ -1463,7 +1464,7 @@ struct ModalCard<Content: View, Actions: View>: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             if let systemImage {
-                Image(systemName: systemImage)
+                IconImage(systemImage)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
             }

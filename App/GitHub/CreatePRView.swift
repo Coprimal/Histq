@@ -82,7 +82,7 @@ struct CreatePRView: View {
     private static let editorHeights: ClosedRange<CGFloat> = 48...96
 
     var body: some View {
-        ModalCard(title: "Create a pull request", subtitle: subtitle, systemImage: "arrow.triangle.pull", width: 540) {
+        ModalCard(title: "Create a pull request", subtitle: subtitle, systemImage: "lucide-git-pull-request-arrow", width: 540) {
             // The sections scroll when the window is too short for them, so the buttons below always show: never
             // taller than their content (`FitHeight`), never taller than the card leaves them.
             FitHeight {
