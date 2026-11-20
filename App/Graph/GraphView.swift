@@ -252,6 +252,8 @@ final class GraphTableView: NSTableView {
         // A pull request chip opens its pull request at once; the row's selection, its detail and a badge drag are
         // left alone (a row select would close the pull request again).
         if event.clickCount == 1, controller?.openPullRequest(at: point) == true { return }
+        // The Open Worktree pill of a selected worktree row opens its tab.
+        if controller?.openWorktree(at: point) == true { return }
         mouseDownPoint = point
         if showsOpenHand { NSCursor.closedHand.set() }
         super.mouseDown(with: event)
@@ -279,12 +281,14 @@ final class GraphTableView: NSTableView {
         let point = convert(event.locationInWindow, from: nil)
         updateCursor(at: point)
         controller?.hoverRefs(at: point)
+        controller?.hoverOpenButton(at: point)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         updateCursor(at: nil)
         controller?.hoverRefs(at: nil)
+        controller?.hoverOpenButton(at: nil)
     }
 
     private var controller: GraphTableController? { delegate as? GraphTableController }
@@ -536,6 +540,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var stackOverlay: RefBadgeCellView?
     private var stackRow = -1
     private weak var coveredCell: RefBadgeCellView?
+    /// The message cell whose Open Worktree pill is under the pointer (lit).
+    private weak var litOpenButton: GraphTextCellView?
     /// While a press on a stacked badge is tracked: the row under it, the stack's row, which it is for, and the
     /// table's selection and the event's modifier keys when it began.
     private var pressRow: (row: Int, stack: Int, selection: IndexSet, modifiers: NSEvent.ModifierFlags)?
@@ -1114,6 +1120,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             cell.textSize = metrics.textSize
             cell.changes = nil
             cell.isDimmed = isDimmed(row: row)
+            // Every row sets it: a reused cell never keeps another row's pill.
+            cell.openableWorktree = openableWorktree(synthetic)
+            cell.isOpenButtonHovered = false
             if let commit {
                 cell.text = commit.subject
                 cell.tone = .primary
@@ -1297,6 +1306,42 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private func worktree(_ synthetic: GraphSyntheticRow?) -> WorktreeInfo? {
         guard let synthetic, synthetic.kind == .worktreeWIP else { return nil }
         return log.worktrees.first { $0.path == synthetic.id }
+    }
+
+    /// The path of the worktree a row opens (its "Open in New Tab"): another worktree's WIP row, not a prunable one.
+    private func openableWorktree(_ synthetic: GraphSyntheticRow?) -> String? {
+        guard let info = worktree(synthetic), !info.isCurrent, !info.worktree.isPrunable else { return nil }
+        return info.path
+    }
+
+    // MARK: Open Worktree pill
+
+    /// Lights the Open Worktree pill under the pointer, as `RowTextButtonStyle` on hover.
+    func hoverOpenButton(at point: NSPoint?) {
+        let cell = point.flatMap { openButtonCell(at: $0) }
+        if litOpenButton !== cell { litOpenButton?.isOpenButtonHovered = false }
+        cell?.isOpenButtonHovered = true
+        litOpenButton = cell
+    }
+
+    /// A click on the Open Worktree pill: opens that worktree's tab, as a double-click on its row.
+    func openWorktree(at point: NSPoint) -> Bool {
+        guard let path = openButtonCell(at: point)?.openableWorktree else { return false }
+        hoverOpenButton(at: nil)
+        view?.onActivate(.worktree(path), nil)
+        return true
+    }
+
+    /// The message cell at `point` (in the table) when `point` is on its Open Worktree pill.
+    private func openButtonCell(at point: NSPoint) -> GraphTextCellView? {
+        guard let table else { return nil }
+        let row = table.row(at: point)
+        let column = table.column(withIdentifier: GraphColumn.message.identifier)
+        guard row >= 0, column >= 0,
+              let cell = table.view(atColumn: column, row: row, makeIfNecessary: false) as? GraphTextCellView,
+              cell.openButtonRect?.contains(cell.convert(point, from: table)) == true
+        else { return nil }
+        return cell
     }
 
     private func reuse<Cell: NSView>(_ table: NSTableView, _ column: GraphColumn, make: () -> Cell) -> Cell {
@@ -1645,7 +1690,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         return IndexSet(integer: pressRow.stack)
     }
 
-    @objc private func scrolled(_ notification: Notification) { hideStack() }
+    @objc private func scrolled(_ notification: Notification) {
+        hideStack()
+        hoverOpenButton(at: nil)
+    }
 
     private func cell(at point: NSPoint) -> RefBadgeCellView? {
         guard let table else { return nil }

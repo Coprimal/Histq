@@ -731,6 +731,18 @@ final class GraphTextCellView: NSView {
     var compactTitle: String?
     /// A row the graph search does not match while it has matches: the text draws at `Style.dimmedAlpha`.
     var isDimmed = false
+    /// Another worktree's WIP row (that worktree's path): while the row is selected, an "Open Worktree" pill at the
+    /// cell's right end (a click opens its tab, `GraphTableController.openWorktree(at:)`); the text gives way to it,
+    /// cut with "…".
+    var openableWorktree: String? {
+        didSet { if openableWorktree != oldValue { refreshToolTip(); needsDisplay = true } }
+    }
+    /// The pointer is on the pill: lighter, as `RowTextButtonStyle` on hover.
+    var isOpenButtonHovered = false {
+        didSet { if isOpenButtonHovered != oldValue { needsDisplay = true } }
+    }
+
+    static let openButtonTitle = "Open Worktree"
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -760,6 +772,7 @@ final class GraphTextCellView: NSView {
         let deleted: NSTextAttachment
         /// One line of the text, for its rect.
         let lineHeight: CGFloat
+        let button: [NSAttributedString.Key: Any]
 
         init(_ size: TextSize) {
             font = NSFont.systemFont(ofSize: size.scaled(12))
@@ -773,6 +786,17 @@ final class GraphTextCellView: NSView {
             added = Self.glyph("plus", Palette.graphLanes[2], size: glyphSize, font: font)
             deleted = Self.glyph("minus", Palette.graphLanes[7], size: glyphSize, font: font)
             lineHeight = ceil(font.ascender - font.descender + font.leading)
+            button = Self.buttonAttributes(font: font)
+        }
+
+        /// The pill's title: medium, white with `RowTextButtonStyle`'s shadow, a size under the graph's text.
+        private static func buttonAttributes(font: NSFont) -> [NSAttributedString.Key: Any] {
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor(Palette.onPrimaryShadow)
+            shadow.shadowBlurRadius = 1
+            shadow.shadowOffset = NSSize(width: 0, height: -0.75)
+            return [.font: NSFont.systemFont(ofSize: font.pointSize - 2, weight: .medium),
+                    .foregroundColor: NSColor(Palette.onAccent), .shadow: shadow]
         }
 
         static let bySize = Dictionary(uniqueKeysWithValues: TextSize.allCases.map { ($0, Style($0)) })
@@ -813,7 +837,23 @@ final class GraphTextCellView: NSView {
         return !GraphHeaderCell.fits(compactTitle, width: bounds.width, textSize: textSize)
     }
 
-    private var textWidth: CGFloat { max(0, bounds.width - 2 * Style.padding) }
+    private var textWidth: CGFloat {
+        let pill = openButtonRect.map { bounds.maxX - $0.minX + Style.padding / 2 } ?? 0
+        return max(0, bounds.width - 2 * Style.padding - pill)
+    }
+
+    /// The "Open Worktree" pill (`openableWorktree`), in the cell: small, a line of text tall at most; nil when hidden
+    /// or when the cell is narrower than it (the text then gives way to "…").
+    var openButtonRect: CGRect? {
+        guard openableWorktree != nil, isRowSelected, !text.isEmpty, !showsAvatar else { return nil }
+        let style = style
+        let title = (Self.openButtonTitle as NSString).size(withAttributes: style.button)
+        let width = ceil(title.width) + 12
+        let height = min(ceil(title.height) + 3, bounds.height - 8)
+        guard bounds.width >= width + Style.padding else { return nil }
+        return CGRect(x: bounds.maxX - Style.padding / 2 - width, y: ((bounds.height - height) / 2).rounded(),
+                      width: width, height: height)
+    }
 
     /// On a selected row every tone draws in full white, brighter than the label colors.
     private var isRowSelected: Bool { (superview as? NSTableRowView)?.isSelected ?? false }
@@ -893,7 +933,29 @@ final class GraphTextCellView: NSView {
         }
         let lineHeight = style.lineHeight
         let rect = CGRect(x: Style.padding, y: (bounds.height - lineHeight) / 2, width: textWidth, height: lineHeight)
-        attributedText.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        // A zero width would draw the line whole: the pill has taken all the room.
+        if rect.width >= 1 {
+            attributedText.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        }
+        if let pill = openButtonRect {
+            // Never dimmed: the pill is a control, not the row's text.
+            if isDimmed { context?.setAlpha(1) }
+            drawOpenButton(in: pill)
+        }
+    }
+
+    /// The pill: the accent capsule of a prominent `RowTextButtonStyle`, lighter on hover, its title centered.
+    private func drawOpenButton(in rect: CGRect) {
+        let capsule = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+        NSColor(Palette.primaryFill).setFill()
+        capsule.fill()
+        if isOpenButtonHovered {
+            NSColor(Palette.hoverFill).setFill()
+            capsule.fill()
+        }
+        let title = NSAttributedString(string: Self.openButtonTitle, attributes: style.button)
+        let size = title.size()
+        title.draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
     }
 }
 

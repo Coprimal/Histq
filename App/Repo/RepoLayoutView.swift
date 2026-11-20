@@ -815,7 +815,7 @@ private struct DetailPanel: View {
             MultipleSelectionPanel(session: session, items: items, diff: diff, files: files, token: session.selectToken,
                                    timingDetail: session.selectDetail)
         case .worktree(let path, let status):
-            WorktreeChangesPanel(path: path, status: status)
+            WorktreeChangesPanel(path: path, status: status) { [session] in session.openWorktree(path) }
         case .submodule(let detail):
             SubmoduleStatusPanel(session: session, path: detail.submodule.path, detail: detail)
         case .compare(let base, let head, let files):

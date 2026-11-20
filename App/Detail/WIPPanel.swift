@@ -545,6 +545,8 @@ struct WIPPanel: View {
 struct WorktreeChangesPanel: View {
     let path: String
     let status: WorkingStatus
+    /// Opens the worktree's tab (its Unstaged card's Open Worktree button).
+    let open: () -> Void
 
     var body: some View {
         let folder = URL(filePath: path, directoryHint: .isDirectory)
@@ -587,7 +589,15 @@ struct WorktreeChangesPanel: View {
                 }
             }
         } accessory: {
-            FileListModeToggle(card: card)
+            HStack(spacing: 10) {
+                if card == .unstaged {
+                    // The same pill as on the worktree's graph row under the pointer.
+                    Button(GraphTextCellView.openButtonTitle, action: open)
+                        .buttonStyle(RowTextButtonStyle(prominent: true))
+                        .fixedSize()
+                }
+                FileListModeToggle(card: card)
+            }
         }
     }
 }
