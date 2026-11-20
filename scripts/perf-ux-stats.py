@@ -358,12 +358,14 @@ def op_window(run, scenario, t, detail, stop):
 def proof(run, scenario):
     """The proof that an outside change was read (CONTRIBUTING.md, "UX latency benchmark"): after the harness's edit, a
     `refresh` (refresh.log), a `refresh-read` and a `git status` of that repo, then, once that status is in, the graph's
-    reaction to the WIP row appearing: `log-again synthetic` or `graph-reload`; in `tabs`, `log-again synthetic` or
-    `log-start` before that tab is shown again (every tab switch reloads the graph table, so a `graph-reload` there
-    proves nothing). In the file-wip tail the file was already changed, so the WIP row stays and no graph line is due;
-    a `file-load` of the open file is due instead. pass(<a>/<b>ms) = from the edit / from the `refresh` line to the
-    last of those lines; the first number is an upper bound (the edit's time is the last log line before it, which
-    can be up to 1 s earlier after `op-settled`), the second is the watcher's own latency."""
+    reaction to the WIP row appearing: `log-again synthetic` or `graph-reload`. In `tabs` the hidden repo holds its
+    refresh until it is shown (task 3.6): after its `select tab`, a `git status` of that repo, a `refresh-read`, then
+    `log-start` or `log-again synthetic` and the log's `graph-reload` (the switch's own `graph-reload` comes before and
+    does not count). In the file-wip tail the file was already changed, so the WIP row stays and no graph line is due;
+    a `file-load` of the open file is due instead. pass(<a>/<b>ms) = from the edit / from the `refresh` line (in
+    `tabs`, from the `select tab`) to the last of those lines; the first number is an upper bound (the edit's time is
+    the last log line before it, which can be up to 1 s earlier after `op-settled`), the second is the watcher's own
+    latency (in `tabs`, the select's)."""
     anchor = edit_anchor(run)
     if anchor is None:
         return None
@@ -373,6 +375,11 @@ def proof(run, scenario):
     if refresh is None:
         return "fail(no refresh)"
     missing = []
+    if scenario == "tabs":
+        index = next((d.split(" ")[0] for _, e, d in run.events if e == "tab-shown" and d.split(" ", 1)[-1] == repo), None)
+        refresh = run.first(t0, inf, lambda e, d: e == "select" and d == f"tab {index}")
+        if refresh is None:
+            return "fail(no select tab)"
     read = run.first(refresh, inf, lambda e, d: e == "refresh-read")
     if read is None:
         missing.append("refresh-read")
@@ -382,12 +389,11 @@ def proof(run, scenario):
     found = [read, status]
     after = status if status is not None else refresh
     if scenario == "tabs":
-        index = next((d.split(" ")[0] for _, e, d in run.events if e == "tab-shown" and d.split(" ", 1)[-1] == repo), None)
-        shown = run.first(t0, inf, lambda e, d: e == "select" and d == f"tab {index}")
-        graph = run.first(after, shown if shown is not None else inf,
-                          lambda e, d: (e == "log-again" and d == "synthetic") or e == "log-start")
+        log = run.first(max(t for t in found + [refresh] if t is not None), inf,
+                        lambda e, d: (e == "log-again" and d == "synthetic") or e == "log-start")
+        graph = run.first(log, inf, lambda e, d: e == "graph-reload") if log is not None else None
         if graph is None:
-            missing.append("log-again synthetic|log-start before the tab is shown")
+            missing.append("log-start|log-again synthetic, then graph-reload")
         found.append(graph)
     elif scenario != "file-wip":
         graph = run.first(after, inf, lambda e, d: (e == "log-again" and d == "synthetic") or e == "graph-reload")

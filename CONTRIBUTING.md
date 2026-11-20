@@ -172,10 +172,12 @@ front app is a warning: someone switched apps meanwhile, or the launch came to f
   `graph-reload` after `op-end`, `git` = count / total / serial ms from the click on, `unacc` = `op-end` − `op-start`
   minus the serial git time inside it, `top` = the 3 costliest verbs (`<verb>*<count>:<ms>`).
 - `proof` (`outside-edit`, `file-wip`, `tabs`): `pass(<ms>)` when the outside change was read: a watcher `refresh`, a
-  `refresh-read` and a `git status` of that repo, then the graph's reload (the WIP row appeared; in `tabs` a log read
-  while the tab is still hidden) or, for `file-wip`, a new `file-load` of the open file; the second number is the time
-  from the watcher's `refresh` line, the first one from the edit is an upper bound (the edit is timed by the last log
-  line before it, up to 1 s early in `outside-edit`); `fail(no …)` names what is missing.
+  `refresh-read` and a `git status` of that repo, then the graph's reload (the WIP row appeared) or, for `file-wip`, a
+  new `file-load` of the open file; in `tabs` the hidden repo holds its refresh until it is shown, so after its
+  `select tab`: a `git status` of that repo, a `refresh-read`, then `log-start` or `log-again synthetic` and the log's
+  `graph-reload` (the switch's own `graph-reload` does not count); the second number is the time from the watcher's
+  `refresh` line (in `tabs`, from the `select tab`), the first one from the edit is an upper bound (the edit is timed by
+  the last log line before it, up to 1 s early in `outside-edit`); `fail(no …)` names what is missing.
 - Pull requests: `action <name> ok ->reloaded` (from the action's answer to the reloaded page), `mergeable lines` and
   the gaps between the re-asks.
 

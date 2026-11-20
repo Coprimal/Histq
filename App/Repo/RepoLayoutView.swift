@@ -741,28 +741,48 @@ private struct DetailPanel: View {
 
     @ViewBuilder private var content: some View {
         Group {
-            switch session.detail {
-            case .idle, .loading:
+            if showsHeldStatus {
+                // The tab showed with a change it held: the old status is not shown while the new one is read.
                 PlaceholderCard(
                     token: session.selectToken, detail: session.selectDetail,
-                    isCurrent: { [model, session] in model.selectedSession === session }
+                    isCurrent: { [model, session] in model.selectedSession === session && session.statusHeld }
                 ) {
                     placeholder
                 }
-            case .loaded(let detail):
-                // Keyed on the select, not on appearing: a switch between two loaded commits can keep this view. A
-                // commit's header shows before its files: `content` waits for them (`content-info` is the header's).
-                loaded(detail)
-                    .onChange(of: ContentKey(token: session.selectToken, isReady: detail.isReady), initial: true) {
-                        _, key in
-                        if key.isReady { UITiming.content(session.selectDetail) }
+            } else {
+                switch session.detail {
+                case .idle, .loading:
+                    PlaceholderCard(
+                        token: session.selectToken, detail: session.selectDetail,
+                        isCurrent: { [model, session] in model.selectedSession === session }
+                    ) {
+                        placeholder
                     }
-            case .failed(let message):
-                FailedCard(message: message, path: session.url.path)
-                    .onChange(of: session.selectToken, initial: true) {
-                        UITiming.content("\(session.selectDetail) failed")
-                    }
+                case .loaded(let detail):
+                    // Keyed on the select, not on appearing: a switch between two loaded commits can keep this view.
+                    // A commit's header shows before its files: `content` waits for them (`content-info` is the
+                    // header's).
+                    loaded(detail)
+                        .onChange(of: ContentKey(token: session.selectToken, isReady: detail.isReady), initial: true) {
+                            _, key in
+                            if key.isReady { UITiming.content(session.selectDetail) }
+                        }
+                case .failed(let message):
+                    FailedCard(message: message, path: session.url.path)
+                        .onChange(of: session.selectToken, initial: true) {
+                            UITiming.content("\(session.selectDetail) failed")
+                        }
+                }
             }
+        }
+    }
+
+    /// The WIP or the overview, which show the status, while the status the tab held is read (`statusHeld`).
+    private var showsHeldStatus: Bool {
+        guard session.statusHeld else { return false }
+        switch session.selection {
+        case .wip, .overview: return true
+        default: return false
         }
     }
 

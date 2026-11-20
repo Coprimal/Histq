@@ -18,6 +18,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ### Changed
 - Clicks react at once: a checkout shows its target branch and a "Checkout X" status in about 3 ms (was 150-200 ms); the commit box clears as soon as you click Commit (was about 200-250 ms) and gets the message back if the commit fails; a pull request opens in about 360 ms instead of 720-1000 ms, with checks and files filling in as they arrive, and opens again in about 45 ms instead of about 720 ms; merging a pull request shows it as merged at once; a pending mergeable state is asked again after about 1 s instead of 3 s; switching back to a tab no longer rereads its repository.
+- Fewer git processes per action: a commit or checkout runs 32-36 git processes instead of 53-57, with one refresh instead of two, and the graph redraws sooner after a stash, rebase, fetch, pull or push (about 90-115 ms instead of 110-150 ms); clicking the WIP row again no longer reloads the open diff (12 git processes instead of 19); a hidden tab waits until it is shown to read changes made outside the app (no git process while it stays hidden, was 13).
 
 ### Fixed
 - Discard on a submodule now puts it back on the recorded commit (it did nothing before).

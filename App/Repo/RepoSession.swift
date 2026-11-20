@@ -786,8 +786,11 @@ final class RepoSession: Identifiable {
     var commitDraft = CommitDraft()
     private(set) var status: Loadable<WorkingStatus> = .idle
     /// Counts the status reads, even those that found the same status (an edit to a file already modified): the WIP
-    /// panel reads its files' sizes again on each.
+    /// panel reads its files' sizes again on each. A select's read that found the same status does not count.
     private(set) var statusReads = 0
+    /// The tab showed with a status change it held (`isShown`): the WIP or the overview shows its placeholder, not
+    /// the old status, until a status read publishes.
+    private(set) var statusHeld = false
     private(set) var refs: Loadable<Refs> = .idle
     private(set) var log: Loadable<LogSnapshot> = .idle {
         didSet { graphSearch.logDidChange() }
@@ -946,6 +949,21 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     /// The scope of the refresh in flight: a newer refresh cancels it and takes over its scope.
     @ObservationIgnored private var refreshScope: RefreshScope = []
+    /// The scope of the last refresh and when it started (ns since 1970): a change made before is in its read.
+    @ObservationIgnored private var refreshStart: (scope: RefreshScope, time: UInt64) = ([], 0)
+    /// The watcher's changes seen while the tab is hidden, read once it shows again (`isShown`).
+    @ObservationIgnored private var heldScope: RefreshScope = []
+    /// Whether the tab is its window's selected one (in a background window too); set by the window. A hidden tab's
+    /// watcher refreshes wait in `heldScope`: showing it again reads them in one refresh.
+    @ObservationIgnored var isShown = true {
+        didSet {
+            guard isShown, !heldScope.isEmpty else { return }
+            let held = heldScope
+            heldScope = []
+            if held.contains(.status) { statusHeld = true }
+            refresh(scope: held)
+        }
+    }
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var branchMapTask: Task<Void, Never>?
     /// The refs moved since `branchMap` was last computed: the log reload that follows maps them, or its failure does.
@@ -1483,7 +1501,8 @@ final class RepoSession: Identifiable {
     /// Switches the detail to `selection` now, in the click's frame: a commit read before shows whole from the cache
     /// (no load), a commit of the log shows its header with its files loading, the WIP shows from the last status (a
     /// read refreshes it), anything else is `.loading` (the placeholder). The load runs in a task that a newer select
-    /// cancels. Selecting the current selection again (a tab switch) reloads it, unless the cache has it. A commit on
+    /// cancels. Selecting the current selection again (a tab switch) reloads it, unless the cache has it; the WIP's
+    /// read publishes nothing when the status is equal (no `statusReads` bump, no reload of the open file). A commit on
     /// screen whole prefetches its neighbours (`prefetchNeighbours`); a newer select cancels that too. `keepsPanel2`:
     /// another selection leaves panel2 as it is (a blame gutter's click keeps the blame).
     func select(_ selection: Selection, keepsPanel2: Bool = false) {
@@ -1651,7 +1670,7 @@ final class RepoSession: Identifiable {
             let loaded: Detail
             switch selection {
             case .overview, .wip:
-                if try await readStatusAndRefs(backend, scope: [.status, .refs]) { loadLog(backend) }
+                if try await readStatusAndRefs(backend, scope: [.status, .refs], forSelect: true) { loadLog(backend) }
                 guard token == selectToken else { return }
                 if selection == .wip {
                     loaded = .wip
@@ -1869,11 +1888,20 @@ final class RepoSession: Identifiable {
     // MARK: Refresh
 
     /// Rereads what `scope` names. A refresh in flight is cancelled and its scope added to this one. `refs` also
-    /// reloads the log when a ref moved.
-    func refresh(scope: RefreshScope) {
-        let scope = refreshTask == nil ? scope : scope.union(refreshScope)
+    /// reloads the log when a ref moved. `changed`: when the watcher's last change was made; what the last refresh
+    /// covers is dropped from `scope` when that refresh started after it (its read sees the change), and a refresh in
+    /// flight is not cancelled for it. A watcher change in a hidden tab is held until the tab shows (`isShown`).
+    func refresh(scope: RefreshScope, changed: UInt64? = nil) {
+        let covered = if let changed, changed < refreshStart.time { refreshStart.scope } else { RefreshScope() }
+        let uncovered = scope.subtracting(covered)
+        guard !uncovered.isEmpty else { return }
+        guard changed == nil || isShown else { return heldScope.formUnion(uncovered) }
+        // A refresh that starts now reads every held change in its scope: all were made before it.
+        heldScope.subtract(uncovered)
+        let scope = refreshTask == nil ? uncovered : uncovered.union(refreshScope)
         refreshTask?.cancel()
         refreshScope = scope
+        refreshStart = (scope, clock_gettime_nsec_np(CLOCK_REALTIME))
         refreshTask = Task { [weak self] in
             await self?.performRefresh(scope)
         }
@@ -1885,9 +1913,18 @@ final class RepoSession: Identifiable {
             // A newer refresh took over (it owns `refreshTask` now).
             try Task.checkCancellation()
             let readStart = DispatchTime.now().uptimeNanoseconds
-            let refsMoved = try await readStatusAndRefs(backend, scope: scope)
+            // Read here when the log reload below can reuse it, with the status and the stashes this read publishes.
+            let env = try await scope.isSuperset(of: [.status, .refs]) ? backend.readEnvironment(cwd: url) : nil
+            let refsMoved = try await readStatusAndRefs(backend, scope: scope, env: env)
             UITiming.refreshRead(since: readStart)
-            if scope.contains(.log) || refsMoved { loadLog(backend) }
+            if scope.contains(.log) || refsMoved {
+                // Published just now, with no suspension since: a newer watcher event would have cancelled this read.
+                if let env, let read = status.value, let stashes {
+                    loadLog(backend, reusing: (env, read, stashes))
+                } else {
+                    loadLog(backend)
+                }
+            }
             // A worktree added or removed, or a commit made in one, shows as a refs change. Never before the first log
             // page: that one starts the first read.
             if scope.contains(.refs), log.value != nil { loadWorktrees(backend) }
@@ -1899,23 +1936,31 @@ final class RepoSession: Identifiable {
             guard !Self.isCancellation(error) else { return }
             Self.logger.error("refresh \(scope.description, privacy: .public) failed: \(error, privacy: .public)")
             failUnread(Self.message(for: error))
+            statusHeld = false
             refreshTask = nil
             refreshScope = []
+            // A failed read covers nothing.
+            refreshStart = ([], 0)
         }
     }
 
     /// Reads the status and the refs (those `scope` names) off the main actor, then publishes them. Returns whether
     /// a ref moved since the last read (a commit, a checkout, a fetch: the log changed). Throws `CancellationError`
-    /// when cancelled, so nothing stale is published.
-    private func readStatusAndRefs(_ backend: Backend, scope: RefreshScope) async throws -> Bool {
+    /// when cancelled, so nothing stale is published. `forSelect`: a status equal to the last one is not published
+    /// (no `statusReads` bump, no reload of the open WIP file); a refresh's read always is, since an edit to a file
+    /// already modified leaves the status equal while its diff changes. `env`: the read environment, else read here.
+    private func readStatusAndRefs(
+        _ backend: Backend, scope: RefreshScope, forSelect: Bool = false, env: [String: String]? = nil
+    ) async throws -> Bool {
         guard scope.contains(.status) || scope.contains(.refs) else { return false }
         let (newStatus, newState, newRefs, newStashes, newRemotes, newUndo) = try await Self.read(
-            backend, cwd: url, status: scope.contains(.status), refs: scope.contains(.refs))
+            backend, cwd: url, env: env, status: scope.contains(.status), refs: scope.contains(.refs))
         try Task.checkCancellation()
         if let newState, newState != repoState { repoState = newState }
         if let newUndo, newUndo != undoStatus { undoStatus = newUndo }
         if newState != nil { removeRebaseFilesIfDone() }
-        if let newStatus {
+        if newStatus != nil, statusHeld { statusHeld = false }
+        if let newStatus, !(forSelect && status.value == newStatus) {
             status = .loaded(newStatus)
             statusReads &+= 1
             if let target = openFile, target.source == .wip {
@@ -1976,10 +2021,10 @@ final class RepoSession: Identifiable {
     }
 
     @concurrent
-    private nonisolated static func read(_ backend: Backend, cwd: URL, status: Bool, refs: Bool) async throws
-        -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?, UndoStatus?)
+    private nonisolated static func read(_ backend: Backend, cwd: URL, env: [String: String]?, status: Bool, refs: Bool)
+        async throws -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?, UndoStatus?)
     {
-        let env = try await backend.readEnvironment(cwd: cwd)
+        let env = if let env { env } else { try await backend.readEnvironment(cwd: cwd) }
         async let newStatus = status ? StatusReader.read(runner: backend.runner, cwd: cwd, env: env) : nil
         // The banner is secondary: a state that cannot be read keeps the last one rather than failing the status.
         async let newState = status ? (try? await RepoState.read(runner: backend.runner, cwd: cwd, env: env)) : nil
@@ -2024,8 +2069,11 @@ final class RepoSession: Identifiable {
 
     /// (Re)loads the log and lays out its graph off the main actor. The first load publishes the first page as soon as
     /// it is parsed; a reload first tries to read only the new commits (`readLogIncrementally`), else reads the whole
-    /// log, and keeps the old log on screen until the new one is complete. A newer load cancels this one.
-    private func loadLog(_ backend: Backend) {
+    /// log, and keeps the old log on screen until the new one is complete. A newer load cancels this one. `read`: the
+    /// read environment, status and stashes a refresh published just now, which the incremental read then reuses.
+    private func loadLog(
+        _ backend: Backend, reusing read: (env: [String: String], status: WorkingStatus, stashes: [Stash])? = nil
+    ) {
         logTask?.cancel()
         let isFirstLoad = log.value == nil
         if isFirstLoad { log = .loading }
@@ -2058,7 +2106,7 @@ final class RepoSession: Identifiable {
                     do {
                         incremental = try await Self.readLogIncrementally(
                             backend, previous: oldLog, cwd: cwd, generation: generation, worktrees: worktrees,
-                            filter: filter, order: order)
+                            filter: filter, order: order, reusing: read)
                     } catch where !Self.isCancellation(error) {
                         Self.logger.error("incremental log reload failed: \(error, privacy: .public)")
                     }
@@ -2209,16 +2257,21 @@ final class RepoSession: Identifiable {
     @concurrent
     private nonisolated static func readLogIncrementally(
         _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
-        filter: LogFilter, order: LogReader.Order
+        filter: LogFilter, order: LogReader.Order,
+        reusing read: (env: [String: String], status: WorkingStatus, stashes: [Stash])?
     ) async throws -> LogSnapshot? {
         var steps = UITiming.Steps()
         guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
-        let env = try await backend.readEnvironment(cwd: cwd)
-        async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        let env = if let read { read.env } else { try await backend.readEnvironment(cwd: cwd) }
+        async let status = if let read { read.status } else {
+            try await StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        }
         steps.lap("env")
         var snapshot = LogSnapshot(generation: generation, order: order)
         snapshot.filter = filter
-        snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        snapshot.stashes = if let read { read.stashes } else {
+            try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        }
         steps.lap("stashes")
         let tips = previous.tips
         steps.lap("tips")
@@ -5011,8 +5064,9 @@ final class RepoSession: Identifiable {
         return outcome
     }
 
-    /// Waits for the reread to publish: the watcher may see the write's own changes and start a refresh that cancels
-    /// this one (and takes its scope over), so it waits for the newer one too, a few times at most.
+    /// Waits for the reread to publish: the watcher may see a change made after this refresh started and start a
+    /// refresh that cancels this one (and takes its scope over), so it waits for the newer one too, a few times at
+    /// most. The write's own changes, made before, are in this read: the watcher's refresh for them is dropped.
     private func refreshAfterWrite() async {
         refresh(scope: [.status, .refs])
         for _ in 0..<5 {
@@ -5607,8 +5661,8 @@ final class RepoSession: Identifiable {
         if setUpTask == nil {
             let cwd = url
             let watcher = watcher
-            let onChange: @MainActor @Sendable (RefreshScope) -> Void = { [weak self] scope in
-                self?.refresh(scope: scope)
+            let onChange: @MainActor @Sendable (RefreshScope, UInt64) -> Void = { [weak self] scope, changed in
+                self?.refresh(scope: scope, changed: changed)
             }
             setUpTask = Task.detached(priority: .userInitiated) {
                 let toolchain = try await GitToolchain.resolve()

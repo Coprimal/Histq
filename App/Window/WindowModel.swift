@@ -56,7 +56,13 @@ final class WindowModel {
     /// saves them (`savedTabs`).
     private(set) var archivedTabs: [SavedTab] = []
     private(set) var selectedTabID: Tab.ID? {
-        didSet { expandSelectedGroup() }
+        didSet {
+            expandSelectedGroup()
+            // A hidden tab holds its watcher's refreshes; the shown one reads what it held (`RepoSession.isShown`).
+            guard oldValue != selectedTabID else { return }
+            oldValue.flatMap { sessions[$0] }?.isShown = false
+            selectedTabID.flatMap { sessions[$0] }?.isShown = true
+        }
     }
     /// The tab groups (by key) collapsed with a click on their name, as Chrome's: only the name shows. The selected
     /// tab is never in one: a group opens again when one of its tabs is selected (the tab list, ⇧⌘T, a worktree).
@@ -304,7 +310,8 @@ final class WindowModel {
 
     /// Shows the selected repo tab (creating its session on first use). A new session, or one whose detail is not
     /// loaded, selects its current selection again: its detail goes to the loading state now and reloads. A loaded
-    /// detail stays as it is: its watcher kept the status and refs current while the tab was hidden.
+    /// detail stays as it is; the changes its watcher held while the tab was hidden are read as it shows
+    /// (`RepoSession.isShown`), a held status with the WIP or the overview on its placeholder until read.
     private func activateSelectedTab() {
         guard let index = selectedIndex, let url = tabs[index].repoURL, !tabs[index].isMissing else { return }
         let id = tabs[index].id
