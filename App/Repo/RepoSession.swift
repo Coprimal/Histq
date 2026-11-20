@@ -1079,6 +1079,8 @@ final class RepoSession: Identifiable {
     init(url: URL) {
         self.url = url
         graphSearch.session = self
+        pullDetail.beginOperation = { [weak self] in self?.beginOperation($0) ?? {} }
+        issueDetail.beginOperation = { [weak self] in self?.beginOperation($0) ?? {} }
         resolveProfile()
         scheduleAutoFetch()
         followCommitOrder()
@@ -3831,7 +3833,10 @@ final class RepoSession: Identifiable {
         conflictError = nil
         let token = fileToken
         let write = write(target.path)
+        // "Saving…" on the button, "Saving App.swift…" in the footer.
+        let endOperation = beginOperation("\(title.dropLast()) \((target.path as NSString).lastPathComponent)")
         return Task { [weak self] in
+            defer { endOperation() }
             guard let self else { return false }
             do {
                 try await perform(write)
@@ -5344,6 +5349,16 @@ final class RepoSession: Identifiable {
     /// Whether the action bar's `key` operation is running.
     func isRunning(_ key: ActionBarAction) -> Bool {
         running.contains { $0.key == key }
+    }
+
+    /// Puts `title` in `running` until the returned closure is called: an operation that does not go through `run` (a
+    /// commit from the WIP panel, a GitHub action, a patch copy) shows in the footer (`RunningStatus`) from the click's
+    /// frame on, as the others do.
+    func beginOperation(_ title: String) -> @MainActor () -> Void {
+        nextOperationID &+= 1
+        let id = nextOperationID
+        running.append(RunningOperation(id: id, title: title, key: nil))
+        return { [weak self] in self?.running.removeAll { $0.id == id } }
     }
 
     /// Asks for a confirmation before `write` (a destructive operation); `OperationDialogs` shows it, naming the

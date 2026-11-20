@@ -34,7 +34,9 @@ extension RepoSession {
     /// Builds `target` off the main actor and puts it on the clipboard as text.
     func copyPatch(_ target: PatchExport) {
         let untracked = untrackedForPatch(target)
+        let endOperation = beginOperation("Copy as Patch")
         Task { [weak self] in
+            defer { endOperation() }
             guard let self else { return }
             do {
                 let backend = try await backend()
@@ -66,6 +68,8 @@ extension RepoSession {
             guard response == .OK, let file = panel.url else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let endOperation = beginOperation("Save as Patch")
+                defer { endOperation() }
                 // Read now, as the tracked changes are: the status may have changed while the panel was open.
                 let untracked = untrackedForPatch(target)
                 do {

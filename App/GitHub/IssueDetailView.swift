@@ -75,6 +75,9 @@ final class IssueDetailModel {
     /// The shown issue's running action.
     var running: IssueAction? { number.flatMap { busy[$0] } }
 
+    /// Shows an action in the tab's footer until the returned closure is called (`RepoSession.beginOperation`). Set by
+    /// the session.
+    @ObservationIgnored var beginOperation: @MainActor (String) -> @MainActor () -> Void = { _ in {} }
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
 
@@ -149,8 +152,11 @@ final class IssueDetailModel {
         }
         busy[number] = action
         if self.number == number { actionError = nil }
+        // "#5 Closing…" in the footer.
+        let endOperation = beginOperation("#\(number) \(action.progressTitle.dropLast())")
         Task { [weak self] in
             let error = await Self.run(action, api.client, api.repository, number: number)
+            endOperation()
             guard let self else { return }
             busy[number] = nil
             UITiming.content("issue \(number) action \(action.timingName) \(error == nil ? "ok" : "failed")")

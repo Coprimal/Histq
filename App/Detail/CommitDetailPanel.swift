@@ -734,6 +734,7 @@ private struct CommitInfoCard: View {
         let write = RepoSession.Write.editMessage(commit: hash, message: draftMessage)
         let title = "Edit Message"
         saving = true
+        let endOperation = session.beginOperation(title)
         Task {
             do {
                 try await session.perform(write)
@@ -748,6 +749,7 @@ private struct CommitInfoCard: View {
                 session.report(OperationFailure(title: title, write: write, error: error,
                                                 message: RepoSession.writeMessage(for: error)))
             }
+            endOperation()
             saving = false
         }
     }

@@ -230,6 +230,9 @@ final class PullRequestDetailModel {
     /// The shown pull request's running action.
     var running: PullRequestAction? { number.flatMap { busy[$0] } }
 
+    /// Shows an action in the tab's footer until the returned closure is called (`RepoSession.beginOperation`). Set by
+    /// the session.
+    @ObservationIgnored var beginOperation: @MainActor (String) -> @MainActor () -> Void = { _ in {} }
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadCount = 0
@@ -416,8 +419,11 @@ final class PullRequestDetailModel {
         }
         busy[number] = action
         if self.number == number { actionError = nil }
+        // "#12 Merging…" in the footer.
+        let endOperation = beginOperation("#\(number) \(action.progressTitle.dropLast())")
         Task { [weak self] in
             let error = await Self.run(action, api.client, api.repository, number: number)
+            endOperation()
             guard let self else { return }
             busy[number] = nil
             UITiming.content("pr \(number) action \(action.timingName) \(error == nil ? "ok" : "failed")")

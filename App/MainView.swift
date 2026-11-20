@@ -174,8 +174,8 @@ private struct TabContent: View {
     }
 }
 
-/// The row under the page, on the window glass: Sidebar, the selected repo's folder and its running operation (one started from a
-/// menu or the automatic fetch, which has no toolbar button to show its progress on) at the leading edge, Histq's
+/// The row under the page, on the window glass: Sidebar, the selected repo's folder and its running operation (any
+/// write, GitHub action or patch export, from the click's frame on: `RunningStatus`) at the leading edge, Histq's
 /// version and Detail at the trailing edge. A fixed height, so a status coming and going never moves the page.
 struct WindowFooter: View {
     let model: WindowModel

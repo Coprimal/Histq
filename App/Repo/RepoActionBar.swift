@@ -1,9 +1,10 @@
 // The repo actions the toolbar's buttons run (`HeaderToolbar`): Pull (its menu: fetch all, pull fast-forward if
 // possible, fast-forward only, rebase), Push (its menu: force with lease, confirmed), Fetch, Branch, Stash and Pop. A
-// button shows its operation's progress on itself from the click's frame (`ActionBarAction`); the menus' operations
-// show in `RunningStatus`. A failure shows in its toast, with a hint mapped from `GitError` (sign-in, unknown or
-// changed host key, "Pull first", index.lock, conflicts) and the hint's action (`FailureHints`); an unknown host key
-// opens the host-key sheet, which scans the host and appends its keys to known_hosts only on "Trust Host".
+// button shows its operation's progress on itself from the click's frame (`ActionBarAction`); every operation, the
+// buttons' too, also shows in `RunningStatus`. A failure shows in its toast, with a hint mapped from `GitError`
+// (sign-in, unknown or changed host key, "Pull first", index.lock, conflicts) and the hint's action (`FailureHints`); an
+// unknown host key opens the host-key sheet, which scans the host and appends its keys to known_hosts only on "Trust
+// Host".
 import HistqCore
 import SwiftUI
 
@@ -172,12 +173,13 @@ extension RepoSession {
     }
 }
 
-/// The menus' operations still running (the toolbar buttons show their own): a spinner and the newest one's title.
+/// The newest operation still running, whatever started it (a toolbar button, a menu, the palette, a panel's button,
+/// the automatic fetch): a spinner and its title, from the click's frame on.
 struct RunningStatus: View {
     let session: RepoSession
 
     var body: some View {
-        if let operation = session.running.last(where: { $0.key == nil }) {
+        if let operation = session.running.last {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
                 Text(operation.title + "…")

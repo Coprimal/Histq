@@ -296,14 +296,25 @@ struct WIPPanel: View {
         moveWrites &+= 1
         let write = moveWrites
         for file in files { moves[file.path] = Move(file: file, toStaged: toStaged, write: write) }
+        let endOperation = session.beginOperation(Self.title(of: writes))
         Task {
             do {
                 for write in writes { try await session.perform(write) }
             } catch {
                 errors[part] = RepoSession.writeMessage(for: error)
             }
+            endOperation()
             busy.subtract(keys)
             if !files.isEmpty { moves = moves.filter { $0.value.write != write } }
+        }
+    }
+
+    /// The footer's title for the panel's writes, which are all of one kind.
+    private static func title(of writes: [RepoSession.Write]) -> String {
+        switch writes.first {
+        case .stage?, .stageAll?: "Stage"
+        case .unstage?, .unstageAll?: "Unstage"
+        default: "Discard changes"
         }
     }
 
@@ -855,6 +866,7 @@ private struct CommitBox: View {
         let title = session.commitDraft.amend ? "Amend" : "Commit"
         busy.insert(.commit)
         error = nil
+        let endOperation = session.beginOperation(title)
         Task {
             do {
                 try await session.perform(write)
@@ -865,6 +877,7 @@ private struct CommitBox: View {
                 session.report(OperationFailure(title: title, write: write, error: error,
                                                 message: RepoSession.writeMessage(for: error)))
             }
+            endOperation()
             busy.remove(.commit)
         }
     }

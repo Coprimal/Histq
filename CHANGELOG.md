@@ -16,6 +16,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Copy as Patch next to Save as Patch… in a commit's menu, and patches of several selected commits (adjacent or not, exported oldest first; also from the selected commits card's Patch menu), of the WIP row's Unstaged, Staged or All Changes (untracked files included), and of a single file in the WIP lists or a commit's files. Binary changes are included.
 - Apply Patch… (a .patch or .diff file) and Apply Patch from Clipboard, in the repository menu, the File menu and the command palette: a preview lists the files with their +/− counts and says whether the patch applies cleanly, needs a 3-way merge or does not apply. Apply to Working Tree leaves the changes unstaged (staged after a 3-way merge, conflicts in the Conflicted card); Apply as Commits creates the commits of a patch made from commits, with their author and message, can be undone, and on a conflict shows a banner with Skip, Abort and Continue.
 
+### Changed
+- The status bar under the window shows every operation while it runs, from the click on: toolbar actions, staging, commits, Edit Message, conflict saves, patch exports and GitHub pull request and issue actions, not only those started from a menu.
+
 ### Fixed
 - Discard on a submodule now puts it back on the recorded commit (it did nothing before).
 
