@@ -1,10 +1,11 @@
 // The small surface the app needs from a code host: which repository a remote URL names, its pull requests and
-// issues, and the few actions Histq offers on them. GitHub (and GitHub Enterprise) is the only provider, so the
-// protocol speaks in GitHub's models (`HostedModels.swift`); another provider would map its JSON into them.
+// issues, and the few actions Histq offers on them. The protocol speaks in GitHub's models (`HostedModels.swift`):
+// GitHub (and GitHub Enterprise) serves them as they are, GitLab (`GitLabClient`) maps its JSON into them.
 import Foundation
 
 /// A repository on a code host: `host` is lowercase and keeps an https port (`ghe.example.com:8443`); `path` is
-/// the full path that names it (`owner/repo` on GitHub, `group/sub/repo` with subgroups).
+/// the full path that names it (`owner/repo` on GitHub, `group/sub/repo` with subgroups), relative to the instance's
+/// root: an account's base path (a GitLab under `https://host/gitlab`) is not part of it.
 public struct HostedRepository: Codable, Sendable, Hashable {
     public var host: String
     public var path: [String]
@@ -49,6 +50,30 @@ public enum HostedMergeMethod: String, Sendable {
 /// Which code host a provider talks to. The raw value is saved in `profiles.json`: never change it.
 public enum HostingKind: String, Codable, Sendable, Hashable {
     case github
+    case gitlab
+}
+
+/// The id rule of `HostedReview` for values a host gives no stable numeric id: a 63-bit FNV-1a hash of the kind and
+/// the key, and on a collision with an id already taken in the same pull request the next free value (linear
+/// probing), so ids stay unique and the same on every load of the same data (assign them in a stable order).
+struct SyntheticIDs {
+    private var used: Set<Int> = []
+
+    /// Takes an id the host gave itself, so no synthetic one lands on it.
+    mutating func reserve(_ id: Int) {
+        used.insert(id)
+    }
+
+    mutating func id(_ kind: String, _ key: String) -> Int {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in kind.utf8 + [0] + key.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x0000_0100_0000_01b3
+        }
+        var id = Int(hash & UInt64(Int.max))
+        while !used.insert(id).inserted { id = id == Int.max ? 0 : id + 1 }
+        return id
+    }
 }
 
 /// What a provider offers beyond lists and comments; the app hides an action its provider lacks.

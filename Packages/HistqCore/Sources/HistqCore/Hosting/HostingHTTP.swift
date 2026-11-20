@@ -3,11 +3,16 @@ import Foundation
 /// What the client and the device flow share: loading with the redirect guard, status mapping, JSON, `Link`,
 /// and the host and token checks.
 public enum HostingHTTP {
-    static func load(_ request: URLRequest, session: URLSession) async throws -> (Data, HTTPURLResponse) {
+    /// `allowedPathPrefix` (a percent-encoded path such as `/gitlab/api/v4`) also refuses a same-origin redirect
+    /// whose path is not under it, so a host under a relative root never sends the token elsewhere on its origin.
+    static func load(_ request: URLRequest, session: URLSession, allowedPathPrefix: String? = nil) async throws
+        -> (Data, HTTPURLResponse)
+    {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request, delegate: SameOriginRedirects())
+            (data, response) = try await session.data(
+                for: request, delegate: SameOriginRedirects(allowedPathPrefix: allowedPathPrefix))
         } catch let error as URLError {
             // The code only: `localizedDescription` can carry the failing URL, which is never a secret here, but
             // a short code is all the UI needs.
@@ -31,7 +36,8 @@ public enum HostingHTTP {
     /// `Retry-After`, a 429 or GitHub's "secondary rate limit" message, and otherwise a plain refusal.
     static func error(for response: HTTPURLResponse, data: Data) -> HostingError {
         struct Body: Decodable { var message: String? }
-        let message = String(((try? JSONDecoder().decode(Body.self, from: data))?.message ?? "").prefix(500))
+        let text = (try? JSONDecoder().decode(Body.self, from: data))?.message ?? otherMessage(data)
+        let message = String(text.prefix(500))
         let status = response.statusCode
         switch status {
         case 401:
@@ -55,6 +61,24 @@ public enum HostingHTTP {
         default:
             return .http(status: status, message: message)
         }
+    }
+
+    /// The message of an error body whose `message` is not a string (GitLab): an object's fields as `field: msg1,
+    /// msg2` (sorted, joined by `; `), an array's strings, else `error_description` or `error`; empty otherwise.
+    private static func otherMessage(_ data: Data) -> String {
+        guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        func text(_ value: Any) -> String? {
+            if let string = value as? String { return string }
+            if let array = value as? [Any] { return array.compactMap { $0 as? String }.joined(separator: ", ") }
+            return nil
+        }
+        if let fields = body["message"] as? [String: Any] {
+            return fields.sorted { $0.key < $1.key }
+                .compactMap { field in text(field.value).map { "\(field.key): \($0)" } }
+                .joined(separator: "; ")
+        }
+        if let message = body["message"].flatMap(text) { return message }
+        return (body["error_description"] as? String) ?? (body["error"] as? String) ?? ""
     }
 
     /// The `rel="next"` URL of a `Link` header (`<url>; rel="next", <url>; rel="last"`).
@@ -101,11 +125,30 @@ public enum HostingHTTP {
         a.scheme?.lowercased() == b.scheme?.lowercased() && a.host()?.lowercased() == b.host()?.lowercased()
             && a.port == b.port
     }
+
+    /// Whether `url`'s path is `prefix` (percent-encoded) plus whole segments, none of them, nor any `/`-separated
+    /// part of one percent-decoded, `.` or `..`, so `/api/v4evil`, `/api/v4/../x` or `/api/v4/..%2Fx` is not under
+    /// `/api/v4` (an encoded project path such as `group%2Fproj` is).
+    static func isPath(of url: URL, under prefix: String) -> Bool {
+        let base = prefix.split(separator: "/", omittingEmptySubsequences: false)
+        let path = url.path(percentEncoded: true).split(separator: "/", omittingEmptySubsequences: false)
+        guard path.starts(with: base) else { return false }
+        return !path.dropFirst(base.count).contains { segment in
+            let decoded = segment.removingPercentEncoding ?? String(segment)
+            return decoded.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == "." || $0 == ".." }
+        }
+    }
 }
 
-/// Refuses a redirect to another origin: URLSession would copy the `Authorization` header to the new request.
-/// The 3xx answer then fails as an HTTP error.
+/// Refuses a redirect to another origin, or with `allowedPathPrefix` to a path outside it: URLSession would copy the
+/// `Authorization` header to the new request. The 3xx answer then fails as an HTTP error.
 private final class SameOriginRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    let allowedPathPrefix: String?
+
+    init(allowedPathPrefix: String?) {
+        self.allowedPathPrefix = allowedPathPrefix
+    }
+
     func urlSession(
         _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
@@ -113,6 +156,7 @@ private final class SameOriginRedirects: NSObject, URLSessionTaskDelegate, Senda
         guard let from = task.originalRequest?.url, let to = request.url, HostingHTTP.isSameOrigin(from, to) else {
             return nil
         }
+        if let allowedPathPrefix, !HostingHTTP.isPath(of: to, under: allowedPathPrefix) { return nil }
         return request
     }
 }

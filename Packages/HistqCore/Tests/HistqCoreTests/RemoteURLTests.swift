@@ -74,6 +74,32 @@ struct RemoteURLTests {
         #expect(GitHubClient.repository(fromRemoteURL: url) == expected)
     }
 
+    @Test("GitLab keeps subgroups and strips the relative root from https remotes only", arguments: [
+        // Relative root: stripped, subgroups kept.
+        ("https://example.com/gitlab/group/sub/proj.git", "gitlab",
+         HostedRepository(host: "example.com", path: ["group", "sub", "proj"])),
+        ("https://example.com:8443/a/b/group/proj.git", "a/b",
+         HostedRepository(host: "example.com:8443", path: ["group", "proj"])),
+        ("https://gitlab.com/group/sub/sub2/proj.git", nil,
+         HostedRepository(host: "gitlab.com", path: ["group", "sub", "sub2", "proj"])),
+        // An https remote not under the relative root, a near-miss root, or one segment left: nothing.
+        ("https://example.com/group/sub/proj.git", "gitlab", nil),
+        ("https://example.com/gitlabx/group/proj.git", "gitlab", nil),
+        ("https://example.com/gitlab/proj.git", "gitlab", nil),
+        ("https://example.com/gitlab/group/my%20proj.git", "gitlab", nil),
+        ("https://example.com/gitlab/group/proj.git", "../gitlab", nil),
+        // ssh and scp remotes never carry the root, so nothing is stripped, even a first segment that matches it.
+        ("git@example.com:group/sub/sub2/proj.git", "gitlab",
+         HostedRepository(host: "example.com", path: ["group", "sub", "sub2", "proj"])),
+        ("ssh://git@example.com:2222/group/sub/proj.git", "gitlab",
+         HostedRepository(host: "example.com", path: ["group", "sub", "proj"])),
+        ("git@example.com:gitlab/group/proj.git", "gitlab",
+         HostedRepository(host: "example.com", path: ["gitlab", "group", "proj"])),
+    ] as [(String, String?, HostedRepository?)])
+    func gitLabRepository(url: String, basePath: String?, expected: HostedRepository?) {
+        #expect(GitLabClient.repository(fromRemoteURL: url, basePath: basePath) == expected)
+    }
+
     @Test("a repository's path splits into owner and name, and the owner/name init round-trips")
     func repositoryPath() {
         let repo = HostedRepository(host: "gitlab.com", path: ["group", "sub", "proj"])

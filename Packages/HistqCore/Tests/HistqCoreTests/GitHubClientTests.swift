@@ -646,7 +646,7 @@ final class StubServer: Sendable {
         var status = 200
         var headers: [String: String] = [:]
         var body: String
-        /// Answer with a redirect to this URL instead.
+        /// Answer with a redirect to this URL instead (the new request keeps the original's headers).
         var redirect: URL?
     }
 
@@ -693,7 +693,11 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         let reply = server.handler(request)
         let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
         if let redirect = reply.redirect {
-            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: redirect), redirectResponse: response)
+            // With the original headers, as URLSession builds the new request before its delegate decides: a test
+            // can see whether a followed redirect carries the `Authorization` header.
+            var next = URLRequest(url: redirect)
+            next.allHTTPHeaderFields = request.allHTTPHeaderFields
+            client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(reply.body.utf8))

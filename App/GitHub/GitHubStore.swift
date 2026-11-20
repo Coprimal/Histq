@@ -393,6 +393,8 @@ final class HostingStore {
         guard let token = await HostingTokens.token(for: account, profileID: profileID) else { return nil }
         switch account.kind {
         case .github: return try? GitHubClient(host: account.host, token: token)
+        // Not connected in the app yet (Phase 7).
+        case .gitlab: return nil
         }
     }
 

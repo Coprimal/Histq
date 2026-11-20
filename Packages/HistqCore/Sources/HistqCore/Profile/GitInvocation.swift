@@ -910,10 +910,13 @@ public struct GitCredential: Sendable, Equatable, CustomStringConvertible, Custo
         self.token = token
     }
 
-    /// What the token helper answers as the username: GitHub's `x-access-token`, whatever `username` says.
+    /// What the token helper answers as the username: GitHub's `x-access-token`, whatever `username` says; for
+    /// GitLab `username` (any name works with a personal access token; an OAuth account saves `oauth2`), else
+    /// `oauth2`. Only a name `isSafeUsername(_:)` accepts is ever answered.
     var gitUsername: String {
         switch kind {
         case .github: "x-access-token"
+        case .gitlab: Self.isSafeUsername(username) ? username : "oauth2"
         }
     }
 
