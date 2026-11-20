@@ -882,10 +882,12 @@ enum RepoMenus {
         return entries
     }
 
-    /// One remote's actions: rename, set URL, push mirror and remove (both confirmed, naming the remote).
+    /// One remote's actions: fetch it, rename, set URL, push mirror and remove (both confirmed, naming the remote).
     static func remote(named name: String, _ session: RepoSession) -> [MenuEntry] {
         let url = session.remotes.first { $0.name == name }?.url ?? ""
         return [
+            .action("Fetch \(name)") { session.fetch(remote: name) },
+            .separator,
             .action("Rename \(name)…") { session.dialog = .renameRemote(name) },
             .action("Set URL…") { session.dialog = .setRemoteURL(name, url: url) },
             .separator,

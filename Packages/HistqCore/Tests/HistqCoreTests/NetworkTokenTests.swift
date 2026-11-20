@@ -135,6 +135,25 @@ struct NetworkTokenTests {
         #expect(await box.decision(.push(remote: "origin"), in: repo) == .repoNetworkConfig(keys: [expected]))
     }
 
+    @Test("a remote group named like the fetched remote, in any scope, withholds the fetch's token, never the push's")
+    func remoteGroupWithholdsFetchOnly() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "origin", box.url(repo)], in: repo)
+        try await box.sandbox.git(["config", "remotes.origin", "../b ../a"], in: repo)
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .remoteGroup(name: "origin"))
+        // `git push <remote>` never resolves remote groups.
+        #expect(await box.decision(.push(remote: "origin"), in: repo) == .attach([Self.credential]))
+
+        // The user's global group counts too: git reads it in every repo.
+        try await box.sandbox.git(["config", "--unset", "remotes.origin"], in: repo)
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach([Self.credential]))
+        try box.writeGlobal("[remotes]\n\torigin = a b\n")
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .remoteGroup(name: "origin"))
+        #expect(await box.decision(.push(remote: "origin"), in: repo) == .attach([Self.credential]))
+    }
+
     @Test("a file the repo includes counts as the repo's own config; the user's global network config does not")
     func includedAndGlobalNetworkConfig() async throws {
         let box = try await TokenSandbox()
@@ -211,14 +230,14 @@ struct NetworkTokenTests {
             guard let withheld = error as? NetworkTokenWithheld, case .auth = withheld.error else { return false }
             return withheld.reason == .repoNetworkConfig(keys: ["http.proxy"])
         }
-        // Without repo config, a failed sign-in stays git's own error.
+        // Without repo config, a failed sign-in on a host with no account says so, with git's own error.
         let other = try await box.sandbox.makeRepo("other")
         try await box.sandbox.git(["remote", "add", "origin", "https://other.histq.invalid\(repo.path)"], in: other)
         await #expect {
             try await box.operations(naive: false, in: other).fetchAll()
         } throws: { error in
-            if case GitError.auth = error { return true }
-            return false
+            guard let withheld = error as? NetworkTokenWithheld, case .auth = withheld.error else { return false }
+            return withheld.reason == .noAccount(host: "other.histq.invalid")
         }
     }
 
@@ -270,8 +289,8 @@ struct NetworkTokenTests {
         }
     }
 
-    @Test("fetch --all with a remote on another host gets no token; with every remote on an account's host, it does")
-    func fetchAllIsAllOrNothing() async throws {
+    @Test("Fetch All gates each remote on its own: one on another host or a local folder does not cost the others the token")
+    func fetchAllGatesEachRemote() async throws {
         let box = try await TokenSandbox(userHelper: true)
         defer { box.remove() }
         let (repo, source) = try await box.makeRepoWithRemote()
@@ -282,9 +301,8 @@ struct NetworkTokenTests {
         try box.clearTransport()
         try await box.sandbox.git(["remote", "add", "local", source.path], in: repo)
         try await box.operations(naive: false, in: repo).fetchAll()
-        #expect(box.transportRan)
-        #expect(!box.transportGotToken, "a fetch --all that also reaches a local folder got the token")
-        #expect(box.transportGotUserSecret)
+        #expect(box.transportGotToken, "the https remotes lost the token beside a local folder")
+        #expect(try await box.hasRef("refs/remotes/local/main", in: repo))
     }
 
     // MARK: - Accounts on several hosts

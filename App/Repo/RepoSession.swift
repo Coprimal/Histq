@@ -667,6 +667,8 @@ final class RepoSession: Identifiable {
         case checkoutPullRequest(HostedCheckout, number: Int, remote: String)
 
         case fetchAll(prune: Bool)
+        /// One remote's Fetch (its menu).
+        case fetchRemote(String, prune: Bool)
         /// `autostash`: `--autostash` (git stashes the local changes and puts them back after the pull).
         case pull(GitOperations.PullMode, autostash: Bool = false)
         /// A branch that is not checked out, fast-forwarded to `remoteBranch` of `remote` (its upstream) by a fetch
@@ -781,7 +783,7 @@ final class RepoSession: Identifiable {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
                  .deleteRemoteBranch(_, let remote), .deleteBranchAndRemote(_, let remote, _),
-                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _):
+                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _), .fetchRemote(let remote, _):
                 remote
             case .checkoutPullRequest(.branch(let remote, _), _, _), .checkoutPullRequest(_, _, let remote):
                 remote
@@ -794,7 +796,7 @@ final class RepoSession: Identifiable {
         var notUndoable: UndoJournal.NotUndoable? {
             switch self {
             case .push, .pushMirror: .push
-            case .fetchAll: .fetch
+            case .fetchAll, .fetchRemote: .fetch
             case .pull, .pullBranch: .pull
             case .deleteRemoteBranch, .deleteBranchAndRemote: .deleteRemoteBranch
             case .deleteRemoteTag: .deleteRemoteTag
@@ -806,7 +808,7 @@ final class RepoSession: Identifiable {
         /// The writes that talk to a remote: the only ones that read the profile's GitHub token.
         var isNetwork: Bool {
             switch self {
-            case .fetchAll, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch,
+            case .fetchAll, .fetchRemote, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch,
                  .deleteBranchAndRemote, .deleteRemoteTag, .checkoutPullRequest, .updateSubmodules, .addSubmodule:
                 true
             default: false
@@ -1678,29 +1680,25 @@ final class RepoSession: Identifiable {
             if !Self.isCancellation(error) {
                 Self.logger.notice("auto-fetch failed: \(Self.message(for: error), privacy: .public)")
             }
-            return
+            // The other remotes were fetched.
+            guard error is RemoteFetchFailure else { return }
         }
         refresh(scope: [.status, .refs])
     }
 
-    /// `git fetch --all [--prune]` in the write lane with the background fetch environment and the tab's profile (a
-    /// fetch is network: the profile's SSH key). Nobody clicked it in a repo that may be downloaded, so the repo's
-    /// config, hooks and credential helpers run nothing (see `GitInvocation.Access.backgroundFetch`), and no gc or
-    /// maintenance runs after it. A failure to list the user's credential helpers, or a repo that sets its own http or
-    /// proxy config, skips the tick (logged; a click on Fetch still fetches). Two minutes at most, so it never holds
-    /// the write lane long.
+    /// `GitOperations.backgroundFetchAll` with the tab's profile and its account tokens: one `git fetch <remote>` per
+    /// remote in the write lane, with the background fetch environment, each remote gated on its own; a remote that
+    /// fails does not stop the others (`RemoteFetchFailure` after them), and a remote named like a remote group is
+    /// left out. A failure to list the user's credential helpers or the remotes, or a repo that sets its own network
+    /// config, skips the tick (logged; a click on Fetch still fetches). Two minutes at most for all the remotes, so it
+    /// never holds the write lane long.
     @concurrent
     private nonisolated static func autoFetch(prune: Bool, profile: Profile?, backend: Backend, cwd: URL) async throws {
         let base = await GitToolchain.writeBase()
-        let runner = backend.runner
-        // Passed to the gate: it reaches git only when every remote is https on the profile's host.
+        // Passed to the gate: a remote's fetch gets them only when the remote is https on an account's host.
         let credentials = await HostingTokens.credentials(for: profile)
-        let environment = try await GitInvocation.backgroundFetchEnvironment(
-            profile: profile, base: base, runner: runner, cwd: cwd, credentials: credentials)
-        let args = ["fetch", "--all"] + (prune ? ["--prune"] : [])
-        _ = try await runner.mutate {
-            try await runner.run(args, cwd: cwd, env: environment, timeout: .seconds(120))
-        }
+        try await GitOperations.backgroundFetchAll(
+            prune: prune, profile: profile, base: base, runner: backend.runner, cwd: cwd, credentials: credentials)
     }
 
     // MARK: Select
@@ -5604,6 +5602,7 @@ final class RepoSession: Identifiable {
             try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
+        case .fetchRemote(let remote, let prune): try await ops.fetch(remote: remote, prune: prune)
         case .pullBranch(let branch, let remote, let remoteBranch):
             try await ops.fetchRefspec(remote: remote, refspec: "heads/\(remoteBranch):\(branch)")
         case .pull(let mode, let autostash):
@@ -6158,9 +6157,12 @@ final class RepoSession: Identifiable {
     /// Opens the host-key sheet at once (scanning), then scans the host of `failure` (named by ssh, else the remote's
     /// URL) with `HostKeyTrust`, which writes nothing. A changed key is never scanned for trust: the sheet only warns.
     func checkHostKey(for failure: OperationFailure) {
-        guard let error = failure.error as? GitError else { return }
+        // A Fetch All in which one remote of several failed: that remote's error (`FailureHints` gave its action).
+        let single = (failure.error as? RemoteFetchFailure).flatMap { $0.failures.count == 1 ? $0.failures.first : nil }
+        guard let error = (single?.error ?? failure.error) as? GitError else { return }
         let isChanged = HostKeyTrust.isKeyChanged(error)
-        guard let host = HostKeyTrust.host(from: error) ?? remoteHost(for: failure.write) else {
+        let write = single.map { Write.fetchRemote($0.remote, prune: false) } ?? failure.write
+        guard let host = HostKeyTrust.host(from: error) ?? remoteHost(for: write) else {
             hostKeyCheck = HostKeyCheck(
                 host: nil, isChanged: isChanged, state: .failed("Histq could not tell which host this is."),
                 failure: failure)
@@ -6360,6 +6362,10 @@ final class RepoSession: Identifiable {
         case let error as NetworkTokenWithheld:
             // Git's own words; the banner's hint says why the token was not sent.
             error.error.stderrTail.isEmpty ? "git failed." : error.error.stderrTail
+        case let error as RemoteFetchFailure:
+            // Each failed remote with git's words.
+            error.failures.map { "\($0.remote): \(message(for: $0.error).trimmingCharacters(in: .whitespacesAndNewlines))" }
+                .joined(separator: "\n")
         case let error as HostKeyTrust.TrustError:
             switch error {
             case .invalidHost(let host): "\(host) is not a host name Histq can check."

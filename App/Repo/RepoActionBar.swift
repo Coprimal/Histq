@@ -149,6 +149,12 @@ extension RepoSession {
         run(.fetchAll(prune: prune), title: "Fetch", key: .fetch)
     }
 
+    /// One remote's Fetch (its menu), pruning as Fetch All does.
+    func fetch(remote: String) {
+        let prune = Preferences.defaults.bool(forKey: PrefKey.pruneOnFetch.rawValue)
+        run(.fetchRemote(remote, prune: prune), title: "Fetch \(remote)", key: .fetch)
+    }
+
     /// `PrefKey.pullMode` ("fastForward", "fastForwardOnly", "rebase").
     static var preferredPullMode: GitOperations.PullMode {
         switch Preferences.defaults.string(forKey: PrefKey.pullMode.rawValue) {
@@ -277,6 +283,26 @@ enum FailureHints {
         {
             return Hint(text: authText + " " + submoduleAuthText)
         }
+        // Fetch All with several remotes: one failed remote gets its own hint and action; several get the sign-in hint
+        // once, then each other hint and each host without an account.
+        if let fetch = failure.error as? RemoteFetchFailure {
+            let failures = fetch.failures.map {
+                OperationFailure(title: failure.title, write: failure.write, error: $0.error, message: failure.message)
+            }
+            if failures.count == 1, let only = failures.first { return hint(for: only) }
+            var texts: [String] = []
+            var notes: [String] = []
+            for item in failures {
+                if let withheld = item.error as? NetworkTokenWithheld, case .noAccount(let host) = withheld.reason {
+                    texts.append(authText)
+                    notes.append(noAccountText(host))
+                } else if let text = hint(for: item).text {
+                    texts.append(text)
+                }
+            }
+            let unique = (texts + notes).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+            return Hint(text: unique.isEmpty ? nil : unique.joined(separator: " "))
+        }
         if let withheld = failure.error as? NetworkTokenWithheld {
             switch withheld.reason {
             case .repoNetworkConfig(let keys):
@@ -286,6 +312,12 @@ enum FailureHints {
             case .submoduleRecursion(let keys):
                 return Hint(text: "Submodule recursion is on (\(keys.joined(separator: ", "))), so Histq did not send "
                     + "your account token. Turn it off, or sign in with a credential helper of your own.")
+            case .noAccount(let host):
+                return Hint(text: authText + " " + noAccountText(host))
+            case .remoteGroup(let name):
+                return Hint(text: "A remote group has the name \(name) (remotes.\(name) in your git config), so git "
+                    + "fetches the group's remotes and Histq did not send your account token. Rename or remove the "
+                    + "group, or sign in with a credential helper of your own.")
             }
         }
         if case GitOperationError.rebaseWouldConflict = failure.error {
@@ -326,6 +358,11 @@ enum FailureHints {
 
     private static let authText = "Git could not sign in to the remote. Check that your SSH key is loaded (ssh-add) or "
         + "that a credential helper knows this host."
+
+    /// Added to `authText` for an https remote on a host the tab's profile has no account for.
+    private static func noAccountText(_ host: String) -> String {
+        "\(host) has no account in this tab's profile: add one in Settings › Integrations, or use SSH."
+    }
     static let submoduleAuthText =
         "Submodule fetches use your SSH key, or the connected account's token for https URLs on its host."
 

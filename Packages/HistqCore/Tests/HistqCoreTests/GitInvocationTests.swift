@@ -831,9 +831,18 @@ struct GitInvocationTests {
         let (base, _, userHelper) = try Self.baseWithUserHelper(sandbox)
         let repo = try await sandbox.makeRepo("repo")
         try await sandbox.git(["remote", "add", "origin", "https://\(Self.tokenHost)/octo/repo.git"], in: repo)
+        // As `GitOperations.backgroundFetchAll` lists them and gives them to a remote the gate let through.
+        let helpers = try await GitInvocation.credentialHelpers(
+            runner: sandbox.runner, cwd: repo,
+            env: GitInvocation.environment(profile: nil, base: base, access: .read(filterDrivers: [])))
+        let access = GitInvocation.Access.backgroundFetch(credentialHelpers: helpers)
+        let decision = await GitInvocation.networkToken(
+            for: .fetch(remotes: ["origin"]), credentials: Self.credentials, base: base, runner: sandbox.runner,
+            cwd: repo)
+        #expect(decision == .attach(Self.credentials))
 
-        let env = try await GitInvocation.backgroundFetchEnvironment(
-            profile: Self.tokenProfile, base: base, runner: sandbox.runner, cwd: repo, credentials: Self.credentials)
+        let env = GitInvocation.environment(
+            profile: Self.tokenProfile, base: base, access: access, credentials: Self.credentials)
         let entries = Self.configEntries(env)
         let reset = try #require(entries.lastIndex(of: "credential.helper="))
         let replayed = try #require(entries.lastIndex(of: "credential.helper=\(userHelper)"))
@@ -850,19 +859,22 @@ struct GitInvocationTests {
         let gaveToken = filled.text.contains("password=\(Self.token)\n")
         #expect(gaveToken, "git credential fill did not give the token")
 
-        let withoutToken = try await GitInvocation.backgroundFetchEnvironment(
-            profile: Self.tokenProfile, base: base, runner: sandbox.runner, cwd: repo)
+        let withoutToken = GitInvocation.environment(profile: Self.tokenProfile, base: base, access: access)
         let withoutCarries = Self.hasCredentialVariable(withoutToken)
         #expect(!withoutCarries)
         #expect(!Self.configEntries(withoutToken).contains { $0.hasPrefix(Self.tokenHelperKey) })
+        #expect(withoutToken["GIT_ALLOW_PROTOCOL"] == "ssh:https:git")
 
-        // `fetch --all` also contacts a remote on another host: the gate keeps the token back.
+        // Each remote is gated on its own: origin keeps its token beside a remote on another host, which gets none.
         try await sandbox.git(["remote", "add", "other", "https://other.histq.invalid/octo/repo.git"], in: repo)
-        let mixed = try await GitInvocation.backgroundFetchEnvironment(
-            profile: Self.tokenProfile, base: base, runner: sandbox.runner, cwd: repo, credentials: Self.credentials)
-        let mixedCarries = Self.hasCredentialVariable(mixed)
-        #expect(!mixedCarries)
-        #expect(mixed["GIT_ALLOW_PROTOCOL"] == "ssh:https:git")
+        let originDecision = await GitInvocation.networkToken(
+            for: .fetch(remotes: ["origin"]), credentials: Self.credentials, base: base, runner: sandbox.runner,
+            cwd: repo)
+        let otherDecision = await GitInvocation.networkToken(
+            for: .fetch(remotes: ["other"]), credentials: Self.credentials, base: base, runner: sandbox.runner,
+            cwd: repo)
+        #expect(originDecision == .attach(Self.credentials))
+        #expect(otherDecision == .otherURL)
     }
 
     // MARK: - Harness

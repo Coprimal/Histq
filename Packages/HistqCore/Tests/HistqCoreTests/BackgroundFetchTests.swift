@@ -74,8 +74,7 @@ struct BackgroundFetchTests {
         let sandbox = try await Sandbox()
         defer { sandbox.remove() }
         let repo = try await sandbox.makeRepo("repo")
-        let env = try await GitInvocation.backgroundFetchEnvironment(
-            profile: GitInvocationTests.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo)
+        let env = try await Self.environment(base: sandbox.base, sandbox: sandbox, repo: repo)
         #expect(env["GIT_SSH_COMMAND"]
             == "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2")
     }
@@ -111,10 +110,31 @@ struct BackgroundFetchTests {
         }
 
         await #expect(throws: GitInvocation.BackgroundFetchError.repoSetsNetworkConfig(keys: [expected])) {
-            try await GitInvocation.backgroundFetchEnvironment(
-                profile: GitInvocationTests.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo)
+            try await GitOperations.backgroundFetchAll(
+                prune: true, profile: GitInvocationTests.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo,
+                credentials: GitInvocationTests.credentials)
         }
         #expect(!sandbox.markerExists, "the listing ran the repo's helper")
+    }
+
+    @Test("a remote named like a remote group is left out of the background fetch; the repo's other remotes are not")
+    func remoteGroupSkipsThatRemoteOnly() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        // `git fetch origin` would fetch the group's two members, not the remote anyone checked.
+        try await sandbox.git(["remote", "add", "origin", "https://example.invalid/repo.git"], in: repo)
+        try await sandbox.git(["config", "remotes.origin", "../b ../a"], in: repo)
+        // A local folder: the background fetch's transport list refuses it, so its fetch fails without the network.
+        try await sandbox.git(["remote", "add", "other", sandbox.root.appending(path: "nothing").path], in: repo)
+        await #expect {
+            try await GitOperations.backgroundFetchAll(
+                prune: true, profile: GitInvocationTests.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo,
+                timeout: .seconds(30))
+        } throws: { error in
+            // origin was never run (it would fail too); `other` still was.
+            (error as? RemoteFetchFailure)?.failures.map(\.remote) == ["other"]
+        }
     }
 
     @Test("the user's own global http and proxy config does not stop a background fetch")
@@ -134,8 +154,7 @@ struct BackgroundFetchTests {
         var base = sandbox.base
         base["GIT_CONFIG_GLOBAL"] = global.path
         let repo = try await sandbox.makeRepo("repo")
-        let env = try await GitInvocation.backgroundFetchEnvironment(
-            profile: GitInvocationTests.profile, base: base, runner: sandbox.runner, cwd: repo)
+        let env = try await Self.environment(base: base, sandbox: sandbox, repo: repo)
         #expect(env["GIT_ALLOW_PROTOCOL"] == "ssh:https:git")
     }
 
@@ -168,8 +187,7 @@ struct BackgroundFetchTests {
                     runner: sandbox.runner, cwd: repo,
                     env: GitInvocation.environment(profile: nil, base: base, access: .read(filterDrivers: [])))
                 #expect(helpers == [.init(key: "credential.helper", value: "!'\(goodHelper.path)'")])
-                env = try await GitInvocation.backgroundFetchEnvironment(
-                    profile: GitInvocationTests.profile, base: base, runner: sandbox.runner, cwd: repo)
+                env = try await Self.environment(base: base, sandbox: sandbox, repo: repo)
             }
             _ = try await sandbox.runner.run(
                 approve, cwd: repo, env: env, stdin: input, timeout: .seconds(30), allowedExitCodes: Set(0...255))
@@ -193,8 +211,7 @@ struct BackgroundFetchTests {
             try await sandbox.git(["config", "core.askPass", sandbox.evil.path], in: repo)
             let env = control
                 ? GitInvocation.environment(profile: GitInvocationTests.profile, base: sandbox.base)
-                : try await GitInvocation.backgroundFetchEnvironment(
-                    profile: GitInvocationTests.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo)
+                : try await Self.environment(base: sandbox.base, sandbox: sandbox, repo: repo)
             let result = try await sandbox.runner.run(
                 fill, cwd: repo, env: env, stdin: input, timeout: .seconds(30), allowedExitCodes: Set(0...255))
             #expect(result.exitCode != 0, "no credential to fill")
@@ -234,26 +251,42 @@ struct BackgroundFetchTests {
             let repo = try await build(sandbox)
             #expect(!sandbox.markerExists, "the setup itself ran the marker")
 
-            let env = control
-                ? GitInvocation.environment(profile: GitInvocationTests.profile, base: base)
-                : try await GitInvocation.backgroundFetchEnvironment(
-                    profile: GitInvocationTests.profile, base: base, runner: sandbox.runner, cwd: repo)
-            let result = try await sandbox.runner.run(
-                Self.fetch, cwd: repo, env: env, timeout: .seconds(30), allowedExitCodes: Set(0...255))
             if control {
+                let env = GitInvocation.environment(profile: GitInvocationTests.profile, base: base)
+                let result = try await sandbox.runner.run(
+                    Self.fetch, cwd: repo, env: env, timeout: .seconds(30), allowedExitCodes: Set(0...255))
                 #expect(sandbox.markerExists, "positive control: the fetch must run the marker (\(result.stderrTail))")
                 continue
             }
+            let failure: (any Error)?
+            do {
+                try await GitOperations.backgroundFetchAll(
+                    prune: true, profile: GitInvocationTests.profile, base: base, runner: sandbox.runner, cwd: repo,
+                    timeout: .seconds(30))
+                failure = nil
+            } catch {
+                failure = error
+            }
             #expect(!sandbox.markerExists, "the background fetch ran the marker")
             if fetchSucceeds {
-                #expect(result.exitCode == 0, "the background fetch failed: \(result.stderrTail)")
+                #expect(failure == nil, "the background fetch failed: \(String(describing: failure))")
                 let fetched = try await sandbox.runner.run(
                     ["rev-parse", "--verify", "-q", "refs/remotes/origin/main"], cwd: repo, env: sandbox.base,
                     allowedExitCodes: [0, 1])
                 #expect(fetched.exitCode == 0, "origin/main was not fetched")
             } else {
-                #expect(result.exitCode != 0, "the blocked remote fetched")
+                #expect(failure is RemoteFetchFailure, "the blocked remote fetched")
             }
         }
+    }
+
+    /// The environment `GitOperations.backgroundFetchAll` gives a remote that gets no token in `repo`: the user's own
+    /// credential helpers listed under a read environment, then `.backgroundFetch` with the test profile.
+    static func environment(base: [String: String], sandbox: Sandbox, repo: URL) async throws -> [String: String] {
+        let helpers = try await GitInvocation.credentialHelpers(
+            runner: sandbox.runner, cwd: repo,
+            env: GitInvocation.environment(profile: nil, base: base, access: .read(filterDrivers: [])))
+        return GitInvocation.environment(
+            profile: GitInvocationTests.profile, base: base, access: .backgroundFetch(credentialHelpers: helpers))
     }
 }

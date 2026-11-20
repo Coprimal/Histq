@@ -22,7 +22,9 @@
 // up on a dead host, and only the credential helpers of the user's own config (system, global, Xcode's):
 // the list is reset and refilled after the repo's `credential.*helper` entries. A repo that sets its own
 // `http.*` or `remote.<name>.proxy` config is not fetched in the background at all, since those keys could
-// send the user's credentials to a third party.
+// send the user's credentials to a third party. A remote named like a remote group (`remotes.<name>`, in any
+// scope) is left out of the background fetch, since `git fetch <name>` would fetch the group's members, URLs
+// nobody checked; the repo's other remotes still are fetched.
 //
 // The profile's account tokens (`GitCredential`, one per host) reach git only for network commands (`.network`,
 // `.backgroundFetch`): for the credential at index `<n>`, env vars `HISTQ_GIT_TOKEN_<n>` and `HISTQ_GIT_USER_<n>`
@@ -34,8 +36,11 @@
 // Every child of git inherits its environment, so a command gets a token only when the gate
 // (`networkToken(for:credentials:base:runner:cwd:)`) lets it: every URL it contacts, after `insteadOf` and
 // `pushInsteadOf`, is `https://<host>/…` for the host of one of the credentials, and the repo's own config sets no
-// network key (`http.*`, a remote's proxy, `url.*.insteadOf`, `credential.*`) that could send a token elsewhere. The
-// command then gets the credentials of the hosts its URLs reach, and no other. Such a command runs
+// network key (`http.*`, a remote's proxy, `url.*.insteadOf`, `credential.*`) that could send a token elsewhere,
+// and, for a fetch, no config scope has a remote group named like a remote it fetches (`remotes.<name>`: `git fetch
+// <name>` fetches a group's members before a remote of that name, so git would not contact the URLs the gate
+// checked; a push never resolves groups, and other groups, such as `remotes.all`, change nothing). The command then
+// gets the credentials of the hosts its URLs reach, and no other. Such a command runs
 // with the `.network` block: the https transport alone (no `ext`, `file` or remote helper of the repo's
 // `remote.<name>.vcs`), no askpass, no submodule, gc or maintenance, no fsmonitor, no alternate refs command, no
 // credential helper but the token's, redirects on the first request only, and no hook (a fetch or clone) or only
@@ -110,7 +115,7 @@ public enum GitInvocation {
     ///
     /// `credentials` are the tokens git may use. Only `.network` and `.backgroundFetch` use them, and only those
     /// `usableCredentials(_:)` keeps; every other access drops them. They do not check the URLs: pass only the set the
-    /// gate matched (`networkToken(for:...)`, `.attach`), as `GitOperations`, `backgroundFetchEnvironment` and
+    /// gate matched (`networkToken(for:...)`, `.attach`), as `GitOperations` (`backgroundFetchAll` too) and
     /// `cloneEnvironment` do.
     public static func environment(
         profile: Profile?, base: [String: String], access: Access = .write, credentials: [GitCredential] = []
@@ -273,27 +278,6 @@ public enum GitInvocation {
             ? candidate : "en_US.UTF-8"
     }
 
-    /// The background fetch environment for a `git fetch --all` run in `cwd`: lists the user's credential helpers
-    /// first, and throws `BackgroundFetchError.repoSetsNetworkConfig` for a repo with its own http or proxy config.
-    /// `credentials` adds the token helpers of the hosts the repo's remotes reach after the replayed helpers (see
-    /// `environment(profile:base:access:credentials:)`) only when the gate lets every remote of the repo have one.
-    public static func backgroundFetchEnvironment(
-        profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL, credentials: [GitCredential] = []
-    ) async throws -> [String: String] {
-        // A read environment, so a token helper is never listed and replayed as one of the user's helpers.
-        let listingEnv = environment(profile: nil, base: base, access: .read(filterDrivers: []))
-        let helpers = try await credentialHelpers(runner: runner, cwd: cwd, env: listingEnv)
-        var gated: [GitCredential] = []
-        if !credentials.isEmpty, let remotes = try? await remoteNames(runner: runner, cwd: cwd, env: listingEnv),
-           case .attach(let matched) = await networkToken(
-               for: .fetch(remotes: remotes), credentials: credentials, base: base, runner: runner, cwd: cwd)
-        {
-            gated = matched
-        }
-        return environment(
-            profile: profile, base: base, access: .backgroundFetch(credentialHelpers: helpers), credentials: gated)
-    }
-
     /// The environment of a clone of `url`: `.network(.fetch)` with the token of the URL's host when the gate lets
     /// the URL have it (`NetworkTarget.clone`), else the plain write environment, so the user's own helpers answer.
     public static func cloneEnvironment(
@@ -315,9 +299,10 @@ public enum GitInvocation {
     /// not valid UTF-8 and any git failure but "no match" throw, so a fetch never runs with a partial list.
     ///
     /// The same listing throws `BackgroundFetchError.repoSetsNetworkConfig` when the repo's own scopes set any
-    /// `http.*` key (`http.<url>.*` too) or a `remote.<name>.proxy`: a repo's proxy, `sslVerify=false`,
-    /// `sslCAInfo` or `extraHeader` could make a fetch nobody clicked hand the user's stored credentials to a
-    /// third party. A fetch the user clicks still runs with them.
+    /// `http.*` key (`http.<url>.*` too) or a `remote.<name>.proxy`: a repo's proxy, `sslVerify=false`, `sslCAInfo`
+    /// or `extraHeader` could make a fetch nobody clicked hand the user's stored credentials to a third party. A
+    /// fetch the user clicks still runs with them. Remote groups do not block it: `GitOperations.backgroundFetchAll`
+    /// leaves out only the remotes named like a group (`remoteGroups(runner:cwd:env:)`).
     public static func credentialHelpers(runner: GitRunner, cwd: URL, env: [String: String]) async throws
         -> [ConfigEntry]
     {
@@ -339,7 +324,8 @@ public enum GitInvocation {
     /// user's own credential helper entries (see `credentialHelpers(runner:cwd:env:)`), and every `credential.*`,
     /// `http.*`, `remote.<name>.proxy`, `url.<base>.insteadOf` and `url.<base>.pushInsteadOf` key the repo's own
     /// scopes set (local, worktree and the files they include; valueless keys too). Keys come back as git
-    /// canonicalizes them: section and variable lowercase.
+    /// canonicalizes them: section and variable lowercase. Remote groups are not here: they matter to a fetch of a
+    /// remote of the same name alone (`remoteGroups(runner:cwd:env:)`).
     private static func networkConfig(runner: GitRunner, cwd: URL, env: [String: String]) async throws
         -> (helpers: [ConfigEntry], repoKeys: [String])
     {
@@ -405,6 +391,9 @@ public enum GitInvocation {
         /// The repo's own config sets these keys (`credential.*`, `http.*`, `remote.<name>.proxy`,
         /// `url.<base>.insteadof`, `url.<base>.pushinsteadof`), any of which could send the token elsewhere.
         case repoNetworkConfig(keys: [String])
+        /// A fetch of the remote `name`, which a remote group of the same name (`remotes.<name>`, in any config scope)
+        /// shadows: `git fetch <name>` would fetch the group's members, URLs the gate did not check.
+        case remoteGroup(name: String)
         /// A URL the command contacts is not `https://<host>/…` for any credential's host (or there is none).
         case otherURL
         /// Git could not list the config or the URLs: no token, as for any doubt.
@@ -417,7 +406,9 @@ public enum GitInvocation {
 
     /// The gate of the credentials: `.attach` only when `usableCredentials(_:)` keeps one, the repo in `cwd` sets no
     /// network key of its own nor, with submodules, a recursion key that is on (`submoduleRecursion`; not for a clone,
-    /// nor for a submodule fetch, whose caller never recurses), and every URL `target` contacts passes
+    /// nor for a submodule fetch, whose caller never recurses), no remote a fetch names is also the name of a remote
+    /// group in any config scope (`remoteGroup`; a push and a submodule fetch never resolve groups, and a group named
+    /// like no fetched remote changes nothing), and every URL `target` contacts passes
     /// `isTokenURL(_:host:)` for the host of one of them after the rewrites git applies (`remote get-url`:
     /// `insteadOf`, and `pushInsteadOf` for a push; `ls-remote --get-url` for a clone). All or nothing: one URL on no
     /// credential's host and the command gets none. `.attach` carries the credentials of the hosts the URLs reach
@@ -441,6 +432,8 @@ public enum GitInvocation {
             case .fetch(let remotes):
                 let keys = try await networkConfig(runner: runner, cwd: cwd, env: listingEnv).repoKeys
                 guard keys.isEmpty else { return .repoNetworkConfig(keys: keys) }
+                let groups = try await remoteGroups(runner: runner, cwd: cwd, env: listingEnv)
+                if let shadowed = remotes.first(where: groups.contains) { return .remoteGroup(name: shadowed) }
                 for remote in remotes {
                     urls += try await remoteURLs(remote, push: false, runner: runner, cwd: cwd, env: listingEnv)
                 }
@@ -530,6 +523,20 @@ public enum GitInvocation {
             return false
         }
         return validated == host
+    }
+
+    /// The names of the remote groups git reads in `cwd`, from every config scope (system, global, the repo's, the
+    /// files they include, command): `<name>` of each `remotes.<name>` key, valueless ones too, as git canonicalizes it
+    /// (the variable part lowercase). `git fetch <name>` compares the same key with the name it is given, so a remote
+    /// whose name is in this set is fetched as the group (two members or more) instead of as the remote.
+    static func remoteGroups(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> Set<String> {
+        let result = try await runner.run(
+            ["config", "-z", "--name-only", "--get-regexp", #"^remotes\."#], cwd: cwd, env: env,
+            timeout: .seconds(10), allowedExitCodes: [0, 1])
+        let prefix = "remotes."
+        // `<key>\0` per entry.
+        return Set(result.stdout.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+            .filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) })
     }
 
     /// The remotes of the repo in `cwd` (`git remote`), as `git fetch --all` goes through them.

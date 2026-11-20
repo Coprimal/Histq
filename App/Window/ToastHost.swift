@@ -65,7 +65,7 @@ struct OperationToast: Identifiable, Equatable {
             let old = before.localBranches.first { $0.name == branch }?.commit
             guard let new = after.localBranches.first(where: { $0.name == branch })?.commit else { return nil }
             return old == new ? "Already up to date. Nothing to pull." : "\(branch) is now at \(new.prefix(7))."
-        case .fetchAll:
+        case .fetchAll, .fetchRemote:
             let old = Dictionary(before.remoteBranches.map { ($0.name, $0.commit) }, uniquingKeysWith: { a, _ in a })
             let new = Dictionary(after.remoteBranches.map { ($0.name, $0.commit) }, uniquingKeysWith: { a, _ in a })
             let updated = new.keys.filter { old[$0] != nil && old[$0] != new[$0] }.sorted()
