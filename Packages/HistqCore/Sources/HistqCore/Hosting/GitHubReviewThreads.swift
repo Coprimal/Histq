@@ -4,7 +4,7 @@
 import Foundation
 
 /// A review thread: a comment on a file's lines and the replies to it, shown under the review it was written in.
-public struct GitHubReviewThread: Sendable, Equatable, Identifiable {
+public struct HostedReviewThread: Sendable, Equatable, Identifiable {
     /// The root comment's id, even when GitHub did not return the root: replies post to it (GitHub refuses a reply
     /// to a reply).
     public var id: Int
@@ -23,9 +23,9 @@ public struct GitHubReviewThread: Sendable, Equatable, Identifiable {
     /// The root's diff hunk, ending at the commented line.
     public var diffHunk: String?
     /// The root first, then the replies oldest first.
-    public var comments: [GitHubReviewComment]
+    public var comments: [HostedReviewComment]
     /// nil when the GraphQL load failed or has no thread for this root: resolving is unavailable then.
-    public var state: GitHubReviewThreadState?
+    public var state: HostedReviewThreadState?
 
     /// Groups `comments` into threads keyed by the review of each thread's root, each review's threads ordered by
     /// their root's date, and joins `states` on the root comment's id. A thread is a root comment and the replies
@@ -37,9 +37,9 @@ public struct GitHubReviewThread: Sendable, Equatable, Identifiable {
     /// reviews: GitHub makes such a review for each later reply and hides it from the timeline. It is read from the
     /// comments alone; whether such a review still shows when it has a body of its own is the caller's choice.
     public static func group(
-        _ comments: [GitHubReviewComment], states: [GitHubReviewThreadState]
+        _ comments: [HostedReviewComment], states: [HostedReviewThreadState]
     ) -> (
-        threadsByReview: [Int: [GitHubReviewThread]], replyOnlyReviewIDs: Set<Int>, unattached: [GitHubReviewThread]
+        threadsByReview: [Int: [HostedReviewThread]], replyOnlyReviewIDs: Set<Int>, unattached: [HostedReviewThread]
     ) {
         // Paging can return a comment twice when one is added meanwhile.
         var seen = Set<Int>()
@@ -47,14 +47,14 @@ public struct GitHubReviewThread: Sendable, Equatable, Identifiable {
         let stateByRoot = Dictionary(
             states.compactMap { state in state.rootCommentID.map { ($0, state) } },
             uniquingKeysWith: { first, _ in first })
-        var threadsByReview: [Int: [GitHubReviewThread]] = [:]
-        var unattached: [GitHubReviewThread] = []
+        var threadsByReview: [Int: [HostedReviewThread]] = [:]
+        var unattached: [HostedReviewThread] = []
         for (rootID, members) in Dictionary(grouping: unique, by: { $0.inReplyToID ?? $0.id }) {
             let sorted = members.sorted(by: isEarlier)
             let head = sorted.first { $0.id == rootID } ?? sorted[0]
             let state = stateByRoot[rootID] ?? stateByRoot[head.id]
             let current = head.line != nil
-            let thread = GitHubReviewThread(
+            let thread = HostedReviewThread(
                 id: rootID, reviewID: head.pullRequestReviewID, path: head.path,
                 startLine: current ? head.startLine : head.originalStartLine,
                 line: current ? head.line : head.originalLine, side: head.side,
@@ -66,7 +66,7 @@ public struct GitHubReviewThread: Sendable, Equatable, Identifiable {
                 unattached.append(thread)
             }
         }
-        let byRootDate = { (a: GitHubReviewThread, b: GitHubReviewThread) in isEarlier(a.comments[0], b.comments[0]) }
+        let byRootDate = { (a: HostedReviewThread, b: HostedReviewThread) in isEarlier(a.comments[0], b.comments[0]) }
         for reviewID in threadsByReview.keys {
             threadsByReview[reviewID]?.sort(by: byRootDate)
         }
@@ -76,7 +76,7 @@ public struct GitHubReviewThread: Sendable, Equatable, Identifiable {
     }
 
     /// Oldest first, then by id when the dates tie or are missing, so the order is the same on every run.
-    private static func isEarlier(_ a: GitHubReviewComment, _ b: GitHubReviewComment) -> Bool {
+    private static func isEarlier(_ a: HostedReviewComment, _ b: HostedReviewComment) -> Bool {
         (a.createdAt ?? .distantPast, a.id) < (b.createdAt ?? .distantPast, b.id)
     }
 }

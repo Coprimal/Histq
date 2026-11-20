@@ -140,7 +140,7 @@ struct GraphView: NSViewRepresentable {
     var dropEntries: @MainActor (RefBadge, RefBadge) -> [MenuEntry] = { _, _ in [] }
     var canUndo: @MainActor (_ redo: Bool) -> Bool = { _ in false }
     var onUndo: @MainActor (_ redo: Bool) -> Void = { _ in }
-    /// The open pull requests by remote branch (`GitHubStore.branchPullRequests`): their chips on the branch badges.
+    /// The open pull requests by remote branch (`HostingStore.branchPullRequests`): their chips on the branch badges.
     var pullRequests: [String: RefBadge.PullRequest] = [:]
     /// The repo's remote names (`RepoSession.remotes`): with one remote, a remote branch's badge drops the remote
     /// from its name (`RefBadge.remoteLabel`).

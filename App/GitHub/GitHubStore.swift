@@ -25,13 +25,13 @@ struct HostedRow: Identifiable, Equatable, Sendable {
 }
 
 extension HostedRow {
-    init(pull: GitHubPullRequest) {
+    init(pull: HostedPullRequest) {
         self.init(item: .pullRequest(pull.number), title: pull.title, authorLogin: pull.user?.login,
                   authorID: pull.user?.id, isDraft: pull.draft ?? false, headSHA: pull.head.sha)
     }
 
     /// A search hit (issue-shaped): the pull request, when All open has it, gives the head commit.
-    init(searchHit hit: GitHubIssue, pull: GitHubPullRequest?) {
+    init(searchHit hit: HostedIssue, pull: HostedPullRequest?) {
         self.init(item: hit.isPullRequest ? .pullRequest(hit.number) : .issue(hit.number), title: hit.title,
                   authorLogin: hit.user?.login, authorID: hit.user?.id,
                   isDraft: hit.draft ?? pull?.draft ?? false, headSHA: pull?.head.sha)
@@ -63,7 +63,7 @@ enum ChecksState: Equatable, Sendable {
     case success, failure, pending
 
     /// nil when the commit has no check runs.
-    init?(_ runs: [GitHubCheckRun]) {
+    init?(_ runs: [HostedCheckRun]) {
         guard !runs.isEmpty else { return nil }
         let failed: Set<String> = ["failure", "timed_out", "cancelled", "action_required", "startup_failure"]
         if runs.contains(where: { failed.contains($0.conclusion ?? "") }) {
@@ -78,7 +78,7 @@ enum ChecksState: Equatable, Sendable {
 
 @Observable
 @MainActor
-final class GitHubStore {
+final class HostingStore {
     enum List: String, CaseIterable, Sendable {
         case mine, reviewRequested, allOpen, assigned
 
@@ -375,7 +375,7 @@ final class GitHubStore {
     /// token. The token stays inside the client.
     @concurrent
     private nonisolated static func makeClient(profile: Profile, host: String) async -> GitHubClient? {
-        guard let token = await GitHubTokens.token(for: profile) else { return nil }
+        guard let token = await HostingTokens.token(for: profile) else { return nil }
         return try? GitHubClient(host: host, token: token)
     }
 
@@ -447,15 +447,15 @@ final class GitHubStore {
     /// The card's text for a failed read; a rate limit also pauses the refreshes until it ends.
     private func listError(_ error: any Error) -> ListError {
         switch error {
-        case GitHubError.unauthorized:
+        case HostingError.unauthorized:
             return ListError(message: "GitHub refused the token (revoked or expired).", reconnect: true)
-        case GitHubError.rateLimited(let resetsAt):
+        case HostingError.rateLimited(let resetsAt):
             pausedUntil = resetsAt ?? Date.now.addingTimeInterval(60)
             return ListError(message: "\(error) Histq tries again then.", reconnect: false)
-        case GitHubError.secondaryRateLimited(let seconds):
+        case HostingError.secondaryRateLimited(let seconds):
             pausedUntil = Date.now.addingTimeInterval(TimeInterval(seconds ?? 60))
             return ListError(message: String(describing: error), reconnect: false)
-        case let error as GitHubError:
+        case let error as HostingError:
             return ListError(message: String(describing: error), reconnect: false)
         default:
             return ListError(message: error.localizedDescription, reconnect: false)
@@ -491,7 +491,7 @@ final class GitHubStore {
     /// The badges of `pulls` by remote branch: only heads whose `owner:branch` label names the repository's owner (a
     /// fork's head is another repository's branch). When two pull requests share a head, the lowest number wins.
     nonisolated static func branchPullRequests(
-        _ pulls: [GitHubPullRequest], repository: HostedRepository, remote: String
+        _ pulls: [HostedPullRequest], repository: HostedRepository, remote: String
     ) -> [String: RefBadge.PullRequest] {
         var result: [String: RefBadge.PullRequest] = [:]
         for pull in pulls.sorted(by: { $0.number < $1.number }) where pull.state == "open" {

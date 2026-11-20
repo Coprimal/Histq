@@ -1,7 +1,7 @@
 // Settings › Integrations, per profile: the profile's GitHub account (`GitHubConnectSection`, which the onboarding's
 // GitHub step embeds too). Connect it by signing in with GitHub (OAuth device flow), by pasting a personal access
 // token, or by importing the GitHub CLI's token; each token is checked with `GET /user` before it is saved in the login
-// Keychain (`GitHubTokens`); the profile keeps the host and login. Tokens are never logged, shown or kept past a check.
+// Keychain (`HostingTokens`); the profile keeps the host and login. Tokens are never logged, shown or kept past a check.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -213,7 +213,7 @@ struct GitHubConnectSection: View {
         }
         tokenStored = .loading
         do {
-            let token = try await GitHubTokens.read(profileID: profile.id, host: host, refresh: true)
+            let token = try await HostingTokens.read(profileID: profile.id, host: host, refresh: true)
             guard !Task.isCancelled else { return }
             tokenStored = .loaded(token != nil)
         } catch {
@@ -296,7 +296,7 @@ struct GitHubConnectSection: View {
         cancelConnection()
         Task {
             do {
-                try await GitHubTokens.delete(profileID: id, host: host)
+                try await HostingTokens.delete(profileID: id, host: host)
                 library.modify(id) { $0.github = nil }
                 tokenStored = .idle
             } catch {
@@ -612,7 +612,7 @@ struct GitHubConnectSection: View {
     private func finishConnect(_ id: UUID, host: String, token: String) async throws {
         let login = try await Self.login(token: token, host: host)
         try Task.checkCancellation()
-        try await GitHubTokens.save(token, profileID: id, host: host)
+        try await HostingTokens.save(token, profileID: id, host: host)
         library.modify(id) { $0.github = Profile.GitHubAccount(host: host, login: login) }
         pastedToken = ""
         activity = .idle
@@ -702,10 +702,10 @@ struct GitHubConnectSection: View {
 
     private static func message(for error: Error) -> String {
         switch error {
-        case GitHubError.unauthorized: "GitHub refused the token: it is wrong, expired or revoked."
-        case GitHubError.invalidToken: "That is not a token: it has spaces or other characters a token never has."
+        case HostingError.unauthorized: "GitHub refused the token: it is wrong, expired or revoked."
+        case HostingError.invalidToken: "That is not a token: it has spaces or other characters a token never has."
         case GitError.timeout: "gh did not answer within a minute."
-        case let error as GitHubError: String(describing: error)
+        case let error as HostingError: String(describing: error)
         case let error as GitHubDeviceFlow.DeviceFlowError: String(describing: error)
         case let error as CLIError: error.description
         case let error as KeychainError: "The token could not be saved: \(error)"
@@ -728,7 +728,7 @@ struct GitHubConnectSection: View {
             ?? library.addProfile(identity: Profile.Identity(name: "QA", email: "qa@histq.invalid"))
         else { return }
         Task {
-            try? await GitHubTokens.save("histq_qa_fake_token", profileID: id, host: "github.com")
+            try? await HostingTokens.save("histq_qa_fake_token", profileID: id, host: "github.com")
             library.modify(id) { $0.github = Profile.GitHubAccount(host: "github.com", login: login) }
         }
     }
@@ -745,7 +745,7 @@ struct GitHubConnectSection: View {
         let accounts = store.profiles.compactMap { profile in profile.github.map { (profile.id, $0.host) } }
         Task {
             for (id, host) in accounts {
-                try? await GitHubTokens.save("histq_qa_fake_token", profileID: id, host: host)
+                try? await HostingTokens.save("histq_qa_fake_token", profileID: id, host: host)
             }
             if let shown = store.profile(id: profileID ?? UUID()) ?? store.profiles.first { await checkToken(shown) }
         }

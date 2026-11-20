@@ -63,14 +63,14 @@ public struct GitHubDeviceFlow: Sendable {
 
     /// `scopes`: `repo` for private repositories and HTTPS pushes, `read:org` for organization repositories,
     /// `workflow` because GitHub refuses a push that changes `.github/workflows` without it. Throws
-    /// `GitHubError.invalidHost` or `DeviceFlowError.missingClientID`.
+    /// `HostingError.invalidHost` or `DeviceFlowError.missingClientID`.
     public init(
         host: String = "github.com", clientID: String, scopes: [String] = ["repo", "read:org", "workflow"],
         session: URLSession = .shared,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) throws {
         guard let validHost = GitHubClient.validatedHost(host), let webBase = URL(string: "https://\(validHost)") else {
-            throw GitHubError.invalidHost(host)
+            throw HostingError.invalidHost(host)
         }
         guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw DeviceFlowError.missingClientID
@@ -86,14 +86,14 @@ public struct GitHubDeviceFlow: Sendable {
     /// Asks for a device code and a user code.
     public func start() async throws -> DeviceCode {
         let data = try await post(["login", "device", "code"], ["client_id": clientID, "scope": scopes.joined(separator: " ")])
-        if let failure = try? GitHubHTTP.decode(data) as Answer, let code = failure.error {
+        if let failure = try? HostingHTTP.decode(data) as Answer, let code = failure.error {
             throw DeviceFlowError.failed(code: code, description: failure.errorDescription)
         }
-        return try GitHubHTTP.decode(data)
+        return try HostingHTTP.decode(data)
     }
 
     /// Polls until the user approves and returns the access token. Throws `DeviceFlowError.expired`,
-    /// `.accessDenied` or `.failed`, a `GitHubError` for an HTTP failure, or `CancellationError`.
+    /// `.accessDenied` or `.failed`, a `HostingError` for an HTTP failure, or `CancellationError`.
     public func waitForToken(_ code: DeviceCode) async throws -> String {
         var interval = max(code.interval, 1)
         var waited = 0
@@ -106,9 +106,9 @@ public struct GitHubDeviceFlow: Sendable {
                 "client_id": clientID, "device_code": code.deviceCode,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             ])
-            let answer: Answer = try GitHubHTTP.decode(data)
+            let answer: Answer = try HostingHTTP.decode(data)
             if let token = answer.accessToken {
-                guard GitHubClient.isUsableToken(token) else { throw GitHubError.invalidResponse("an unusable token") }
+                guard GitHubClient.isUsableToken(token) else { throw HostingError.invalidResponse("an unusable token") }
                 return token
             }
             switch answer.error {
@@ -124,7 +124,7 @@ public struct GitHubDeviceFlow: Sendable {
             case let code?:
                 throw DeviceFlowError.failed(code: code, description: answer.errorDescription)
             case nil:
-                throw GitHubError.invalidResponse("neither a token nor an error")
+                throw HostingError.invalidResponse("neither a token nor an error")
             }
         }
     }
@@ -144,7 +144,7 @@ public struct GitHubDeviceFlow: Sendable {
         }
     }
 
-    /// A form POST asking for JSON. An HTTP failure without an OAuth error code becomes a `GitHubError`.
+    /// A form POST asking for JSON. An HTTP failure without an OAuth error code becomes a `HostingError`.
     private func post(_ segments: [String], _ form: [String: String]) async throws -> Data {
         var url = webBase
         for segment in segments { url.append(path: segment) }
@@ -154,11 +154,11 @@ public struct GitHubDeviceFlow: Sendable {
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.setValue("Histq", forHTTPHeaderField: "User-Agent")
         request.httpBody = Data(Self.formEncoded(form).utf8)
-        let (data, response) = try await GitHubHTTP.load(request, session: session)
+        let (data, response) = try await HostingHTTP.load(request, session: session)
         if !(200..<300).contains(response.statusCode) {
-            let answer = try? GitHubHTTP.decode(data) as Answer
+            let answer = try? HostingHTTP.decode(data) as Answer
             if let code = answer?.error { throw DeviceFlowError.failed(code: code, description: answer?.errorDescription) }
-            throw GitHubHTTP.error(for: response, data: data)
+            throw HostingHTTP.error(for: response, data: data)
         }
         return data
     }

@@ -1,6 +1,6 @@
 // The small surface the app needs from a code host: which repository a remote URL names, its pull requests and
 // issues, and the few actions Histq offers on them. GitHub (and GitHub Enterprise) is the only provider, so the
-// protocol speaks in GitHub's models (`GitHubModels.swift`); another provider would map its JSON into them.
+// protocol speaks in GitHub's models (`HostedModels.swift`); another provider would map its JSON into them.
 import Foundation
 
 /// A repository on a code host: `host` is lowercase and keeps an https port (`ghe.example.com:8443`).
@@ -59,51 +59,51 @@ public protocol HostingProvider: Sendable {
     static func repository(fromRemoteURL url: String) -> HostedRepository?
 
     /// The account the token belongs to.
-    func currentUser() async throws -> GitHubUser
+    func currentUser() async throws -> HostedUser
 
-    func pullRequests(in repo: HostedRepository, state: HostedListState) async throws -> [GitHubPullRequest]
-    func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> GitHubPullRequest
+    func pullRequests(in repo: HostedRepository, state: HostedListState) async throws -> [HostedPullRequest]
+    func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequest
     /// Issues only: the pull requests GitHub also lists as issues are left out.
-    func issues(in repo: HostedRepository, state: HostedListState) async throws -> [GitHubIssue]
-    func issue(_ number: Int, in repo: HostedRepository) async throws -> GitHubIssue
+    func issues(in repo: HostedRepository, state: HostedListState) async throws -> [HostedIssue]
+    func issue(_ number: Int, in repo: HostedRepository) async throws -> HostedIssue
     /// The open pull requests the token's user opened, as issue-shaped search results (no `head`/`base`;
     /// `draft` is set).
-    func myOpenPullRequests(in repo: HostedRepository) async throws -> [GitHubIssue]
+    func myOpenPullRequests(in repo: HostedRepository) async throws -> [HostedIssue]
     /// The open pull requests that ask the token's user (or one of their teams) for a review, as search results.
-    func reviewRequestedPullRequests(in repo: HostedRepository) async throws -> [GitHubIssue]
+    func reviewRequestedPullRequests(in repo: HostedRepository) async throws -> [HostedIssue]
     /// The open issues (no pull requests) assigned to the token's user, as search results.
-    func assignedOpenIssues(in repo: HostedRepository) async throws -> [GitHubIssue]
+    func assignedOpenIssues(in repo: HostedRepository) async throws -> [HostedIssue]
     /// The conversation comments of an issue or a pull request.
-    func comments(on number: Int, in repo: HostedRepository) async throws -> [GitHubComment]
-    func reviews(of number: Int, in repo: HostedRepository) async throws -> [GitHubReview]
+    func comments(on number: Int, in repo: HostedRepository) async throws -> [HostedComment]
+    func reviews(of number: Int, in repo: HostedRepository) async throws -> [HostedReview]
     /// A pull request's commits, oldest first (GitHub lists at most 250).
-    func pullRequestCommits(_ number: Int, in repo: HostedRepository) async throws -> [GitHubCommit]
+    func pullRequestCommits(_ number: Int, in repo: HostedRepository) async throws -> [HostedCommit]
     /// The files a pull request changes, with their patches (GitHub lists at most 3000).
-    func pullRequestFiles(_ number: Int, in repo: HostedRepository) async throws -> [GitHubPullRequestFile]
+    func pullRequestFiles(_ number: Int, in repo: HostedRepository) async throws -> [HostedPullRequestFile]
     /// The check runs of a commit (`ref` is a commit id or a branch name).
-    func checkRuns(for ref: String, in repo: HostedRepository) async throws -> [GitHubCheckRun]
+    func checkRuns(for ref: String, in repo: HostedRepository) async throws -> [HostedCheckRun]
 
     /// The repository's own data (its default branch).
-    func repositoryInfo(_ repo: HostedRepository) async throws -> GitHubRepositoryInfo
+    func repositoryInfo(_ repo: HostedRepository) async throws -> HostedRepositoryInfo
     /// The repository's labels, for a new pull request.
-    func labels(in repo: HostedRepository) async throws -> [GitHubLabel]
+    func labels(in repo: HostedRepository) async throws -> [HostedLabel]
     /// The users an issue or a pull request can be assigned to.
-    func assignableUsers(in repo: HostedRepository) async throws -> [GitHubUser]
+    func assignableUsers(in repo: HostedRepository) async throws -> [HostedUser]
     /// The repository's collaborators, the users a review can be requested from (403 without push access).
-    func collaborators(in repo: HostedRepository) async throws -> [GitHubUser]
+    func collaborators(in repo: HostedRepository) async throws -> [HostedUser]
 
     func createPullRequest(_ pullRequest: NewPullRequest, in repo: HostedRepository) async throws
-        -> GitHubPullRequest
+        -> HostedPullRequest
     /// Asks `logins` to review pull request `number`.
     func requestReviewers(_ logins: [String], on number: Int, in repo: HostedRepository) async throws
     /// Adds labels (by name) to an issue or a pull request.
     func addLabels(_ names: [String], to number: Int, in repo: HostedRepository) async throws
     /// Assigns `logins` to an issue or a pull request.
     func addAssignees(_ logins: [String], to number: Int, in repo: HostedRepository) async throws
-    func comment(on number: Int, in repo: HostedRepository, body: String) async throws -> GitHubComment
+    func comment(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedComment
     func review(_ number: Int, in repo: HostedRepository, event: HostedReviewEvent, body: String?)
-        async throws -> GitHubReview
-    /// Merges only while the head is still `sha` (409 otherwise, `GitHubError.headChanged` for GitHub).
+        async throws -> HostedReview
+    /// Merges only while the head is still `sha` (409 otherwise, `HostingError.headChanged` for GitHub).
     func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws
     /// Closes (`open` false) or reopens an issue or a pull request.
     func setOpen(_ open: Bool, number: Int, in repo: HostedRepository) async throws

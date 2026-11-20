@@ -13,8 +13,8 @@ import WebKit
 /// (no overflow, code blocks wrap; only a table too wide for it scrolls sideways, inside it), and its vertical wheel
 /// events scroll the enclosing scroll view. `html` goes into
 /// the page's body: GitHub's `body_html` as GitHub sanitized it, and markup Histq built around it with every other
-/// value passed through `GitHubHTML.escape`.
-struct GitHubHTMLView: View {
+/// value passed through `HostedHTML.escape`.
+struct HostedHTMLView: View {
     /// Starts a web view with a blank page, for the next new page to take (a pull request's while it loads).
     static func warmUp() { GitHubHTMLPage.warmUp() }
 
@@ -23,12 +23,12 @@ struct GitHubHTMLView: View {
     var measureKey = 0
     /// What the app changed on the page since it was built; a new value is applied and the page measured again,
     /// without a load.
-    var patch = GitHubHTMLPatch()
+    var patch = HostedHTMLPatch()
     /// Called once per page, when it is laid out (the timing log's content line).
     var onLoad: @MainActor () -> Void = {}
     /// Called with the page's `data-slot` elements after every measurement, in the same update as the new height, so
     /// native views drawn on them never lag the page's frame.
-    var onSlots: @MainActor ([GitHubHTMLSlot]) -> Void = { _ in }
+    var onSlots: @MainActor ([HostedHTMLSlot]) -> Void = { _ in }
     /// The body's height at the current width; nil until the first page is measured.
     @State private var contentHeight: CGFloat?
 
@@ -47,7 +47,7 @@ struct GitHubHTMLView: View {
 /// An empty element of the page (`data-slot="<id>"`, outside GitHub's bodies, with an id of the timeline's formats)
 /// that a native view covers: its frame in points from the page's top left (a CSS pixel is a point: the page is never
 /// zoomed).
-struct GitHubHTMLSlot: Equatable, Sendable {
+struct HostedHTMLSlot: Equatable, Sendable {
     let id: String
     let frame: CGRect
 
@@ -66,7 +66,7 @@ struct GitHubHTMLSlot: Equatable, Sendable {
 /// class (a review thread the user expanded or collapsed). Applied before every measurement, so a new page (a quiet
 /// reload) gets it too. Ids are the page's own (`data-slot`, `id`), of the timeline's formats only (a slot's,
 /// `thread-<n>`): nothing inside GitHub's HTML (`.body`) changes.
-struct GitHubHTMLPatch: Equatable {
+struct HostedHTMLPatch: Equatable {
     /// Heights in points, by slot id; a slot without one keeps the stylesheet's.
     var slotHeights: [String: CGFloat] = [:]
     /// Whether each element, by its `id`, has the `collapsed` class; one without an entry keeps its markup's.
@@ -91,14 +91,14 @@ extension View {
     }
 }
 
-/// The web view behind `GitHubHTMLView`: loads the page and reports the body's height and the slots after each load,
+/// The web view behind `HostedHTMLView`: loads the page and reports the body's height and the slots after each load,
 /// width change, new `measureKey` and new patch.
 private struct GitHubHTMLPage: NSViewRepresentable {
     let html: String
     let measureKey: Int
-    let patch: GitHubHTMLPatch
+    let patch: HostedHTMLPatch
     let onLoad: @MainActor () -> Void
-    let onMeasure: @MainActor (CGFloat, [GitHubHTMLSlot]) -> Void
+    let onMeasure: @MainActor (CGFloat, [HostedHTMLSlot]) -> Void
     @Environment(\.tabIsShown) private var tabIsShown
 
     /// One store for every page: non-persistent (no cookies, no cache on disk), and one session for all of them
@@ -109,7 +109,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
     /// parked page stays locked down): the same page shown again (a pull request opened again) takes its view back
     /// instead of starting a new web content process and loading again. Memory only.
     private static var parked: [(view: MeasuredWebView, coordinator: Coordinator)] = []
-    /// A blank page started while a pull request loads (`GitHubHTMLView.warmUp`), with its own coordinator as its
+    /// A blank page started while a pull request loads (`HostedHTMLView.warmUp`), with its own coordinator as its
     /// delegate: the next new page takes it once its load finished, so its web content process runs already.
     private static var warm: (view: MeasuredWebView, coordinator: Coordinator)?
 
@@ -123,7 +123,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         view.navigationDelegate = coordinator
         view.uiDelegate = coordinator
         coordinator.expectsLoad = true
-        view.loadHTMLString(GitHubHTML.document(body: ""), baseURL: nil)
+        view.loadHTMLString(HostedHTML.document(body: ""), baseURL: nil)
         warm = (view, coordinator)
     }
 
@@ -160,7 +160,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         view.allowsBackForwardNavigationGestures = false
         view.allowsMagnification = false
         view.allowsLinkPreview = false
-        view.underPageBackgroundColor = GitHubHTML.background
+        view.underPageBackgroundColor = HostedHTML.background
         // Hidden until the first page is laid out: no white frame before the dark stylesheet applies.
         view.alphaValue = 0
         #if DEBUG
@@ -191,7 +191,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         }
         context.coordinator.expectsLoad = true
         context.coordinator.isLoaded = false
-        view.loadHTMLString(GitHubHTML.document(body: html), baseURL: nil)
+        view.loadHTMLString(HostedHTML.document(body: html), baseURL: nil)
     }
 
     static func dismantleNSView(_ view: MeasuredWebView, coordinator: Coordinator) {
@@ -241,11 +241,11 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// The current page has finished loading, so it can be measured.
         var isLoaded = false
         var onLoad: @MainActor () -> Void = {}
-        var onMeasure: @MainActor (CGFloat, [GitHubHTMLSlot]) -> Void = { _, _ in }
+        var onMeasure: @MainActor (CGFloat, [HostedHTMLSlot]) -> Void = { _, _ in }
         /// The view's last `measureKey`.
         var measureKey: Int?
         /// The view's last patch, applied by every measurement.
-        var patch = GitHubHTMLPatch()
+        var patch = HostedHTMLPatch()
         /// The tab shows (`tabIsShown`): a page of a kept-alive tab that is not shown skips `remeasure`
         /// (`skippedMeasure`) and is measured once when it shows again.
         var isShown = true
@@ -344,7 +344,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
                 let noWidth = ((try? result.get()) as? [String: Any])?["width"] as? NSNumber == 0
                 if !noWidth, case .success(let value) = result, let page = value as? [String: Any],
                    let height = (page["height"] as? NSNumber)?.doubleValue, height > 0 {
-                    let slots = (page["slots"] as? [[String: Any]] ?? []).compactMap(GitHubHTMLSlot.init(measured:))
+                    let slots = (page["slots"] as? [[String: Any]] ?? []).compactMap(HostedHTMLSlot.init(measured:))
                     self?.onMeasure(CGFloat(height), slots)
                     UITiming.content("html height \(Int(height)) at width \(Int(webView.frame.width))")
                     #if DEBUG
@@ -392,7 +392,7 @@ enum GitHubLinks {
 }
 
 /// The page around GitHub's HTML: the policy, the stylesheet from `Palette`, and the escaping of Histq's own values.
-enum GitHubHTML {
+enum HostedHTML {
     /// Escapes text for an HTML text node or a quoted attribute value.
     nonisolated static func escape(_ text: String) -> String {
         var result = ""
@@ -649,7 +649,7 @@ enum GitHubHTMLProbe {
     /// slot's frame from the page, and where SwiftUI drew its overlay, taken into the web view's own AppKit frame (a
     /// web view that sits elsewhere than SwiftUI thinks shows as a delta); `delta` is the largest difference. Three
     /// seconds after the first measurement the window grows by 400 pt, 200 on each side, for a pass at another width.
-    /// Slots are outlined in red (`GitHubHTML.probeStylesheet`).
+    /// Slots are outlined in red (`HostedHTML.probeStylesheet`).
     static let slotsEnabled = GitHubStub.isEnabled && AppState.launchFlag("-HistqSlotProbe") == "YES"
     /// The overlays' frames are kept for the slot probe and for the scroll probe's wheel over an overlay.
     static let recordsOverlays = slotsEnabled
@@ -659,10 +659,10 @@ enum GitHubHTMLProbe {
     @MainActor private static var slotPasses = 0
     @MainActor private static var slotWidth: CGFloat?
     /// The last measurement's slots and page width: a pass logs the page as it is by then.
-    @MainActor private static var lastSlots: (slots: [GitHubHTMLSlot], pageWidth: Double) = ([], 0)
+    @MainActor private static var lastSlots: (slots: [HostedHTMLSlot], pageWidth: Double) = ([], 0)
     @MainActor private static var didResize = false
 
-    @MainActor static func slots(_ view: WKWebView, _ slots: [GitHubHTMLSlot], pageWidth: Double) {
+    @MainActor static func slots(_ view: WKWebView, _ slots: [HostedHTMLSlot], pageWidth: Double) {
         // A slot gone from the page (the reply row of a thread just collapsed) takes its overlay's frame with it: the
         // scroll probe picks the overlays it wheels over from these.
         if recordsOverlays {

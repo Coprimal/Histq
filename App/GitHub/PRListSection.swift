@@ -1,13 +1,13 @@
 // The sidebar's PRs tab: the repo's GitHub lists in their own cards (My PRs, Review requested, All open, Issues
 // assigned to me), or the Connect GitHub card without a connected account. A row shows the number, title, author
 // avatar, a draft capsule and the checks state; a click selects it at once and panel2 shows its placeholder in the same
-// frame. Also `GitHubDriver`, which keeps the tab's `GitHubStore` running while the repo tab shows (the graph's PR
+// frame. Also `GitHubDriver`, which keeps the tab's `HostingStore` running while the repo tab shows (the graph's PR
 // badges need its lists too).
 import AppKit
 import HistqCore
 import SwiftUI
 
-/// Drives the tab's `GitHubStore` while the repo tab shows: `watch` resolves the connection, reads the lists once (the
+/// Drives the tab's `HostingStore` while the repo tab shows: `watch` resolves the connection, reads the lists once (the
 /// graph's PR badges), and keeps them fresh while the PRs tab shows; it restarts when the profile, the remotes, the
 /// window's visibility, the shown tab (`tabIsShown`) or the sidebar tab change, stops when the repo tab or the window
 /// goes away, and pauses while the window is hidden or covered or a kept-alive tab is not shown. Draws nothing.
@@ -40,7 +40,7 @@ struct GitHubDriver: View {
     /// The sidebar shows the PRs tab (not hidden, `SidebarSections`).
     private var listsShown: Bool { layout.shownTab(session.sidebarTab) == .prs }
 
-    private var source: GitHubStore.Source {
+    private var source: HostingStore.Source {
         let profile = session.profile
         #if DEBUG
         let isStub = GitHubStub.isEnabled
@@ -52,7 +52,7 @@ struct GitHubDriver: View {
         case .loaded, .failed: true
         case .idle, .loading: false
         }
-        return GitHubStore.Source(
+        return HostingStore.Source(
             profilesLoaded: profilesLoaded, profileID: profile?.id, account: profile?.github,
             remotes: session.remotes, remotesKnown: session.refs.value != nil, settingsOpen: model.isSettingsOpen,
             windowVisible: windowState.isVisible, listsShown: listsShown, isShown: tabIsShown, isStub: isStub)
@@ -115,7 +115,7 @@ struct PullRequestSections: View {
 /// kept, then the rows.
 private struct ListCard: View {
     let session: RepoSession
-    let list: GitHubStore.List
+    let list: HostingStore.List
     /// The authors' GitHub avatars load (github.com, not the stub), whatever `AvatarStore`'s mode.
     let realAvatars: Bool
     /// The header's search (`CardSearchButton`): the field above the rows, which then show only the matching ones.
@@ -169,7 +169,7 @@ private struct ListCard: View {
 
 /// A failed read: GitHub's reason, and for a refused token the way to reconnect.
 private struct ListErrorRow: View {
-    let error: GitHubStore.ListError
+    let error: HostingStore.ListError
     @Environment(WindowModel.self) private var model
     @Environment(\.textSize) private var textSize
 

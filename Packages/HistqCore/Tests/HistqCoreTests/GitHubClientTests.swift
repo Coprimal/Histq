@@ -97,7 +97,7 @@ struct GitHubClientTests {
         let client = try GitHubClient(token: Self.token, session: stub.session)
         let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
 
-        await #expect(throws: GitHubError.invalidResponse("a next-page link to another host")) {
+        await #expect(throws: HostingError.invalidResponse("a next-page link to another host")) {
             try await client.pullRequests(in: repo, state: .open)
         }
         #expect(stub.requests.allSatisfy { $0.url?.host() == "api.github.com" })
@@ -118,7 +118,7 @@ struct GitHubClientTests {
         if isFollowed {
             #expect(try await client.currentUser().login == "moved", "positive control: the stub redirects")
         } else {
-            await #expect(throws: GitHubError.self) { try await client.currentUser() }
+            await #expect(throws: HostingError.self) { try await client.currentUser() }
             #expect(stub.requests.allSatisfy { $0.url?.host() == "api.github.com" })
         }
     }
@@ -129,7 +129,7 @@ struct GitHubClientTests {
         var status: Int
         var headers: [String: String] = [:]
         var body: String
-        var expected: GitHubError
+        var expected: HostingError
         var testDescription: String { "\(status) \(expected)" }
     }
 
@@ -147,13 +147,13 @@ struct GitHubClientTests {
                   body: #"{"message": "Resource not accessible by integration"}"#,
                   expected: .forbidden(message: "Resource not accessible by integration")),
         ErrorCase(status: 404, body: #"{"message": "Not Found"}"#, expected: .notFound),
-        ErrorCase(status: 200, body: "not json", expected: .invalidResponse("unexpected JSON for GitHubUser")),
+        ErrorCase(status: 200, body: "not json", expected: .invalidResponse("unexpected JSON for HostedUser")),
     ])
     func httpFailuresAreTyped(_ errorCase: ErrorCase) async throws {
         let stub = StubServer { _ in .init(status: errorCase.status, headers: errorCase.headers, body: errorCase.body) }
         let client = try GitHubClient(token: Self.token, session: stub.session)
 
-        let error = await #expect(throws: GitHubError.self) { try await client.currentUser() }
+        let error = await #expect(throws: HostingError.self) { try await client.currentUser() }
         #expect(error == errorCase.expected)
         var dumped = ""
         dump(client, to: &dumped)
@@ -219,9 +219,9 @@ struct GitHubClientTests {
         let client = try GitHubClient(token: Self.token, session: stub.session)
 
         let injected = HostedRepository(host: "github.com", owner: "octo", name: "hello is:closed repo:evil/x")
-        await #expect(throws: GitHubError.self) { try await client.myOpenPullRequests(in: injected) }
+        await #expect(throws: HostingError.self) { try await client.myOpenPullRequests(in: injected) }
         let otherHost = HostedRepository(host: "ghe.example.com", owner: "octo", name: "hello")
-        await #expect(throws: GitHubError.wrongHost("ghe.example.com")) {
+        await #expect(throws: HostingError.wrongHost("ghe.example.com")) {
             try await client.assignedOpenIssues(in: otherHost)
         }
         #expect(stub.requests.isEmpty)
@@ -254,11 +254,11 @@ struct GitHubClientTests {
         let client = try GitHubClient(token: Self.token, session: stub.session)
         let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
 
-        await #expect(throws: GitHubError.headChanged) {
+        await #expect(throws: HostingError.headChanged) {
             try await client.merge(7, in: repo, method: .merge, sha: "abc123")
         }
-        #expect(GitHubError.headChanged.description == "The pull request's head changed: reload and review it again.")
-        await #expect(throws: GitHubError.http(
+        #expect(HostingError.headChanged.description == "The pull request's head changed: reload and review it again.")
+        await #expect(throws: HostingError.http(
             status: 409, message: "Head branch was modified. Review and try the merge again.")) {
             try await client.setOpen(false, number: 7, in: repo)
         }
@@ -330,7 +330,7 @@ struct GitHubClientTests {
         #expect(try await client.labels(in: repo).map(\.name) == ["bug"])
         #expect(try await client.assignableUsers(in: repo).map(\.login) == ["octo"])
         // A token without push access: the form leaves the reviewers out instead of failing.
-        await #expect(throws: GitHubError.forbidden(message: "Must have push access to view repository collaborators.")) {
+        await #expect(throws: HostingError.forbidden(message: "Must have push access to view repository collaborators.")) {
             try await client.collaborators(in: repo)
         }
         #expect(stub.requests.map { $0.url?.path() } == [
@@ -438,7 +438,7 @@ struct GitHubClientTests {
 
         let states = try await client.reviewThreadStates(of: 4242, in: repo)
 
-        #expect(states == [GitHubReviewThreadState(
+        #expect(states == [HostedReviewThreadState(
             id: "PRRT_1", isResolved: true, isOutdated: false, viewerCanResolve: false, viewerCanUnresolve: true,
             rootCommentID: 10)])
         let request = try #require(stub.requests.first)
@@ -469,7 +469,7 @@ struct GitHubClientTests {
         }
         let client = try GitHubClient(token: Self.token, session: stub.session)
 
-        await #expect(throws: GitHubError.graphQL(
+        await #expect(throws: HostingError.graphQL(
             message: "Could not resolve to a node with the global id of 'PRRT_x'")) {
             try await client.setReviewThread("PRRT_x", resolved: true)
         }
@@ -495,15 +495,15 @@ struct GitHubClientTests {
             """
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let comments = try decoder.decode([GitHubReviewComment].self, from: Data(json.utf8))
+        let comments = try decoder.decode([HostedReviewComment].self, from: Data(json.utf8))
         let states = [
-            GitHubReviewThreadState(id: "PRRT_20", isResolved: false, isOutdated: false, viewerCanResolve: true,
+            HostedReviewThreadState(id: "PRRT_20", isResolved: false, isOutdated: false, viewerCanResolve: true,
                                     viewerCanUnresolve: false, rootCommentID: 20),
-            GitHubReviewThreadState(id: "PRRT_10", isResolved: true, isOutdated: false, viewerCanResolve: false,
+            HostedReviewThreadState(id: "PRRT_10", isResolved: true, isOutdated: false, viewerCanResolve: false,
                                     viewerCanUnresolve: true, rootCommentID: 10),
         ]
 
-        let grouped = GitHubReviewThread.group(comments, states: states)
+        let grouped = HostedReviewThread.group(comments, states: states)
 
         #expect(Array(grouped.threadsByReview.keys) == [701])
         let threads = try #require(grouped.threadsByReview[701])

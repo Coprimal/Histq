@@ -1,9 +1,9 @@
 // An issue in panel2, laid out like the pull request detail, each part in its own card: the header (back, title,
 // number, state pill, "author opened this issue on <date> · N comments"), the Conversation (the body and the comments
-// in one `GitHubHTMLView` with native avatars on it, the same page as a pull request's, `PRTimelinePage`) and the
+// in one `HostedHTMLView` with native avatars on it, the same page as a pull request's, `PRTimelinePage`) and the
 // comment box in one scroll, and a side column with Close/Reopen (confirmed), the assignees and the labels. The row
 // click shows the header and skeleton cards in the same frame (`PlaceholderCard`); the issue and its comments load
-// off the main actor in one go (`IssueDetailModel`). The actions call GitHub through the tab's `GitHubStore` client.
+// off the main actor in one go (`IssueDetailModel`). The actions call GitHub through the tab's `HostingStore` client.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -13,7 +13,7 @@ import SwiftUI
 /// Everything the detail shows, read in one load.
 struct IssueDetail: Sendable {
     let loadID: Int
-    let issue: GitHubIssue
+    let issue: HostedIssue
     let commentCount: Int
     /// The body, then the comments by date (`PRTimeline.page`).
     let timeline: PRTimelineHTML
@@ -95,7 +95,7 @@ final class IssueDetailModel {
     #endif
 
     /// Loads issue `number`; `quiet` keeps the shown detail until the new one is in (after an action).
-    func load(_ number: Int, github: GitHubStore, quiet: Bool = false) {
+    func load(_ number: Int, github: HostingStore, quiet: Bool = false) {
         task?.cancel()
         generation &+= 1
         if number != self.number {
@@ -143,8 +143,8 @@ final class IssueDetailModel {
 
     /// Runs `action` on issue `number` (the one whose detail the user acted on), then reloads it and the PRs tab's
     /// lists. A failure shows above the cards while that issue shows; otherwise it names the number in the PRs tab
-    /// (`GitHubStore.actionNotice`).
-    func perform(_ action: IssueAction, on number: Int, github: GitHubStore) {
+    /// (`HostingStore.actionNotice`).
+    func perform(_ action: IssueAction, on number: Int, github: HostingStore) {
         guard busy[number] == nil else { return }
         guard let api = github.api else {
             actionError = "GitHub is not connected for this tab."

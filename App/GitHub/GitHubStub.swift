@@ -1,5 +1,5 @@
 #if DEBUG
-// DEBUG `-HistqGitHubStub YES`: the PRs tab, the PR and issue details and the create form without GitHub. `GitHubStore`
+// DEBUG `-HistqGitHubStub YES`: the PRs tab, the PR and issue details and the create form without GitHub. `HostingStore`
 // then uses the repository `stub/stub` on github.com (the fixtures' origin is a local bare repo, which names no GitHub
 // repo), a fake token, and a `URLSession` whose only protocol is `GitHubStubProtocol`: it answers every request from
 // the JSON below (PR #1's merge, a 409 when it is not pinned to its head, review, comment, close/reopen and a reply to

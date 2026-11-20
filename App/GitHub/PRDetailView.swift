@@ -1,11 +1,11 @@
 // A pull request in panel2, laid out like GitHub's page, each part in its own card: the header (back, title, number,
 // state pill, "author wants to merge N commits into base from head", the tabs), then the selected tab: Conversation
-// (the description, comments and reviews in one `GitHubHTMLView`, the comment and review box, and a side column with
+// (the description, comments and reviews in one `HostedHTMLView`, the comment and review box, and a side column with
 // the actions, reviewers, assignees and labels), Commits, Files changed (the file list and the selected file's patch in
 // a read-only `DiffLineTable`, parsed from GitHub's `patch` with git's diff parser, so no local git is needed) and
 // Checks. The row click shows the header and skeleton cards in the same frame (`PlaceholderCard`); everything loads
 // off the main actor (`PullRequestDetailModel`): the Conversation's parts first, then commits, files and checks as each
-// arrives. The actions call GitHub through the tab's `GitHubStore`
+// arrives. The actions call GitHub through the tab's `HostingStore`
 // client; Merge and Close/Reopen ask first; Checkout locally is a repo write (`RepoSession.Write.checkoutPullRequest`).
 import AppKit
 import HistqCore
@@ -39,7 +39,7 @@ enum PRTab: String, CaseIterable, Hashable, Sendable {
 /// A changed file of the pull request, with its rows built off the main actor; no section when GitHub sent no patch
 /// (a binary file, or a diff too large for the API).
 struct PRFile: Identifiable, Sendable {
-    let file: GitHubPullRequestFile
+    let file: HostedPullRequestFile
     let change: FileChange
     let section: DiffSection?
 
@@ -57,16 +57,16 @@ struct PRReviewer: Identifiable, Sendable {
     var id: String { login }
 }
 
-/// The pull request's review threads, grouped by `GitHubReviewThread.group`: their comments come from REST and only
+/// The pull request's review threads, grouped by `HostedReviewThread.group`: their comments come from REST and only
 /// whether each is resolved from GraphQL, so a GraphQL failure, or states that join no thread, leave the threads
 /// without a state and say why.
 struct PRThreads: Sendable {
     /// The threads of each review (its id), each review's oldest root first.
-    let byReview: [Int: [GitHubReviewThread]]
+    let byReview: [Int: [HostedReviewThread]]
     /// The reviews that only hold replies to other reviews' threads: GitHub hides them from the timeline.
     let replyOnlyReviewIDs: Set<Int>
     /// The threads whose root has no review, shown at the end of the timeline.
-    let unattached: [GitHubReviewThread]
+    let unattached: [HostedReviewThread]
     /// Why resolving is unavailable: the GraphQL load failed, or its states joined none of the threads. nil when
     /// the states loaded and joined, even only some of the threads, or when there are no threads.
     let resolveUnavailable: String?
@@ -74,7 +74,7 @@ struct PRThreads: Sendable {
     let statesFailed: Bool
 
     /// Every thread in one stable order: by review id, each review's own order, then the unattached ones.
-    var all: [GitHubReviewThread] {
+    var all: [HostedReviewThread] {
         byReview.keys.sorted().flatMap { byReview[$0] ?? [] } + unattached
     }
 }
@@ -85,15 +85,15 @@ struct PRThreads: Sendable {
 struct PullRequestDetail: Sendable {
     let loadID: Int
     /// Replaced alone by the model's re-poll while GitHub still computes whether the branch merges.
-    var pull: GitHubPullRequest
+    var pull: HostedPullRequest
     let timelineCount: Int
     /// The Conversation's page: the description, then comments and reviews by date, each review with its threads
     /// (`PRTimeline.page`).
     let timeline: PRTimelineHTML
     let reviewers: [PRReviewer]
-    var commits: Loadable<[GitHubCommit]>
+    var commits: Loadable<[HostedCommit]>
     var files: Loadable<[PRFile]>
-    var checks: Loadable<[GitHubCheckRun]>
+    var checks: Loadable<[HostedCheckRun]>
     let threads: Loadable<PRThreads>
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
@@ -109,7 +109,7 @@ enum PullRequestAction: Equatable, Sendable {
     case setOpen(Bool)
     /// `rootID`: the thread's root comment, the only one GitHub takes a reply to.
     case reply(rootID: Int, body: String)
-    /// `threadID`: the thread's GraphQL node id (`GitHubReviewThreadState.id`).
+    /// `threadID`: the thread's GraphQL node id (`HostedReviewThreadState.id`).
     case resolve(threadID: String, resolved: Bool)
 
     var progressTitle: String {
@@ -293,7 +293,7 @@ final class PullRequestDetailModel {
     #endif
 
     /// Loads pull request `number`; `quiet` keeps the shown detail until the new one is in (after an action).
-    func load(_ number: Int, github: GitHubStore, quiet: Bool = false) {
+    func load(_ number: Int, github: HostingStore, quiet: Bool = false) {
         task?.cancel()
         generation &+= 1
         if number != self.number {
@@ -339,7 +339,7 @@ final class PullRequestDetailModel {
                 // It starts after the placeholder's frame, never in front of it.
                 if warmsUp {
                     try? await Task.sleep(for: .milliseconds(20))
-                    if !Task.isCancelled { GitHubHTMLView.warmUp() }
+                    if !Task.isCancelled { HostedHTMLView.warmUp() }
                 }
                 let result = await fetched
                 guard let self, generation == self.generation, !Task.isCancelled else {
@@ -463,7 +463,7 @@ final class PullRequestDetailModel {
     }
 
     /// The timing log's `pr <n> mergeable true|false|null`, once for each answer (QA of the re-poll).
-    private static func logMergeable(_ pull: GitHubPullRequest) {
+    private static func logMergeable(_ pull: HostedPullRequest) {
         UITiming.content("pr \(pull.number) mergeable \(pull.mergeable.map { "\($0)" } ?? "null")")
     }
 
@@ -489,8 +489,8 @@ final class PullRequestDetailModel {
 
     /// Runs `action` on pull request `number` (the one whose detail the user acted on), then reloads it and the PRs
     /// tab's lists. A failure shows above the tabs while that pull request shows; otherwise it names the number in
-    /// the PRs tab (`GitHubStore.actionNotice`), since the shown detail is another one's.
-    func perform(_ action: PullRequestAction, on number: Int, github: GitHubStore) {
+    /// the PRs tab (`HostingStore.actionNotice`), since the shown detail is another one's.
+    func perform(_ action: PullRequestAction, on number: Int, github: HostingStore) {
         guard busy[number] == nil else { return }
         guard let api = github.api else {
             actionError = "GitHub is not connected for this tab."
@@ -515,7 +515,7 @@ final class PullRequestDetailModel {
                     github.actionNotice = "\(action.failureTitle(of: number)): \(Self.message(for: error))"
                 }
                 // The head moved since the user reviewed it: show the new one, so they review it before merging.
-                if case GitHubError.headChanged = error {
+                if case HostingError.headChanged = error {
                     github.refreshNow()
                     if showing { load(number, github: github, quiet: true) }
                 }
@@ -591,10 +591,10 @@ final class PullRequestDetailModel {
 
     /// A part the Conversation does not need, read beside it (`load`).
     private enum Part: Sendable {
-        case commits(Loadable<[GitHubCommit]>)
+        case commits(Loadable<[HostedCommit]>)
         case files(Loadable<[PRFile]>)
         /// The check runs of head `sha`.
-        case checks(sha: String, Loadable<[GitHubCheckRun]>)
+        case checks(sha: String, Loadable<[HostedCheckRun]>)
     }
 
     @concurrent
@@ -629,11 +629,11 @@ final class PullRequestDetailModel {
     /// loaded but joined none of the threads make it unavailable too, with a reason, instead of Resolve going
     /// missing without one.
     private nonisolated static func threads(
-        _ comments: Loadable<[GitHubReviewComment]>, _ states: Loadable<[GitHubReviewThreadState]>
+        _ comments: Loadable<[HostedReviewComment]>, _ states: Loadable<[HostedReviewThreadState]>
     ) -> Loadable<PRThreads> {
         switch comments {
         case .loaded(let comments):
-            let grouped = GitHubReviewThread.group(comments, states: states.value ?? [])
+            let grouped = HostedReviewThread.group(comments, states: states.value ?? [])
             var unavailable: String?
             var failed = false
             if case .failed(let message) = states {
@@ -656,7 +656,7 @@ final class PullRequestDetailModel {
     @concurrent
     private nonisolated static func fetchPull(
         _ client: GitHubClient, _ repository: HostedRepository, number: Int
-    ) async -> GitHubPullRequest? {
+    ) async -> HostedPullRequest? {
         try? await client.pullRequest(number, in: repository)
     }
 
@@ -668,7 +668,7 @@ final class PullRequestDetailModel {
         }
     }
 
-    private nonisolated static func prFile(_ file: GitHubPullRequestFile) -> PRFile {
+    private nonisolated static func prFile(_ file: HostedPullRequestFile) -> PRFile {
         let letter: Character = switch file.status {
         case "added": "A"
         case "removed": "D"
@@ -685,9 +685,9 @@ final class PullRequestDetailModel {
 
     /// The requested reviewers, then everyone who reviewed with their latest state (a later comment-only review does
     /// not hide an approval or a change request, as on GitHub).
-    private nonisolated static func reviewers(_ pull: GitHubPullRequest, _ reviews: [GitHubReview]) -> [PRReviewer] {
+    private nonisolated static func reviewers(_ pull: HostedPullRequest, _ reviews: [HostedReview]) -> [PRReviewer] {
         var latest: [String: String] = [:]
-        var order: [GitHubUser] = []
+        var order: [HostedUser] = []
         for review in reviews where review.state != "PENDING" {
             guard let user = review.user else { continue }
             if latest[user.login] == nil { order.append(user) }
@@ -722,9 +722,9 @@ final class PullRequestDetailModel {
 
     nonisolated static func message(for error: any Error) -> String {
         switch error {
-        case GitHubError.unauthorized:
+        case HostingError.unauthorized:
             "GitHub refused the token (revoked or expired). Reconnect in Settings › Integrations."
-        case let error as GitHubError:
+        case let error as HostingError:
             String(describing: error)
         default:
             error.localizedDescription
@@ -1643,7 +1643,7 @@ struct GitHubUserAvatar: View {
 
     /// Whether the accounts of `store`'s repository show their GitHub avatars: only on github.com (an Enterprise host
     /// has its avatars elsewhere), and never in a stub run, whose repository names github.com but must not reach it.
-    static func allowsReal(_ store: GitHubStore) -> Bool {
+    static func allowsReal(_ store: HostingStore) -> Bool {
         guard case .connected(let repository) = store.connection, repository.host == "github.com" else { return false }
         #if DEBUG
         return !GitHubStub.isEnabled
@@ -1683,7 +1683,7 @@ struct GitHubUserAvatar: View {
 
 /// A label: its GitHub color as a dot (the label's own data), then its name.
 struct PRLabelChip: View {
-    let label: GitHubLabel
+    let label: HostedLabel
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1713,7 +1713,7 @@ struct PRLabelChip: View {
 // MARK: Commits
 
 private struct PRCommitsTab: View {
-    let commits: Loadable<[GitHubCommit]>
+    let commits: Loadable<[HostedCommit]>
 
     var body: some View {
         switch commits {
@@ -1738,7 +1738,7 @@ private struct PRCommitsTab: View {
 
 /// A commit: its subject, author and date, and its short id, which opens it on GitHub.
 private struct PRCommitRow: View {
-    let commit: GitHubCommit
+    let commit: HostedCommit
     @State private var hovered = false
 
     var body: some View {
@@ -1848,7 +1848,7 @@ private struct PRFilesTab: View {
         }
     }
 
-    private func counts(_ file: GitHubPullRequestFile) -> some View {
+    private func counts(_ file: HostedPullRequestFile) -> some View {
         HStack(spacing: 6) {
             Text("+\(file.additions)")
                 .foregroundStyle(Color(nsColor: Palette.diffAddedSign))
@@ -1919,7 +1919,7 @@ private struct PRFileRow: View {
 // MARK: Checks
 
 private struct PRChecksTab: View {
-    let checks: Loadable<[GitHubCheckRun]>
+    let checks: Loadable<[HostedCheckRun]>
 
     var body: some View {
         switch checks {
@@ -1948,7 +1948,7 @@ private struct PRChecksTab: View {
         }
     }
 
-    private func summary(_ runs: [GitHubCheckRun]) -> String {
+    private func summary(_ runs: [HostedCheckRun]) -> String {
         guard let state = ChecksState(runs) else { return "No checks ran on the head commit." }
         return switch state {
         case .success: "All checks passed."
@@ -1960,7 +1960,7 @@ private struct PRChecksTab: View {
 
 /// A check run: its state glyph, name, conclusion and duration; a click opens it on GitHub.
 private struct PRCheckRow: View {
-    let run: GitHubCheckRun
+    let run: HostedCheckRun
     @State private var hovered = false
 
     var body: some View {

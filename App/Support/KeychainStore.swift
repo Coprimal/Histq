@@ -4,7 +4,7 @@
 // U10.1 checks it). Accounts: `github.<profileID>.<host>` (GitHub tokens), later `ai.<provider>`.
 //
 // The SecItem calls block (and may wait on a Keychain prompt), so callers run them off the main thread:
-// `GitHubTokens` does. Values are never logged or put in an error: only OSStatus codes and account names.
+// `HostingTokens` does. Values are never logged or put in an error: only OSStatus codes and account names.
 // DEBUG `-HistqKeychain memory` swaps in the in-memory twin, so QA shots never touch a real keychain.
 import Foundation
 import HistqCore
@@ -185,7 +185,7 @@ struct KeychainStore: Sendable {
 /// account, so a write or fetch reads the Keychain once per profile and host. Settings › Integrations saves and
 /// deletes through here, which updates the cache, so the next git command sees the change. A failed read is never
 /// cached (the next use tries again).
-enum GitHubTokens {
+enum HostingTokens {
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "keychain")
     /// Account to token; nil = known to have no item.
     private static let cache = OSAllocatedUnfairLock<[String: String?]>(initialState: [:])

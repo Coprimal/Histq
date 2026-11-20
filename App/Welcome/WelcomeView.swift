@@ -56,7 +56,7 @@ final class WelcomeModel {
     enum RepoList: Equatable {
         case idle
         case loading
-        case loaded(account: Profile.GitHubAccount, repos: [GitHubRepository])
+        case loaded(account: Profile.GitHubAccount, repos: [HostedCloneRepository])
         /// No default profile or GitHub account on it, or (`account` set) its token is not in the Keychain.
         case notConnected(account: Profile.GitHubAccount?)
         /// `reconnect` when GitHub refused the token.
@@ -181,7 +181,7 @@ final class WelcomeModel {
     }
 
     /// The picked repository while it is still listed and `cloneURL` is still its URL.
-    var selectedRepository: GitHubRepository? {
+    var selectedRepository: HostedCloneRepository? {
         guard case .loaded(_, let repos) = repoList else { return nil }
         return repos.first { $0.id == selectedRepoID && $0.cloneURL == cloneURL }
     }
@@ -445,7 +445,7 @@ final class WelcomeModel {
         // with its token.
         let store = await ProfileLibrary.shared.loaded()
         let profile = profileID.flatMap { store?.profile(id: $0) } ?? store?.defaultProfile
-        let token = await GitHubTokens.token(for: profile)
+        let token = await HostingTokens.token(for: profile)
         let base = await GitToolchain.writeBase()
         let cloneEnv = await GitInvocation.cloneEnvironment(
             url: url, profile: profile, base: base, token: token, runner: runner)
@@ -472,7 +472,7 @@ final class WelcomeModel {
     // MARK: GitHub repositories
 
     /// The loaded repositories grouped by owner: the account's own login first, then the others alphabetically.
-    var repoGroups: [(owner: String, repos: [GitHubRepository])] {
+    var repoGroups: [(owner: String, repos: [HostedCloneRepository])] {
         guard case .loaded(let account, let repos) = repoList else { return [] }
         let groups = Dictionary(grouping: repos, by: \.owner.login)
         let owners = groups.keys.sorted { lhs, rhs in
@@ -527,7 +527,7 @@ final class WelcomeModel {
     }
 
     /// Clones `repo` next: its URL goes into `cloneURL`, so the destination and the clone work as for a typed URL.
-    func selectRepository(_ repo: GitHubRepository) {
+    func selectRepository(_ repo: HostedCloneRepository) {
         cloneURL = repo.cloneURL
         selectedRepoID = repo.id
     }
@@ -569,7 +569,7 @@ final class WelcomeModel {
         }
         #endif
         guard let profile, let account = profile.github else { return (nil, .notConnected(account: nil)) }
-        guard let token = await GitHubTokens.token(for: profile) else {
+        guard let token = await HostingTokens.token(for: profile) else {
             return (profile, .notConnected(account: account))
         }
         return (profile, await repoList(account) { try GitHubClient(host: account.host, token: token) })
@@ -585,7 +585,7 @@ final class WelcomeModel {
         guard let store = await ProfileLibrary.shared.loaded(), let profile = gitHubProfile(nil, in: store) else {
             return false
         }
-        return await GitHubTokens.token(for: profile) != nil
+        return await HostingTokens.token(for: profile) != nil
     }
 
     @concurrent
@@ -602,10 +602,10 @@ final class WelcomeModel {
 
     private nonisolated static func repoListError(_ error: any Error) -> RepoList {
         switch error {
-        case GitHubError.unauthorized:
+        case HostingError.unauthorized:
             .failed(message: "GitHub refused the token (revoked or expired). Reconnect the account in Settings › "
                 + "Integrations.", reconnect: true)
-        case let error as GitHubError:
+        case let error as HostingError:
             .failed(message: String(describing: error), reconnect: false)
         default:
             .failed(message: error.localizedDescription, reconnect: false)
@@ -1045,10 +1045,10 @@ private struct RepositoryRow: View {
 /// Return picks it, Escape closes the list, the chevron opens or closes it. A pick fills the field with `owner/name`;
 /// that text lists every repository again.
 private struct RepositoryPicker: View {
-    typealias Groups = [(owner: String, repos: [GitHubRepository])]
+    typealias Groups = [(owner: String, repos: [HostedCloneRepository])]
 
     let model: WelcomeModel
-    let repos: [GitHubRepository]
+    let repos: [HostedCloneRepository]
     @State private var query = ""
     @State private var isOpen = false
     /// The groups the list shows: `repos` filtered by the query.
@@ -1059,7 +1059,7 @@ private struct RepositoryPicker: View {
     /// What the list is filtered for: changes rerun the filter.
     private struct FilterKey: Equatable {
         let query: String
-        let repos: [GitHubRepository]
+        let repos: [HostedCloneRepository]
     }
 
     /// The query the list is filtered by: none while the field shows the picked repository.
@@ -1217,7 +1217,7 @@ private struct RepositoryPicker: View {
         }
     }
 
-    private func pick(_ repo: GitHubRepository) {
+    private func pick(_ repo: HostedCloneRepository) {
         UITiming.select("welcome repo")
         model.selectRepository(repo)
         query = repo.fullName

@@ -420,7 +420,7 @@ struct CreatePRView: View {
     private nonisolated static func choice(_ body: () async throws -> [String]) async -> Loadable<[String]> {
         do {
             return .loaded(try await body())
-        } catch GitHubError.forbidden, GitHubError.notFound {
+        } catch HostingError.forbidden, HostingError.notFound {
             return .failed("Not available to this account.")
         } catch {
             return .failed(PullRequestDetailModel.message(for: error))
@@ -493,7 +493,7 @@ struct CreatePRView: View {
     private nonisolated static func create(
         _ request: NewPullRequest, extras: Extras, _ client: GitHubClient, _ repository: HostedRepository
     ) async -> Result<Created, any Error> {
-        let pull: GitHubPullRequest
+        let pull: HostedPullRequest
         do {
             pull = try await client.createPullRequest(request, in: repository)
         } catch {

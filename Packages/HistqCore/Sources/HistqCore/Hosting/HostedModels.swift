@@ -3,7 +3,7 @@
 // values over time, and an unknown one must not make a whole list fail to decode. Dates are ISO 8601.
 import Foundation
 
-public struct GitHubUser: Codable, Sendable, Equatable {
+public struct HostedUser: Codable, Sendable, Equatable {
     public var id: Int
     public var login: String
     public var avatarURL: String?
@@ -27,7 +27,7 @@ public struct GitHubUser: Codable, Sendable, Equatable {
 }
 
 /// A repository as `GET /repos/<owner>/<name>` returns it: only what a new pull request needs.
-public struct GitHubRepositoryInfo: Codable, Sendable, Equatable {
+public struct HostedRepositoryInfo: Codable, Sendable, Equatable {
     public var fullName: String?
     public var defaultBranch: String
 
@@ -38,19 +38,19 @@ public struct GitHubRepositoryInfo: Codable, Sendable, Equatable {
 }
 
 /// A repository as `GET /user/repos` lists it: what the Welcome page's clone picker needs.
-public struct GitHubRepository: Codable, Sendable, Equatable, Identifiable {
+public struct HostedCloneRepository: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var name: String
     /// `owner/name`.
     public var fullName: String
-    public var owner: GitHubUser
+    public var owner: HostedUser
     /// The https URL `git clone` takes.
     public var cloneURL: String
     public var isPrivate: Bool
     public var fork: Bool?
 
     public init(
-        id: Int, name: String, fullName: String, owner: GitHubUser, cloneURL: String, isPrivate: Bool,
+        id: Int, name: String, fullName: String, owner: HostedUser, cloneURL: String, isPrivate: Bool,
         fork: Bool? = nil
     ) {
         self.id = id
@@ -70,7 +70,7 @@ public struct GitHubRepository: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct GitHubLabel: Codable, Sendable, Equatable {
+public struct HostedLabel: Codable, Sendable, Equatable {
     public var name: String
     /// `RRGGBB` without `#`.
     public var color: String?
@@ -78,29 +78,29 @@ public struct GitHubLabel: Codable, Sendable, Equatable {
 }
 
 /// One end of a pull request: the branch and the commit it points at.
-public struct GitHubBranchRef: Codable, Sendable, Equatable {
+public struct HostedBranchRef: Codable, Sendable, Equatable {
     /// `owner:branch`.
     public var label: String?
     public var ref: String
     public var sha: String
 }
 
-public struct GitHubPullRequest: Codable, Sendable, Equatable, Identifiable {
+public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var number: Int
     public var title: String
     /// `open` or `closed` (a merged pull request is `closed` with `mergedAt` set).
     public var state: String
     public var draft: Bool?
-    public var user: GitHubUser?
+    public var user: HostedUser?
     public var body: String?
     public var bodyHTML: String?
     public var htmlURL: String
-    public var head: GitHubBranchRef
-    public var base: GitHubBranchRef
-    public var labels: [GitHubLabel]?
-    public var assignees: [GitHubUser]?
-    public var requestedReviewers: [GitHubUser]?
+    public var head: HostedBranchRef
+    public var base: HostedBranchRef
+    public var labels: [HostedLabel]?
+    public var assignees: [HostedUser]?
+    public var requestedReviewers: [HostedUser]?
     public var createdAt: Date?
     public var updatedAt: Date?
     public var mergedAt: Date?
@@ -130,18 +130,18 @@ public struct GitHubPullRequest: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct GitHubIssue: Codable, Sendable, Equatable, Identifiable {
+public struct HostedIssue: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var number: Int
     public var title: String
     /// `open` or `closed`.
     public var state: String
-    public var user: GitHubUser?
+    public var user: HostedUser?
     public var body: String?
     public var bodyHTML: String?
     public var htmlURL: String
-    public var labels: [GitHubLabel]?
-    public var assignees: [GitHubUser]?
+    public var labels: [HostedLabel]?
+    public var assignees: [HostedUser]?
     /// The number of comments.
     public var comments: Int?
     public var createdAt: Date?
@@ -170,9 +170,9 @@ public struct GitHubIssue: Codable, Sendable, Equatable, Identifiable {
 }
 
 /// A conversation comment of an issue or a pull request.
-public struct GitHubComment: Codable, Sendable, Equatable, Identifiable {
+public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
-    public var user: GitHubUser?
+    public var user: HostedUser?
     public var body: String?
     public var bodyHTML: String?
     public var htmlURL: String?
@@ -188,9 +188,9 @@ public struct GitHubComment: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct GitHubReview: Codable, Sendable, Equatable, Identifiable {
+public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
-    public var user: GitHubUser?
+    public var user: HostedUser?
     /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`.
     public var state: String
     public var body: String?
@@ -210,7 +210,7 @@ public struct GitHubReview: Codable, Sendable, Equatable, Identifiable {
 /// `inReplyToID` set to its thread's root comment; the root's `pullRequestReviewID` is the review the thread
 /// belongs to. Only `id` and `path` are required: GitHub may leave out or null the rest, and one missing field
 /// must not make every thread of the pull request fail to decode.
-public struct GitHubReviewComment: Codable, Sendable, Equatable, Identifiable {
+public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var pullRequestReviewID: Int?
     /// The root comment of the thread this reply belongs to; nil for a root comment.
@@ -229,7 +229,7 @@ public struct GitHubReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var diffHunk: String?
     public var body: String?
     public var bodyHTML: String?
-    public var user: GitHubUser?
+    public var user: HostedUser?
     public var createdAt: Date?
     public var htmlURL: String?
 
@@ -248,8 +248,8 @@ public struct GitHubReviewComment: Codable, Sendable, Equatable, Identifiable {
 }
 
 /// The state of a pull request's review thread, from GitHub's GraphQL API: REST has a thread's comments but not
-/// whether it is resolved. `rootCommentID` joins it to the thread's root `GitHubReviewComment`.
-public struct GitHubReviewThreadState: Sendable, Equatable, Identifiable {
+/// whether it is resolved. `rootCommentID` joins it to the thread's root `HostedReviewComment`.
+public struct HostedReviewThreadState: Sendable, Equatable, Identifiable {
     /// The thread's GraphQL node id, which resolving and unresolving take.
     public var id: String
     public var isResolved: Bool
@@ -276,12 +276,12 @@ public struct GitHubReviewThreadState: Sendable, Equatable, Identifiable {
 }
 
 /// A commit of a pull request (`GET .../pulls/<n>/commits`).
-public struct GitHubCommit: Codable, Sendable, Equatable, Identifiable {
+public struct HostedCommit: Codable, Sendable, Equatable, Identifiable {
     public var sha: String
     public var htmlURL: String?
     public var commit: Details
     /// The GitHub account of the commit's author; nil when its email belongs to no account.
-    public var author: GitHubUser?
+    public var author: HostedUser?
 
     public var id: String { sha }
 
@@ -304,7 +304,7 @@ public struct GitHubCommit: Codable, Sendable, Equatable, Identifiable {
 
 /// A file a pull request changes (`GET .../pulls/<n>/files`). `patch` is GitHub's unified diff of the file without
 /// its header, only the `@@` hunks; GitHub leaves it out for a binary file and for a diff too large to show.
-public struct GitHubPullRequestFile: Codable, Sendable, Equatable, Identifiable {
+public struct HostedPullRequestFile: Codable, Sendable, Equatable, Identifiable {
     public var filename: String
     /// `added`, `removed`, `modified`, `renamed`, `copied`, `changed` or `unchanged`.
     public var status: String
@@ -341,7 +341,7 @@ public struct GitHubPullRequestFile: Codable, Sendable, Equatable, Identifiable 
     }
 }
 
-public struct GitHubCheckRun: Codable, Sendable, Equatable, Identifiable {
+public struct HostedCheckRun: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var name: String
     /// `queued`, `in_progress` or `completed` (and a few newer waiting states).

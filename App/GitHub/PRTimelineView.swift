@@ -1,4 +1,4 @@
-// The pull request's Conversation page: one locked-down `GitHubHTMLView` holding the description, the comments and
+// The pull request's Conversation page: one locked-down `HostedHTMLView` holding the description, the comments and
 // the reviews by date, each review with its inline review threads under it (the path and lines, the commented diff
 // rows, the comments), and native views drawn on the empty slots the page reserves for them (avatars, a chevron in
 // each thread's header, a reply row under each thread). An issue's page is the same, with its description and
@@ -15,7 +15,7 @@ enum PRTimeline {
     nonisolated static func bodyHTML(_ html: String?, _ markdown: String?) -> String? {
         if let html, !html.isEmpty { return html }
         guard let markdown, !markdown.isEmpty else { return nil }
-        return "<p class=\"plain\">\(GitHubHTML.escape(markdown))</p>"
+        return "<p class=\"plain\">\(HostedHTML.escape(markdown))</p>"
     }
 }
 
@@ -23,7 +23,7 @@ enum PRTimeline {
 struct PRTimelineHTML: Sendable {
     let html: String
     /// The account drawn on each avatar slot, by slot id; a deleted account (ghost) has none.
-    let avatars: [String: GitHubUser]
+    let avatars: [String: HostedUser]
     /// The comments and reviews it shows, the description aside.
     let count: Int
 }
@@ -41,53 +41,53 @@ extension PRTimeline {
     /// Threads are collapsed per `isCollapsed(_:expanded:)`. An issue's page has no reviews and no threads. Dates
     /// follow the user's date format (Settings › Appearance, 24 h by default).
     nonisolated static func page(
-        author: GitHubUser?, action: String, date: Date?, html: String?, markdown: String?,
-        comments: [GitHubComment], reviews: [GitHubReview] = [], threads: Loadable<PRThreads> = .idle,
+        author: HostedUser?, action: String, date: Date?, html: String?, markdown: String?,
+        comments: [HostedComment], reviews: [HostedReview] = [], threads: Loadable<PRThreads> = .idle,
         expanded: [Int: Bool] = [:]
     ) -> PRTimelineHTML {
         let dates = DateFormatter()
         dates.locale = Locale(identifier: Locale.current.identifier)
         dates.dateFormat = Preferences.defaults.string(forKey: PrefKey.dateFormat.rawValue) ?? "MM/dd/yy @ HH:mm"
-        var avatars: [String: GitHubUser] = [:]
+        var avatars: [String: HostedUser] = [:]
 
         /// A header's content: the avatar slot, the login, what they did (none for a thread's comment) and when.
-        func head(_ slot: String, _ user: GitHubUser?, action: String?, badge: String? = nil, date: Date?) -> String {
+        func head(_ slot: String, _ user: HostedUser?, action: String?, badge: String? = nil, date: Date?) -> String {
             avatars[slot] = user
             let what = action.map { action in
-                " " + (badge.map { "<span class=\"badge \($0)\">\(GitHubHTML.escape(action))</span>" }
-                    ?? GitHubHTML.escape(action))
+                " " + (badge.map { "<span class=\"badge \($0)\">\(HostedHTML.escape(action))</span>" }
+                    ?? HostedHTML.escape(action))
             } ?? ""
-            let when = date.map { "<span class=\"date\">\(GitHubHTML.escape(dates.string(from: $0)))</span>" } ?? ""
+            let when = date.map { "<span class=\"date\">\(HostedHTML.escape(dates.string(from: $0)))</span>" } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
-            // (`GitHubHTMLPage`); one made from a String would have to go through `GitHubHTML.escape`.
+            // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             return "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>"
-                + "<b>\(GitHubHTML.escape(user?.login ?? "ghost"))</b>\(what)\(when)"
+                + "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>\(what)\(when)"
         }
 
         /// A thread: its header (chevron slot, path, lines, state), then, unless collapsed, the commented diff rows,
         /// the comments and the reply slot. Its id and `collapsed` class let the app expand it without a reload.
-        func thread(_ thread: GitHubReviewThread) -> String {
+        func thread(_ thread: HostedReviewThread) -> String {
             let collapsed = isCollapsed(thread, expanded: expanded)
             let comments = thread.comments.map { comment in
                 let body = bodyHTML(comment.bodyHTML, comment.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
                 let header = head("avatar-c\(comment.id)", comment.user, action: nil, date: comment.createdAt)
                 return "<div class=\"comment\"><div class=\"comment-head\">\(header)</div>\(body)</div>"
             }
-            // `thread.id` is an integer: it goes in unescaped (a String id would need `GitHubHTML.escape`).
+            // `thread.id` is an integer: it goes in unescaped (a String id would need `HostedHTML.escape`).
             return "<div class=\"thread\(collapsed ? " collapsed" : "")\" id=\"thread-\(thread.id)\">"
                 + threadHead(thread, isResolved: thread.state?.isResolved == true) + excerptTable(thread)
                 + comments.joined() + "<div class=\"slot-reply\" data-slot=\"reply-\(thread.id)\"></div></div>"
         }
 
         func item(
-            _ slot: String, _ user: GitHubUser?, _ action: String, badge: String? = nil, date: Date?, body: String?,
-            emptyText: String? = nil, threads: [GitHubReviewThread] = []
+            _ slot: String, _ user: HostedUser?, _ action: String, badge: String? = nil, date: Date?, body: String?,
+            emptyText: String? = nil, threads: [HostedReviewThread] = []
         ) -> String {
             let content: String
             if let body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 content = "<div class=\"body\">\(body)</div>"
             } else if let emptyText {
-                content = "<div class=\"body empty\">\(GitHubHTML.escape(emptyText))</div>"
+                content = "<div class=\"body empty\">\(HostedHTML.escape(emptyText))</div>"
             } else {
                 content = ""
             }
@@ -136,7 +136,7 @@ extension PRTimeline {
             + (threads.value?.unattached ?? [])
         var end = loose.isEmpty ? "" : "<div class=\"threads loose\">\(loose.map(thread).joined())</div>"
         if case .failed(let message) = threads {
-            end += "<p class=\"empty\">The inline review comments did not load: \(GitHubHTML.escape(message))</p>"
+            end += "<p class=\"empty\">The inline review comments did not load: \(HostedHTML.escape(message))</p>"
         }
         return PRTimelineHTML(
             html: ([description] + sorted).joined() + end, avatars: avatars, count: comments.count + shown.count)
@@ -144,13 +144,13 @@ extension PRTimeline {
 
     /// Whether `thread` shows collapsed (its header only): a resolved one is, an unresolved one is not, unless the user
     /// chose otherwise (`expanded`, by root comment id). The page and the native views on it agree on it.
-    nonisolated static func isCollapsed(_ thread: GitHubReviewThread, expanded: [Int: Bool]) -> Bool {
+    nonisolated static func isCollapsed(_ thread: HostedReviewThread, expanded: [Int: Bool]) -> Bool {
         !(expanded[thread.id] ?? (thread.state?.isResolved != true))
     }
 
     /// The chevron slot, the path with its folders shortened in the middle when it is too long (the file name
     /// stays), "Line N" or "Lines a–b", and the Outdated and Resolved capsules.
-    private nonisolated static func threadHead(_ thread: GitHubReviewThread, isResolved: Bool) -> String {
+    private nonisolated static func threadHead(_ thread: HostedReviewThread, isResolved: Bool) -> String {
         let slash = thread.path.lastIndex(of: "/")
         let folder = slash.map { String(thread.path[..<$0]) } ?? ""
         let file = slash.map { String(thread.path[$0...]) } ?? thread.path
@@ -159,11 +159,11 @@ extension PRTimeline {
         case let (_, end?): "Line \(end)"
         default: nil
         }
-        // `thread.id` is an integer: it goes in unescaped (a String id would need `GitHubHTML.escape`).
+        // `thread.id` is an integer: it goes in unescaped (a String id would need `HostedHTML.escape`).
         return "<div class=\"thread-head\"><span class=\"slot-chevron\" data-slot=\"chevron-\(thread.id)\"></span>"
-            + "<span class=\"path\" title=\"\(GitHubHTML.escape(thread.path))\">"
-            + "<span class=\"folder\">\(GitHubHTML.escape(folder))</span>"
-            + "<span class=\"file\">\(GitHubHTML.escape(file))</span></span>"
+            + "<span class=\"path\" title=\"\(HostedHTML.escape(thread.path))\">"
+            + "<span class=\"folder\">\(HostedHTML.escape(folder))</span>"
+            + "<span class=\"file\">\(HostedHTML.escape(file))</span></span>"
             + (lines.map { "<span class=\"lines\">\($0)</span>" } ?? "")
             + (thread.isOutdated ? "<span class=\"cap outdated\">Outdated</span>" : "")
             + (isResolved ? "<span class=\"cap\">Resolved</span>" : "") + "</div>"
@@ -171,7 +171,7 @@ extension PRTimeline {
 
     /// The commented diff rows as the Files tab shows them: old and new line numbers, the sign, the text on a green or
     /// red band.
-    private nonisolated static func excerptTable(_ thread: GitHubReviewThread) -> String {
+    private nonisolated static func excerptTable(_ thread: HostedReviewThread) -> String {
         let rows = excerpt(thread).map { line in
             let (kind, sign) = switch line.kind {
             case .added: ("add", "+")
@@ -180,21 +180,21 @@ extension PRTimeline {
             }
             return "<tr class=\"\(kind)\"><td class=\"num\">\(line.oldLine.map(String.init) ?? "")</td>"
                 + "<td class=\"num\">\(line.newLine.map(String.init) ?? "")</td><td class=\"sign\">\(sign)</td>"
-                + "<td class=\"code\">\(GitHubHTML.escape(line.text))</td></tr>"
+                + "<td class=\"code\">\(HostedHTML.escape(line.text))</td></tr>"
         }
         return rows.isEmpty ? "" : "<table class=\"excerpt\">\(rows.joined())</table>"
     }
 
     /// The rows of `thread`'s diff hunk, which ends at the commented line: from its first line for a range (the rows
     /// of the other side in between included), else the last 4. The hunk goes through the Files tab's patch parser,
-    /// `GitHubPullRequestFile.diff`, the parser's only public way in, as the patch of a file.
-    private nonisolated static func excerpt(_ thread: GitHubReviewThread) -> ArraySlice<DiffLine> {
+    /// `HostedPullRequestFile.diff`, the parser's only public way in, as the patch of a file.
+    private nonisolated static func excerpt(_ thread: HostedReviewThread) -> ArraySlice<DiffLine> {
         let file: [String: Any] = [
             "filename": thread.path, "status": "modified", "additions": 0, "deletions": 0,
             "patch": thread.diffHunk ?? "",
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: file),
-              let lines = (try? JSONDecoder().decode(GitHubPullRequestFile.self, from: data))?.diff?.hunks.last?.lines
+              let lines = (try? JSONDecoder().decode(HostedPullRequestFile.self, from: data))?.diff?.hunks.last?.lines
         else { return [] }
         let left = thread.side == "LEFT"
         if let start = thread.startLine, start != thread.line,
@@ -224,7 +224,7 @@ struct PRTimelinePage: View {
     /// The timing log's word for the page (`pr 1 conversation html`, `issue 2 conversation html`).
     var kind = "pr"
     let realAvatars: Bool
-    @State private var slots: [GitHubHTMLSlot] = []
+    @State private var slots: [HostedHTMLSlot] = []
     /// Each reply row's height with its margins, by slot id: its slot takes it, so a field grown to more lines pushes
     /// the rest of the page down instead of covering it.
     @State private var replyHeights: [String: CGFloat] = [:]
@@ -237,9 +237,9 @@ struct PRTimelinePage: View {
         let collapsed = Dictionary(uniqueKeysWithValues: threads.values.map { thread in
             ("thread-\(thread.id)", PRTimeline.isCollapsed(thread, expanded: expanded))
         })
-        GitHubHTMLView(
+        HostedHTMLView(
             html: timeline.html, measureKey: loadID,
-            patch: GitHubHTMLPatch(slotHeights: replyHeights, collapsed: collapsed)
+            patch: HostedHTMLPatch(slotHeights: replyHeights, collapsed: collapsed)
         ) { [kind, number] in
             UITiming.content("\(kind) \(number) conversation html")
         } onSlots: {
@@ -264,7 +264,7 @@ struct PRTimelinePage: View {
     /// "ghost"), the chevrons and the reply rows. A thread collapsed by a click drops its reply row at once, before
     /// the page is measured again without its slot.
     @ViewBuilder private func overlay(
-        _ slot: GitHubHTMLSlot, threads: [Int: GitHubReviewThread], expanded: [Int: Bool]
+        _ slot: HostedHTMLSlot, threads: [Int: HostedReviewThread], expanded: [Int: Bool]
     ) -> some View {
         if slot.id.hasPrefix("avatar-") {
             let user = timeline.avatars[slot.id]
@@ -291,15 +291,15 @@ struct PRTimelinePage: View {
 
     /// The thread of a `chevron-<root>` or `reply-<root>` slot.
     private static func thread(
-        of slot: GitHubHTMLSlot, _ prefix: String, in threads: [Int: GitHubReviewThread]
-    ) -> GitHubReviewThread? {
+        of slot: HostedHTMLSlot, _ prefix: String, in threads: [Int: HostedReviewThread]
+    ) -> HostedReviewThread? {
         guard slot.id.hasPrefix(prefix) else { return nil }
         return Int(slot.id.dropFirst(prefix.count)).flatMap { threads[$0] }
     }
 
     /// The thread's chevron: a click expands or collapses it at once (the user's choice, kept across reloads), and
     /// the page follows with the patch.
-    private func chevron(_ thread: GitHubReviewThread, collapsed: Bool) -> some View {
+    private func chevron(_ thread: HostedReviewThread, collapsed: Bool) -> some View {
         Button {
             session.pullDetail.threadExpanded[thread.id] = collapsed
         } label: {
@@ -327,7 +327,7 @@ struct PRTimelinePage: View {
 private struct PRReplyRow: View {
     let session: RepoSession
     let number: Int
-    let thread: GitHubReviewThread
+    let thread: HostedReviewThread
     let resolveUnavailable: String?
     /// The slot's width.
     let width: CGFloat

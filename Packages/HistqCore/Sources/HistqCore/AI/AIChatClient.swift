@@ -266,7 +266,7 @@ final class AIRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
         _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
     ) async -> URLRequest? {
-        guard let from = task.originalRequest?.url, let to = request.url, GitHubHTTP.isSameOrigin(from, to) else {
+        guard let from = task.originalRequest?.url, let to = request.url, HostingHTTP.isSameOrigin(from, to) else {
             return nil
         }
         return request
