@@ -10,7 +10,7 @@
 #   - the designated requirements, cross-checked both ways (each app must satisfy the other's DR;
 #     Keychain access rests on it, and Xcode and the export write the DR differently)
 #   - Info.plist keys CFBundleIdentifier, CFBundleShortVersionString, CFBundleVersion,
-#     LSMinimumSystemVersion, SUFeedURL, SUPublicEDKey, HistqGitHubClientID
+#     LSMinimumSystemVersion, SUFeedURL, SUPublicEDKey, HistqGitHubClientID, HistqGitLabClientID
 # It prints every mismatch and exits 1, else prints "PARITY OK".
 #
 # The local Release build is not the notarized export that ships; the export can be checked the
@@ -105,7 +105,7 @@ plist_value() {
   /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist" 2> /dev/null || echo "<missing>"
 }
 for key in CFBundleIdentifier CFBundleShortVersionString CFBundleVersion LSMinimumSystemVersion \
-  SUFeedURL SUPublicEDKey HistqGitHubClientID; do
+  SUFeedURL SUPublicEDKey HistqGitHubClientID HistqGitLabClientID; do
   compare "Info.plist $key" "$(plist_value "$D" "$key")" "$(plist_value "$R" "$key")"
 done
 

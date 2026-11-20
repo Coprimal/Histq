@@ -402,8 +402,10 @@ final class HostingStore {
     }
 
     /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab asks
-    /// `HostingTokens` on each request (off the main actor, cached; a forced refresh after a 401 reads the Keychain
-    /// again), so a token saved again in Settings is used at once. Throws `HostingError` for a bad host or token.
+    /// `HostingTokens.accessToken` on each request (off the main actor; an OAuth sign-in through the refresher, else
+    /// cached, read again after a 401), so a token saved again in Settings or renewed is used at once. A sign-in that
+    /// cannot be renewed reads as a refused token, so every list and the detail offer Reconnect. Throws `HostingError`
+    /// for a bad host or token.
     nonisolated static func client(
         for account: HostingAccount, profileID: UUID, token: String
     ) throws -> any HostingProvider {
@@ -411,12 +413,17 @@ final class HostingStore {
         case .github:
             return try GitHubClient(host: account.host, token: token)
         case .gitlab:
-            let host = account.host
-            return try GitLabClient(host: host, basePath: account.basePath) { forceRefresh in
-                guard let token = try await HostingTokens.read(
-                    profileID: profileID, kind: .gitlab, host: host, refresh: forceRefresh)
-                else { throw HostingError.unauthorized }
-                return token
+            return try GitLabClient(host: account.host, basePath: account.basePath) { rejected in
+                do {
+                    guard let token = try await HostingTokens.accessToken(
+                        for: account, profileID: profileID, rejecting: rejected)
+                    else { throw HostingError.unauthorized }
+                    return token
+                } catch OAuthRefresher.RefresherError.reconnectNeeded {
+                    throw HostingError.unauthorized
+                } catch OAuthRefresher.RefresherError.refreshFailed(let error) {
+                    throw error
+                }
             }
         }
     }

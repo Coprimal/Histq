@@ -1,7 +1,8 @@
 // Secrets in the Keychain: generic-password items of one service (`AppState.keychainService`), in the file-based
 // login keychain (`kSecUseDataProtectionKeychain = false`). Debug and Release are both Developer ID-signed with the
 // same identity, so an item one build writes is read by the other without an "Always Allow" prompt (user checklist
-// U10.1 checks it). Accounts: `<kind>.<profileID>.<host>` (code host tokens, `github.…` for GitHub), later
+// U10.1 checks it). Accounts: `<kind>.<profileID>.<host>` (code host tokens, `github.…` for GitHub) with, for an
+// OAuth sign-in that can be renewed, its `<kind>.<profileID>.<host>.oauth` record (refresh token and expiry), later
 // `ai.<provider>`.
 //
 // The SecItem calls block (and may wait on a Keychain prompt), so callers run them off the main thread:
@@ -36,6 +37,8 @@ protocol KeychainBackend: Sendable {
     func contains(service: String, account: String) -> OSStatus
     /// Replaces the item's data, or adds the item when it does not exist.
     func upsert(service: String, account: String, data: Data) -> OSStatus
+    /// Replaces the item's data; `errSecItemNotFound` when it does not exist (it is never added).
+    func update(service: String, account: String, data: Data) -> OSStatus
     /// `errSecSuccess` also when there was no such item.
     func delete(service: String, account: String) -> OSStatus
 }
@@ -78,11 +81,16 @@ struct LoginKeychainBackend: KeychainBackend {
 
     func upsert(service: String, account: String, data: Data) -> OSStatus {
         let query = query(service: service, account: account)
-        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        let status = update(service: service, account: account, data: data)
         guard status == errSecItemNotFound else { return status }
         var item = query
         item[kSecValueData as String] = data
         return SecItemAdd(item as CFDictionary, nil)
+    }
+
+    func update(service: String, account: String, data: Data) -> OSStatus {
+        let query = query(service: service, account: account)
+        return SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
     }
 
     func delete(service: String, account: String) -> OSStatus {
@@ -113,6 +121,15 @@ final class InMemoryKeychainBackend: KeychainBackend {
         return errSecSuccess
     }
 
+    func update(service: String, account: String, data: Data) -> OSStatus {
+        items.withLock { items in
+            let key = Key(service: service, account: account)
+            guard items[key] != nil else { return errSecItemNotFound }
+            items[key] = data
+            return errSecSuccess
+        }
+    }
+
     func delete(service: String, account: String) -> OSStatus {
         items.withLock { $0[Key(service: service, account: account)] = nil }
         return errSecSuccess
@@ -138,6 +155,13 @@ struct KeychainStore: Sendable {
     /// `github`, so its items keep the `github.<profileID>.<host>` name they always had; the host is used as is.
     static func hostingAccount(_ kind: HostingKind, profileID: UUID, host: String) -> String {
         "\(kind.rawValue).\(profileID.uuidString).\(host)"
+    }
+
+    /// The OAuth record next to the access token item `account` (`hostingAccount(_:profileID:host:)`): the refresh
+    /// token and the access token's expiry as JSON (`OAuthKeychainStore`). Only an account signed in with OAuth has
+    /// one.
+    static func oauthAccount(_ account: String) -> String {
+        account + ".oauth"
     }
 
     /// The value, nil when there is no item. Throws `KeychainError` when the read failed, or the item is not UTF-8.
@@ -170,6 +194,14 @@ struct KeychainStore: Sendable {
         guard status == errSecSuccess else { throw KeychainError(status: status) }
     }
 
+    /// Replaces an existing item's value; throws `KeychainError` (`errSecItemNotFound` when there is no item, which is
+    /// never added).
+    func updateString(_ value: String, account: String) throws {
+        assertOffMain()
+        let status = backend.update(service: service, account: account, data: Data(value.utf8))
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+    }
+
     /// Deletes the item; no error when there was none.
     func delete(account: String) throws {
         assertOffMain()
@@ -183,14 +215,135 @@ struct KeychainStore: Sendable {
     }
 }
 
+/// The refresher's token pairs in the Keychain: the access token item `<kind>.<profileID>.<host>` (what git and the
+/// API clients use) and its `.oauth` record. Always read uncached, since another Histq build may have rotated the pair.
+/// A write saves the record first, so a torn write leaves the new refresh token (the old one may be used up), then the
+/// access token, and puts it in `HostingTokens`' cache. Both are updates only: an item that is gone (a Disconnect while
+/// the refresh ran) is never written again. Blocking SecItem calls, off the main thread (`@concurrent`).
+struct OAuthKeychainStore: OAuthRefresher.Store {
+    /// The `.oauth` item's JSON.
+    private struct Record: Codable {
+        var refreshToken: String?
+        var expiresAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case refreshToken = "refresh_token"
+            case expiresAt = "expires_at"
+        }
+    }
+
+    /// The `.oauth` item's text for `refreshToken` and `expiresAt`.
+    static func record(refreshToken: String?, expiresAt: Date?) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let data = try encoder.encode(Record(refreshToken: refreshToken, expiresAt: expiresAt))
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Nil when either item is missing; a failed read or a record that is not ours throws.
+    @concurrent
+    func read(_ key: String) async throws -> OAuthRefresher.TokenPair? {
+        let keychain = KeychainStore.shared
+        guard let accessToken = try keychain.string(account: key),
+              let text = try keychain.string(account: KeychainStore.oauthAccount(key))
+        else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let record = try decoder.decode(Record.self, from: Data(text.utf8))
+        return OAuthRefresher.TokenPair(
+            accessToken: accessToken, refreshToken: record.refreshToken, expiresAt: record.expiresAt)
+    }
+
+    @concurrent
+    func write(_ pair: OAuthRefresher.TokenPair, for key: String) async throws {
+        let keychain = KeychainStore.shared
+        let record = try Self.record(refreshToken: pair.refreshToken, expiresAt: pair.expiresAt)
+        try keychain.updateString(record, account: KeychainStore.oauthAccount(key))
+        try keychain.updateString(pair.accessToken, account: key)
+        HostingTokens.cache.withLock { $0[key] = .some(pair.accessToken) }
+    }
+}
+
 /// The profiles' code host tokens, read from `KeychainStore.shared` off the main thread and cached for the process by
 /// account, so a write or fetch reads the Keychain once per profile, kind and host. Settings › Integrations saves and
 /// deletes through here, which updates the cache, so the next git command sees the change. A failed read is never
-/// cached (the next use tries again).
+/// cached (the next use tries again). An account with an `.oauth` record (an OAuth sign-in with a refresh token or an
+/// expiry) gets its access token through the app's one `refresher`, which renews it before it expires and after a
+/// 401; any other token is handed out as it is.
 enum HostingTokens {
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "keychain")
     /// Account to token; nil = known to have no item.
-    private static let cache = OSAllocatedUnfairLock<[String: String?]>(initialState: [:])
+    fileprivate static let cache = OSAllocatedUnfairLock<[String: String?]>(initialState: [:])
+    /// Account to whether it has an `.oauth` record; a failed lookup is not kept.
+    private static let oauthRecords = OSAllocatedUnfairLock<[String: Bool]>(initialState: [:])
+    /// The account behind each refresher key, for its token request (host, base path, client ID).
+    private static let oauthAccounts = OSAllocatedUnfairLock<[String: HostingAccount]>(initialState: [:])
+
+    /// The refresher of every OAuth account, keyed by the access token's Keychain account.
+    static let refresher = OAuthRefresher(store: OAuthKeychainStore()) { key, refreshToken in
+        try await renew(key, refreshToken)
+    }
+
+    /// Histq's GitLab OAuth application ID (`HistqGitLabClientID`, gitlab.com); nil when the build has none.
+    private static let gitLabClientID: String? = {
+        let value = (Bundle.main.object(forInfoDictionaryKey: "HistqGitLabClientID") as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // An unexpanded `$(…)` would mean the build setting is missing, not a client ID.
+        return value.isEmpty || value.hasPrefix("$(") ? nil : value
+    }()
+
+    /// The token request of the refresher key `key`. The account's own OAuth application (`oauthClientID`, the one its
+    /// token came from) comes first, else Histq's. Without a client ID, for an account this process never handed out
+    /// or for GitHub (whose OAuth App tokens never expire), the grant cannot be renewed: a rejection, so the account
+    /// shows "reconnect".
+    @concurrent
+    private static func renew(_ key: String, _ refreshToken: String) async throws -> DeviceFlow.Token {
+        let ownID = { (id: String) in id.trimmingCharacters(in: .whitespaces).isEmpty ? nil : id }
+        guard let account = oauthAccounts.withLock({ $0[key] }), account.kind == .gitlab,
+              let clientID = account.oauthClientID.flatMap(ownID) ?? gitLabClientID
+        else { throw HostingError.unauthorized }
+        let flow = try DeviceFlow(kind: .gitlab, host: account.host, basePath: account.basePath, clientID: clientID)
+        return try await flow.refresh(refreshToken)
+    }
+
+    /// Whether the access token item `key` has an `.oauth` record; throws `KeychainError` when the lookup failed.
+    private static func hasOAuthRecord(_ key: String) throws -> Bool {
+        if let known = oauthRecords.withLock({ $0[key] }) { return known }
+        let found = try KeychainStore.shared.contains(account: KeychainStore.oauthAccount(key))
+        oauthRecords.withLock { $0[key] = found }
+        return found
+    }
+
+    /// The access token of `account` of `profileID` for an API client or git: through the refresher for an OAuth
+    /// account, else the item as `read` gives it. `rejecting` is the token a 401 just refused (then a plain token is
+    /// read again, uncached). Nil when a plain token is missing; throws `KeychainError` or
+    /// `OAuthRefresher.RefresherError` (`reconnectNeeded`: the sign-in cannot be renewed).
+    @concurrent
+    static func accessToken(
+        for account: HostingAccount, profileID: UUID, rejecting: String? = nil
+    ) async throws -> String? {
+        let key = KeychainStore.hostingAccount(account.kind, profileID: profileID, host: account.host)
+        guard try hasOAuthRecord(key) else {
+            return try await read(
+                profileID: profileID, kind: account.kind, host: account.host, refresh: rejecting != nil)
+        }
+        oauthAccounts.withLock { $0[key] = account }
+        return try await refresher.token(for: key, rejecting: rejecting)
+    }
+
+    /// Whether `account`'s OAuth sign-in can no longer be renewed (the refresher says reconnect). False for a plain
+    /// token, and for any other failure (offline), which says nothing about the sign-in.
+    @concurrent
+    static func isSignInExpired(_ account: HostingAccount, profileID: UUID) async -> Bool {
+        do {
+            _ = try await accessToken(for: account, profileID: profileID)
+            return false
+        } catch OAuthRefresher.RefresherError.reconnectNeeded {
+            return true
+        } catch {
+            return false
+        }
+    }
 
     /// The `kind` token of `profileID` for `host`, nil when there is none or the read failed (logged, status only).
     /// With `refresh`, reads the Keychain even when cached (the Integrations page, so an item deleted outside Histq
@@ -209,7 +362,8 @@ enum HostingTokens {
     }
 
     /// What git gets for `profile` (`GitInvocation`, which trusts the set): one credential per account of the profile
-    /// itself that has a token, for the account's host; empty without a profile. The username is the account's
+    /// itself that has a token, for the account's host (an OAuth one renewed first when it is about to expire; one that
+    /// cannot be had is left out, logged); empty without a profile. The username is the account's
     /// `gitUsername`, else `x-access-token` for GitHub and `oauth2` for GitLab (any name works with a personal access
     /// token; OAuth tokens need `oauth2`).
     @concurrent
@@ -217,9 +371,15 @@ enum HostingTokens {
         guard let profile else { return [] }
         var credentials: [GitCredential] = []
         for account in profile.accounts {
-            guard let token = await token(profileID: profile.id, kind: account.kind, host: account.host) else {
-                continue
+            let token: String?
+            do {
+                token = try await accessToken(for: account, profileID: profile.id)
+            } catch {
+                let reason = logReason(error)
+                logger.error("no token of \(account.host, privacy: .public) for git: \(reason, privacy: .public)")
+                token = nil
             }
+            guard let token else { continue }
             let kindUsername = switch account.kind {
             case .github: "x-access-token"
             case .gitlab: "oauth2"
@@ -228,6 +388,18 @@ enum HostingTokens {
             credentials.append(GitCredential(kind: account.kind, host: account.host, username: username, token: token))
         }
         return credentials
+    }
+
+    /// What a log says of a failure to get a token: the error's case and an HTTP status, never a server's text.
+    private static func logReason(_ error: any Error) -> String {
+        switch error {
+        case OAuthRefresher.RefresherError.reconnectNeeded: "reconnect needed"
+        case OAuthRefresher.RefresherError.storeFailed: "Keychain read or save failed"
+        case OAuthRefresher.RefresherError.refreshFailed(let cause): "refresh failed (\(logReason(cause)))"
+        case HostingError.http(let status, _): "HTTP \(status)"
+        case let error as KeychainError: error.description
+        default: String(describing: type(of: error))
+        }
     }
 
     /// As `token(profileID:kind:host:refresh:)`, but a failed read throws instead of reading as no token.
@@ -247,19 +419,50 @@ enum HostingTokens {
         }
     }
 
+    /// Saves a connection's token; with a `refreshToken` or an `expiresIn` (seconds, an OAuth sign-in) also its
+    /// `.oauth` record, else deletes an earlier sign-in's record. The record goes first, so a failed save never leaves
+    /// the new token next to the earlier sign-in's record. The refresher forgets the account before (a refresh in
+    /// flight saves nothing over the new items) and after.
     @concurrent
-    static func save(_ token: String, profileID: UUID, kind: HostingKind = .github, host: String) async throws {
+    static func save(
+        _ token: String, refreshToken: String? = nil, expiresIn: Int? = nil, profileID: UUID,
+        kind: HostingKind = .github, host: String
+    ) async throws {
         let account = KeychainStore.hostingAccount(kind, profileID: profileID, host: host)
+        let oauth = KeychainStore.oauthAccount(account)
+        let isOAuth = refreshToken != nil || expiresIn != nil
+        oauthRecords.withLock { $0[account] = nil }
+        await refresher.forget(account)
+        if isOAuth {
+            let expiresAt = expiresIn.map { Date.now.addingTimeInterval(TimeInterval($0)) }
+            try KeychainStore.shared.setString(
+                try OAuthKeychainStore.record(refreshToken: refreshToken, expiresAt: expiresAt), account: oauth)
+        } else {
+            try KeychainStore.shared.delete(account: oauth)
+        }
         try KeychainStore.shared.setString(token, account: account)
         cache.withLock { $0[account] = .some(token) }
+        oauthRecords.withLock { $0[account] = isOAuth }
+        await refresher.forget(account)
     }
 
+    /// Deletes the account's token item and its `.oauth` record (both are tried), and the refresher forgets it.
     @concurrent
     static func delete(profileID: UUID, kind: HostingKind = .github, host: String) async throws {
         let account = KeychainStore.hostingAccount(kind, profileID: profileID, host: host)
         // Forgotten first: even if the delete fails, git stops getting the token the user asked to remove.
         cache.withLock { $0[account] = .some(nil) }
-        try KeychainStore.shared.delete(account: account)
+        oauthRecords.withLock { $0[account] = false }
+        await refresher.forget(account)
+        var failure: (any Error)?
+        for item in [account, KeychainStore.oauthAccount(account)] {
+            do {
+                try KeychainStore.shared.delete(account: item)
+            } catch {
+                failure = failure ?? error
+            }
+        }
+        if let failure { throw failure }
     }
 }
 
@@ -279,8 +482,63 @@ enum KeychainSelfTest {
                     ? "login: \(roundTrip(KeychainStore(service: AppState.keychainService, backend: LoginKeychainBackend())))"
                     : "login: skipped (no state dir)")
             }
+            if KeychainStore.shared.isInMemory { lines.append("disconnect: \(await disconnectCheck())") }
             let file = StatePaths.root.appending(path: "keychain-selftest.txt", directoryHint: .notDirectory)
             try? (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// With `-HistqKeychain memory` only: a fake OAuth sign-in of a throwaway GitLab account saved through
+    /// `HostingTokens` has both items and is handed out by the refresher; the refresher's store writes a renewed pair
+    /// that reads back (and git's token follows it); a pasted token saved over it drops the `.oauth` record;
+    /// Disconnect (`HostingTokens.delete`) of a fake OAuth sign-in leaves neither item, and a renewed pair written
+    /// after it does not bring them back. "ok", or the first step that failed (never a value).
+    private static func disconnectCheck() async -> String {
+        let profileID = UUID()
+        let host = "gitlab.selftest.invalid"
+        let account = HostingAccount(kind: .gitlab, host: host, login: "selftest")
+        let token = KeychainStore.hostingAccount(.gitlab, profileID: profileID, host: host)
+        let oauth = KeychainStore.oauthAccount(token)
+        let keychain = KeychainStore.shared
+        func saveOAuth() async throws {
+            try await HostingTokens.save(
+                "histq_qa_fake_token", refreshToken: "histq_qa_fake_refresh", expiresIn: 7200, profileID: profileID,
+                kind: .gitlab, host: host)
+        }
+        do {
+            try await saveOAuth()
+            guard try keychain.contains(account: token), try keychain.contains(account: oauth) else {
+                return "fail: an item is missing after an OAuth save"
+            }
+            let handedOut = try await HostingTokens.accessToken(for: account, profileID: profileID)
+            guard handedOut == "histq_qa_fake_token" else { return "fail: the refresher handed out another token" }
+            let store = OAuthKeychainStore()
+            let renewed = OAuthRefresher.TokenPair(
+                accessToken: "histq_qa_fake_renewed", refreshToken: "histq_qa_fake_refresh_2",
+                expiresAt: Date(timeIntervalSince1970: 2_000_000_000))
+            try await store.write(renewed, for: token)
+            guard try await store.read(token) == renewed else { return "fail: a renewed pair did not read back" }
+            let forGit = try await HostingTokens.read(profileID: profileID, kind: .gitlab, host: host)
+            guard forGit == "histq_qa_fake_renewed" else { return "fail: the cache kept the old token" }
+            try await HostingTokens.save("histq_qa_fake_pat", profileID: profileID, kind: .gitlab, host: host)
+            guard try !keychain.contains(account: oauth) else { return "fail: .oauth left after a pasted token" }
+            try await saveOAuth()
+            try await HostingTokens.delete(profileID: profileID, kind: .gitlab, host: host)
+            let tokenLeft = try keychain.contains(account: token)
+            let oauthLeft = try keychain.contains(account: oauth)
+            guard !tokenLeft, !oauthLeft else {
+                return "fail: after Disconnect the token item is \(tokenLeft ? "left" : "gone"), the .oauth item "
+                    + (oauthLeft ? "left" : "gone")
+            }
+            let resurrected = (try? await store.write(renewed, for: token)) != nil
+            guard !resurrected, try !keychain.contains(account: token), try !keychain.contains(account: oauth) else {
+                return "fail: a renewed pair written after Disconnect brought the account back"
+            }
+            return "ok (renewed pair saved; after Disconnect neither the token item nor the .oauth item remains, and "
+                + "a late renewal does not bring them back)"
+        } catch {
+            try? await HostingTokens.delete(profileID: profileID, kind: .gitlab, host: host)
+            return "fail: \(error)"
         }
     }
 

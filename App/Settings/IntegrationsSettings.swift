@@ -1,11 +1,13 @@
 // Settings › Integrations, per profile: the profile's code host accounts, one per host. Add Account connects GitHub
 // (github.com) or a GitHub Enterprise Server host by signing in with GitHub (OAuth device flow, github.com only), by
 // pasting a personal access token, or by importing the GitHub CLI's token; GitLab (gitlab.com) or a GitLab
-// Self-Managed host (with an optional base path) by pasting a personal access token. Each token is checked with
-// `GET /user` before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the host (and base
-// path) and the login.
-// Disconnect deletes that account's Keychain item. Tokens are never logged, shown or kept in the page's state longer
-// than the check.
+// Self-Managed host (with an optional base path) by pasting a personal access token, or by signing in with GitLab
+// (device flow) with Histq's application on gitlab.com or the account's own Application ID on Self-Managed. Each token
+// is checked with `GET /user` before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the
+// host (and base path), the login and a Self-Managed sign-in's Application ID.
+// A sign-in that returns a refresh token or an expiry also saves the account's `.oauth` record, and an account whose
+// sign-in can no longer be renewed says so. Disconnect deletes that account's Keychain items. Tokens are never logged,
+// shown or kept in the page's state longer than the check.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -22,9 +24,14 @@ struct IntegrationsSettings: View {
     @State private var hostDraft = ""
     /// The GitLab Self-Managed base path typed for the next connection (`gitlab` for `https://example.com/gitlab`).
     @State private var basePathDraft = ""
+    /// The Application ID of the GitLab Self-Managed instance's own OAuth application, typed for "Sign in with GitLab".
+    @State private var applicationIDDraft = ""
     @State private var pastedToken = ""
     /// Whether the Keychain holds each account's token (by host), read off the main thread at each select of the page.
     @State private var tokenStored: [String: Loadable<Bool>] = [:]
+    /// The hosts whose OAuth sign-in can no longer be renewed (`HostingTokens.isSignInExpired`), read with
+    /// `tokenStored`.
+    @State private var signInExpired: Set<String> = []
     @State private var activity: Activity = .idle
     /// The connection in flight (a check, an import, a device flow's polling); cancelled by Cancel, a profile switch
     /// and the Settings modal closing.
@@ -39,9 +46,9 @@ struct IntegrationsSettings: View {
     private enum ConnectMethod: Hashable, CaseIterable {
         case signIn, token, cli
 
-        var title: String {
+        func title(_ kind: HostingKind) -> String {
             switch self {
-            case .signIn: "Sign in with GitHub"
+            case .signIn: "Sign in with \(kind.name)"
             case .token: "Personal access token"
             case .cli: "GitHub CLI"
             }
@@ -67,16 +74,6 @@ struct IntegrationsSettings: View {
             case .gitlab, .gitlabSelfManaged: .gitlab
             }
         }
-
-        /// The OAuth App exists on github.com only; Enterprise hosts connect with a token or the GitHub CLI, GitLab
-        /// hosts with a token.
-        var methods: [ConnectMethod] {
-            switch self {
-            case .github: ConnectMethod.allCases
-            case .enterprise: [.token, .cli]
-            case .gitlab, .gitlabSelfManaged: [.token]
-            }
-        }
     }
 
     private enum Activity: Equatable {
@@ -84,18 +81,24 @@ struct IntegrationsSettings: View {
         /// Waiting on the host or the GitHub CLI; the text says for what.
         case working(String)
         /// The device flow's code is shown; polling until the user approves it.
-        case deviceCode(GitHubDeviceFlow.DeviceCode, host: String)
+        case deviceCode(DeviceFlow.DeviceCode, kind: HostingKind, host: String, basePath: String?)
         case failed(String)
     }
 
     /// `HistqGitHubClientID` from Info.plist (build setting `HISTQ_GITHUB_CLIENT_ID`); empty until an OAuth App is
     /// registered, and then "Sign in with GitHub" is replaced by a hint.
-    static let clientID: String = {
-        let value = (Bundle.main.object(forInfoDictionaryKey: "HistqGitHubClientID") as? String ?? "")
+    static let clientID = infoPlistID("HistqGitHubClientID")
+
+    /// `HistqGitLabClientID` from Info.plist (build setting `HISTQ_GITLAB_CLIENT_ID`): Histq's GitLab application on
+    /// gitlab.com; empty until one is registered, and then gitlab.com has no "Sign in with GitLab".
+    static let gitLabClientID = infoPlistID("HistqGitLabClientID")
+
+    private static func infoPlistID(_ key: String) -> String {
+        let value = (Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // An unexpanded `$(…)` would mean the build setting is missing, not a client ID.
         return value.hasPrefix("$(") ? "" : value
-    }()
+    }
 
     private var library: ProfileLibrary { .shared }
 
@@ -134,8 +137,8 @@ struct IntegrationsSettings: View {
                 }
                 .onChange(of: profile.id) { closeAdd() }
             if let adding {
-                if case .deviceCode(let code, let host) = activity {
-                    deviceCodeGroup(code, host: host)
+                if case .deviceCode(let code, let kind, let host, let basePath) = activity {
+                    deviceCodeGroup(code, kind: kind, host: host, basePath: basePath)
                 }
                 connectGroup(profile, kind: adding)
             }
@@ -195,12 +198,18 @@ struct IntegrationsSettings: View {
     /// Reads whether the Keychain has each account's token (fresh, not cached: an item deleted outside Histq shows).
     private func checkTokens(_ profile: Profile) async {
         tokenStored = Dictionary(profile.accounts.map { ($0.host, .loading) }, uniquingKeysWith: { first, _ in first })
+        signInExpired = []
         for account in profile.accounts {
             do {
                 let token = try await HostingTokens.read(
                     profileID: profile.id, kind: account.kind, host: account.host, refresh: true)
                 guard !Task.isCancelled else { return }
                 tokenStored[account.host] = .loaded(token != nil)
+                // An OAuth sign-in may need a token request to tell: the row shows its token first.
+                if token != nil, await HostingTokens.isSignInExpired(account, profileID: profile.id) {
+                    guard !Task.isCancelled else { return }
+                    signInExpired.insert(account.host)
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 tokenStored[account.host] = .failed(String(describing: error))
@@ -242,7 +251,7 @@ struct IntegrationsSettings: View {
                     .foregroundStyle(.secondary)
             }
             SettingsHint("Connected to \(account.address)")
-            tokenStatus(tokenStored[account.host] ?? .idle)
+            tokenStatus(tokenStored[account.host] ?? .idle, expired: signInExpired.contains(account.host))
         }
     }
 
@@ -292,8 +301,12 @@ struct IntegrationsSettings: View {
     }
 
     @ViewBuilder
-    private func tokenStatus(_ stored: Loadable<Bool>) -> some View {
+    private func tokenStatus(_ stored: Loadable<Bool>, expired: Bool) -> some View {
         switch stored {
+        case .loaded(true) where expired:
+            Text("The sign-in expired and could not be renewed. Disconnect, then connect again.")
+                .font(.settingsCaption)
+                .foregroundStyle(.red)
         case .loaded(true):
             SettingsHint("The token is in your login Keychain.")
         case .loaded(false):
@@ -318,7 +331,8 @@ struct IntegrationsSettings: View {
             button: "Disconnect", isDestructive: true) { disconnect(profile.id, account: account) }))
     }
 
-    /// Deletes only this account's Keychain item, then removes the account from the profile.
+    /// Deletes only this account's Keychain items (token and `.oauth` record), then removes the account from the
+    /// profile.
     private func disconnect(_ id: UUID, account: HostingAccount) {
         Task {
             do {
@@ -368,9 +382,44 @@ struct IntegrationsSettings: View {
         return host
     }
 
+    /// The typed Self-Managed Application ID, trimmed; nil when empty.
+    private var draftApplicationID: String? {
+        let text = applicationIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// The OAuth client ID "Sign in with" uses for `kind`: Histq's on github.com and gitlab.com, the typed Application
+    /// ID on GitLab Self-Managed; nil when there is none (always on GitHub Enterprise Server).
+    private func signInClientID(_ kind: AddKind) -> String? {
+        let id = switch kind {
+        case .github: Self.clientID
+        case .gitlab: Self.gitLabClientID
+        case .gitlabSelfManaged: draftApplicationID ?? ""
+        case .enterprise: ""
+        }
+        return id.isEmpty ? nil : id
+    }
+
+    /// Histq's OAuth App exists on github.com only (without a client ID its row says how to set one); Enterprise hosts
+    /// connect with a token or the GitHub CLI. GitLab hosts connect with a token, or sign in when there is an
+    /// application ID (Histq's on gitlab.com, the typed one on Self-Managed).
+    private func methods(_ kind: AddKind) -> [ConnectMethod] {
+        switch kind {
+        case .github: ConnectMethod.allCases
+        case .enterprise: [.token, .cli]
+        case .gitlab, .gitlabSelfManaged: signInClientID(kind) == nil ? [.token] : [.signIn, .token]
+        }
+    }
+
+    /// The picked method, or the kind's first when it is not offered (the Application ID was cleared).
+    private func shownMethod(_ kind: AddKind) -> ConnectMethod {
+        let methods = methods(kind)
+        return methods.contains(method) ? method : methods[0]
+    }
+
     private func startAdd(_ kind: AddKind) {
         closeAdd()
-        if !kind.methods.contains(method) { method = kind.methods[0] }
+        if !methods(kind).contains(method) { method = methods(kind)[0] }
         adding = kind
     }
 
@@ -380,6 +429,7 @@ struct IntegrationsSettings: View {
         adding = nil
         hostDraft = ""
         basePathDraft = ""
+        applicationIDDraft = ""
         pastedToken = ""
         if case .failed = activity { activity = .idle }
     }
@@ -390,8 +440,9 @@ struct IntegrationsSettings: View {
             + "Keychain.") {
             LabeledContent {
                 HStack(spacing: 8) {
-                    CapsuleMenuPicker(label: "Method", selection: $method, title: Text(method.title)) {
-                        ForEach(kind.methods, id: \.self) { Text($0.title).tag($0) }
+                    CapsuleMenuPicker(label: "Method", selection: $method,
+                                      title: Text(shownMethod(kind).title(kind.kind))) {
+                        ForEach(methods(kind), id: \.self) { Text($0.title(kind.kind)).tag($0) }
                     }
                     .disabled(isBusy)
                     Button("Cancel", action: closeAdd)
@@ -408,9 +459,11 @@ struct IntegrationsSettings: View {
             if kind == .gitlabSelfManaged {
                 basePathRow
                 SettingsDivider()
+                applicationIDRow
+                SettingsDivider()
             }
-            switch method {
-            case .signIn: signInRow(profile: profile, host: connectableHost(profile))
+            switch shownMethod(kind) {
+            case .signIn: signInRow(profile: profile, kind: kind, host: connectableHost(profile))
             case .token: tokenRow(profile, kind: kind)
             case .cli: cliRow(profile)
             }
@@ -458,6 +511,21 @@ struct IntegrationsSettings: View {
                 SettingsHint("Optional: only when GitLab lives under a path, such as gitlab for "
                     + "https://example.com/gitlab.")
             }
+        }
+    }
+
+    private var applicationIDRow: some View {
+        LabeledContent {
+            TextField("Application ID", text: $applicationIDDraft)
+                .textFieldStyle(.settings)
+                .frame(maxWidth: 240)
+                .labelsHidden()
+                .disabled(isBusy)
+        } label: {
+            Text("Application ID")
+            SettingsHint("Optional: for Sign in with GitLab, the ID of an application on this GitLab that is not "
+                + "confidential, has the device authorization grant on and the scopes api, read_user, read_repository "
+                + "and write_repository.")
         }
     }
 
@@ -541,22 +609,24 @@ struct IntegrationsSettings: View {
         cliAccounts = accounts
     }
 
-    /// "Sign in with GitHub": the device flow's button, or the hint when this build has no OAuth App client ID.
-    private func signInRow(profile: Profile?, host: String?) -> some View {
-        LabeledContent {
-            if !Self.clientID.isEmpty {
+    /// "Sign in with GitHub" or "Sign in with GitLab": the device flow's button, or the hint when this build has no
+    /// GitHub OAuth App client ID (GitLab offers the method only with an application ID).
+    private func signInRow(profile: Profile?, kind: AddKind = .github, host: String?) -> some View {
+        let clientID = signInClientID(kind)
+        return LabeledContent {
+            if clientID != nil {
                 Button("Sign In…") {
-                    if let profile, let host { startDeviceFlow(profile, host: host) }
+                    if let profile, let host { startDeviceFlow(profile, kind: kind, host: host) }
                 }
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
                 .disabled(profile == nil || host == nil || isBusy)
             }
         } label: {
-            Text("Sign in with GitHub")
-            if Self.clientID.isEmpty {
+            Text("Sign in with \(kind.kind.name)")
+            if clientID == nil {
                 SettingsHint("Register a GitHub OAuth App and set HISTQ_GITHUB_CLIENT_ID")
             } else {
-                SettingsHint("Opens GitHub in your browser, where you enter a one-time code.")
+                SettingsHint("Opens \(kind.kind.name) in your browser, where you enter a one-time code.")
             }
         }
     }
@@ -591,11 +661,13 @@ struct IntegrationsSettings: View {
             .padding(.top, 8)
     }
 
-    /// The device flow's code, big, with Copy and Open GitHub (both already done once when the code came), while the
-    /// app polls for the approval.
-    private func deviceCodeGroup(_ code: GitHubDeviceFlow.DeviceCode, host: String) -> some View {
-        SettingsGroup("Sign in with GitHub", description: "The code is copied and GitHub is open in your browser: paste it "
-            + "there. Histq connects as soon as you approve it.") {
+    /// The device flow's code, big, with Copy and Open GitHub (or GitLab; both already done once when the code came),
+    /// while the app polls for the approval.
+    private func deviceCodeGroup(
+        _ code: DeviceFlow.DeviceCode, kind: HostingKind, host: String, basePath: String?
+    ) -> some View {
+        SettingsGroup("Sign in with \(kind.name)", description: "The code is copied and \(kind.name) is open in your "
+            + "browser: paste it there. Histq connects as soon as you approve it.") {
             HStack(spacing: 12) {
                 Text(code.userCode)
                     .font(.system(size: 28, weight: .semibold, design: .monospaced))
@@ -607,14 +679,18 @@ struct IntegrationsSettings: View {
                     copied = true
                 }
                 .buttonStyle(RowTextButtonStyle(formRow: true))
-                Button("Open GitHub") { NSWorkspace.shared.open(Self.verificationURL(code, host: host)) }
-                    .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                Button("Open \(kind.name)") {
+                    NSWorkspace.shared.open(
+                        Self.verificationURL(code, kind: kind, host: host, basePath: basePath, complete: true))
+                }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
             }
             SettingsDivider()
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Waiting for the approval at \(Self.verificationURL(code, host: host).absoluteString)…")
+                Text("Waiting for the approval at "
+                    + "\(Self.verificationURL(code, kind: kind, host: host, basePath: basePath).absoluteString)…")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -624,17 +700,25 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// The flow's verification URL when it is https on the flow's host and port (`host` as validated, with its port if
-    /// it has one) without userinfo, else `https://<host>/login/device`: the URL comes from the server, and the browser
-    /// should only ever open the host the user typed.
-    private static func verificationURL(_ code: GitHubDeviceFlow.DeviceCode, host: String) -> URL {
+    /// The flow's verification URL (with `complete`, the one with the code filled in when the host sent it) when it is
+    /// https on the flow's host and port (`host` as validated, with its port if it has one) without userinfo, else
+    /// `https://<host>/login/device` on GitHub and `https://<host>[/<basePath>]/oauth/device` on GitLab: the URL comes
+    /// from the server, and the browser should only ever open the host the user typed.
+    private static func verificationURL(
+        _ code: DeviceFlow.DeviceCode, kind: HostingKind, host: String, basePath: String?, complete: Bool = false
+    ) -> URL {
         let hostParts = host.split(separator: ":", maxSplits: 1).map(String.init)
-        if let url = URL(string: code.verificationURI), url.scheme?.lowercased() == "https",
-           url.user == nil, url.password == nil,
-           url.host?.lowercased() == hostParts.first, url.port == hostParts.dropFirst().first.flatMap({ Int($0) }) {
+        func onHost(_ text: String?) -> URL? {
+            guard let text, let url = URL(string: text), url.scheme?.lowercased() == "https",
+                  url.user == nil, url.password == nil,
+                  url.host?.lowercased() == hostParts.first, url.port == hostParts.dropFirst().first.flatMap({ Int($0) })
+            else { return nil }
             return url
         }
-        return URL(string: "https://\(host)/login/device") ?? URL(string: "https://github.com/login/device")!
+        if complete, let url = onHost(code.verificationURIComplete) { return url }
+        if let url = onHost(code.verificationURI) { return url }
+        let path = kind == .gitlab ? (basePath.map { "/" + $0 } ?? "") + "/oauth/device" : "/login/device"
+        return URL(string: "https://\(host)\(path)") ?? URL(string: "https://github.com/login/device")!
     }
 
     private func cancelConnection() {
@@ -660,30 +744,60 @@ struct IntegrationsSettings: View {
         }
     }
 
-    private func startDeviceFlow(_ profile: Profile, host: String) {
-        guard !isBusy, profile.account(forHost: host) == nil else { return }
+    /// The device flow on `host`. A GitLab Self-Managed account keeps the Application ID it signed in with (its token
+    /// renews with it); on github.com and gitlab.com the account keeps none (Histq's own).
+    private func startDeviceFlow(_ profile: Profile, kind: AddKind, host: String) {
+        guard !isBusy, profile.account(forHost: host) == nil, let clientID = signInClientID(kind),
+              let draftPath = draftBasePath
+        else { return }
         connectTask?.cancel()
         copied = false
-        activity = .working("Asking GitHub for a code…")
+        let hostKind = kind.kind
+        let basePath = draftPath.isEmpty ? nil : draftPath
+        let ownClientID = kind == .gitlabSelfManaged ? clientID : nil
+        activity = .working("Asking \(hostKind.name) for a code…")
         let id = profile.id
         connectTask = Task {
             do {
-                let flow = try GitHubDeviceFlow(host: host, clientID: Self.clientID)
-                let code = try await flow.start()
+                let flow = try DeviceFlow(kind: hostKind, host: host, basePath: basePath, clientID: clientID)
+                let code: DeviceFlow.DeviceCode
+                do {
+                    code = try await flow.start()
+                } catch let error where hostKind == .gitlab && Self.lacksDeviceGrant(error) {
+                    throw NoDeviceGrant()
+                }
                 try Task.checkCancellation()
-                activity = .deviceCode(code, host: host)
+                activity = .deviceCode(code, kind: hostKind, host: host, basePath: basePath)
                 // As `gh auth login --web`: the code goes to the clipboard and the browser opens, ready to paste.
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(code.userCode, forType: .string)
                 copied = true
-                NSWorkspace.shared.open(Self.verificationURL(code, host: host))
+                NSWorkspace.shared.open(
+                    Self.verificationURL(code, kind: hostKind, host: host, basePath: basePath, complete: true))
                 let token = try await flow.waitForToken(code)
                 try Task.checkCancellation()
-                activity = .working("Checking the token with GitHub…")
-                try await finishConnect(id, host: host, token: token)
+                activity = .working("Checking the token with \(hostKind.name)…")
+                try await finishConnect(
+                    id, kind: hostKind, host: host, basePath: basePath, token: token.accessToken,
+                    refreshToken: token.refreshToken, expiresIn: token.expiresIn, oauthClientID: ownClientID)
             } catch {
-                fail(error)
+                fail(error, kind: hostKind)
             }
+        }
+    }
+
+    /// A GitLab whose device-code request fails because it has no device authorization grant.
+    private struct NoDeviceGrant: Error {}
+
+    /// Whether a GitLab device-code request failed for want of the device authorization grant: a 404 (no such
+    /// endpoint), `unsupported_grant_type`, or `invalid_request` about the device grant.
+    private static func lacksDeviceGrant(_ error: Error) -> Bool {
+        switch error {
+        case HostingError.notFound: true
+        case DeviceFlow.DeviceFlowError.failed(code: "unsupported_grant_type", description: _): true
+        case DeviceFlow.DeviceFlowError.failed(code: "invalid_request", description: let description?):
+            description.localizedCaseInsensitiveContains("device")
+        default: false
         }
     }
 
@@ -706,15 +820,19 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// Checks `token` with `GET /user`, saves it in the Keychain, then adds the profile's account (host, base path and
-    /// login).
+    /// Checks `token` with `GET /user`, saves it in the Keychain (with a sign-in's `refreshToken` and `expiresIn` in
+    /// its `.oauth` record), then adds the profile's account (host, base path, login and the sign-in's own
+    /// `oauthClientID`).
     private func finishConnect(
-        _ id: UUID, kind: HostingKind = .github, host: String, basePath: String? = nil, token: String
+        _ id: UUID, kind: HostingKind = .github, host: String, basePath: String? = nil, token: String,
+        refreshToken: String? = nil, expiresIn: Int? = nil, oauthClientID: String? = nil
     ) async throws {
         let login = try await Self.login(token: token, kind: kind, host: host, basePath: basePath)
         try Task.checkCancellation()
-        try await HostingTokens.save(token, profileID: id, kind: kind, host: host)
-        library.setAccount(HostingAccount(kind: kind, host: host, basePath: basePath, login: login), of: id)
+        try await HostingTokens.save(
+            token, refreshToken: refreshToken, expiresIn: expiresIn, profileID: id, kind: kind, host: host)
+        library.setAccount(
+            HostingAccount(kind: kind, host: host, basePath: basePath, login: login, oauthClientID: oauthClientID), of: id)
         activity = .idle
         connectTask = nil
         closeAdd()
@@ -819,7 +937,8 @@ struct IntegrationsSettings: View {
         case HostingError.invalidToken: "That is not a token: it has spaces or other characters a token never has."
         case GitError.timeout: "gh did not answer within a minute."
         case let error as HostingError: String(describing: error)
-        case let error as GitHubDeviceFlow.DeviceFlowError: String(describing: error)
+        case let error as DeviceFlow.DeviceFlowError: error.message(provider: kind.name)
+        case is NoDeviceGrant: "This GitLab does not support device sign-in; use a token."
         case let error as CLIError: error.description
         case let error as KeychainError: "The token could not be saved: \(error)"
         default: error.localizedDescription

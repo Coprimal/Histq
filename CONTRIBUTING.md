@@ -38,6 +38,23 @@ then asks again for Keychain access and grants after each rebuild:
 CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=
 ```
 
+## OAuth apps
+
+"Sign in with GitHub" and "Sign in with GitLab" use the OAuth device flow with Histq's own registered apps. Their IDs
+are public values, set as build settings in `project.yml` and read from Info.plist. With an empty GitHub ID, Settings ›
+Integrations shows how to set it; with an empty GitLab ID, gitlab.com has no sign-in. A personal access token works
+either way.
+
+| Provider | What to register | Build setting (Info.plist key) |
+| -------- | ---------------- | ------------------------------ |
+| GitHub | An OAuth App with "Enable Device Flow" checked. | `HISTQ_GITHUB_CLIENT_ID` (`HistqGitHubClientID`) |
+| GitLab (gitlab.com) | An application with Confidential off (a public client), scopes `api`, `read_user`, `read_repository` and `write_repository`, and the device authorization grant enabled. | `HISTQ_GITLAB_CLIENT_ID` (`HistqGitLabClientID`) |
+
+A GitLab Self-Managed account can use its own application (registered the same way on that instance): its Application
+ID goes in the Add Account form and is kept with the account in the profile.
+
+Only public client IDs are committed. Never commit a client secret.
+
 ## Fixtures
 
 `scripts/make-fixtures.sh build/qa/fx` builds deterministic git repositories for tests and QA, isolated from your git

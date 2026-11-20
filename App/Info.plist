@@ -5,6 +5,8 @@
 	<!-- Partial Info.plist: merged with the generated one (GENERATE_INFOPLIST_FILE=YES). -->
 	<key>HistqGitHubClientID</key>
 	<string>$(HISTQ_GITHUB_CLIENT_ID)</string>
+	<key>HistqGitLabClientID</key>
+	<string>$(HISTQ_GITLAB_CLIENT_ID)</string>
 	<key>SUFeedURL</key>
 	<string>https://histq.coprimal.dev/appcast.xml</string>
 	<key>SUPublicEDKey</key>

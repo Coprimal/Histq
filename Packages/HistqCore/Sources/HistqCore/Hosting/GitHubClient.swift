@@ -96,11 +96,6 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     // MARK: - Hosts and remote URLs
 
-    /// Forwards to `HostingHTTP.validatedHost(_:)`.
-    public static func validatedHost(_ host: String) -> String? {
-        HostingHTTP.validatedHost(host)
-    }
-
     /// The REST base of `host` (already validated).
     static func apiBase(forHost host: String) -> URL? {
         host == "github.com" ? URL(string: "https://api.github.com") : URL(string: "https://\(host)/api/v3")
@@ -115,11 +110,6 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         let name = remote.segments[1]
         guard isSafeSegment(owner, extra: "-_"), isSafeSegment(name, extra: "-_.") else { return nil }
         return HostedRepository(host: remote.host, owner: owner, name: name)
-    }
-
-    /// Forwards to `HostingHTTP.isUsableToken(_:)`.
-    public static func isUsableToken(_ token: String) -> Bool {
-        HostingHTTP.isUsableToken(token)
     }
 
     private static func isSafeSegment(_ text: String, extra: String) -> Bool {

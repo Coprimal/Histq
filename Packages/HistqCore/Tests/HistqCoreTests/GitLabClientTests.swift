@@ -23,11 +23,11 @@ struct GitLabClientTests {
     }
 
     /// A client of a GitLab under `https://git.example.com/gitlab` whose provider hands out `staleToken` until it is
-    /// asked to refresh, then `token`.
+    /// told that token was refused, then `token`. Any other refused token is counted as wrong.
     static func client(_ stub: StubServer, refreshes: Refreshes = Refreshes()) throws -> GitLabClient {
-        try GitLabClient(host: "git.example.com", basePath: "/gitlab/", session: stub.session) { force in
+        try GitLabClient(host: "git.example.com", basePath: "/gitlab/", session: stub.session) { rejected in
             refreshes.count.withLock { count in
-                if force { count += 1 }
+                if let rejected { count += rejected == Self.staleToken ? 1 : 1000 }
                 return count > 0 ? Self.token : Self.staleToken
             }
         }
@@ -856,8 +856,8 @@ struct GitLabClientTests {
 
         let rejecting = StubServer { _ in .init(status: 401, body: #"{"message": "401 Unauthorized"}"#) }
         let refreshFails = try GitLabClient(host: "git.example.com", basePath: "gitlab", session: rejecting.session) {
-            force in
-            if force { throw ProviderFailure() }
+            rejected in
+            if rejected != nil { throw ProviderFailure() }
             return Self.staleToken
         }
         await #expect(throws: ProviderFailure()) { try await refreshFails.currentUser() }

@@ -565,14 +565,14 @@ struct GitHubClientTests {
             }
         }
         let sleeps = Mutex<[Duration]>([])
-        let flow = try GitHubDeviceFlow(
+        let flow = try DeviceFlow(
             clientID: "Iv1.test", session: stub.session, sleep: { duration in sleeps.withLock { $0.append(duration) } })
 
         let code = try await flow.start()
         #expect(code.userCode == "ABCD-1234")
         let token = try await flow.waitForToken(code)
 
-        #expect(token == Self.token)
+        #expect(token == DeviceFlow.Token(accessToken: Self.token))
         #expect(sleeps.withLock { $0 } == [.seconds(5), .seconds(5), .seconds(10)])
         let requests = stub.requests
         #expect(requests.allSatisfy { $0.url?.host() == "github.com" }, "the web host, not the API host")
@@ -583,18 +583,133 @@ struct GitHubClientTests {
     }
 
     @Test("the device flow stops on expired_token, access_denied, and once expires_in has passed", arguments: [
-        ("expired_token", 900, GitHubDeviceFlow.DeviceFlowError.expired),
+        ("expired_token", 900, DeviceFlow.DeviceFlowError.expired),
         ("access_denied", 900, .accessDenied),
         ("authorization_pending", 12, .expired),
     ])
-    func deviceFlowStops(answer: String, expiresIn: Int, expected: GitHubDeviceFlow.DeviceFlowError) async throws {
+    func deviceFlowStops(answer: String, expiresIn: Int, expected: DeviceFlow.DeviceFlowError) async throws {
         let stub = StubServer { _ in .init(body: #"{"error": "\#(answer)"}"#) }
-        let flow = try GitHubDeviceFlow(clientID: "Iv1.test", session: stub.session, sleep: { _ in })
-        let code = GitHubDeviceFlow.DeviceCode(
+        let flow = try DeviceFlow(clientID: "Iv1.test", session: stub.session, sleep: { _ in })
+        let code = DeviceFlow.DeviceCode(
             deviceCode: "dev", userCode: "U", verificationURI: "https://github.com/login/device",
             expiresIn: expiresIn, interval: 5)
 
         await #expect(throws: expected) { try await flow.waitForToken(code) }
+    }
+
+    @Test("GitLab's device flow asks under the base path, polls through 400 answers and reads optional fields",
+          arguments: [
+              (#", "refresh_token": "glrt-refresh01", "expires_in": 7200"#, "glrt-refresh01" as String?, 7200 as Int?),
+              ("", nil, nil),
+          ])
+    func gitLabDeviceFlow(extra: String, refreshToken: String?, expiresIn: Int?) async throws {
+        let polls = Mutex(0)
+        let stub = StubServer { request in
+            if request.url?.path() == "/gitlab/oauth/authorize_device" {
+                return .init(body: """
+                    {"device_code": "dev123", "user_code": "ABCD-1234", "verification_uri": "https://gitlab.example.com/gitlab/oauth/device",
+                     "verification_uri_complete": "https://gitlab.example.com/gitlab/oauth/device?user_code=ABCD-1234",
+                     "expires_in": 300, "interval": 5}
+                    """)
+            }
+            let poll = polls.withLock { count in count += 1; return count }
+            switch poll {
+            case 1: return .init(status: 400, body: #"{"error": "authorization_pending", "error_description": "Pending"}"#)
+            case 2: return .init(status: 400, body: #"{"error": "slow_down"}"#)
+            default: return .init(body: #"{"access_token": "\#(Self.token)", "token_type": "Bearer"\#(extra)}"#)
+            }
+        }
+        let sleeps = Mutex<[Duration]>([])
+        let flow = try DeviceFlow(
+            kind: .gitlab, host: "GitLab.example.com", basePath: "/gitlab/", clientID: "app-id", session: stub.session,
+            sleep: { duration in sleeps.withLock { $0.append(duration) } })
+
+        let code = try await flow.start()
+        let token = try await flow.waitForToken(code)
+
+        #expect(code.verificationURIComplete == "https://gitlab.example.com/gitlab/oauth/device?user_code=ABCD-1234")
+        #expect(token == DeviceFlow.Token(accessToken: Self.token, refreshToken: refreshToken, expiresIn: expiresIn))
+        #expect(!String(describing: token).contains(Self.token) && !String(reflecting: token).contains(Self.token))
+        #expect(!String(describing: token).contains("glrt-") && !String(reflecting: token).contains("glrt-"))
+        #expect(sleeps.withLock { $0 } == [.seconds(5), .seconds(5), .seconds(10)])
+        let requests = stub.requests
+        #expect(requests.map { $0.url?.absoluteString } == ["https://gitlab.example.com/gitlab/oauth/authorize_device"]
+            + Array(repeating: "https://gitlab.example.com/gitlab/oauth/token", count: 3))
+        #expect(requests.allSatisfy {
+            $0.httpMethod == "POST" && $0.value(forHTTPHeaderField: "Accept") == "application/json"
+                && $0.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded"
+                && $0.value(forHTTPHeaderField: "Authorization") == nil
+        })
+        let startBody = String(decoding: requests.first?.httpBody ?? Data(), as: UTF8.self)
+        #expect(startBody == "client_id=app-id&scope=api%20read_user%20read_repository%20write_repository")
+        let pollBody = String(decoding: requests.last?.httpBody ?? Data(), as: UTF8.self)
+        #expect(pollBody
+            == "client_id=app-id&device_code=dev123&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code")
+    }
+
+    @Test("GitLab's device flow fails on a 400 with another error code, and never follows a redirect off its base path")
+    func gitLabDeviceFlowFailures() async throws {
+        let code = DeviceFlow.DeviceCode(
+            deviceCode: "dev", userCode: "U", verificationURI: "https://gitlab.example.com/oauth/device",
+            expiresIn: 300, interval: 5)
+        let denied = StubServer { _ in .init(status: 400, body: #"{"error": "access_denied"}"#) }
+        let deniedFlow = try DeviceFlow(
+            kind: .gitlab, host: "gitlab.example.com", clientID: "app-id", session: denied.session, sleep: { _ in })
+        await #expect(throws: DeviceFlow.DeviceFlowError.accessDenied) { try await deniedFlow.waitForToken(code) }
+        let invalid = StubServer { _ in .init(status: 400, body: #"{"error": "invalid_grant"}"#) }
+        let invalidFlow = try DeviceFlow(
+            kind: .gitlab, host: "gitlab.example.com", clientID: "app-id", session: invalid.session, sleep: { _ in })
+        await #expect(throws: DeviceFlow.DeviceFlowError.failed(code: "invalid_grant", description: nil)) {
+            try await invalidFlow.waitForToken(code)
+        }
+        let missing = StubServer { _ in .init(status: 404, body: #"{"status": 404, "error": "Not Found"}"#) }
+        let missingFlow = try DeviceFlow(
+            kind: .gitlab, host: "gitlab.example.com", clientID: "app-id", session: missing.session, sleep: { _ in })
+        await #expect(throws: HostingError.notFound) { try await missingFlow.start() }
+
+        let redirected = StubServer { request in
+            request.url?.path() == "/gitlab/oauth/token"
+                ? .init(status: 307, body: "", redirect: URL(string: "https://gitlab.example.com/other/oauth/token"))
+                : .init(body: #"{"access_token": "\#(Self.token)"}"#)
+        }
+        let flow = try DeviceFlow(
+            kind: .gitlab, host: "gitlab.example.com", basePath: "gitlab", clientID: "app-id",
+            session: redirected.session, sleep: { _ in })
+        await #expect(throws: HostingError.self) { try await flow.waitForToken(code) }
+        #expect(redirected.requests.map { $0.url?.path() } == ["/gitlab/oauth/token"])
+    }
+
+    @Test("GitLab's refresh posts the refresh grant under the base path, and a 400 or 401 is the rejection the refresher reads")
+    func gitLabRefresh() async throws {
+        let stub = StubServer { request in
+            let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            if body.contains("refresh_token=fake-refresh-dead") {
+                return .init(status: 400, body: #"{"error": "invalid_grant", "error_description": "The grant is invalid."}"#)
+            }
+            if body.contains("refresh_token=fake-refresh-401") {
+                return .init(status: 401, body: #"{"error": "invalid_client"}"#)
+            }
+            return .init(body: #"{"access_token": "\#(Self.token)", "refresh_token": "fake-refresh-next", "expires_in": 7200}"#)
+        }
+        let flow = try DeviceFlow(
+            kind: .gitlab, host: "GitLab.example.com", basePath: "/gitlab/", clientID: "app-id", session: stub.session,
+            sleep: { _ in })
+
+        let token = try await flow.refresh("fake-refresh-old")
+        let expected = token == DeviceFlow.Token(accessToken: Self.token, refreshToken: "fake-refresh-next", expiresIn: 7200)
+        #expect(expected)
+        let request = try #require(stub.requests.first)
+        #expect(request.url?.absoluteString == "https://gitlab.example.com/gitlab/oauth/token")
+        #expect(request.httpMethod == "POST" && request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded")
+        let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            == "client_id=app-id&grant_type=refresh_token&refresh_token=fake-refresh-old"
+        #expect(body)
+
+        await #expect(throws: HostingError.http(status: 400, message: "The grant is invalid.")) {
+            try await flow.refresh("fake-refresh-dead")
+        }
+        await #expect(throws: HostingError.unauthorized) { try await flow.refresh("fake-refresh-401") }
     }
 
     // MARK: - Web URLs

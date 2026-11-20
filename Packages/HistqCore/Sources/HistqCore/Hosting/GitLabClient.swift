@@ -4,8 +4,8 @@
 // `path` is that full path, relative to the instance's root (an account's base path is not part of it).
 //
 // The token is a secret: the client asks its provider for it on every request (a constant for a personal access
-// token, a refresher for OAuth), and after a 401 asks once more with `forceRefresh` and retries that request once. It
-// only ever goes in the `Authorization` header of a request under `apiBase` (its origin and base path): a
+// token, a refresher for OAuth), and after a 401 asks once more with the refused token and retries that request once.
+// It only ever goes in the `Authorization` header of a request under `apiBase` (its origin and base path): a
 // `Link: rel="next"` URL outside it is refused, a redirect to another origin or outside the base path is not followed,
 // no error or description holds it, and `print`, `dump` and `String(reflecting:)` of a client show only its host.
 import Foundation
@@ -14,9 +14,9 @@ import Synchronization
 public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebugStringConvertible,
     CustomReflectable
 {
-    /// Hands out the access token: `forceRefresh` is true after a 401, when a refreshable token may have expired (a
-    /// constant personal access token ignores it).
-    public typealias TokenProvider = @Sendable (_ forceRefresh: Bool) async throws -> String
+    /// Hands out the access token: `rejected` is the token a 401 just refused, so a refreshable one is renewed unless
+    /// it already was (a constant personal access token ignores it); nil otherwise.
+    public typealias TokenProvider = @Sendable (_ rejected: String?) async throws -> String
 
     /// The lowercase host the client talks to, with an optional port.
     public let host: String
@@ -921,18 +921,18 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// provider for a refreshed token and retries once; a second 401 is `unauthorized`.
     private func perform(_ method: String, _ url: URL, body: Data? = nil) async throws -> (Data, HTTPURLResponse) {
         guard isUnderAPIBase(url) else { throw HostingError.invalidResponse("a URL outside the API") }
-        var (data, response) = try await load(method, url, body: body, forceRefresh: false)
+        let token = try await self.token(nil)
+        var (data, response) = try await load(method, url, body: body, token: token)
         if response.statusCode == 401 {
-            (data, response) = try await load(method, url, body: body, forceRefresh: true)
+            (data, response) = try await load(method, url, body: body, token: try await self.token(token))
         }
         guard (200..<300).contains(response.statusCode) else { throw HostingHTTP.error(for: response, data: data) }
         return (data, response)
     }
 
-    private func load(_ method: String, _ url: URL, body: Data?, forceRefresh: Bool) async throws
+    private func load(_ method: String, _ url: URL, body: Data?, token: String) async throws
         -> (Data, HTTPURLResponse)
     {
-        let token = try await self.token(forceRefresh)
         guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
         var request = URLRequest(url: url)
         request.httpMethod = method
