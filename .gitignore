@@ -32,3 +32,4 @@ sparkle_private_key*
 *.pem
 
 *.env
+website/.hallmark/
