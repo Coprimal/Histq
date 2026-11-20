@@ -148,12 +148,12 @@ struct ProfileStoreTests {
 
         let store = try ProfileStore.load(from: sandbox.file)
         let personal = try #require(store.profiles.first)
-        #expect(personal.github == Profile.GitHubAccount(host: "GHE.example.com:8443", login: "octo"))
+        #expect(personal.accounts == [HostingAccount(kind: .github, host: "GHE.example.com:8443", login: "octo")])
         #expect(personal.signing == .gpg(keyID: "ABCDEF") && personal.signByDefault)
         #expect(personal.ssh == .keyFile(path: "/Users/me/.ssh/id_ed25519"))
         #expect(personal.identity == .init(name: "Me", email: "me@histq.invalid"))
         let work = try #require(store.profiles.last)
-        #expect(store.profiles.count == 2 && work.github == nil && work.ssh == .agent && work.signing == Profile.Signing.none)
+        #expect(store.profiles.count == 2 && work.accounts.isEmpty && work.ssh == .agent && work.signing == Profile.Signing.none)
         #expect(store.defaultProfileID == personal.id && store.repoProfiles == ["/private/tmp/repo": work.id])
     }
 
@@ -168,7 +168,7 @@ struct ProfileStoreTests {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
         var profile = Self.personal
-        profile.github = .init(host: "github.com", login: "octo")
+        profile.setAccount(HostingAccount(kind: .github, host: "github.com", login: "octo"))
         profile.setAccount(HostingAccount(kind: .github, host: "GHE.example.com", login: "work-octo"))
         try ProfileStore(profiles: [profile]).save(to: sandbox.file)
 
@@ -199,7 +199,7 @@ struct ProfileStoreTests {
         var store = try ProfileStore.load(from: sandbox.file)
         var profile = try #require(store.profiles.first)
         #expect(profile.accounts == [HostingAccount(kind: .github, host: "github.com", login: "octo")])
-        profile.github = nil
+        profile.removeAccount(forHost: "github.com")
         #expect(profile.accounts.isEmpty)
         store.upsert(profile)
         try store.save(to: sandbox.file)
@@ -231,22 +231,14 @@ struct ProfileStoreTests {
     @Test("setting an account on a host the profile has replaces it, in place")
     func oneAccountPerHost() {
         var profile = Self.personal
-        profile.github = .init(host: "github.com", login: "octo")
+        profile.setAccount(HostingAccount(kind: .github, host: "github.com", login: "octo"))
         profile.setAccount(HostingAccount(kind: .github, host: "ghe.example.com", login: "a"))
         profile.setAccount(HostingAccount(kind: .github, host: "GitHub.com", login: "other"))
         #expect(profile.accounts.map(\.login) == ["other", "a"])
-        profile.github = .init(host: "github.com", login: "third")
-        #expect(profile.accounts.map(\.host) == ["github.com", "ghe.example.com"] && profile.github?.login == "third")
+        profile.setAccount(HostingAccount(kind: .github, host: "github.com", login: "third"))
+        #expect(profile.accounts.map(\.host) == ["github.com", "ghe.example.com"])
+        #expect(profile.account(forHost: "github.com")?.login == "third")
         profile.removeAccount(forHost: "GITHUB.COM")
-        #expect(profile.github == .init(host: "ghe.example.com", login: "a"))
-
-        // A second GitHub account stays put when the first moves to a new host, and the moved one keeps its place.
-        profile.setAccount(HostingAccount(kind: .github, host: "github.com", login: "octo"))
-        profile.github = .init(host: "third.example.com", login: "b")
-        #expect(profile.accounts.map(\.host) == ["third.example.com", "github.com"])
-        #expect(profile.github == .init(host: "third.example.com", login: "b"))
-        // Moving onto the host of another account replaces that account.
-        profile.github = .init(host: "github.com", login: "c")
-        #expect(profile.accounts.map(\.login) == ["c"])
+        #expect(profile.accounts == [HostingAccount(kind: .github, host: "ghe.example.com", login: "a")])
     }
 }

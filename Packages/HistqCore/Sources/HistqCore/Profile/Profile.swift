@@ -38,14 +38,10 @@ public struct Profile: Codable, Sendable, Equatable, Identifiable {
         case keyFile(path: String)
     }
 
-    public struct GitHubAccount: Codable, Sendable, Equatable {
-        public var host: String
-        public var login: String
-
-        public init(host: String = "github.com", login: String) {
-            self.host = host
-            self.login = login
-        }
+    /// The legacy `github` key: one GitHub account, as builds without `accounts` saved it.
+    private struct GitHubAccount: Codable, Sendable, Equatable {
+        var host: String
+        var login: String
     }
 
     public var id: UUID
@@ -64,7 +60,7 @@ public struct Profile: Codable, Sendable, Equatable, Identifiable {
 
     public init(
         id: UUID = UUID(), name: String, color: String, identity: Identity, signing: Signing = .none,
-        signByDefault: Bool = false, ssh: SSHKey = .agent, github: GitHubAccount? = nil
+        signByDefault: Bool = false, ssh: SSHKey = .agent
     ) {
         self.id = id
         self.name = name
@@ -74,7 +70,6 @@ public struct Profile: Codable, Sendable, Equatable, Identifiable {
         self.signByDefault = signByDefault
         self.ssh = ssh
         self.accounts = []
-        self.github = github
     }
 
     // MARK: - Accounts
@@ -100,31 +95,9 @@ public struct Profile: Codable, Sendable, Equatable, Identifiable {
         accounts.removeAll { Self.sameHost($0.host, host) }
     }
 
-    /// The first GitHub account. Setting it replaces that account (keeping its other fields when the host stays),
-    /// nil removes it.
-    public var github: GitHubAccount? {
-        get { accounts.first { $0.kind == .github }.map { GitHubAccount(host: $0.host, login: $0.login) } }
-        set {
-            guard let index = accounts.firstIndex(where: { $0.kind == .github }) else {
-                if let newValue { setAccount(HostingAccount(kind: .github, host: newValue.host, login: newValue.login)) }
-                return
-            }
-            guard let newValue else {
-                accounts.remove(at: index)
-                return
-            }
-            var account = accounts[index]
-            if !Self.sameHost(account.host, newValue.host) {
-                account = HostingAccount(kind: .github, host: newValue.host, login: newValue.login)
-            }
-            account.host = newValue.host
-            account.login = newValue.login
-            accounts[index] = account
-            // One account per host: any other account on the new host goes.
-            accounts = accounts.enumerated()
-                .filter { $0.offset == index || !Self.sameHost($0.element.host, newValue.host) }
-                .map(\.element)
-        }
+    /// The first GitHub account as the legacy `github` key saves it.
+    private var legacyGitHub: GitHubAccount? {
+        accounts.first { $0.kind == .github }.map { GitHubAccount(host: $0.host, login: $0.login) }
     }
 
     private static func sameHost(_ a: String, _ b: String) -> Bool {
@@ -190,7 +163,7 @@ public struct Profile: Codable, Sendable, Equatable, Identifiable {
             try list.encode(contentsOf: accounts)
             try list.encode(contentsOf: unknownAccounts)
         }
-        try container.encodeIfPresent(github, forKey: .github)
+        try container.encodeIfPresent(legacyGitHub, forKey: .github)
     }
 }
 

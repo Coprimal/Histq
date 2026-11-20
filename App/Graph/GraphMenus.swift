@@ -1219,15 +1219,20 @@ enum RepoMenus {
     {
         guard let remote = session.github.api?.remote else {
             return switch session.github.connection {
-            case .resolving: "GitHub is still connecting."
-            case .noRemote(let host): "No remote of this repository is on \(host)."
-            case .notConnected, .connected: "Connect a GitHub account to this tab's profile in Settings › Integrations."
+            case .resolving: "The account is still connecting."
+            case .noRemote where session.hostedRemoteHost == nil:
+                "No remote of this repository has a connected account."
+            case .notConnected(let account?):
+                "\(account.providerName) is not connected for this tab: connect it in Settings › Integrations."
+            case .notConnected(nil), .noRemote, .connected:
+                "Connect an account" + (session.hostedRemoteHost.map { " for \($0)" } ?? "")
+                    + " to this tab's profile in Settings › Integrations."
             }
         }
         guard let headName = head.branchName else { return "Only a branch can be a pull request's head." }
         let headBranch = gitHubBranch(of: head, session)
         if headBranch == nil, !pushing {
-            return "Push \(headName) to \(remote) first: GitHub opens a pull request only from a branch it has."
+            return "Push \(headName) to \(remote) first: the host opens a pull request only from a branch it has."
         }
         guard let base else {
             // The form's base is another branch of the GitHub remote: without one, its Base picker is empty.
@@ -1235,7 +1240,8 @@ enum RepoMenus {
             return others?.isEmpty == false ? nil : "\(remote) has no other branch for \(headName) to go into."
         }
         guard let baseBranch = gitHubBranch(of: base, session) else {
-            return "\(base.branchName ?? "The target") is not on \(remote): a pull request goes into a branch GitHub has."
+            return "\(base.branchName ?? "The target") is not on \(remote): "
+                + "a pull request goes into a branch the host has."
         }
         return headBranch == baseBranch ? "Both are the same branch on \(remote)." : nil
     }

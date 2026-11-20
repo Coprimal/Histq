@@ -103,9 +103,9 @@ final class HostingStore {
     enum Connection: Equatable {
         /// The profiles, the remotes or the token are still being read.
         case resolving
-        /// No profile, no GitHub account on it, or (`account` set) its token is not in the Keychain: the Connect card.
-        case notConnected(account: Profile.GitHubAccount?)
-        /// Connected, but no remote of the repo is on the account's host.
+        /// No profile, no account on it, or (`account` set) its token is not in the Keychain: the Connect card.
+        case notConnected(account: HostingAccount?)
+        /// Connected, but no remote of the repo is on an account's host (`host`: the profile's first account's).
         case noRemote(host: String)
         case connected(HostedRepository)
     }
@@ -126,7 +126,7 @@ final class HostingStore {
     struct Source: Equatable, Sendable {
         var profilesLoaded: Bool
         var profileID: UUID?
-        var account: Profile.GitHubAccount?
+        var accounts: [HostingAccount]
         /// The tab's remotes; `remotesKnown` false until the first refs read has listed them.
         var remotes: [RemoteInfo]
         var remotesKnown: Bool
@@ -194,7 +194,7 @@ final class HostingStore {
 
     private struct Identity: Equatable {
         let profileID: UUID?
-        let account: Profile.GitHubAccount?
+        let account: HostingAccount?
         let repository: HostedRepository
         /// The remote whose URL names `repository`: a pull request's Checkout locally fetches from it.
         let remote: String
@@ -275,10 +275,10 @@ final class HostingStore {
         }
         #endif
         guard source.profilesLoaded else { return setConnection(.resolving) }
-        guard let profile, let account = profile.github else { return disconnect(.notConnected(account: nil)) }
+        guard let profile, let first = profile.accounts.first else { return disconnect(.notConnected(account: nil)) }
         guard source.remotesKnown else { return setConnection(.resolving) }
-        guard let (remote, repository) = Self.remote(in: source.remotes, host: account.host) else {
-            return disconnect(.noRemote(host: account.host))
+        guard let (remote, repository, account) = Self.remote(in: source.remotes, profile: profile) else {
+            return disconnect(.noRemote(host: first.host))
         }
         let identity = Identity(profileID: profile.id, account: account, repository: repository, remote: remote)
         // Settings closing (`settingsOpen`) still reads the token again: a reconnect changes nothing else. So does a
@@ -295,7 +295,7 @@ final class HostingStore {
             forgetLists()
             setConnection(.resolving)
         }
-        let client = await Self.makeClient(profile: profile, kind: .github, host: account.host)
+        let client = await Self.makeClient(profileID: profile.id, account: account)
         guard generation == resolveGeneration, !Task.isCancelled else { return }
         guard let client else { return disconnect(.notConnected(account: account)) }
         self.client = client
@@ -339,13 +339,19 @@ final class HostingStore {
         actionNotice = nil
     }
 
-    /// `origin` when it names a repository on `host`, else the first remote that does, with that repository.
-    static func remote(in remotes: [RemoteInfo], host: String) -> (name: String, repository: HostedRepository)? {
-        let host = host.lowercased()
+    /// `origin` when it names a repository on the host of one of `profile`'s accounts, else the first remote that
+    /// does, with that repository and account.
+    static func remote(
+        in remotes: [RemoteInfo], profile: Profile
+    ) -> (name: String, repository: HostedRepository, account: HostingAccount)? {
         let ordered = remotes.filter { $0.name == "origin" } + remotes.filter { $0.name != "origin" }
         return ordered.lazy
-            .compactMap { remote in GitHubClient.repository(fromRemoteURL: remote.url).map { (remote.name, $0) } }
-            .first { $0.1.host == host }
+            .compactMap { remote in
+                GitHubClient.repository(fromRemoteURL: remote.url).flatMap { repository in
+                    profile.account(forHost: repository.host).map { (remote.name, repository, $0) }
+                }
+            }
+            .first
     }
 
     /// The client, the repository and its remote while connected: the PR detail loads and acts through them.
@@ -378,15 +384,15 @@ final class HostingStore {
         refreshTask = Task { [weak self] in await self?.refresh() }
     }
 
-    /// Reads the profile's token (the Keychain, off the main actor) and builds the client of the account's `kind`; nil
-    /// without a usable token. The token stays inside the client.
+    /// Reads `account`'s token of the profile `profileID` (the Keychain, off the main actor) and builds the client of
+    /// the account's `kind`; nil without a usable token. The token stays inside the client.
     @concurrent
     private nonisolated static func makeClient(
-        profile: Profile, kind: HostingKind, host: String
+        profileID: UUID, account: HostingAccount
     ) async -> (any HostingProvider)? {
-        guard let token = await HostingTokens.token(for: profile) else { return nil }
-        switch kind {
-        case .github: return try? GitHubClient(host: host, token: token)
+        guard let token = await HostingTokens.token(for: account, profileID: profileID) else { return nil }
+        switch account.kind {
+        case .github: return try? GitHubClient(host: account.host, token: token)
         }
     }
 

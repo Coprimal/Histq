@@ -245,7 +245,7 @@ struct CreatePRView: View {
     #endif
 
     private var subtitle: String {
-        guard let api = session.github.api else { return "GitHub is not connected for this tab." }
+        guard let api = session.github.api else { return "No account is connected for this tab." }
         return "On \(api.repository.fullName), from branches of \(api.remote)."
     }
 
@@ -394,7 +394,7 @@ struct CreatePRView: View {
     /// labels, all at once.
     private func loadChoices() async {
         guard let api = session.github.api else {
-            let reason = "GitHub is not connected."
+            let reason = "No account is connected."
             choices = Choices(reviewers: .failed(reason), assignees: .failed(reason), labels: .failed(reason))
             return
         }
@@ -460,7 +460,7 @@ struct CreatePRView: View {
     }
 
     private var submitHelp: String {
-        if session.github.api == nil { return "GitHub is not connected for this tab." }
+        if session.github.api == nil { return "No account is connected for this tab." }
         if head == base { return "The head and the base are the same branch." }
         if trimmedTitle.isEmpty { return "A pull request needs a title." }
         return ""

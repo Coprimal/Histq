@@ -281,11 +281,11 @@ enum FailureHints {
             switch withheld.reason {
             case .repoNetworkConfig(let keys):
                 return Hint(text: "This repository sets its own network settings (\(keys.joined(separator: ", "))), "
-                    + "so Histq did not send your GitHub token. Remove them from its config, or sign in with a "
+                    + "so Histq did not send your account token. Remove them from its config, or sign in with a "
                     + "credential helper of your own.")
             case .submoduleRecursion(let keys):
                 return Hint(text: "Submodule recursion is on (\(keys.joined(separator: ", "))), so Histq did not send "
-                    + "your GitHub token. Turn it off, or sign in with a credential helper of your own.")
+                    + "your account token. Turn it off, or sign in with a credential helper of your own.")
             }
         }
         if case GitOperationError.rebaseWouldConflict = failure.error {
@@ -327,7 +327,7 @@ enum FailureHints {
     private static let authText = "Git could not sign in to the remote. Check that your SSH key is loaded (ssh-add) or "
         + "that a credential helper knows this host."
     static let submoduleAuthText =
-        "Submodule fetches use your SSH key, or the GitHub account token for https URLs on its host."
+        "Submodule fetches use your SSH key, or the connected account's token for https URLs on its host."
 
     private static func isSubmoduleWrite(_ write: RepoSession.Write) -> Bool {
         switch write {

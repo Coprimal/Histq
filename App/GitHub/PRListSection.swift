@@ -53,7 +53,7 @@ struct GitHubDriver: View {
         case .idle, .loading: false
         }
         return HostingStore.Source(
-            profilesLoaded: profilesLoaded, profileID: profile?.id, account: profile?.github,
+            profilesLoaded: profilesLoaded, profileID: profile?.id, accounts: profile?.accounts ?? [],
             remotes: session.remotes, remotesKnown: session.refs.value != nil, settingsOpen: model.isSettingsOpen,
             windowVisible: windowState.isVisible, listsShown: listsShown, isShown: tabIsShown, isStub: isStub)
     }
@@ -81,16 +81,26 @@ struct PullRequestSections: View {
                     ListCard(session: session, list: list, realAvatars: false)
                 }
             case .notConnected(let account):
-                ConnectGitHubCard(account: account)
-            case .noRemote(let host):
-                SectionCard("GitHub", systemImage: "exclamationmark.triangle") {
+                ConnectGitHubCard(account: account, host: session.hostedRemoteHost)
+            case .noRemote where session.hostedRemoteHost != nil:
+                // A remote names a hosted repository on a host the profile has no account for.
+                ConnectGitHubCard(account: nil, host: session.hostedRemoteHost)
+            case .noRemote:
+                SectionCard("Integrations", systemImage: "exclamationmark.triangle") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("No GitHub remote")
+                        Text("No connected remote")
                             .font(textSize.bodyMedium)
-                        Text("None of this repository's remotes is on \(host), the host of this tab's GitHub account.")
+                        Text("No remote of this repository has a connected account.")
                             .font(textSize.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let hint = session.sshRemoteHint {
+                            Text("\(hint.name) uses SSH on \(hint.host): connect an account for that host in "
+                                + "Settings › Integrations. Host aliases from ~/.ssh/config are not matched to accounts.")
+                                .font(textSize.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             case .connected(let repository):
@@ -199,31 +209,67 @@ private struct ListErrorRow: View {
 /// Without a connected account: what is missing, and the button to Settings › Integrations.
 private struct ConnectGitHubCard: View {
     /// Set when the profile has an account whose token is not in the Keychain.
-    let account: Profile.GitHubAccount?
+    let account: HostingAccount?
+    /// `RepoSession.hostedRemoteHost`; nil when no remote names a host an account can be connected for.
+    let host: String?
     @Environment(WindowModel.self) private var model
     @Environment(\.textSize) private var textSize
 
     var body: some View {
-        SectionCard("GitHub", systemImage: "person.crop.circle.badge.plus") {
+        SectionCard(account?.providerName ?? "Integrations", systemImage: "person.crop.circle.badge.plus") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(account == nil ? "Connect GitHub" : "Reconnect GitHub")
+                Text(account.map { "Reconnect \($0.providerName)" } ?? "Connect an account")
                     .font(textSize.bodyMedium)
                 Text(detail)
                     .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(account == nil ? "Connect GitHub" : "Reconnect") { model.selectSettings(.integrations) }
+                Button(account == nil ? connectTitle : "Reconnect") { model.selectSettings(.integrations) }
                     .buttonStyle(RowTextButtonStyle(prominent: true))
                     .help("Settings › Integrations")
             }
         }
     }
 
+    private var connectTitle: String {
+        host.map { "Connect an account for \($0)…" } ?? "Connect an account…"
+    }
+
     private var detail: String {
         guard let account else {
-            return "Pull requests and issues of this repository show here once this tab's profile has a GitHub account."
+            return "Pull requests and issues of this repository show here once this tab's profile has an account for "
+                + (host ?? "its host") + "."
         }
         return "The token of \(account.login) on \(account.host) is not in the Keychain."
+    }
+}
+
+extension RepoSession {
+    /// The host of the first https remote (origin first) whose URL names a hosted repository on a host an account
+    /// can be connected for; nil when none does. Never an ssh remote's host, which may be an SSH alias from
+    /// `~/.ssh/config` (`git@github.com-work:…`), nor a host the profile has an account on under another port.
+    var hostedRemoteHost: String? {
+        let accountNames = Set((profile?.accounts ?? []).map { Self.hostName($0.host) })
+        return orderedRemotes.lazy.filter { $0.url.lowercased().hasPrefix("https://") }
+            .compactMap { GitHubClient.repository(fromRemoteURL: $0.url)?.host }
+            .first { !accountNames.contains(Self.hostName($0)) }
+    }
+
+    /// The name and host of the first ssh remote (origin first) whose URL names a hosted repository; nil when none
+    /// does.
+    var sshRemoteHint: (name: String, host: String)? {
+        orderedRemotes.lazy.filter { !$0.url.lowercased().hasPrefix("https://") }
+            .compactMap { remote in GitHubClient.repository(fromRemoteURL: remote.url).map { (remote.name, $0.host) } }
+            .first
+    }
+
+    private var orderedRemotes: [RemoteInfo] {
+        remotes.filter { $0.name == "origin" } + remotes.filter { $0.name != "origin" }
+    }
+
+    /// `host` without its `:port`, lowercase.
+    private static func hostName(_ host: String) -> Substring {
+        host.lowercased().split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
     }
 }
 

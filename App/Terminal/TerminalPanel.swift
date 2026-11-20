@@ -4,7 +4,7 @@
 //
 // The shell is the user's login shell, started as a login shell in the repo folder with the user's own environment
 // plus the tab's profile (`GitInvocation.terminalProcessEnvironment(base:profile:)`: identity, signing, SSH key file).
-// It never gets the GitHub token or Histq's credential helper: what the user types there runs with their own
+// It never gets an account token or Histq's credential helper: what the user types there runs with their own
 // credentials, as in Terminal.app. It starts only when the user asks for it: a drawer shown with each new tab waits
 // for a click, since a shell prompt runs git in the repo, whose own config may run commands.
 import AppKit

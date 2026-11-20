@@ -202,12 +202,10 @@ enum HostingTokens {
         try? await read(profileID: profileID, kind: kind, host: host, refresh: refresh)
     }
 
-    /// The profile's GitHub token, for the GitHub API client: nil without a profile or a GitHub account (the Keychain
-    /// is not read then). Git gets `credentials(for:)`.
+    /// The token of `account` of `profileID`, for the API client. Git gets `credentials(for:)`.
     @concurrent
-    static func token(for profile: Profile?) async -> String? {
-        guard let profile, let host = profile.github?.host else { return nil }
-        return await token(profileID: profile.id, host: host)
+    static func token(for account: HostingAccount, profileID: UUID) async -> String? {
+        await token(profileID: profileID, kind: account.kind, host: account.host)
     }
 
     /// What git gets for `profile` (`GitInvocation`, which trusts the set): one credential per account of the profile

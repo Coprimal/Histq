@@ -106,7 +106,7 @@ final class IssueDetailModel {
         self.number = number
         if !quiet || state.value == nil { state = .loading }
         guard let api = github.api else {
-            state = .failed("GitHub is not connected for this tab: connect it in Settings › Integrations.")
+            state = .failed("No account is connected for this tab: connect one in Settings › Integrations.")
             return
         }
         let generation = generation
@@ -147,7 +147,7 @@ final class IssueDetailModel {
     func perform(_ action: IssueAction, on number: Int, github: HostingStore) {
         guard busy[number] == nil else { return }
         guard let api = github.api else {
-            actionError = "GitHub is not connected for this tab."
+            actionError = "No account is connected for this tab."
             return
         }
         busy[number] = action

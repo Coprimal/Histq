@@ -137,6 +137,23 @@ struct ProfilesSettings: View {
                 title: "Default profile",
                 hint: "New tabs whose repo has no remembered profile use it.",
                 isOn: Binding(get: { isDefault }, set: { library.setDefault($0 ? profile.id : nil) }))
+            SettingsDivider()
+            LabeledContent {
+                VStack(alignment: .trailing, spacing: 4) {
+                    if profile.accounts.isEmpty {
+                        Text("None")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(profile.accounts, id: \.host) { account in
+                        Text(account.accountTitle)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            } label: {
+                Text("Accounts")
+                SettingsHint("Connected in Settings › Integrations, one per host.")
+            }
         }
     }
 
