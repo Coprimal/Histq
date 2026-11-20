@@ -49,8 +49,9 @@ enum Palette {
     static let destructiveFill = color(srgb(0xC0282D))
     /// The WIP panel's Stage All button: a green, under a white label. #2E9E5B
     static let stageAllFill = color(srgb(0x2E9E5B))
-    /// The WIP panel's Unstage All button: a light red, under a white label. #E0706C
-    static let unstageAllFill = color(srgb(0xE0706C))
+    /// The WIP panel's Discard All and Unstage All buttons: a mid red (between `destructiveFill` and the old light
+    /// red #E0706C), under a white label. #D04C4D
+    static let wipRedFill = color(srgb(0xD04C4D))
     /// The WIP panel's Conflicted card: its title and icon, and the tint of its fill and edge (`SectionCard.tone`). The
     /// conflict editor's gold. #F2B630
     static let conflictTone = color(srgb(0xF2B630))

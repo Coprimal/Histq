@@ -169,8 +169,8 @@ struct WIPPanel: View {
         } accessory: {
             HStack(spacing: 10) {
                 FileListModeToggle(card: .unstaged)
-                headerButton("Discard All", systemImage: "trash", busy: .discardAll, disabled: files.isEmpty,
-                             fill: Palette.destructiveFill) { confirmDiscardAll(files) }
+                headerButton("Discard All", systemImage: "arrow.uturn.backward", busy: .discardAll,
+                             disabled: files.isEmpty, fill: Palette.wipRedFill) { confirmDiscardAll(files) }
                 headerButton("Stage All", busy: .stageAll, disabled: files.isEmpty, fill: Palette.stageAllFill) {
                     run([.stageAll], busy: [.stageAll], part: .unstaged, moving: files, toStaged: true)
                 }
@@ -217,7 +217,7 @@ struct WIPPanel: View {
             HStack(spacing: 10) {
                 FileListModeToggle(card: .staged)
                 headerButton("Unstage All", busy: .unstageAll, disabled: files.isEmpty,
-                             fill: Palette.unstageAllFill) { confirmUnstageAll(files) }
+                             fill: Palette.wipRedFill) { confirmUnstageAll(files) }
             }
         }
     }
