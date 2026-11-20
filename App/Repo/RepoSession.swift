@@ -187,6 +187,29 @@ struct BranchMap: Sendable {
     }
 }
 
+/// Which commits of a log snapshot are on another worktree's branch only, from its fork off this worktree's history
+/// (`WorktreeReach.masks`): the graph fades them, and a selected one shows its worktree's again. `masks[i]` is
+/// `commits[i]`'s, bit `k` for the other worktree at `paths[k]`. `logGeneration` and `masks.count` tell the snapshot it
+/// was computed for; `generation` is new for each computed map.
+struct WorktreeMap: Sendable {
+    var paths: [String] = []
+    var masks: [UInt64] = []
+    var logGeneration = -1
+    var generation = 0
+
+    /// The other worktrees' bits of `commits[index]` in `log`; 0 when this map was not computed for `log`'s commits.
+    func mask(at index: Int, in log: LogSnapshot) -> UInt64 {
+        guard logGeneration == log.generation, masks.count == log.commits.count, masks.indices.contains(index)
+        else { return 0 }
+        return masks[index]
+    }
+
+    /// The bit of the other worktree at `path`; 0 for none.
+    func bit(of path: String) -> UInt64 {
+        paths.firstIndex(of: path).map { 1 << UInt64($0) } ?? 0
+    }
+}
+
 /// A commit or a stash as the detail panel shows it: its message, people, dates, parents and changed files (against
 /// its first parent; a stash adds the untracked files it saved).
 struct CommitDetail: Sendable {
@@ -802,6 +825,9 @@ final class RepoSession: Identifiable {
     let graphSearch = GraphSearch()
     /// The branch each commit of `log` is on, computed off the main actor for each log snapshot and refs change.
     private(set) var branchMap = BranchMap()
+    /// The commits of `log` on another worktree's branch only, computed off the main actor with `branchMap` and when
+    /// the worktrees change.
+    private(set) var worktreeMap = WorktreeMap()
     /// The merge, rebase, cherry-pick or revert in progress (the operation banner), read with every status read; nil
     /// until the first one.
     private(set) var repoState: RepoState?
@@ -951,6 +977,7 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var refreshScope: RefreshScope = []
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var branchMapTask: Task<Void, Never>?
+    @ObservationIgnored private var worktreeMapTask: Task<Void, Never>?
     /// The refs moved since `branchMap` was last computed: the log reload that follows maps them, or its failure does.
     @ObservationIgnored private var branchMapRefsStale = false
     /// The last load's `LogSnapshot.generation`.
@@ -1224,6 +1251,7 @@ final class RepoSession: Identifiable {
         refreshTask?.cancel()
         logTask?.cancel()
         branchMapTask?.cancel()
+        worktreeMapTask?.cancel()
         worktreeTask?.cancel()
         submoduleTask?.cancel()
         setUpTask?.cancel()
@@ -1241,6 +1269,7 @@ final class RepoSession: Identifiable {
         refreshTask?.cancel()
         logTask?.cancel()
         branchMapTask?.cancel()
+        worktreeMapTask?.cancel()
         worktreeTask?.cancel()
         submoduleTask?.cancel()
         setUpTask?.cancel()
@@ -2513,6 +2542,7 @@ final class RepoSession: Identifiable {
                 if worktrees.value != list {
                     worktrees = .loaded(list)
                     refreshWorktreeSelection(backend)
+                    updateWorktreeMap()
                 }
                 updateWorktreeRows(backend)
             } catch {
@@ -2699,6 +2729,7 @@ final class RepoSession: Identifiable {
     /// Computes `branchMap` for the log and refs now, off the main actor; a newer run cancels this one. Nothing until
     /// both are read.
     private func updateBranchMap() {
+        updateWorktreeMap()
         guard let log = log.value, let refs = visibleRefs else { return }
         branchMapRefsStale = false
         branchMapTask?.cancel()
@@ -2715,6 +2746,35 @@ final class RepoSession: Identifiable {
             branchMapTask = nil
             UITiming.branchMap(count: claims.count, ms: ms)
         }
+    }
+
+    /// Computes `worktreeMap` for the log and the worktrees now, off the main actor; a newer run cancels this one. Each
+    /// other worktree's tip is its branch's commit in the refs (read more often than the worktree list), else its HEAD.
+    private func updateWorktreeMap() {
+        guard let log = log.value else { return }
+        let others = (worktrees.value ?? []).filter { !$0.isCurrent && !$0.worktree.isBare }
+            .prefix(WorktreeReach.maxTips)
+        let refs = refs.value
+        let head = refs?.head.commit ?? worktrees.value?.first { $0.isCurrent }?.worktree.head
+        let tips = others.map { info in
+            info.worktree.branch.flatMap { branch in refs?.localBranches.first { $0.refName == branch }?.commit }
+                ?? info.worktree.head
+        }
+        let paths = others.map(\.path)
+        worktreeMapTask?.cancel()
+        worktreeMapTask = Task { [weak self] in
+            let masks = await Self.worktreeMasks(log, head: head, tips: tips)
+            guard !Task.isCancelled, let self else { return }
+            worktreeMap = WorktreeMap(
+                paths: paths, masks: masks, logGeneration: log.generation, generation: worktreeMap.generation &+ 1)
+            worktreeMapTask = nil
+        }
+    }
+
+    @concurrent
+    private nonisolated static func worktreeMasks(_ log: LogSnapshot, head: String?, tips: [String?]) async -> [UInt64] {
+        guard tips.contains(where: { $0 != nil }) else { return [] }
+        return WorktreeReach.masks(commits: log.commits, index: log.commitIndex, head: head, tips: tips)
     }
 
     /// `BranchAttribution.claims` of `log` and `refs`, with how long it took (ms).

@@ -25,13 +25,18 @@ public struct GraphSegment: Sendable, Hashable {
     public let color: Int
     /// The line between a synthetic row (WIP, stash) and its base commit.
     public let isDashed: Bool
+    /// The commit the line leaves from, by its index among every commit the layout was fed (the child of the edge it
+    /// draws); -1 for a synthetic row's line. A merge's line that joins a lane already waiting for the same parent
+    /// keeps that lane's owner below the join.
+    public let owner: Int32
 
-    public init(shape: Shape, from: Int, to: Int, color: Int, isDashed: Bool) {
+    public init(shape: Shape, from: Int, to: Int, color: Int, isDashed: Bool, owner: Int32 = -1) {
         self.shape = shape
         self.from = from
         self.to = to
         self.color = color
         self.isDashed = isDashed
+        self.owner = owner
     }
 }
 
@@ -111,6 +116,8 @@ public struct GraphLayout: Sendable {
         var waitingFor: String
         var color: Int
         var edge: Edge
+        /// `GraphSegment.owner`.
+        var owner: Int32 = -1
     }
 
     private var lanes: [Lane?] = []
@@ -210,10 +217,12 @@ public struct GraphLayout: Sendable {
             let dashed = lane.edge == .synthetic
             if lane.waitingFor == commit.hash {
                 let shape: GraphSegment.Shape = index == node ? .straight : .bendIn
-                top.append(GraphSegment(shape: shape, from: index, to: node, color: lane.color, isDashed: dashed))
+                top.append(GraphSegment(
+                    shape: shape, from: index, to: node, color: lane.color, isDashed: dashed, owner: lane.owner))
                 lanes[index] = nil
             } else {
-                top.append(GraphSegment(shape: .straight, from: index, to: index, color: lane.color, isDashed: dashed))
+                top.append(GraphSegment(
+                    shape: .straight, from: index, to: index, color: lane.color, isDashed: dashed, owner: lane.owner))
             }
         }
 
@@ -223,8 +232,9 @@ public struct GraphLayout: Sendable {
         for parent in commit.parents where !parents.contains(parent) { parents.append(parent) }
         var outgoing: [GraphSegment] = []
         var opened: [Int] = []
+        let owner = Int32(placed)
         if let first = parents.first {
-            lanes[node] = Lane(waitingFor: first, color: color, edge: .firstParent)
+            lanes[node] = Lane(waitingFor: first, color: color, edge: .firstParent, owner: owner)
         }
         for parent in parents.dropFirst() {
             let joined = lanes.firstIndex { $0?.waitingFor == parent && $0?.edge != .synthetic }
@@ -233,11 +243,11 @@ public struct GraphLayout: Sendable {
                 target = joined
             } else {
                 target = freeSlot()
-                lanes[target] = Lane(waitingFor: parent, color: newColor(), edge: .mergeParent)
+                lanes[target] = Lane(waitingFor: parent, color: newColor(), edge: .mergeParent, owner: owner)
                 opened.append(target)
             }
-            outgoing.append(
-                GraphSegment(shape: .bendOut, from: node, to: target, color: lanes[target]!.color, isDashed: false))
+            outgoing.append(GraphSegment(
+                shape: .bendOut, from: node, to: target, color: lanes[target]!.color, isDashed: false, owner: owner))
         }
         trimFreeSlots()
 
@@ -253,7 +263,8 @@ public struct GraphLayout: Sendable {
             guard let lane = lanes[index] else { continue }
             segments.append(
                 GraphSegment(
-                    shape: .straight, from: index, to: index, color: lane.color, isDashed: lane.edge == .synthetic))
+                    shape: .straight, from: index, to: index, color: lane.color, isDashed: lane.edge == .synthetic,
+                    owner: lane.owner))
         }
         return segments
     }

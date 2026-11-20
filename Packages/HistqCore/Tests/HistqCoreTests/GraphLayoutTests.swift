@@ -23,8 +23,10 @@ struct GraphLayoutTests {
         #expect(rows.map(\.width) == [2, 2, 2, 2, 2, 2, 1])
         let merge = rows[2]
         #expect(!merge.top.contains { $0.from == 1 && $0.to == 1 }, "T2's line ended at M: slot 1 is free")
-        #expect(merge.bottom.contains(GraphSegment(shape: .bendOut, from: 0, to: 1, color: rows[3].color, isDashed: false)),
+        #expect(merge.bottom.contains(
+            GraphSegment(shape: .bendOut, from: 0, to: 1, color: rows[3].color, isDashed: false, owner: 2)),
                 "M's second parent reopens slot 1, in S's color")
+        #expect(rows[5].top.first { $0.shape == .bendIn }?.owner == 3, "S's line to F is S's")
         #expect(rows[5].top.contains { $0.shape == .bendIn && $0.from == 1 && $0.to == 0 }, "S's lane joins at F")
         #expect(rows[5].bottom.map(\.from) == [0], "and is freed there")
         #expect(rows[3].color != rows[4].color, "the opened lane has its own color")

@@ -151,6 +151,9 @@ struct GraphView: NSViewRepresentable {
     /// The branch each commit is on (`RepoSession.branchMap`): a lone selected commit without a branch badge of its own
     /// shows its branch's badge faded.
     var branchMap = BranchMap()
+    /// The commits on another worktree's branch only (`RepoSession.worktreeMap`): faded, with their lines, until a row
+    /// of that worktree's (a commit, or its WIP row) is selected.
+    var worktreeMap = WorktreeMap()
     /// The rows the graph search dims (`GraphSearch.dimming`).
     var dimming = GraphDimming()
     /// New with each move to a search match: the selected row is centred when it is off screen.
@@ -483,6 +486,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var remoteAvatars: [String: NSImage] = [:]
     private var badges: [String: [RefBadge]] = [:]
     private var branchMap = BranchMap()
+    private var worktreeMap = WorktreeMap()
+    /// The other worktrees whose rows show unfaded: those of the selected rows (`WorktreeMap` bits).
+    private var revealedWorktrees: UInt64 = 0
     /// The faded badge on the selected row (`RefBadge.isGhost`), with the row and commit it was made for.
     private struct Ghost: Equatable {
         let row: Int
@@ -709,6 +715,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             if let item = view.selection.first, let row = row(of: item) { centerIfHidden(row) }
         }
         syncSelection(view.selection)
+        refreshWorktreeFade()
         placeInitially()
         isUpdating = false
         // The map may arrive after the selection (a launch selection, a new log): the selected row follows it here.
@@ -771,6 +778,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             reloadVisible = true
         }
         if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
+        if view.worktreeMap.generation != worktreeMap.generation {
+            worktreeMap = view.worktreeMap
+            reloadVisible = true
+        }
         let wip = view.status.map(WorktreeChanges.init)
         if wip != wipChanges {
             wipChanges = wip
@@ -1065,6 +1076,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // After the row's own badges (a detached HEAD, tags): when the column is short, the hint gives way first.
             if let ghostBadge { cell.badges.append(ghostBadge) }
             cell.color = graphRow.color
+            cell.isFaded = isWorktreeFaded(row: row)
             cell.remoteAvatars = remoteAvatars
             cell.metrics = metrics
             // A reloaded row keeps its hover stack, made again from its new badges (a click on the stack selects
@@ -1085,7 +1097,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // Another worktree's row has its folder's badge: its line runs on to the dashed node here too.
             cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? (worktree(synthetic) != nil)
             cell.hasGhostRef = ghost(at: row, commit: commit) != nil
-            cell.isFaded = worktree(synthetic) != nil
+            cell.isFaded = isWorktreeFaded(row: row)
+            cell.isSegmentFaded = { [weak self] owner in
+                owner >= 0 && self?.isWorktreeFaded(commit: Int(owner)) == true
+            }
             if let commit {
                 cell.node = commit.isMerge
                     ? .merge : .commit(initials: GraphRowDrawing.initials(of: commit.authorName))
@@ -1223,11 +1238,59 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         log.stashes.first { $0.hash == hash }
     }
 
-    /// A text cell's dimming: a row the search does not match, or another worktree's WIP row (always faded, so it does
-    /// not read as this worktree's changes).
+    /// A text cell's dimming: a row the search does not match, or another worktree's faded row.
     private func isDimmed(row: Int) -> Bool {
-        if case .synthetic(let synthetic, _) = log.entry(at: row), synthetic.kind == .worktreeWIP { return true }
-        return dimming.isDimmed(row: row, in: log)
+        isWorktreeFaded(row: row) || dimming.isDimmed(row: row, in: log)
+    }
+
+    /// Another worktree's row, faded so it does not read as this worktree's: its WIP row, and its branch's commits from
+    /// where it forks off this worktree's history (`WorktreeMap`). Unfaded while a row of that worktree is selected.
+    private func isWorktreeFaded(row: Int) -> Bool {
+        switch log.entry(at: row) {
+        case .commit(let index): isWorktreeFaded(commit: index)
+        case .synthetic(let synthetic, _) where synthetic.kind == .worktreeWIP:
+            worktreeMap.bit(of: synthetic.id) & revealedWorktrees == 0
+        default: false
+        }
+    }
+
+    /// `log.commits[index]` is on a faded worktree's branch only; its lines to its parents fade with it.
+    private func isWorktreeFaded(commit index: Int) -> Bool {
+        let mask = worktreeMap.mask(at: index, in: log)
+        return mask != 0 && mask & revealedWorktrees == 0
+    }
+
+    /// The other worktrees of `row` (`WorktreeMap` bits): a commit's, or a worktree WIP row's own.
+    private func worktreeBits(row: Int) -> UInt64 {
+        switch log.entry(at: row) {
+        case .commit(let index): worktreeMap.mask(at: index, in: log)
+        case .synthetic(let synthetic, _) where synthetic.kind == .worktreeWIP: worktreeMap.bit(of: synthetic.id)
+        default: 0
+        }
+    }
+
+    /// Reveals the worktrees of the selected rows and fades the others again, redrawing the cells the table has made
+    /// (on screen and just around it) when that changed. In the click's frame: no read, only the map.
+    private func refreshWorktreeFade() {
+        guard let table else { return }
+        let revealed = table.selectedRowIndexes.reduce(UInt64(0)) { $0 | worktreeBits(row: $1) }
+        guard revealed != revealedWorktrees else { return }
+        revealedWorktrees = revealed
+        let graph = table.column(withIdentifier: GraphColumn.graph.identifier)
+        let refs = table.column(withIdentifier: GraphColumn.refs.identifier)
+        table.enumerateAvailableRowViews { rowView, row in
+            let faded = self.isWorktreeFaded(row: row)
+            if graph >= 0, let cell = rowView.view(atColumn: graph) as? GraphCellView {
+                // Lines passing by may be another row's: every graph cell redraws.
+                cell.isFaded = faded
+                cell.needsDisplay = true
+            }
+            if refs >= 0, let cell = rowView.view(atColumn: refs) as? RefBadgeCellView, cell.isFaded != faded {
+                cell.isFaded = faded
+                cell.needsDisplay = true
+            }
+        }
+        refreshDimming()
     }
 
     /// The other worktree of a worktree WIP row.
@@ -1247,6 +1310,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         reportSelection()
+        refreshWorktreeFade()
         // `update` refreshes it once its reload is done.
         if !isUpdating { refreshGhost() }
     }
@@ -1501,6 +1565,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         if row != stackRow || overlay.badges != cell.badges { overlay.hovered = nil }
         overlay.badges = cell.badges
         overlay.color = cell.color
+        overlay.isFaded = cell.isFaded
         overlay.remoteAvatars = cell.remoteAvatars
         overlay.metrics = metrics
         let size = overlay.stackSize(rowHeight: cellRect.height, lineEnd: cellRect.width)

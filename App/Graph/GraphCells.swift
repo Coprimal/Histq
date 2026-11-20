@@ -120,6 +120,8 @@ final class RefBadgeCellView: NSView {
     var badges: [RefBadge] = []
     /// The row's lane color (`GraphRow.color`).
     var color = 0
+    /// Another worktree's faded row: its badges and line are faded (`Palette.graphOtherWorktreeAlpha`).
+    var isFaded = false
     /// The logos of the remotes' owners by remote name (`AvatarStore.ownerAvatar`): drawn in place of the cloud.
     var remoteAvatars: [String: NSImage] = [:]
     var metrics = GraphMetrics(density: "regular")
@@ -437,8 +439,8 @@ final class RefBadgeCellView: NSView {
         context.saveGState()
         defer { context.restoreGState() }
         context.clip(to: bounds)
-        // Another worktree's WIP row is faded as a whole, its badge and line (one transparency layer).
-        let isFaded = badges.first?.kind == .worktree
+        // Another worktree's faded row is faded as a whole, its badges and line (one transparency layer).
+        let isFaded = self.isFaded
         if isFaded {
             context.setAlpha(Palette.graphOtherWorktreeAlpha)
             context.beginTransparencyLayer(auxiliaryInfo: nil)

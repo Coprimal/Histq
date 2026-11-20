@@ -1,7 +1,7 @@
 // Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the commit graph's
-// avatars, date format, row height, text size and commit order, the sidebar's sections (shown, and their order in each
-// tab), the graph's text columns, the file lists' layout and file sizes, the WIP panel's order, and the diffs' default
-// view and whitespace.
+// avatars, date format, row height, text size, commit order and the other worktrees' fading, the sidebar's sections
+// (shown, and their order in each tab), the graph's text columns, the file lists' layout and file sizes, the WIP
+// panel's order, and the diffs' default view and whitespace.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -20,6 +20,7 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
+    @AppStorage(PrefKey.graphFadeOtherWorktrees.rawValue, store: Preferences.defaults) private var fadesWorktrees = true
     @AppStorage(PrefKey.showFileSizes.rawValue, store: Preferences.defaults) private var showFileSizes = true
     @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var fileListMode =
         FileListMode.tree.rawValue
@@ -178,6 +179,11 @@ struct AppearanceSettings: View {
                         + "together.")
                 }
                 .settingsSearchAnchor("Commit order")
+                SettingsDivider()
+                SettingsSwitchRow(title: "Fade other worktrees",
+                                  hint: "Their branches fade from where they fork off this tab's history. Selecting "
+                                      + "one of their commits or WIP rows shows that worktree's again.",
+                                  isOn: $fadesWorktrees)
             }
             SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {
                 let order = sidebarOrder

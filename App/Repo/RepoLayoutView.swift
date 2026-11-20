@@ -549,6 +549,7 @@ private struct CommitListPanel: View {
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
     @AppStorage(PrefKey.graphShowDate.rawValue, store: Preferences.defaults) private var showDate = true
+    @AppStorage(PrefKey.graphFadeOtherWorktrees.rawValue, store: Preferences.defaults) private var fadesWorktrees = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -607,6 +608,8 @@ private struct CommitListPanel: View {
                                                  uniquingKeysWith: { first, _ in first }),
                           onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },
                           branchMap: session.branchMap,
+                          // Off: an empty map fades no commit (another worktree's WIP row still fades).
+                          worktreeMap: fadesWorktrees ? session.worktreeMap : WorktreeMap(),
                           dimming: session.graphSearch.dimming,
                           revealToken: session.graphSearch.revealToken,
                           bottomInset: session.graphSearch.isOpen ? GraphSearchBar.overlayHeight : 0,

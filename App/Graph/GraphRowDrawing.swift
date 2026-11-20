@@ -98,7 +98,9 @@ enum GraphRowDrawing {
     /// Draws `row` in `bounds` (a flipped view's bounds, the graph column's cell), clipped to it. `hasRefs` draws the
     /// line from the column's left edge (where the ref badges' line ends) to the node, at `refsAlpha` (a ghost badge's
     /// is faded). `avatar`, when given, fills the node. `nodeAlpha` fades the row's own band, refs line and node
-    /// (another worktree's WIP row), not the lanes passing by. `selected` draws the band brighter (the selected row).
+    /// (another worktree's row), not the lanes passing by. `isSegmentFaded` tells, by `GraphSegment.owner`, the lines
+    /// drawn at `Palette.graphOtherWorktreeAlpha` (another worktree's branch). `selected` draws the band brighter (the
+    /// selected row).
     ///
     /// When `bounds` is too narrow for the log's `logLanes`, the right-most lanes fold continuously
     /// (`GraphMetrics.drawnX`): their nodes are pushed left, over their neighbours' lines, and the lines of a pinned
@@ -109,7 +111,7 @@ enum GraphRowDrawing {
     /// the branches apart.
     static func draw(
         _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, nodeAlpha: CGFloat = 1,
-        selected: Bool = false, avatar: NSImage?, metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
+        isSegmentFaded: (Int32) -> Bool = { _ in false }, selected: Bool = false, avatar: NSImage?, metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
     ) {
         context.saveGState()
         defer { context.restoreGState() }
@@ -159,11 +161,14 @@ enum GraphRowDrawing {
             func shows(_ lane: Int, atCenter: Bool) -> Bool {
                 !metrics.isPinned(lane: lane, width: width) || (atCenter && lane == row.lane)
             }
+            func alpha(_ segment: GraphSegment) -> CGFloat {
+                isSegmentFaded(segment.owner) ? Palette.graphOtherWorktreeAlpha : 1
+            }
             for segment in row.top where shows(segment.from, atCenter: false) && shows(segment.to, atCenter: true) {
-                stroke(segment, top: true, metrics: metrics, bounds: bounds, context: context)
+                stroke(segment, top: true, alpha: alpha(segment), metrics: metrics, bounds: bounds, context: context)
             }
             for segment in row.bottom where shows(segment.from, atCenter: true) && shows(segment.to, atCenter: false) {
-                stroke(segment, top: false, metrics: metrics, bounds: bounds, context: context)
+                stroke(segment, top: false, alpha: alpha(segment), metrics: metrics, bounds: bounds, context: context)
             }
             if fades {
                 context.endTransparencyLayer()
@@ -195,13 +200,14 @@ enum GraphRowDrawing {
     /// none when a folded node sits on the other lane: the bend is then a straight line). Lanes are at their drawn x
     /// (`GraphMetrics.drawnX`).
     private static func stroke(
-        _ segment: GraphSegment, top: Bool, metrics: GraphMetrics, bounds: CGRect, context: CGContext
+        _ segment: GraphSegment, top: Bool, alpha: CGFloat, metrics: GraphMetrics, bounds: CGRect, context: CGContext
     ) {
         let fromX = bounds.minX + metrics.drawnX(lane: segment.from, width: bounds.width)
         let toX = bounds.minX + metrics.drawnX(lane: segment.to, width: bounds.width)
         let midY = bounds.midY
         let radius = min(metrics.bendRadius, abs(toX - fromX), bounds.height / 2)
-        Palette.graphLane(segment.color).setStroke()
+        let color = Palette.graphLane(segment.color)
+        (alpha < 1 ? color.withAlphaComponent(alpha) : color).setStroke()
         if segment.isDashed { context.setLineDash(phase: 0, lengths: [3, 3]) }
         switch (segment.shape, top) {
         case (.bendIn, _):
@@ -336,8 +342,10 @@ final class GraphCellView: NSView {
     var hasRefs = false
     /// The row shows only a ghost badge (`RefBadge.isGhost`): its line to the node is faded.
     var hasGhostRef = false
-    /// Another worktree's WIP row: its band, refs line and node are faded (`Palette.graphOtherWorktreeAlpha`).
+    /// Another worktree's faded row: its band, refs line and node are faded (`Palette.graphOtherWorktreeAlpha`).
     var isFaded = false
+    /// The lines of another worktree's faded branch, by `GraphSegment.owner`.
+    var isSegmentFaded: (Int32) -> Bool = { _ in false }
     /// 5.2's avatar for the node; initials while nil.
     var avatar: NSImage?
     var metrics = GraphMetrics(density: "regular")
@@ -351,7 +359,7 @@ final class GraphCellView: NSView {
         guard let row, let context = NSGraphicsContext.current?.cgContext else { return }
         GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef,
                              refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha,
-                             nodeAlpha: isFaded ? Palette.graphOtherWorktreeAlpha : 1,
+                             nodeAlpha: isFaded ? Palette.graphOtherWorktreeAlpha : 1, isSegmentFaded: isSegmentFaded,
                              selected: (superview as? NSTableRowView)?.isSelected ?? false, avatar: avatar, metrics: metrics,
                              logLanes: logLanes, in: bounds, context: context)
     }
