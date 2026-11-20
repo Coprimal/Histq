@@ -1,7 +1,7 @@
-// Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the sidebar's sections
-// (shown, and their order in each tab), the commit graph's avatars, date format, row height, commit order and text
-// columns, the text size, the file lists' layout and file sizes, the WIP panel's order, and the diffs' default view and
-// whitespace.
+// Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the commit graph's
+// avatars, date format, row height, text size and commit order, the sidebar's sections (shown, and their order in each
+// tab), the graph's text columns, the file lists' layout and file sizes, the WIP panel's order, and the diffs' default
+// view and whitespace.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -106,22 +106,6 @@ struct AppearanceSettings: View {
                 SettingsSwitchRow(title: "Card borders", hint: "A thin light edge around each card.",
                                   isOn: $cardBorders)
             }
-            SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {
-                let order = sidebarOrder
-                let hidden = hiddenSidebarIDs
-                ForEach(SidebarTab.allCases, id: \.self) { tab in
-                    if tab != SidebarTab.allCases.first { SettingsDivider() }
-                    Text(tab.title)
-                        .font(.settingsCaption)
-                        .foregroundStyle(.secondary)
-                        .padding(.bottom, 6)
-                    let ids = order.filter { $0.tab == tab }
-                    ForEach(ids, id: \.self) { id in
-                        if id != ids.first { SettingsDivider() }
-                        sidebarRow(id, in: ids, isHidden: hidden.contains(id))
-                    }
-                }
-            }
             SettingsGroup("Avatars") {
                 LabeledContent {
                     CapsuleTabs(selection: $avatarMode, tabs: ["generated", "real", "initials"],
@@ -184,6 +168,22 @@ struct AppearanceSettings: View {
                     Text("Commit order")
                     SettingsHint("By date: newest first across branches. By branch: each branch's commits stay "
                         + "together.")
+                }
+            }
+            SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {
+                let order = sidebarOrder
+                let hidden = hiddenSidebarIDs
+                ForEach(SidebarTab.allCases, id: \.self) { tab in
+                    if tab != SidebarTab.allCases.first { SettingsDivider() }
+                    Text(tab.title)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 6)
+                    let ids = order.filter { $0.tab == tab }
+                    ForEach(ids, id: \.self) { id in
+                        if id != ids.first { SettingsDivider() }
+                        sidebarRow(id, in: ids, isHidden: hidden.contains(id))
+                    }
                 }
             }
             SettingsGroup("Graph columns", description: "Branch / Tag and Graph always show.") {
