@@ -19,7 +19,7 @@ extension EnvironmentValues {
 /// A modal of the window that is not a repo operation's.
 enum WindowModal: Identifiable {
     case confirmation(ModalConfirmation)
-    /// Settings › SSH › Generate Key… for a profile.
+    /// Settings › SSH › Generate Key for a profile.
     case generateKey(profileID: UUID)
     /// A tab's menu › Set Alias… for the tab `tabID`.
     case tabAlias(tabID: UUID)
@@ -375,7 +375,7 @@ private struct TabEmojiModal: View {
                         let kept = TabEmoji.normalized(new) ?? ""
                         if kept != new { emoji = kept }
                     }
-                Button("Choose…", action: choose)
+                Button("Choose", action: choose)
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
             .padding(.horizontal, ModalFooterMetrics.trailingPadding)

@@ -185,7 +185,7 @@ struct GeneralSettings: View {
                             .frame(maxWidth: 260)
                             .labelsHidden()
                             .onSubmit { useGit(at: gitDraft) }
-                        Button("Choose…", action: chooseGit)
+                        Button("Choose", action: chooseGit)
                             .buttonStyle(RowTextButtonStyle(formRow: true))
                     }
                 } label: {

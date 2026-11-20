@@ -208,10 +208,10 @@ enum FailureHints {
 
         var title: String {
             switch self {
-            case .checkHostKey: "Check Host Key…"
+            case .checkHostKey: "Check Host Key"
             case .pull: "Pull"
-            case .forceDelete: "Delete Anyway…"
-            case .forceRemoveWorktree, .forceRemoveSubmodule: "Remove Anyway…"
+            case .forceDelete: "Delete Anyway"
+            case .forceRemoveWorktree, .forceRemoveSubmodule: "Remove Anyway"
             }
         }
     }

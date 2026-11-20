@@ -148,7 +148,7 @@ struct SubmoduleStatusPanel: View {
     private var placeholderActions: (pointer: [Action], folder: [Action]) {
         guard let list = session.submodules.value, let submodule = list.first(where: { $0.path == path }) else {
             let placeholder = { (title: String) in Action(title: title, help: "") {} }
-            return (["Update"].map(placeholder), ["Open in New Tab", "Remove…"].map(placeholder))
+            return (["Update"].map(placeholder), ["Open in New Tab", "Remove"].map(placeholder))
         }
         return actions(submodule, isNested: SubmoduleDetail.isNested(path, in: list))
     }
@@ -180,7 +180,7 @@ struct SubmoduleStatusPanel: View {
             })
         }
         if !isNested {
-            folder.append(Action(title: "Remove…", help: "Remove the submodule from this repository") {
+            folder.append(Action(title: "Remove", help: "Remove the submodule from this repository") {
                 RepoMenus.confirmRemoveSubmodule(path, session)
             })
         }
@@ -399,10 +399,10 @@ struct SubmoduleChangeCard: View {
         var id: String { title }
     }
 
-    /// Open Submodule (a checkout), then for an unstaged pointer move Stage and Discard….
+    /// Open Submodule (a checkout), then for an unstaged pointer move Stage and Discard.
     private var actions: [Action] {
         guard let pointer else {
-            let titles = isWIP ? ["Open Submodule", "Stage", "Discard…"] : ["Open Submodule"]
+            let titles = isWIP ? ["Open Submodule", "Stage", "Discard"] : ["Open Submodule"]
             return titles.map { Action(title: $0, help: "") {} }
         }
         var actions: [Action] = []
@@ -417,7 +417,7 @@ struct SubmoduleChangeCard: View {
                                   help: "Record the checked-out commit in this repository's index") { [session, path] in
                 session.run(.stage([path]), title: "Stage submodule pointer \(path)")
             })
-            actions.append(Action(title: "Discard…", help: "Check out the commit the index records again") {
+            actions.append(Action(title: "Discard", help: "Check out the commit the index records again") {
                 [session, path] in
                 session.confirm("Discard the changes to \(path)?",
                                 message: "Puts \(path) back on \(from.prefix(7)). Commits only on its current detached "

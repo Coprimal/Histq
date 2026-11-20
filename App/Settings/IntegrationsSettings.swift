@@ -184,7 +184,7 @@ struct IntegrationsSettings: View {
     private func connectedGroup(_ profile: Profile, account: Profile.GitHubAccount) -> some View {
         SettingsGroup("GitHub account") {
             LabeledContent {
-                Button("Disconnect…") { confirmDisconnect(profile, account: account) }
+                Button("Disconnect") { confirmDisconnect(profile, account: account) }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             } label: {
                 HStack(spacing: 6) {
@@ -205,7 +205,7 @@ struct IntegrationsSettings: View {
             {
                 SettingsDivider()
                 LabeledContent {
-                    Button("Manage on GitHub…") { NSWorkspace.shared.open(url) }
+                    Button("Manage on GitHub") { NSWorkspace.shared.open(url) }
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("Organization access")
@@ -405,7 +405,7 @@ struct IntegrationsSettings: View {
     private func signInRow(profile: Profile?, host: String?) -> some View {
         LabeledContent {
             if !Self.clientID.isEmpty {
-                Button("Sign In…") {
+                Button("Sign In") {
                     if let profile, let host { startDeviceFlow(profile, host: host) }
                 }
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))

@@ -84,7 +84,7 @@ struct ProfilesSettings: View {
                 Button("Add") { select(library.addProfile()) }
                 Button("Duplicate") { current.map { select(library.duplicate($0.id)) } }
                     .disabled(current == nil)
-                Button("Delete…") { current.map(confirmDelete) }
+                Button("Delete") { current.map(confirmDelete) }
                     .disabled(current == nil)
                 Spacer(minLength: 12)
                 Button(importing ? "Reading…" : "Add from Global Git Config") { importGlobal(into: nil) }
@@ -452,7 +452,7 @@ struct KeyPathRow: View {
                     .labelsHidden()
                     .focused($focused)
                     .onSubmit(commit)
-                Button("Choose…") {
+                Button("Choose") {
                     Task {
                         let start = path.isEmpty ? nil : (path as NSString).deletingLastPathComponent
                         guard let chosen = await ProfileLibrary.chooseFile(

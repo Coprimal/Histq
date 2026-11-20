@@ -375,7 +375,7 @@ private struct HiddenSectionsCard: View {
                     .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Show Sections…") { model.selectSettings(.appearance) }
+                Button("Show Sections") { model.selectSettings(.appearance) }
                     .buttonStyle(RowTextButtonStyle(prominent: true))
                     .help("Settings › Appearance")
             }

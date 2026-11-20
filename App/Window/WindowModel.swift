@@ -540,7 +540,7 @@ final class WindowModel {
                         pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil)
     }
 
-    /// "Repo not found" › Locate…: the tab opens `url` instead (the tab that already shows it when there is one, or
+    /// "Repo not found" › Locate: the tab opens `url` instead (the tab that already shows it when there is one, or
     /// its entry in the archive, popped out).
     func locate(_ id: Tab.ID, at url: URL) {
         let url = url.standardizedFileURL

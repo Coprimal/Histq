@@ -67,7 +67,7 @@ struct AppearanceSettings: View {
                                 let kept = TabEmoji.normalized(new) ?? ""
                                 if kept != new { tabEmoji = kept }
                             }
-                        Button("Choose…", action: chooseEmoji)
+                        Button("Choose", action: chooseEmoji)
                             .buttonStyle(RowTextButtonStyle(formRow: true))
                     }
                 } label: {

@@ -175,7 +175,7 @@ final class WelcomeModel {
         checkGit()
     }
 
-    /// Forgets the resolved git and looks again: after "Choose git…" or a Command Line Tools install.
+    /// Forgets the resolved git and looks again: after "Choose git" or a Command Line Tools install.
     func checkGitAgain() {
         GitToolchain.reset()
         checkGit()
@@ -702,7 +702,7 @@ private struct GitProblemCard: View {
                         Button("Install Command Line Tools") { model.installCommandLineTools() }
                             .buttonStyle(RowTextButtonStyle(prominent: true))
                     }
-                    Button("Choose git…") { model.chooseGit() }
+                    Button("Choose git") { model.chooseGit() }
                         .buttonStyle(RowTextButtonStyle())
                     if model.hasGitOverride {
                         Button("Detect Automatically") { model.useAutomaticGit() }
@@ -758,7 +758,7 @@ private struct OpenCard: View {
     var body: some View {
         SectionCard("Open", systemImage: "folder") {
             LabeledContent {
-                Button("Open…") { model.chooseFolderToOpen() }
+                Button("Open") { model.chooseFolderToOpen() }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             } label: {
                 Text("Open a repository")
@@ -777,7 +777,7 @@ private struct InitCard: View {
     var body: some View {
         SectionCard("Init", systemImage: "plus.rectangle.on.folder") {
             LabeledContent {
-                Button("Init…") { model.chooseFolderToInit() }
+                Button("Init") { model.chooseFolderToInit() }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
                     .disabled(isGitMissing)
             } label: {
@@ -834,7 +834,7 @@ private struct CloneCard: View {
             }
             SettingsDivider()
             LabeledContent {
-                Button("Choose…") { model.chooseCloneParent() }
+                Button("Choose") { model.chooseCloneParent() }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
                     .disabled(model.isCloning)
             } label: {

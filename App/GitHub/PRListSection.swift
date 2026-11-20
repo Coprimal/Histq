@@ -182,7 +182,7 @@ private struct ListErrorRow: View {
                     .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Reconnect…") { model.selectSettings(.integrations) }
+                Button("Reconnect") { model.selectSettings(.integrations) }
                     .buttonStyle(RowTextButtonStyle())
             }
         }
@@ -209,7 +209,7 @@ private struct ConnectGitHubCard: View {
                     .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(account == nil ? "Connect GitHub…" : "Reconnect…") { model.selectSettings(.integrations) }
+                Button(account == nil ? "Connect GitHub" : "Reconnect") { model.selectSettings(.integrations) }
                     .buttonStyle(RowTextButtonStyle(prominent: true))
                     .help("Settings › Integrations")
             }

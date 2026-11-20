@@ -1,5 +1,5 @@
 // The page of a restored tab whose repo folder is gone (session restore, 8.4): one card that names the folder, with
-// Locate… (pick where it went, then it opens in this tab) and Remove (close the tab).
+// Locate (pick where it went, then it opens in this tab) and Remove (close the tab).
 import AppKit
 import SwiftUI
 
@@ -20,7 +20,7 @@ struct RepoNotFoundView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {
-                        Button("Locate…") { locate() }
+                        Button("Locate") { locate() }
                             .buttonStyle(RowTextButtonStyle(prominent: true))
                         Button("Remove") { remove() }
                             .buttonStyle(RowTextButtonStyle())

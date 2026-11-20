@@ -66,7 +66,7 @@ struct SSHSettings: View {
             keyGroup(profile)
             SettingsGroup("New key") {
                 LabeledContent {
-                    Button("Generate Key…") { onGenerate(profile.id) }
+                    Button("Generate Key") { onGenerate(profile.id) }
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("Generate an ed25519 key")

@@ -187,7 +187,7 @@ struct TerminalSettings: View {
                             .frame(maxWidth: 260)
                             .labelsHidden()
                             .onSubmit { useShell(at: shellDraft) }
-                        Button("Choose…", action: chooseShell)
+                        Button("Choose", action: chooseShell)
                             .buttonStyle(RowTextButtonStyle(formRow: true))
                     }
                 } label: {

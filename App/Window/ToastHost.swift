@@ -1,6 +1,6 @@
 // The window's operation toasts, at its bottom right: a user operation's outcome (a push, a pull, a fetch, a commit,
 // a menu's or a dialog's write) as a short card that closes by itself after a few seconds, or at once with its x. A
-// failure with an action ("Delete Anyway…") stays until its action or its x.
+// failure with an action ("Delete Anyway") stays until its action or its x.
 // The pointer over the cards holds their timers until it leaves. Settings › General › Notifications picks whether the
 // successes show (`ToastLevel`); a failure always shows, as the only place it is reported: its hint, the hint's
 // action (`FailureHints`) and a button that copies git's whole message. The automatic fetch never shows one.
@@ -10,7 +10,7 @@ import SwiftUI
 
 /// One outcome on screen.
 struct OperationToast: Identifiable, Equatable {
-    /// A button on the card ("Delete Anyway…"); the toast closes when it is clicked.
+    /// A button on the card ("Delete Anyway"); the toast closes when it is clicked.
     struct Action {
         let title: String
         let perform: @MainActor () -> Void

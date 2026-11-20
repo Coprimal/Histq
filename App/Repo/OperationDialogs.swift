@@ -520,7 +520,7 @@ struct AddWorktreeView: View {
                             .foregroundStyle(parent.isEmpty ? .secondary : .primary)
                             .help(parent)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Choose…", action: chooseParent)
+                        Button("Choose", action: chooseParent)
                             .buttonStyle(RowTextButtonStyle(formRow: true))
                     }
                 }

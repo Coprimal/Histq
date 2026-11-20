@@ -1339,7 +1339,7 @@ private struct PRActionsCard: View {
                           title: Text(pullDetail.mergeMethod.title)) {
             ForEach(HostedMergeMethod.all, id: \.self) { Text($0.title).tag($0) }
         }
-        Button("Merge…") { confirmMerge(pullDetail.mergeMethod) }
+        Button("Merge") { confirmMerge(pullDetail.mergeMethod) }
             .buttonStyle(RowTextButtonStyle(
                 formRow: true,
                 fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
@@ -1369,7 +1369,7 @@ private struct PRActionsCard: View {
                     IconImage(open ? "lucide-git-pull-request-closed" : "lucide-git-pull-request-arrow")
                         .foregroundStyle(Color(nsColor: open ? Palette.diffRemovedSign : Palette.diffAddedSign))
                         .accessibilityHidden(true)
-                    Text(open ? "Close Pull Request…" : "Reopen Pull Request…")
+                    Text(open ? "Close Pull Request" : "Reopen Pull Request")
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true))

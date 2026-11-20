@@ -468,7 +468,7 @@ private struct IssueSideColumn: View {
         VStack(spacing: SectionCardMetrics.spacing) {
             SectionCard("Actions", systemImage: "bolt") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Button(detail.isOpen ? "Close Issue…" : "Reopen Issue…") { confirmSetOpen(!detail.isOpen) }
+                    Button(detail.isOpen ? "Close Issue" : "Reopen Issue") { confirmSetOpen(!detail.isOpen) }
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                         .disabled(busy != nil)
                     if let busy {
