@@ -332,6 +332,7 @@ private struct PRReplyRow: View {
     /// The slot's width.
     let width: CGFloat
     @FocusState private var focused: Bool
+    @Environment(\.tabIsShown) private var tabIsShown
 
     /// A box of about 200 pt beside Reply and "Unresolve conversation".
     private static let oneLineWidth: CGFloat = 440
@@ -386,12 +387,15 @@ private struct PRReplyRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .hidden()
             .overlay {
-                TextEditor(text: draft)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .scrollIndicators(.never)
-                    .focused($focused)
-                    .accessibilityLabel("Reply to the conversation on \(thread.path)")
+                // Unmounted in a kept-alive tab that is not shown, out of the key view loop (`settingsTextEditor`).
+                if tabIsShown {
+                    TextEditor(text: draft)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .scrollIndicators(.never)
+                        .focused($focused)
+                        .accessibilityLabel("Reply to the conversation on \(thread.path)")
+                }
             }
             .overlay(alignment: .topLeading) {
                 if text.isEmpty {
