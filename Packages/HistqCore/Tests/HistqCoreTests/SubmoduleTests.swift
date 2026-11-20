@@ -290,11 +290,12 @@ struct SubmoduleTests {
         #expect(try await box.sandbox.git(["rev-parse", "HEAD"], in: checkout) == old)
 
         // The submodule's own config runs a marker as the smudge filter of every file (`smudge.ran`, and
-        // `smudge.token` when it sees the token); it passes the content through.
+        // `smudge.token` when it sees a credential variable or a token, `TokenSandbox.sawCredential`); it passes the
+        // content through.
         let smudge = box.sandbox.root.appending(path: "bin/smudge.sh")
         let marker = box.sandbox.root.appending(path: "smudge").path
         try Fixtures.writeScript(
-            "touch '\(marker).ran'\ntest -n \"$HISTQ_GIT_TOKEN\" && touch '\(marker).token'\ncat", to: smudge)
+            "touch '\(marker).ran'\n\(TokenSandbox.sawCredential) && touch '\(marker).token'\ncat", to: smudge)
         try await box.sandbox.git(["config", "filter.evil.smudge", smudge.path], in: checkout)
         try Data("* filter=evil\n".utf8).write(to: parent.appending(path: ".git/modules/mod/info/attributes"))
         // A new commit that changes the file, recorded in the parent and not fetched yet.
@@ -356,7 +357,7 @@ struct SubmoduleTests {
         await #expect {
             try await GitOperations.cloneSubmodules(
                 in: clone, runner: sandbox.runner, profile: NetworkTokenTests.profile, base: box.base,
-                token: NetworkTokenTests.token) { _ in }
+                credentials: NetworkTokenTests.credentials) { _ in }
         } throws: { error in
             guard let failure = error as? SubmoduleUpdateFailure else { return false }
             return failure.failures.map(\.path).sorted() == ["byfile", "bypath"]

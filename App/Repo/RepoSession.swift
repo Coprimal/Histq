@@ -1694,9 +1694,9 @@ final class RepoSession: Identifiable {
         let base = await GitToolchain.writeBase()
         let runner = backend.runner
         // Passed to the gate: it reaches git only when every remote is https on the profile's host.
-        let token = await HostingTokens.token(for: profile)
+        let credentials = await HostingTokens.credentials(for: profile)
         let environment = try await GitInvocation.backgroundFetchEnvironment(
-            profile: profile, base: base, runner: runner, cwd: cwd, token: token)
+            profile: profile, base: base, runner: runner, cwd: cwd, credentials: credentials)
         let args = ["fetch", "--all"] + (prune ? ["--prune"] : [])
         _ = try await runner.mutate {
             try await runner.run(args, cwd: cwd, env: environment, timeout: .seconds(120))
@@ -5561,12 +5561,13 @@ final class RepoSession: Identifiable {
     {
         var outcome = WriteOutcome.done
         let base = await GitToolchain.writeBase()
-        // The profile's GitHub token, from the Keychain off the main actor (cached), for network writes alone: their
-        // operations hand it to git only when the gate lets them (`GitInvocation.networkToken`).
-        let token = write.isNetwork ? await HostingTokens.token(for: profile) : nil
+        // The profile's account tokens, from the Keychain off the main actor (cached), for network writes alone: their
+        // operations hand one to git only when the gate lets them (`GitInvocation.networkToken`).
+        let credentials = write.isNetwork ? await HostingTokens.credentials(for: profile) : []
         // The tab's identity, signing and SSH key, as command-scope config: `.git/config` is never edited.
         let ops = GitOperations(
-            runner: backend.runner, cwd: cwd, profile: profile, base: base, token: token, journal: backend.journal)
+            runner: backend.runner, cwd: cwd, profile: profile, base: base, credentials: credentials,
+            journal: backend.journal)
         // Local writes (patches, the merge tool) never get the token.
         let environment = ops.env
         switch write {
@@ -5950,7 +5951,7 @@ final class RepoSession: Identifiable {
         // It may fetch a recorded commit a submodule lacks: the profile's token, as `.updateSubmodules` gets it.
         let ops = GitOperations(
             runner: backend.runner, cwd: backend.directories.worktree, profile: profile,
-            base: await GitToolchain.writeBase(), token: await HostingTokens.token(for: profile))
+            base: await GitToolchain.writeBase(), credentials: await HostingTokens.credentials(for: profile))
         return try await ops.autoUpdateSubmodules(before: before, base: backend.base)
     }
 

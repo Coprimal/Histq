@@ -24,17 +24,18 @@
 // `http.*` or `remote.<name>.proxy` config is not fetched in the background at all, since those keys could
 // send the user's credentials to a third party.
 //
-// The profile's GitHub token reaches git only for network commands (`.network`, `.backgroundFetch`): env var
-// `HISTQ_GIT_TOKEN` and a credential helper for the profile's host alone, `credential.https://<host>.helper`
-// reset (so the user's osxkeychain is not asked, and nothing is stored there) and then set to a shell function
-// that prints the variable. The token is never in a config value or an argument (a process list shows those),
-// and reads, local writes and the terminal never get it. The core never reads the Keychain: the caller passes
-// the token in.
+// The profile's account tokens (`GitCredential`, one per host) reach git only for network commands (`.network`,
+// `.backgroundFetch`): for the credential at index `<n>`, env vars `HISTQ_GIT_TOKEN_<n>` and `HISTQ_GIT_USER_<n>`
+// and a credential helper for its host alone, `credential.https://<host>.helper` reset (so the user's osxkeychain is
+// not asked, and nothing is stored there) and then set to a shell function that prints the two variables. A token or
+// a username is never in a config value or an argument (a process list shows those), and reads, local writes and the
+// terminal never get them. The core never reads the Keychain: the caller passes the credentials in.
 //
-// Every child of git inherits its environment, so a command gets the token only when the gate
-// (`networkToken(for:profile:token:base:runner:cwd:)`) lets it: every URL it contacts, after `insteadOf` and
-// `pushInsteadOf`, is `https://<profile host>/…`, and the repo's own config sets no network key (`http.*`, a
-// remote's proxy, `url.*.insteadOf`, `credential.*`) that could send the token elsewhere. Such a command runs
+// Every child of git inherits its environment, so a command gets a token only when the gate
+// (`networkToken(for:credentials:base:runner:cwd:)`) lets it: every URL it contacts, after `insteadOf` and
+// `pushInsteadOf`, is `https://<host>/…` for the host of one of the credentials, and the repo's own config sets no
+// network key (`http.*`, a remote's proxy, `url.*.insteadOf`, `credential.*`) that could send a token elsewhere. The
+// command then gets the credentials of the hosts its URLs reach, and no other. Such a command runs
 // with the `.network` block: the https transport alone (no `ext`, `file` or remote helper of the repo's
 // `remote.<name>.vcs`), no askpass, no submodule, gc or maintenance, no fsmonitor, no alternate refs command, no
 // credential helper but the token's, redirects on the first request only, and no hook (a fetch or clone) or only
@@ -107,16 +108,15 @@ public enum GitInvocation {
     /// Config entries are appended after any `GIT_CONFIG_*` entries already in `base`; within command scope the last
     /// one wins.
     ///
-    /// `token` is the profile's GitHub token. Only `.network` and `.backgroundFetch` use it, and only when the
-    /// profile has a GitHub account whose host passes `HostingHTTP.validatedHost` and the token passes
-    /// `HostingHTTP.isUsableToken`; every other access drops it. They do not check the URLs: pass it only after
-    /// the gate (`networkToken(for:...)`), as `GitOperations`, `backgroundFetchEnvironment` and `cloneEnvironment` do.
+    /// `credentials` are the tokens git may use. Only `.network` and `.backgroundFetch` use them, and only those
+    /// `usableCredentials(_:)` keeps; every other access drops them. They do not check the URLs: pass only the set the
+    /// gate matched (`networkToken(for:...)`, `.attach`), as `GitOperations`, `backgroundFetchEnvironment` and
+    /// `cloneEnvironment` do.
     public static func environment(
-        profile: Profile?, base: [String: String], access: Access = .write, token: String? = nil
+        profile: Profile?, base: [String: String], access: Access = .write, credentials: [GitCredential] = []
     ) -> [String: String] {
-        var env = base
-        // Only the token helper below may set it, whatever `base` carries.
-        env["HISTQ_GIT_TOKEN"] = nil
+        // Only the token helpers below may set them, whatever `base` carries.
+        var env = base.filter { !isCredentialVariable($0.key) }
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["LC_ALL"] = "C"
         var config: [(String, String)] = []
@@ -167,9 +167,9 @@ public enum GitInvocation {
                 config += [("core.hooksPath", hooksPath), ("push.gpgSign", "false")]
             }
         }
-        // Last, so no helper entry of any scope comes after the reset for the profile's host.
-        if access.isNetwork, let token, let helper = tokenHelperConfig(profile: profile, token: token) {
-            env["HISTQ_GIT_TOKEN"] = token
+        // Last, so no helper entry of any scope comes after the reset for a credential's host.
+        let usable = access.isNetwork ? usableCredentials(credentials) : []
+        if !usable.isEmpty {
             switch access {
             case .network:
                 // No helper but the token's, so none of the user's (or another host's after a redirect) runs in an
@@ -181,40 +181,53 @@ public enum GitInvocation {
             case .write, .read:
                 break
             }
-            config += helper
+            for (index, credential) in usable.enumerated() {
+                env["HISTQ_GIT_TOKEN_\(index)"] = credential.token
+                env["HISTQ_GIT_USER_\(index)"] = credential.gitUsername
+                let key = "credential.https://\(credential.host).helper"
+                config += [(key, ""), (key, tokenHelper(index))]
+            }
         }
         append(config, to: &env)
         return env
     }
 
-    /// The shell-function helper git runs for the profile's host: it answers `get` with the token read from
-    /// `HISTQ_GIT_TOKEN` (expanded by the shell, so the token is in no argument; `printf '%s'` prints it as it is,
-    /// where some `echo`s expand backslashes) and ignores `store` and `erase`.
-    public static let tokenHelper =
-        #"!f() { test "$1" = get && printf 'username=%s\npassword=%s\n' x-access-token "$HISTQ_GIT_TOKEN"; }; f"#
-
-    /// `credential.https://<host>.helper` reset, then `tokenHelper`; nil without a GitHub account, with a host
-    /// that could widen or bend the config key (`*`, `/`, `@`, whitespace), or with a token that could break the
-    /// helper's output lines.
-    private static func tokenHelperConfig(profile: Profile?, token: String) -> [(String, String)]? {
-        guard let host = tokenHost(profile: profile, token: token) else { return nil }
-        let key = "credential.https://\(host).helper"
-        return [(key, ""), (key, tokenHelper)]
+    /// The shell-function helper git runs for the host of the credential at `index`: it answers `get` with the
+    /// username and token read from `HISTQ_GIT_USER_<index>` and `HISTQ_GIT_TOKEN_<index>` (expanded by the shell, so
+    /// neither is in an argument nor in the helper's text; `printf '%s'` prints them as they are, where some `echo`s
+    /// expand backslashes) and ignores `store` and `erase`. Only the index, a number, is in the text.
+    public static func tokenHelper(_ index: Int) -> String {
+        #"!f() { test "$1" = get && printf 'username=%s\npassword=%s\n' "$HISTQ_GIT_USER_\#(index)" "#
+            + #""$HISTQ_GIT_TOKEN_\#(index)"; }; f"#
     }
 
-    /// The profile's GitHub host (`HostingHTTP.validatedHost`: lowercase, with its port if it has one) when it
-    /// has an account and `token` passes `HostingHTTP.isUsableToken`; nil otherwise.
-    static func tokenHost(profile: Profile?, token: String) -> String? {
-        guard let account = profile?.github, let host = HostingHTTP.validatedHost(account.host),
-              HostingHTTP.isUsableToken(token)
-        else { return nil }
-        return host
+    /// The credentials git may get, in order, each with its host as `HostingHTTP.validatedHost` gives it (lowercase,
+    /// with its port if it has one); the position in this list is the `<n>` of its variables. A credential is dropped
+    /// when its host could widen or bend the config key (`*`, `/`, `@`, whitespace), its token could break the
+    /// helper's output lines (`HostingHTTP.isUsableToken`) or its username is not `GitCredential.isSafeUsername`; a
+    /// second credential for a host already listed is dropped too.
+    static func usableCredentials(_ credentials: [GitCredential]) -> [GitCredential] {
+        var usable: [GitCredential] = []
+        for var credential in credentials {
+            guard let host = HostingHTTP.validatedHost(credential.host), HostingHTTP.isUsableToken(credential.token),
+                  GitCredential.isSafeUsername(credential.username), !usable.contains(where: { $0.host == host })
+            else { continue }
+            credential.host = host
+            usable.append(credential)
+        }
+        return usable
+    }
+
+    /// A variable that carries a credential (`HISTQ_GIT_TOKEN`, `HISTQ_GIT_TOKEN_<n>`, `HISTQ_GIT_USER_<n>`), which
+    /// only the token helpers may set.
+    static func isCredentialVariable(_ key: String) -> Bool {
+        key.hasPrefix("HISTQ_GIT_TOKEN") || key.hasPrefix("HISTQ_GIT_USER_")
     }
 
     /// The variables a terminal opened for `profile` adds to the user's own environment: identity and signing as
     /// command-scope config (`GIT_CONFIG_COUNT` from 0: they replace an inherited list) and, for a key file, the
-    /// ssh command. Never a token or a credential helper. Unlike `environment(profile:base:access:token:)` it keeps
-    /// ssh and git interactive (no `BatchMode`, no `GIT_TERMINAL_PROMPT=0`), since the user can answer a prompt
+    /// ssh command. Never a token or a credential helper. Unlike `environment(profile:base:access:credentials:)` it
+    /// keeps ssh and git interactive (no `BatchMode`, no `GIT_TERMINAL_PROMPT=0`), since the user can answer a prompt
     /// there; with the SSH agent it sets no ssh command, so the user's own `core.sshCommand` and ssh config apply.
     public static func terminalEnvironment(profile: Profile?) -> [String: String] {
         guard let profile else { return [:] }
@@ -228,7 +241,8 @@ public enum GitInvocation {
 
     /// The whole environment of a terminal's shell: `base` (Histq's own, the user's launchd environment) without what
     /// belongs to Histq or to a git command it runs, then the terminal's type, a UTF-8 `LANG` when there is none, and
-    /// `terminalEnvironment(profile:)`. No `HISTQ_GIT_TOKEN`, credential helper or askpass program ever reaches it.
+    /// `terminalEnvironment(profile:)`. No `HISTQ_GIT_TOKEN*` or `HISTQ_GIT_USER_*` variable, credential helper or
+    /// askpass program ever reaches it.
     public static func terminalProcessEnvironment(base: [String: String], profile: Profile?) -> [String: String] {
         var env = base.filter { !isHistqOwned($0.key) }
         env["TERM"] = "xterm-256color"
@@ -259,35 +273,36 @@ public enum GitInvocation {
 
     /// The background fetch environment for a `git fetch --all` run in `cwd`: lists the user's credential helpers
     /// first, and throws `BackgroundFetchError.repoSetsNetworkConfig` for a repo with its own http or proxy config.
-    /// `token` adds the profile's token helper after the replayed helpers (see
-    /// `environment(profile:base:access:token:)`) only when the gate lets every remote of the repo have it.
+    /// `credentials` adds the token helpers of the hosts the repo's remotes reach after the replayed helpers (see
+    /// `environment(profile:base:access:credentials:)`) only when the gate lets every remote of the repo have one.
     public static func backgroundFetchEnvironment(
-        profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL, token: String? = nil
+        profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL, credentials: [GitCredential] = []
     ) async throws -> [String: String] {
-        // A read environment, so the token helper is never listed and replayed as one of the user's helpers.
+        // A read environment, so a token helper is never listed and replayed as one of the user's helpers.
         let listingEnv = environment(profile: nil, base: base, access: .read(filterDrivers: []))
         let helpers = try await credentialHelpers(runner: runner, cwd: cwd, env: listingEnv)
-        var gated: String?
-        if let token, let remotes = try? await remoteNames(runner: runner, cwd: cwd, env: listingEnv),
-           await networkToken(
-               for: .fetch(remotes: remotes), profile: profile, token: token, base: base, runner: runner, cwd: cwd)
-               == .attach
+        var gated: [GitCredential] = []
+        if !credentials.isEmpty, let remotes = try? await remoteNames(runner: runner, cwd: cwd, env: listingEnv),
+           case .attach(let matched) = await networkToken(
+               for: .fetch(remotes: remotes), credentials: credentials, base: base, runner: runner, cwd: cwd)
         {
-            gated = token
+            gated = matched
         }
         return environment(
-            profile: profile, base: base, access: .backgroundFetch(credentialHelpers: helpers), token: gated)
+            profile: profile, base: base, access: .backgroundFetch(credentialHelpers: helpers), credentials: gated)
     }
 
-    /// The environment of a clone of `url`: `.network(.fetch)` with the token when the gate lets the URL have it
-    /// (`NetworkTarget.clone`), else the plain write environment, so the user's own helpers answer.
+    /// The environment of a clone of `url`: `.network(.fetch)` with the token of the URL's host when the gate lets
+    /// the URL have it (`NetworkTarget.clone`), else the plain write environment, so the user's own helpers answer.
     public static func cloneEnvironment(
-        url: String, profile: Profile?, base: [String: String], token: String?, runner: GitRunner
+        url: String, profile: Profile?, base: [String: String], credentials: [GitCredential], runner: GitRunner
     ) async -> [String: String] {
         let decision = await networkToken(
-            for: .clone(url: url), profile: profile, token: token, base: base, runner: runner, cwd: URL(filePath: "/"))
-        guard decision == .attach else { return environment(profile: profile, base: base, access: .write) }
-        return environment(profile: profile, base: base, access: .network(.fetch), token: token)
+            for: .clone(url: url), credentials: credentials, base: base, runner: runner, cwd: URL(filePath: "/"))
+        guard case .attach(let matched) = decision else {
+            return environment(profile: profile, base: base, access: .write)
+        }
+        return environment(profile: profile, base: base, access: .network(.fetch), credentials: matched)
     }
 
     /// The `credential.helper` and `credential.<url>.helper` entries (empty resets included, in git's order) of
@@ -363,7 +378,7 @@ public enum GitInvocation {
 
     // MARK: - Token gate
 
-    /// What a network command contacts, for `networkToken(for:profile:token:base:runner:cwd:)`.
+    /// What a network command contacts, for `networkToken(for:credentials:base:runner:cwd:)`.
     public enum NetworkTarget: Sendable, Equatable {
         /// A fetch from these remotes (by name): every fetch URL of each.
         case fetch(remotes: [String])
@@ -377,16 +392,18 @@ public enum GitInvocation {
         case submodule(path: String)
     }
 
-    /// Whether a network command gets the profile's token, and why not.
+    /// Whether a network command gets credentials, which, and why not.
     public enum TokenDecision: Sendable, Equatable {
-        /// Every URL is `https://<profile host>/…` and the repo sets no network key of its own.
-        case attach
-        /// No token, no GitHub account, or a host or token `GitHubClient` refuses.
+        /// Every URL is `https://<host>/…` for the host of one of these credentials (the usable ones whose host a URL
+        /// reaches, no other; hosts as `HostingHTTP.validatedHost` gives them) and the repo sets no network key of
+        /// its own.
+        case attach([GitCredential])
+        /// No credential `usableCredentials(_:)` keeps.
         case noToken
         /// The repo's own config sets these keys (`credential.*`, `http.*`, `remote.<name>.proxy`,
         /// `url.<base>.insteadof`, `url.<base>.pushinsteadof`), any of which could send the token elsewhere.
         case repoNetworkConfig(keys: [String])
-        /// A URL the command contacts is not `https://<profile host>/…` (or there is none).
+        /// A URL the command contacts is not `https://<host>/…` for any credential's host (or there is none).
         case otherURL
         /// Git could not list the config or the URLs: no token, as for any doubt.
         case lookupFailed
@@ -396,19 +413,20 @@ public enum GitInvocation {
         case submoduleRecursion(keys: [String])
     }
 
-    /// The gate of the profile's token: `.attach` only when the profile has a GitHub account and a usable token,
-    /// the repo in `cwd` sets no network key of its own nor, with submodules, a recursion key that is on
-    /// (`submoduleRecursion`; not for a clone, nor for a submodule fetch, whose caller never recurses), and every URL
-    /// `target` contacts passes
-    /// `isTokenURL(_:host:)` after the rewrites git applies (`remote get-url`: `insteadOf`, and `pushInsteadOf` for
-    /// a push; `ls-remote --get-url` for a clone). The git runs read config only, under a read environment (no
-    /// transport at all), so the gate never touches the network; a clone's URL is resolved in `/`, where no
-    /// repository's config applies, and the URL as typed must pass too.
+    /// The gate of the credentials: `.attach` only when `usableCredentials(_:)` keeps one, the repo in `cwd` sets no
+    /// network key of its own nor, with submodules, a recursion key that is on (`submoduleRecursion`; not for a clone,
+    /// nor for a submodule fetch, whose caller never recurses), and every URL `target` contacts passes
+    /// `isTokenURL(_:host:)` for the host of one of them after the rewrites git applies (`remote get-url`:
+    /// `insteadOf`, and `pushInsteadOf` for a push; `ls-remote --get-url` for a clone). All or nothing: one URL on no
+    /// credential's host and the command gets none. `.attach` carries the credentials of the hosts the URLs reach
+    /// alone, so a command never gets the token of a host it does not contact. The git runs read config only, under a
+    /// read environment (no transport at all), so the gate never touches the network; a clone's URL is resolved in
+    /// `/`, where no repository's config applies, and the URL as typed must pass too.
     public static func networkToken(
-        for target: NetworkTarget, profile: Profile?, token: String?, base: [String: String], runner: GitRunner,
-        cwd: URL
+        for target: NetworkTarget, credentials: [GitCredential], base: [String: String], runner: GitRunner, cwd: URL
     ) async -> TokenDecision {
-        guard let token, let host = tokenHost(profile: profile, token: token) else { return .noToken }
+        let usable = usableCredentials(credentials)
+        guard !usable.isEmpty else { return .noToken }
         let listingEnv = environment(profile: nil, base: base, access: .read(filterDrivers: []))
         var urls: [String] = []
         do {
@@ -440,10 +458,16 @@ public enum GitInvocation {
         } catch {
             return .lookupFailed
         }
-        guard !urls.isEmpty, urls.allSatisfy({ isTokenURL($0, host: host) }) else { return .otherURL }
+        guard !urls.isEmpty else { return .otherURL }
+        var reached: Set<String> = []
+        for url in urls {
+            guard let credential = usable.first(where: { isTokenURL(url, host: $0.host) }) else { return .otherURL }
+            reached.insert(credential.host)
+        }
+        let matched = usable.filter { reached.contains($0.host) }
         // A clone has no repo yet; a submodule's caller never recurses (the parent has `.gitmodules` anyway).
         switch target {
-        case .clone, .submodule: return .attach
+        case .clone, .submodule: return .attach(matched)
         case .fetch, .push: break
         }
         do {
@@ -452,7 +476,7 @@ public enum GitInvocation {
         } catch {
             return .lookupFailed
         }
-        return .attach
+        return .attach(matched)
     }
 
     /// The submodule recursion keys that are on in `cwd` (`submodule.recurse` true, `fetch.recurseSubmodules` or
@@ -610,16 +634,20 @@ public enum GitInvocation {
     /// `core.hooksPath` or `.git/hooks`), so no other hook runs: the reference-transaction hook that a push runs as
     /// it updates `refs/remotes/...` stays off. The caller removes the folder after the push.
     ///
-    /// The repo's hook never sees the token. Only git-lfs's generated stub (`isLFSPrePushStub(_:)`, checked here, on
+    /// The repo's hook never sees a token. Only git-lfs's generated stub (`isLFSPrePushStub(_:)`, checked here, on
     /// an executable regular file once symlinks are resolved, in a repo whose own config names no git-lfs transfer
-    /// agent or extension, programs git-lfs would run) gets it, for git-lfs's upload: the wrapper then runs the stub's
-    /// two commands itself, so nothing read later from the repo's file runs with the token. Any other hook runs with
-    /// the same arguments and input after the wrapper puts back what it would see without the token, from `env`:
-    /// `HISTQ_GIT_TOKEN` unset, and `GIT_CONFIG_COUNT`, `GIT_ALLOW_PROTOCOL`, `GIT_ASKPASS` and `SSH_ASKPASS` as `env`
-    /// has them (unset when it has none). The `.network` block and the token's entries all come after the write
-    /// environment's own config entries, so the count drops them: a `git` the hook runs (over ssh too) sees the write
-    /// environment, the user's own credential helpers and the repo's hooks, as in a push without the token.
-    public static func prePushHooksFolder(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> URL {
+    /// agent or extension, programs git-lfs would run) gets them, for git-lfs's upload: the wrapper then runs the
+    /// stub's two commands itself, so nothing read later from the repo's file runs with a token. Any other hook runs
+    /// with the same arguments and input after the wrapper puts back what it would see without the tokens, from `env`:
+    /// `HISTQ_GIT_TOKEN_<n>` and `HISTQ_GIT_USER_<n>` of every one of `credentials` (the set the push runs with, as
+    /// `environment(profile:base:access:credentials:)` numbers it) unset, and `GIT_CONFIG_COUNT`,
+    /// `GIT_ALLOW_PROTOCOL`, `GIT_ASKPASS` and `SSH_ASKPASS` as `env` has them (unset when it has none). The
+    /// `.network` block and the tokens' entries all come after the write environment's own config entries, so the
+    /// count drops them: a `git` the hook runs (over ssh too) sees the write environment, the user's own credential
+    /// helpers and the repo's hooks, as in a push without the tokens.
+    public static func prePushHooksFolder(
+        runner: GitRunner, cwd: URL, env: [String: String], credentials: [GitCredential]
+    ) async throws -> URL {
         let output = try await runner.run(
             ["rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"], cwd: cwd, env: env,
             timeout: .seconds(10)).text
@@ -636,6 +664,8 @@ public enum GitInvocation {
                 + #"on your path."; exit 2; }"# + "\nexec " + lfsStubCommand + "\n"
             // `exec`, so the hook's `$0` is its own path (hook managers find their files next to it).
             : "#!/bin/sh\nunset HISTQ_GIT_TOKEN\n"
+                // Every index `credentials` could use: never fewer than the usable ones it numbers from 0.
+                + credentials.indices.map { "unset HISTQ_GIT_TOKEN_\($0) HISTQ_GIT_USER_\($0)\n" }.joined()
                 + ["GIT_CONFIG_COUNT", "GIT_ALLOW_PROTOCOL", "GIT_ASKPASS", "SSH_ASKPASS"].map { key in
                     env[key].map { "\(key)=\(shellQuoted($0))\nexport \(key)\n" } ?? "unset \(key)\n"
                 }.joined()
@@ -857,5 +887,47 @@ public enum GitInvocation {
             index += 1
         }
         if index > 0 { env["GIT_CONFIG_COUNT"] = String(index) }
+    }
+}
+
+/// One account's token for git over https on `host` (see `GitInvocation`). Its description and mirror never show the
+/// token, so a log, `dump` or test failure that prints it leaks nothing.
+public struct GitCredential: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible,
+    CustomReflectable
+{
+    public var kind: HostingKind
+    /// The host as the account has it, `HostingHTTP.validatedHost` style (with a port if it has one).
+    public var host: String
+    /// The username git sends with the token for kinds that need one; it must pass `isSafeUsername(_:)`, else the
+    /// credential is never used.
+    public var username: String
+    public var token: String
+
+    public init(kind: HostingKind, host: String, username: String, token: String) {
+        self.kind = kind
+        self.host = host
+        self.username = username
+        self.token = token
+    }
+
+    /// What the token helper answers as the username: GitHub's `x-access-token`, whatever `username` says.
+    var gitUsername: String {
+        switch kind {
+        case .github: "x-access-token"
+        }
+    }
+
+    /// Printable ASCII without a space, `:`, `@`, `/`, quote, `$`, backslash or backquote, and not empty: nothing a
+    /// shell, a URL or the credential protocol could read as more than a name.
+    static func isSafeUsername(_ username: String) -> Bool {
+        !username.isEmpty && username.unicodeScalars.allSatisfy {
+            (0x21...0x7E).contains($0.value) && !":@/'\"$\\`".unicodeScalars.contains($0)
+        }
+    }
+
+    public var description: String { "GitCredential(\(kind), \(host), \(username), token: <redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["kind": kind, "host": host, "username": username, "token": "<redacted>"])
     }
 }

@@ -152,6 +152,15 @@ final class ProfileLibrary {
         update { $0.delete(id: id) }
     }
 
+    /// Adds `account` to profile `id`, in place of the account it had on that host: one account per host.
+    func setAccount(_ account: HostingAccount, of id: UUID) {
+        modify(id) { $0.setAccount(account) }
+    }
+
+    func removeAccount(forHost host: String, of id: UUID) {
+        modify(id) { $0.removeAccount(forHost: host) }
+    }
+
     /// The profile of new tabs; nil for none (git then uses the user's own config).
     func setDefault(_ id: UUID?) {
         update { $0.defaultProfileID = id }

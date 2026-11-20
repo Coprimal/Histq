@@ -425,12 +425,12 @@ final class WelcomeModel {
         clone = .running(line: text, fraction: percent.map { min($0, 100) / 100 })
     }
 
-    /// What a clone ran as, for its submodule step: the same git, profile, environment base and token.
+    /// What a clone ran as, for its submodule step: the same git, profile, environment base and credentials.
     private struct CloneContext: Sendable {
         let runner: GitRunner
         let profile: Profile?
         let base: [String: String]
-        let token: String?
+        let credentials: [GitCredential]
     }
 
     @concurrent
@@ -441,16 +441,16 @@ final class WelcomeModel {
         let toolchain = try await GitToolchain.resolve()
         let runner = GitRunner(executable: toolchain.executable.url)
         // The clone opens with `profileID`'s profile (the default one when nil or deleted), so it clones as that
-        // profile too (SSH key) and, when the URL (after the user's rewrites) is https on the profile's GitHub host,
-        // with its token.
+        // profile too (SSH key) and, when the URL (after the user's rewrites) is https on one of the profile's account
+        // hosts, with that account's token.
         let store = await ProfileLibrary.shared.loaded()
         let profile = profileID.flatMap { store?.profile(id: $0) } ?? store?.defaultProfile
-        let token = await HostingTokens.token(for: profile)
+        let credentials = await HostingTokens.credentials(for: profile)
         let base = await GitToolchain.writeBase()
         let cloneEnv = await GitInvocation.cloneEnvironment(
-            url: url, profile: profile, base: base, token: token, runner: runner)
+            url: url, profile: profile, base: base, credentials: credentials, runner: runner)
         try await GitOperations.clone(url: url, into: destination, runner: runner, env: cloneEnv, progress: progress)
-        return CloneContext(runner: runner, profile: profile, base: base, token: token)
+        return CloneContext(runner: runner, profile: profile, base: base, credentials: credentials)
     }
 
     /// Clones the submodules of the clone at `folder` (no git without `.gitmodules`) as the clone ran: the token only
@@ -462,7 +462,7 @@ final class WelcomeModel {
         do {
             try await GitOperations.cloneSubmodules(
                 in: folder, runner: context.runner, profile: context.profile, base: context.base,
-                token: context.token, progress: progress)
+                credentials: context.credentials, progress: progress)
             return nil
         } catch {
             return error is CancellationError || Task.isCancelled ? nil : error

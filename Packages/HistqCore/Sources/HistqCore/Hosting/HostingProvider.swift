@@ -46,8 +46,8 @@ public enum HostedMergeMethod: String, Sendable {
     case merge, squash, rebase
 }
 
-/// Which code host a provider talks to.
-public enum HostingKind: Sendable, Hashable {
+/// Which code host a provider talks to. The raw value is saved in `profiles.json`: never change it.
+public enum HostingKind: String, Codable, Sendable, Hashable {
     case github
 }
 

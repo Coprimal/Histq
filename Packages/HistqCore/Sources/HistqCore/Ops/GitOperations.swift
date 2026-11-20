@@ -12,7 +12,7 @@
 // with `-c core.editor=true`, so git never waits for an editor.
 //
 // Token: with a `credential`, each network operation asks `GitInvocation.networkToken` first (inside its lane, for
-// the remotes it contacts) and gets the GitHub token only when the gate lets it; see `networkExec`.
+// the remotes it contacts) and gets the tokens of the hosts it reaches only when the gate lets it; see `networkExec`.
 //
 // Undo: with a `journal`, the operations the journal can take back (commit, amend, checkout, reset, merge, rebase,
 // cherry-pick, revert, am, local branch create/delete/rename, discard) are snapshotted before and after inside their
@@ -96,16 +96,16 @@ public struct GitOperations: Sendable {
         case profileDefault, sign, noSign
     }
 
-    /// The profile's GitHub token and what the token gate needs to decide, command by command, whether git gets it.
+    /// The profile's account tokens and what the token gate needs to decide, command by command, which git gets.
     public struct NetworkCredential: Sendable {
         public var profile: Profile?
         public var base: [String: String]
-        public var token: String
+        public var credentials: [GitCredential]
 
-        public init(profile: Profile?, base: [String: String], token: String) {
+        public init(profile: Profile?, base: [String: String], credentials: [GitCredential]) {
             self.profile = profile
             self.base = base
-            self.token = token
+            self.credentials = credentials
         }
     }
 
@@ -117,7 +117,7 @@ public struct GitOperations: Sendable {
     /// The environment of network operations (fetch, pull, push and their compound steps) that do not get the
     /// token. Defaults to `env`.
     public let networkEnv: [String: String]
-    /// The token for network operations that pass the gate (`networkExec`); nil = never a token.
+    /// The tokens for network operations that pass the gate (`networkExec`); nil = never a token.
     public let credential: NetworkCredential?
     /// The time limit of one network command (git is stopped after it).
     public let networkTimeout: Duration
@@ -137,15 +137,16 @@ public struct GitOperations: Sendable {
         self.journal = journal
     }
 
-    /// The usual setup for `profile`: `env` (and `networkEnv`) is its write environment, and `token` goes only to the
-    /// network operations the gate lets have it.
+    /// The usual setup for `profile`: `env` (and `networkEnv`) is its write environment, and each of `credentials`
+    /// goes only to the network operations the gate lets have it.
     public init(
-        runner: GitRunner, cwd: URL, profile: Profile?, base: [String: String], token: String? = nil,
+        runner: GitRunner, cwd: URL, profile: Profile?, base: [String: String], credentials: [GitCredential] = [],
         networkTimeout: Duration = .seconds(600), journal: UndoJournal? = nil
     ) {
         self.init(
             runner: runner, cwd: cwd, env: GitInvocation.environment(profile: profile, base: base, access: .write),
-            credential: token.map { NetworkCredential(profile: profile, base: base, token: $0) },
+            credential: credentials.isEmpty
+                ? nil : NetworkCredential(profile: profile, base: base, credentials: credentials),
             networkTimeout: networkTimeout, journal: journal)
     }
 
@@ -395,12 +396,12 @@ public struct GitOperations: Sendable {
             do {
                 let remote = ops.credential == nil ? nil : try? await ops.upstreamRemote()
                 let decision = await ops.tokenDecision(for: remote.map { .fetch(remotes: [$0]) })
-                if decision == .attach, let remote, let credential = ops.credential {
+                if case .attach(let matched) = decision, let remote, let credential = ops.credential {
                     // As `pull`, before the fetch moves the tracking ref; nil without one or without a fork point.
                     let forkPoint = mode == .rebase ? await ops.forkPoint() : nil
                     try await ops.exec(
                         ["fetch", "--end-of-options", remote], network: true,
-                        environment: ops.tokenEnvironment(.fetch, credential))
+                        environment: ops.tokenEnvironment(.fetch, credential, matched))
                     let candidates = try await ops.mergeCandidates()
                     switch mode {
                     case .fastForward: try await ops.exec(["merge"] + auto + ["--ff", "--no-edit", "FETCH_HEAD"])
@@ -1226,7 +1227,7 @@ public struct GitOperations: Sendable {
 
     /// Clones `url` into `destination` (which must not exist; its parent must), reporting git's
     /// `--progress` lines (stderr, split on `\r` and `\n`) as they arrive. `env` is
-    /// `GitInvocation.cloneEnvironment(url:profile:base:token:runner:)`. Cancelling the task stops git, and so does
+    /// `GitInvocation.cloneEnvironment(url:profile:base:credentials:runner:)`. Cancelling the task stops git, and so does
     /// `timeout` (1 h by default; nil = no limit, for huge repos).
     public static func clone(
         url: String, into destination: URL, runner: GitRunner, env: [String: String],
@@ -1488,31 +1489,35 @@ public struct GitOperations: Sendable {
     @discardableResult
     func networkExec(_ args: [String], target: GitInvocation.NetworkTarget?) async throws -> GitResult {
         let decision = await tokenDecision(for: target)
-        guard decision == .attach, let credential else {
+        guard case .attach(let matched) = decision, let credential else {
             return try await withheldExec(decision) { try await exec(args, network: true) }
         }
         guard case .push = target else {
-            return try await exec(args, network: true, environment: tokenEnvironment(.fetch, credential))
+            return try await exec(args, network: true, environment: tokenEnvironment(.fetch, credential, matched))
         }
         // The write environment of the credential's profile: where git finds the hook, and what the hook sees.
         let hookEnv = GitInvocation.environment(profile: credential.profile, base: credential.base, access: .write)
-        let hooks = try await GitInvocation.prePushHooksFolder(runner: runner, cwd: cwd, env: hookEnv)
+        let hooks = try await GitInvocation.prePushHooksFolder(
+            runner: runner, cwd: cwd, env: hookEnv, credentials: matched)
         defer { try? FileManager.default.removeItem(at: hooks) }
         return try await exec(
-            args, network: true, environment: tokenEnvironment(.push(hooksPath: hooks.path), credential))
+            args, network: true, environment: tokenEnvironment(.push(hooksPath: hooks.path), credential, matched))
     }
 
     func tokenDecision(for target: GitInvocation.NetworkTarget?) async -> GitInvocation.TokenDecision {
         guard let credential else { return .noToken }
         guard let target else { return .lookupFailed }
         return await GitInvocation.networkToken(
-            for: target, profile: credential.profile, token: credential.token, base: credential.base, runner: runner,
-            cwd: cwd)
+            for: target, credentials: credential.credentials, base: credential.base, runner: runner, cwd: cwd)
     }
 
-    func tokenEnvironment(_ kind: GitInvocation.NetworkKind, _ credential: NetworkCredential) -> [String: String] {
+    /// The token-carrying environment of `kind` with `matched` alone: the credentials the gate's `.attach` gave for
+    /// this command, never the whole set of `credential`.
+    func tokenEnvironment(
+        _ kind: GitInvocation.NetworkKind, _ credential: NetworkCredential, _ matched: [GitCredential]
+    ) -> [String: String] {
         GitInvocation.environment(
-            profile: credential.profile, base: credential.base, access: .network(kind), token: credential.token)
+            profile: credential.profile, base: credential.base, access: .network(kind), credentials: matched)
     }
 
     /// Runs a network command that did not get the token; when the repo's own network config or its submodule

@@ -1,7 +1,8 @@
 // Secrets in the Keychain: generic-password items of one service (`AppState.keychainService`), in the file-based
 // login keychain (`kSecUseDataProtectionKeychain = false`). Debug and Release are both Developer ID-signed with the
 // same identity, so an item one build writes is read by the other without an "Always Allow" prompt (user checklist
-// U10.1 checks it). Accounts: `github.<profileID>.<host>` (GitHub tokens), later `ai.<provider>`.
+// U10.1 checks it). Accounts: `<kind>.<profileID>.<host>` (code host tokens, `github.…` for GitHub), later
+// `ai.<provider>`.
 //
 // The SecItem calls block (and may wait on a Keychain prompt), so callers run them off the main thread:
 // `HostingTokens` does. Values are never logged or put in an error: only OSStatus codes and account names.
@@ -132,10 +133,11 @@ struct KeychainStore: Sendable {
     /// Whether this is the in-memory twin (DEBUG seams that fake a connected account require it).
     var isInMemory: Bool { backend is InMemoryKeychainBackend }
 
-    /// The account of a profile's GitHub token: `github.<profileID>.<host>`, the id uppercase as `profiles.json` has it
-    /// (so `security find-generic-password -a` finds it with the id copied from there).
-    static func githubAccount(profileID: UUID, host: String) -> String {
-        "github.\(profileID.uuidString).\(host)"
+    /// The account of a profile's code host token: `<kind>.<profileID>.<host>`, the id uppercase as `profiles.json` has
+    /// it (so `security find-generic-password -a` finds it with the id copied from there). GitHub's raw value is
+    /// `github`, so its items keep the `github.<profileID>.<host>` name they always had; the host is used as is.
+    static func hostingAccount(_ kind: HostingKind, profileID: UUID, host: String) -> String {
+        "\(kind.rawValue).\(profileID.uuidString).\(host)"
     }
 
     /// The value, nil when there is no item. Throws `KeychainError` when the read failed, or the item is not UTF-8.
@@ -181,8 +183,8 @@ struct KeychainStore: Sendable {
     }
 }
 
-/// The profiles' GitHub tokens, read from `KeychainStore.shared` off the main thread and cached for the process by
-/// account, so a write or fetch reads the Keychain once per profile and host. Settings › Integrations saves and
+/// The profiles' code host tokens, read from `KeychainStore.shared` off the main thread and cached for the process by
+/// account, so a write or fetch reads the Keychain once per profile, kind and host. Settings › Integrations saves and
 /// deletes through here, which updates the cache, so the next git command sees the change. A failed read is never
 /// cached (the next use tries again).
 enum HostingTokens {
@@ -190,24 +192,47 @@ enum HostingTokens {
     /// Account to token; nil = known to have no item.
     private static let cache = OSAllocatedUnfairLock<[String: String?]>(initialState: [:])
 
-    /// The token of `profileID` for `host`, nil when there is none or the read failed (logged, status only). With
-    /// `refresh`, reads the Keychain even when cached (the Integrations page, so an item deleted outside Histq shows).
+    /// The `kind` token of `profileID` for `host`, nil when there is none or the read failed (logged, status only).
+    /// With `refresh`, reads the Keychain even when cached (the Integrations page, so an item deleted outside Histq
+    /// shows).
     @concurrent
-    static func token(profileID: UUID, host: String, refresh: Bool = false) async -> String? {
-        try? await read(profileID: profileID, host: host, refresh: refresh)
+    static func token(
+        profileID: UUID, kind: HostingKind = .github, host: String, refresh: Bool = false
+    ) async -> String? {
+        try? await read(profileID: profileID, kind: kind, host: host, refresh: refresh)
     }
 
-    /// The token git gets for `profile`: nil without a profile or a GitHub account (the Keychain is not read then).
+    /// The profile's GitHub token, for the GitHub API client: nil without a profile or a GitHub account (the Keychain
+    /// is not read then). Git gets `credentials(for:)`.
     @concurrent
     static func token(for profile: Profile?) async -> String? {
         guard let profile, let host = profile.github?.host else { return nil }
         return await token(profileID: profile.id, host: host)
     }
 
-    /// As `token(profileID:host:refresh:)`, but a failed read throws instead of reading as no token.
+    /// What git gets for `profile` (`GitInvocation`, which trusts the set): one credential per account of the profile
+    /// itself that has a token, for the account's host; empty without a profile. The username is the account's
+    /// `gitUsername`, else `x-access-token` for GitHub and the login for other kinds.
     @concurrent
-    static func read(profileID: UUID, host: String, refresh: Bool = false) async throws -> String? {
-        let account = KeychainStore.githubAccount(profileID: profileID, host: host)
+    static func credentials(for profile: Profile?) async -> [GitCredential] {
+        guard let profile else { return [] }
+        var credentials: [GitCredential] = []
+        for account in profile.accounts {
+            guard let token = await token(profileID: profile.id, kind: account.kind, host: account.host) else {
+                continue
+            }
+            let username = account.gitUsername ?? (account.kind == .github ? "x-access-token" : account.login)
+            credentials.append(GitCredential(kind: account.kind, host: account.host, username: username, token: token))
+        }
+        return credentials
+    }
+
+    /// As `token(profileID:kind:host:refresh:)`, but a failed read throws instead of reading as no token.
+    @concurrent
+    static func read(
+        profileID: UUID, kind: HostingKind = .github, host: String, refresh: Bool = false
+    ) async throws -> String? {
+        let account = KeychainStore.hostingAccount(kind, profileID: profileID, host: host)
         if !refresh, let cached = cache.withLock({ $0[account] }) { return cached }
         do {
             let token = try KeychainStore.shared.string(account: account)
@@ -220,15 +245,15 @@ enum HostingTokens {
     }
 
     @concurrent
-    static func save(_ token: String, profileID: UUID, host: String) async throws {
-        let account = KeychainStore.githubAccount(profileID: profileID, host: host)
+    static func save(_ token: String, profileID: UUID, kind: HostingKind = .github, host: String) async throws {
+        let account = KeychainStore.hostingAccount(kind, profileID: profileID, host: host)
         try KeychainStore.shared.setString(token, account: account)
         cache.withLock { $0[account] = .some(token) }
     }
 
     @concurrent
-    static func delete(profileID: UUID, host: String) async throws {
-        let account = KeychainStore.githubAccount(profileID: profileID, host: host)
+    static func delete(profileID: UUID, kind: HostingKind = .github, host: String) async throws {
+        let account = KeychainStore.hostingAccount(kind, profileID: profileID, host: host)
         // Forgotten first: even if the delete fails, git stops getting the token the user asked to remove.
         cache.withLock { $0[account] = .some(nil) }
         try KeychainStore.shared.delete(account: account)

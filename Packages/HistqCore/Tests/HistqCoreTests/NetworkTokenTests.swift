@@ -1,10 +1,12 @@
-// Security tests for the GitHub token on user-initiated network commands: the gate
-// (`GitInvocation.networkToken`) gives it only to commands whose every URL is `https://<profile host>/…` in a
-// repo without network config of its own, and then nothing the repo configures but the pre-push hook runs with
-// `HISTQ_GIT_TOKEN`. Each marker case first proves, with the naive token environment (the write environment plus
-// the token and its helper for every child, as before the gate), that its marker does see the token. No case
-// touches the network or the Keychain: `https://git.histq.invalid/<path>` reaches the local folder `<path>`
-// through a fake `git-remote-https` in a copy of git's exec path, and HOME and the global config are temporary.
+// Security tests for the account tokens on user-initiated network commands: the gate
+// (`GitInvocation.networkToken`) gives a command only the credentials of the hosts its URLs reach, and only when
+// every URL is `https://<account host>/…` in a repo without network config of its own; then nothing the repo
+// configures but git-lfs's pre-push stub runs with a `HISTQ_GIT_TOKEN_<n>` or `HISTQ_GIT_USER_<n>` variable. The
+// profile has two accounts, on `git.histq.invalid` and `second.histq.invalid`. Each marker case first proves, with the
+// naive token environment (the write environment plus every token and its helper for every child, as before the
+// gate), that its marker does see a token. No case touches the network or the Keychain: `https://<host>/<path>`
+// reaches the local folder `<path>` through a fake `git-remote-https` in a copy of git's exec path, and HOME and the
+// global config are temporary. A token is never put in a failure message: checks compare first, then report a Bool.
 import Foundation
 import HistqCore
 import Testing
@@ -12,7 +14,18 @@ import Testing
 struct NetworkTokenTests {
     static let token = GitInvocationTests.token
     static let host = GitInvocationTests.tokenHost
-    static let profile = GitInvocationTests.tokenProfile
+    static let credential = GitInvocationTests.credential
+    /// The profile's second account, on another host, with a token of its own.
+    static let secondHost = "second.histq.invalid"
+    static let secondToken = "ghp_HistqSecondFakeToken9876543210"
+    static let secondCredential = GitCredential(
+        kind: .github, host: secondHost, username: "x-access-token", token: secondToken)
+    static let credentials = [credential, secondCredential]
+    static var profile: Profile {
+        var profile = GitInvocationTests.tokenProfile
+        profile.setAccount(HostingAccount(kind: .github, host: secondHost, login: "octo2"))
+        return profile
+    }
 
     // MARK: - URL rules
 
@@ -62,8 +75,8 @@ struct NetworkTokenTests {
         defer { box.remove() }
         let repo = try await box.sandbox.makeRepo("repo")
         try await box.sandbox.git(["remote", "add", "origin", box.url(repo)], in: repo)
-        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach)
-        #expect(await box.decision(.push(remote: "origin"), in: repo) == .attach)
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach([Self.credential]))
+        #expect(await box.decision(.push(remote: "origin"), in: repo) == .attach([Self.credential]))
         #expect(!box.transportRan, "the gate ran the transport")
 
         // The user's global rewrites: to another host for fetch and push, then for push only.
@@ -71,12 +84,12 @@ struct NetworkTokenTests {
         #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .otherURL)
         #expect(await box.decision(.push(remote: "origin"), in: repo) == .otherURL)
         try box.writeGlobal("[url \"https://evil.histq.invalid/\"]\n\tpushInsteadOf = https://\(Self.host)/\n")
-        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach)
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach([Self.credential]))
         #expect(await box.decision(.push(remote: "origin"), in: repo) == .otherURL)
         // A rewrite that lands on the profile's host qualifies.
         try box.writeGlobal("[url \"https://\(Self.host)/\"]\n\tinsteadOf = gh:\n")
         try await box.sandbox.git(["remote", "add", "short", "gh:octo/repo"], in: repo)
-        #expect(await box.decision(.fetch(remotes: ["origin", "short"]), in: repo) == .attach)
+        #expect(await box.decision(.fetch(remotes: ["origin", "short"]), in: repo) == .attach([Self.credential]))
 
         try await box.sandbox.git(["config", "remote.origin.pushurl", "ssh://\(Self.host)/octo/repo"], in: repo)
         #expect(await box.decision(.push(remote: "origin"), in: repo) == .otherURL)
@@ -86,14 +99,14 @@ struct NetworkTokenTests {
         #expect(await box.decision(.fetch(remotes: []), in: repo) == .otherURL)
         #expect(!box.transportRan, "the gate ran the transport")
 
-        var noAccount = Self.profile
-        noAccount.github = nil
         #expect(await GitInvocation.networkToken(
-            for: .fetch(remotes: ["origin"]), profile: noAccount, token: Self.token, base: box.base,
-            runner: box.sandbox.runner, cwd: repo) == .noToken)
+            for: .fetch(remotes: ["origin"]), credentials: [], base: box.base, runner: box.sandbox.runner,
+            cwd: repo) == .noToken)
+        var unusable = Self.credential
+        unusable.token = "two words"
         #expect(await GitInvocation.networkToken(
-            for: .fetch(remotes: ["origin"]), profile: Self.profile, token: nil, base: box.base,
-            runner: box.sandbox.runner, cwd: repo) == .noToken)
+            for: .fetch(remotes: ["origin"]), credentials: [unusable], base: box.base, runner: box.sandbox.runner,
+            cwd: repo) == .noToken)
     }
 
     @Test(
@@ -137,7 +150,7 @@ struct NetworkTokenTests {
             \tinsteadOf = elsewhere:
 
             """)
-        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach)
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach([Self.credential]))
         let included = box.sandbox.root.appending(path: "included.config")
         try Data("[http]\n\tsslVerify\n".utf8).write(to: included)
         try await box.sandbox.git(["config", "include.path", included.path], in: repo)
@@ -257,7 +270,7 @@ struct NetworkTokenTests {
         }
     }
 
-    @Test("fetch --all with a remote on another host gets no token; with every remote on the profile's host, it does")
+    @Test("fetch --all with a remote on another host gets no token; with every remote on an account's host, it does")
     func fetchAllIsAllOrNothing() async throws {
         let box = try await TokenSandbox(userHelper: true)
         defer { box.remove() }
@@ -272,6 +285,117 @@ struct NetworkTokenTests {
         #expect(box.transportRan)
         #expect(!box.transportGotToken, "a fetch --all that also reaches a local folder got the token")
         #expect(box.transportGotUserSecret)
+    }
+
+    // MARK: - Accounts on several hosts
+
+    @Test("a command whose every URL is on one account's host gets that host's credential alone, never another's")
+    func onlyTheReachedHostsCredential() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let (repo, source) = try await box.makeRepoWithRemote(host: Self.secondHost)
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == .attach([Self.secondCredential]))
+        #expect(await box.decision(.push(remote: "origin"), in: repo) == .attach([Self.secondCredential]))
+
+        try await box.operations(naive: false, in: repo).fetchAll()
+        #expect(
+            box.transportGot(Self.secondToken, host: Self.secondHost), "the fetch did not sign in to the second host")
+        try box.expectOnlySecondCredential(in: box.transportEnvironment(host: Self.secondHost), "fetch")
+
+        try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "to push"], in: repo)
+        try box.clearTransport()
+        try await box.operations(naive: false, in: repo).push(branch: "main", to: "origin", as: "pushed")
+        #expect(try await box.sandbox.git(["rev-parse", "pushed"], in: source)
+            == box.sandbox.git(["rev-parse", "main"], in: repo))
+        #expect(
+            box.transportGot(Self.secondToken, host: Self.secondHost), "the push did not sign in to the second host")
+        try box.expectOnlySecondCredential(in: box.transportEnvironment(host: Self.secondHost), "push")
+    }
+
+    @Test("a fetch across remotes on two account hosts gets both credentials, each helper bound to its own host")
+    func fetchAcrossTwoAccountHosts() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let (repo, source) = try await box.makeRepoWithRemote()
+        try await box.sandbox.git(["remote", "add", "second", box.url(source, host: Self.secondHost)], in: repo)
+        #expect(await box.decision(.fetch(remotes: ["origin", "second"]), in: repo) == .attach(Self.credentials))
+        // The set's order, whatever order the remotes come in.
+        #expect(await box.decision(.fetch(remotes: ["second", "origin"]), in: repo) == .attach(Self.credentials))
+
+        try await box.operations(naive: false, in: repo).fetchAll()
+        let first = box.transportAnswer(host: Self.host)
+        let second = box.transportAnswer(host: Self.secondHost)
+        let firstOK = first.contains("password=\(Self.token)\n") && !first.contains(Self.secondToken)
+        let secondOK = second.contains("password=\(Self.secondToken)\n") && !second.contains(Self.token)
+        #expect(firstOK, "the first host did not get its own token alone")
+        #expect(secondOK, "the second host did not get its own token alone")
+
+        // Each helper answers for its own host only, with its own token.
+        let env = GitInvocation.environment(
+            profile: Self.profile, base: box.base, access: .network(.fetch), credentials: Self.credentials)
+        let entries = GitInvocationTests.configEntries(env)
+        #expect(entries.suffix(4) == [
+            "credential.https://\(Self.host).helper=",
+            "credential.https://\(Self.host).helper=\(GitInvocation.tokenHelper(0))",
+            "credential.https://\(Self.secondHost).helper=",
+            "credential.https://\(Self.secondHost).helper=\(GitInvocation.tokenHelper(1))",
+        ])
+        for (host, mine, other) in [(Self.host, Self.token, Self.secondToken),
+                                    (Self.secondHost, Self.secondToken, Self.token)] {
+            let fill = try await box.sandbox.runner.run(
+                ["credential", "fill"], cwd: repo, env: env, stdin: Data("protocol=https\nhost=\(host)\n\n".utf8),
+                timeout: .seconds(30))
+            let bound = fill.text == "protocol=https\nhost=\(host)\nusername=x-access-token\npassword=\(mine)\n"
+                && !fill.text.contains(other)
+            #expect(bound, "the helper for \(host) did not answer with its own token alone")
+        }
+
+        // All or nothing: one more remote on no account's host and the fetch gets neither token.
+        try await box.sandbox.git(["remote", "add", "local", source.path], in: repo)
+        #expect(await box.decision(.fetch(remotes: ["origin", "second", "local"]), in: repo) == .otherURL)
+    }
+
+    @Test(
+        "a username a shell or the credential protocol could misread never reaches git: the credential is dropped",
+        arguments: ["$(touch MARKER)", "`touch MARKER`", "a'b", "a\"b", "a\nb", "a\rb", "a$b", "a\\b", "a:b", "a@b",
+                    "a/b", "a b", ""])
+    func unsafeUsernameDropsCredential(username: String) async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let marker = box.sandbox.root.appending(path: "username-ran")
+        var bad = Self.credential
+        bad.username = username.replacing("MARKER", with: marker.path)
+        let (repo, _) = try await box.makeRepoWithRemote()
+        #expect(await GitInvocation.networkToken(
+            for: .fetch(remotes: ["origin"]), credentials: [bad], base: box.base, runner: box.sandbox.runner,
+            cwd: repo) == .noToken)
+
+        // Beside a good credential for another host: only that one is kept, and numbered 0.
+        let env = GitInvocation.environment(
+            profile: Self.profile, base: box.base, access: .network(.fetch), credentials: [bad, Self.secondCredential])
+        let entries = GitInvocationTests.configEntries(env)
+        #expect(!entries.contains { $0.hasPrefix("credential.https://\(Self.host).") }, "a helper for the dropped one")
+        #expect(entries.suffix(2) == [
+            "credential.https://\(Self.secondHost).helper=",
+            "credential.https://\(Self.secondHost).helper=\(GitInvocation.tokenHelper(0))",
+        ])
+        let names = env.keys.filter { $0.hasPrefix("HISTQ_") }.sorted()
+        #expect(names == ["HISTQ_GIT_TOKEN_0", "HISTQ_GIT_USER_0"])
+        let leaked = env.values.contains { $0.contains(Self.token) || (!bad.username.isEmpty && $0 == bad.username) }
+        #expect(!leaked, "the dropped credential's token or username is in the environment")
+
+        // End to end: the fetch runs without the token, and nothing the username holds ever ran.
+        let ops = GitOperations(
+            runner: box.sandbox.runner, cwd: repo, profile: Self.profile, base: box.base, credentials: [bad])
+        _ = try? await ops.fetchAll()
+        let fill = try await box.sandbox.runner.run(
+            ["credential", "fill"], cwd: repo, env: env,
+            stdin: Data("protocol=https\nhost=\(Self.host)\n\n".utf8), timeout: .seconds(30),
+            allowedExitCodes: Set(0...255))
+        #expect(box.transportRan && !box.transportGotToken, "the fetch signed in with the dropped credential")
+        let answered = fill.text.contains("password=")
+        #expect(!answered, "a helper answered for the dropped credential's host")
+        #expect(!FileManager.default.fileExists(atPath: marker.path), "the username ran in a shell")
     }
 
     // MARK: - Fetch refspec
@@ -472,7 +596,8 @@ struct NetworkTokenTests {
         }
         // The user's own config.
         try box.writeGlobal("[\(key.split(separator: ".")[0])]\n\t\(key.split(separator: ".")[1]) = \(value)\n")
-        let decision: GitInvocation.TokenDecision = expected.isEmpty ? .attach : .submoduleRecursion(keys: expected)
+        let decision: GitInvocation.TokenDecision =
+            expected.isEmpty ? .attach([Self.credential]) : .submoduleRecursion(keys: expected)
         #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo) == decision)
         #expect(await box.decision(.push(remote: "origin"), in: repo) == decision)
     }
@@ -504,14 +629,18 @@ struct NetworkTokenTests {
             defer { box.remove() }
             let (repo, source) = try await box.makeRepoWithRemote()
             try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "to push"], in: repo)
-            // The custom hook records its arguments, its input, whether it sees the variable, and what a
-            // `git credential fill` for the profile's host gives it.
+            // Pushed to both account hosts (two push URLs), so the push carries both credentials.
+            try await box.sandbox.git(["config", "remote.origin.pushurl", box.url(source)], in: repo)
+            try await box.sandbox.git(
+                ["config", "--add", "remote.origin.pushurl", box.url(source, host: Self.secondHost)], in: repo)
+            // The custom hook records its arguments, its input, its whole environment, and what a
+            // `git credential fill` for the first account's host gives it.
             let root = box.sandbox.root.path
             let custom = box.sandbox.root.appending(path: "hooks-src/custom-pre-push")
             try Fixtures.writeScript("""
                 echo "$*" >> '\(root)/pre-push.ran'
-                cat > '\(root)/pre-push.stdin'
-                test -n "$HISTQ_GIT_TOKEN" && touch '\(root)/pre-push.token'
+                cat >> '\(root)/pre-push.stdin'
+                env > '\(root)/pre-push.envdump'
                 printf 'protocol=https\\nhost=\(Self.host)\\n\\n' | git credential fill > '\(root)/pre-push.fill' 2>/dev/null
                 echo "${GIT_ALLOW_PROTOCOL-unset} ${GIT_ASKPASS-unset} ${SSH_ASKPASS-unset}" > '\(root)/pre-push.env'
                 git config --get core.hooksPath > '\(root)/pre-push.hookspath'
@@ -527,7 +656,9 @@ struct NetworkTokenTests {
 
             try await box.operations(naive: naive, in: repo).push(branch: "main", to: "origin", as: "pushed")
 
-            #expect(box.transportGotToken, "the push did not sign in with the token (naive: \(naive))")
+            let signedIn = box.transportGot(Self.token, host: Self.host)
+                && box.transportGot(Self.secondToken, host: Self.secondHost)
+            #expect(signedIn, "the push did not sign in to both hosts with their tokens (naive: \(naive))")
             let pushed = try await box.sandbox.git(["rev-parse", "pushed"], in: source)
             let local = try await box.sandbox.git(["rev-parse", "main"], in: repo)
             #expect(pushed == local, "the push landed (naive: \(naive))")
@@ -536,13 +667,16 @@ struct NetworkTokenTests {
             let input = (try? String(contentsOfFile: "\(root)/pre-push.stdin", encoding: .utf8)) ?? ""
             #expect(input.hasPrefix("refs/heads/main \(local) refs/heads/pushed "), "\(input)")
             let fill = (try? String(contentsOfFile: "\(root)/pre-push.fill", encoding: .utf8)) ?? ""
+            let fillHasToken = fill.contains(Self.token)
+            let dump = try String(contentsOfFile: "\(root)/pre-push.envdump", encoding: .utf8)
+            let dumpHasCredential = box.hasCredential(envDump: dump)
             if naive {
-                #expect(box.sawToken("pre-push") && fill.contains(Self.token),
+                #expect(dumpHasCredential && fillHasToken,
                         "positive control: the hook sees the token in the naive environment")
                 #expect(box.sawToken("rt"), "positive control: reference-transaction sees the token")
             } else {
-                #expect(!box.sawToken("pre-push"), "the pre-push hook saw HISTQ_GIT_TOKEN")
-                #expect(!fill.contains(Self.token), "git credential fill in the pre-push hook gave the token")
+                #expect(!dumpHasCredential, "the pre-push hook's environment has a credential")
+                #expect(!fillHasToken, "git credential fill in the pre-push hook gave the token")
                 #expect(!box.ran("rt"), "the reference-transaction hook ran during a token-carrying push")
                 // The hook sees what it would without the token: the base has no protocol list or askpass, and
                 // a `git` in it reads the repo's hooks folder, not the wrapper's.
@@ -562,13 +696,18 @@ struct NetworkTokenTests {
         defer { box.remove() }
         let (repo, source) = try await box.makeRepoWithRemote()
         try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "to push"], in: repo)
-        // A fake git-lfs on PATH: records its arguments, whether it sees the variable, and what
-        // `git credential fill` gives it, as git-lfs asks before an upload.
+        // Pushed to both account hosts (two push URLs), so the push carries both credentials.
+        try await box.sandbox.git(["config", "remote.origin.pushurl", box.url(source)], in: repo)
+        try await box.sandbox.git(
+            ["config", "--add", "remote.origin.pushurl", box.url(source, host: Self.secondHost)], in: repo)
+        // A fake git-lfs on PATH: records its arguments, whether it sees a credential, and what
+        // `git credential fill` gives it for each host, as git-lfs asks before an upload.
         let root = box.sandbox.root.path
         try Fixtures.writeScript("""
             echo "$*" >> '\(root)/lfs.ran'
-            test -n "$HISTQ_GIT_TOKEN" && touch '\(root)/lfs.token'
+            \(TokenSandbox.sawCredential) && touch '\(root)/lfs.token'
             printf 'protocol=https\\nhost=\(Self.host)\\n\\n' | git credential fill > '\(root)/lfs.fill' 2>/dev/null
+            printf 'protocol=https\\nhost=\(Self.secondHost)\\n\\n' | git credential fill > '\(root)/lfs.fill2' 2>/dev/null
             exit 0
             """, to: box.fakeBin.appending(path: "git-lfs"))
         let stub = variant == "2.x" ? Self.lfsStub2 : variant == "1.x-minimal" ? Self.lfsStubMinimal : Self.lfsStub3
@@ -590,10 +729,14 @@ struct NetworkTokenTests {
             == box.sandbox.git(["rev-parse", "main"], in: repo))
         #expect(box.firstArguments("lfs") == "pre-push", "git-lfs ran from the stub")
         let fill = (try? String(contentsOfFile: "\(root)/lfs.fill", encoding: .utf8)) ?? ""
+        let fill2 = (try? String(contentsOfFile: "\(root)/lfs.fill2", encoding: .utf8)) ?? ""
         if variant == "customTransfer" {
-            #expect(!box.sawToken("lfs") && !fill.contains(Self.token), "git-lfs got the token")
+            let got = box.sawToken("lfs") || fill.contains(Self.token) || fill2.contains(Self.secondToken)
+            #expect(!got, "git-lfs got a token")
         } else {
-            #expect(box.sawToken("lfs") && fill.contains("password=\(Self.token)\n"), "git-lfs did not get the token")
+            let first = fill.contains("password=\(Self.token)\n") && !fill.contains(Self.secondToken)
+            let second = fill2.contains("password=\(Self.secondToken)\n") && !fill2.contains(Self.token)
+            #expect(box.sawToken("lfs") && first && second, "git-lfs did not get each host's own token")
         }
     }
 
@@ -671,17 +814,26 @@ struct NetworkTokenTests {
         let source = try await box.sandbox.makeRepo("source")
         let env = { (url: String) in
             await GitInvocation.cloneEnvironment(
-                url: url, profile: Self.profile, base: box.base, token: Self.token, runner: box.sandbox.runner)
+                url: url, profile: Self.profile, base: box.base, credentials: Self.credentials,
+                runner: box.sandbox.runner)
         }
         let good = await env(box.url(source))
-        #expect(good["HISTQ_GIT_TOKEN"] == Self.token)
+        let goodCarries = good["HISTQ_GIT_TOKEN_0"] == Self.token
+            && !good.values.contains { $0.contains(Self.secondToken) }
+        #expect(goodCarries, "the clone does not carry the first host's token alone")
         #expect(good["GIT_ALLOW_PROTOCOL"] == "https")
+        let second = await env(box.url(source, host: Self.secondHost))
+        let secondCarries = second["HISTQ_GIT_TOKEN_0"] == Self.secondToken
+            && !second.values.contains { $0.contains(Self.token) }
+        #expect(secondCarries, "a clone from the second host does not carry its token alone")
         for url in ["https://other.histq.invalid/o/r", "http://\(Self.host)/o/r", "https://me@\(Self.host)/o/r",
                     "ssh://\(Self.host)/o/r", source.path] {
-            #expect(await env(url)["HISTQ_GIT_TOKEN"] == nil, "\(url)")
+            let carries = GitInvocationTests.hasCredentialVariable(await env(url))
+            #expect(!carries, "\(url)")
         }
         try box.writeGlobal("[url \"https://other.histq.invalid/\"]\n\tinsteadOf = https://\(Self.host)/\n")
-        #expect(await env(box.url(source))["HISTQ_GIT_TOKEN"] == nil, "a rewrite to another host kept the token")
+        let rewrittenCarries = GitInvocationTests.hasCredentialVariable(await env(box.url(source)))
+        #expect(!rewrittenCarries, "a rewrite to another host kept the token")
         try box.writeGlobal("")
 
         // The real clone signs in with the token through the fake transport.
@@ -718,9 +870,9 @@ struct NetworkTokenTests {
         let https = try await parent("https", box.url(lib))
         #expect(await box.decision(target, in: https) == .otherURL, "no URL in the config yet")
         try await box.sandbox.git(["submodule", "init", "--", "lib"], in: https)
-        #expect(await box.decision(target, in: https) == .attach)
+        #expect(await box.decision(target, in: https) == .attach([Self.credential]))
         try box.writeGlobal("[submodule]\n\trecurse = true\n")
-        #expect(await box.decision(target, in: https) == .attach, "the caller never recurses")
+        #expect(await box.decision(target, in: https) == .attach([Self.credential]), "the caller never recurses")
         try box.writeGlobal("")
         #expect(await box.decision(.submodule(path: "other"), in: https) == .otherURL, "no submodule at that path")
 
@@ -734,7 +886,7 @@ struct NetworkTokenTests {
         #expect(await box.decision(target, in: https) == .otherURL, "its origin is a local folder")
         let checkedOut = https.appending(path: "lib")
         try await box.sandbox.git(["remote", "set-url", "origin", box.url(lib)], in: checkedOut)
-        #expect(await box.decision(target, in: https) == .attach)
+        #expect(await box.decision(target, in: https) == .attach([Self.credential]))
         try await box.sandbox.git(["config", "http.proxy", "http://127.0.0.1:1"], in: checkedOut)
         #expect(await box.decision(target, in: https) == .repoNetworkConfig(keys: ["http.proxy"]))
 
@@ -742,16 +894,16 @@ struct NetworkTokenTests {
         let relative = try await parent("relative", "../lib")
         try await box.sandbox.git(["submodule", "init", "--", "lib"], in: relative)
         #expect(try await box.sandbox.git(["config", "submodule.mod.url"], in: relative) == box.url(lib))
-        #expect(await box.decision(target, in: relative) == .attach)
+        #expect(await box.decision(target, in: relative) == .attach([Self.credential]))
 
         // 5. End to end: `submodule update` in the token's environment signs in with the token.
         #expect(!box.transportRan)
         let env = GitInvocation.environment(
-            profile: Self.profile, base: box.base, access: .network(.fetch), token: Self.token)
+            profile: Self.profile, base: box.base, access: .network(.fetch), credentials: [Self.credential])
         try await box.sandbox.git(["submodule", "update", "--init", "--", "lib"], in: relative, env: env)
         #expect(box.transportGotToken)
         #expect(try await box.sandbox.git(["rev-parse", "HEAD"], in: relative.appending(path: "lib")) == libHead)
-        #expect(await box.decision(target, in: relative) == .attach, "checked out with an https origin")
+        #expect(await box.decision(target, in: relative) == .attach([Self.credential]), "checked out with an https origin")
 
         // A git folder left in `.git/modules` after a deinit is reused by the next update: its config counts.
         try await box.sandbox.git(["submodule", "deinit", "-q", "-f", "--", "lib"], in: relative)
@@ -767,9 +919,10 @@ struct NetworkTokenTests {
 
 // MARK: - Harness
 
-/// A `Sandbox` whose git reaches `https://git.histq.invalid/<path>` as the local folder `<path>`: `GIT_EXEC_PATH` is a
+/// A `Sandbox` whose git reaches `https://<host>/<path>` as the local folder `<path>`: `GIT_EXEC_PATH` is a
 /// copy of git's exec path (links) with a fake `git-remote-https`. The fake first asks `git credential fill` for its
-/// own host, as git's https transport does (and keeps the answer in `transport.txt`), then for
+/// own host, as git's https transport does (and keeps the answer in `transport.txt` and `transport.<host>.txt`, and
+/// its environment in `transport.<host>.env`), then for
 /// `other.histq.invalid`, as after a redirect, fails like GitHub without a password, and else serves the folder with
 /// `git upload-pack`/`git receive-pack`. `fakeBin` comes first on PATH.
 struct TokenSandbox {
@@ -791,10 +944,13 @@ struct TokenSandbox {
                 at: fakeExec.appending(path: name), withDestinationURL: URL(filePath: execPath).appending(path: name))
         }
         let out = sandbox.root.appending(path: "transport.txt").path
+        let root = sandbox.root.path
         try Fixtures.writeScript(#"""
             host=$(printf '%s' "$2" | cut -d/ -f3)
             dir="/${2#https://*/}"
             printf 'protocol=https\nhost=%s\n\n' "$host" | git credential fill > '\#(out)' 2>/dev/null
+            cp '\#(out)' '\#(root)'"/transport.$host.txt"
+            env > '\#(root)'"/transport.$host.env"
             printf 'protocol=https\nhost=other.histq.invalid\n\n' | git credential fill > /dev/null 2>&1
             grep -q '^password=' '\#(out)' || { echo "fatal: Authentication failed for '$2'" >&2; exit 128; }
             while read -r line; do
@@ -823,23 +979,22 @@ struct TokenSandbox {
 
     func remove() { sandbox.remove() }
 
-    func url(_ folder: URL) -> String { "https://\(NetworkTokenTests.host)\(folder.path)" }
+    func url(_ folder: URL, host: String = NetworkTokenTests.host) -> String { "https://\(host)\(folder.path)" }
 
     func writeGlobal(_ text: String) throws { try Data(text.utf8).write(to: global) }
 
-    /// A repo whose `origin` is the fake https URL of `source`, a folder with a commit the repo does not have.
-    func makeRepoWithRemote() async throws -> (repo: URL, source: URL) {
+    /// A repo whose `origin` is the fake https URL on `host` of `source`, a folder with a commit the repo does not have.
+    func makeRepoWithRemote(host: String = NetworkTokenTests.host) async throws -> (repo: URL, source: URL) {
         let source = try await sandbox.makeRepo("source")
         try await sandbox.git(["commit", "-q", "--allow-empty", "-m", "remote only"], in: source)
         let repo = try await sandbox.makeRepo("repo")
-        try await sandbox.git(["remote", "add", "origin", url(source)], in: repo)
+        try await sandbox.git(["remote", "add", "origin", url(source, host: host)], in: repo)
         return (repo, source)
     }
 
     func decision(_ target: GitInvocation.NetworkTarget, in repo: URL) async -> GitInvocation.TokenDecision {
         await GitInvocation.networkToken(
-            for: target, profile: NetworkTokenTests.profile, token: NetworkTokenTests.token, base: base,
-            runner: sandbox.runner, cwd: repo)
+            for: target, credentials: NetworkTokenTests.credentials, base: base, runner: sandbox.runner, cwd: repo)
     }
 
     /// The operations with the gate, or (`naive`) with the naive environment for every command.
@@ -848,27 +1003,60 @@ struct TokenSandbox {
             ? GitOperations(runner: sandbox.runner, cwd: repo, env: naiveEnvironment())
             : GitOperations(
                 runner: sandbox.runner, cwd: repo, profile: NetworkTokenTests.profile, base: base,
-                token: NetworkTokenTests.token)
+                credentials: NetworkTokenTests.credentials)
     }
 
-    /// Before the gate: the write environment plus `HISTQ_GIT_TOKEN` and the token helper, for every child.
+    /// Before the gate: the write environment plus, for every credential, its `HISTQ_GIT_TOKEN_<n>`,
+    /// `HISTQ_GIT_USER_<n>` and token helper, for every child.
     func naiveEnvironment() -> [String: String] {
         var env = GitInvocation.environment(profile: NetworkTokenTests.profile, base: base, access: .write)
-        let index = Int(env["GIT_CONFIG_COUNT"] ?? "") ?? 0
-        env["GIT_CONFIG_KEY_\(index)"] = GitInvocationTests.tokenHelperKey
-        env["GIT_CONFIG_VALUE_\(index)"] = GitInvocation.tokenHelper
-        env["GIT_CONFIG_COUNT"] = String(index + 1)
-        env["HISTQ_GIT_TOKEN"] = NetworkTokenTests.token
+        var index = Int(env["GIT_CONFIG_COUNT"] ?? "") ?? 0
+        for (n, credential) in NetworkTokenTests.credentials.enumerated() {
+            env["GIT_CONFIG_KEY_\(index)"] = "credential.https://\(credential.host).helper"
+            env["GIT_CONFIG_VALUE_\(index)"] = GitInvocation.tokenHelper(n)
+            env["HISTQ_GIT_TOKEN_\(n)"] = credential.token
+            env["HISTQ_GIT_USER_\(n)"] = "x-access-token"
+            index += 1
+        }
+        env["GIT_CONFIG_COUNT"] = String(index)
         return env
     }
 
-    /// A marker script: appends its arguments to `<name>.ran`, touches `<name>.token` when it sees
-    /// `HISTQ_GIT_TOKEN`, prints nothing and succeeds (a hook, a credential helper or a transport).
+    /// A shell test that succeeds when the environment has any `HISTQ_GIT_TOKEN*` or `HISTQ_GIT_USER_*` variable or
+    /// either token's value.
+    static var sawCredential: String {
+        "{ env | grep -q -e '^HISTQ_GIT_TOKEN' -e '^HISTQ_GIT_USER_' || env | grep -qF -e '\(NetworkTokenTests.token)' "
+            + "-e '\(NetworkTokenTests.secondToken)'; }"
+    }
+
+    /// A marker script: appends its arguments to `<name>.ran`, touches `<name>.token` when it sees a credential
+    /// (`sawCredential`), prints nothing and succeeds (a hook, a credential helper or a transport).
     func writeMarker(_ name: String, to url: URL) throws {
         let ran = sandbox.root.appending(path: "\(name).ran").path
         let token = sandbox.root.appending(path: "\(name).token").path
         try Fixtures.writeScript(
-            "echo \"$*\" >> '\(ran)'\ntest -n \"$HISTQ_GIT_TOKEN\" && touch '\(token)'\nexit 0", to: url)
+            "echo \"$*\" >> '\(ran)'\n\(Self.sawCredential) && touch '\(token)'\nexit 0", to: url)
+    }
+
+    /// Whether an `env` dump has a variable that carries a credential (a line that starts with `HISTQ_GIT_TOKEN` or
+    /// `HISTQ_GIT_USER_`; a `GIT_CONFIG_VALUE_<n>` with a helper's text only names them) or either token's value.
+    func hasCredential(envDump dump: String) -> Bool {
+        dump.split(separator: "\n").contains { $0.hasPrefix("HISTQ_GIT_TOKEN") || $0.hasPrefix("HISTQ_GIT_USER_") }
+            || dump.contains(NetworkTokenTests.token) || dump.contains(NetworkTokenTests.secondToken)
+    }
+
+    /// Checks that `dump`, the environment of a command that reaches the second account's host alone, has that
+    /// account's token as `HISTQ_GIT_TOKEN_0` and nothing of the first account's: not its token, nor its helper.
+    func expectOnlySecondCredential(in dump: String, _ what: String) throws {
+        let lines = dump.split(separator: "\n").map(String.init)
+        let second = lines.contains("HISTQ_GIT_TOKEN_0=\(NetworkTokenTests.secondToken)")
+        let firstToken = dump.contains(NetworkTokenTests.token)
+        let firstHelper = lines.contains { $0.hasSuffix("=credential.https://\(NetworkTokenTests.host).helper") }
+        let others = lines.contains { $0.hasPrefix("HISTQ_GIT_TOKEN_1") || $0.hasPrefix("HISTQ_GIT_USER_1") }
+        #expect(second, "the \(what) does not carry the second host's token")
+        #expect(!firstToken, "the \(what) carries the first host's token")
+        #expect(!firstHelper, "the \(what) has a helper for the first host")
+        #expect(!others, "the \(what) has a second credential's variables")
     }
 
     func ran(_ name: String) -> Bool { exists("\(name).ran") }
@@ -885,8 +1073,27 @@ struct TokenSandbox {
     var transportGotUserSecret: Bool { transportAnswer.contains("password=user-secret\n") }
     private var transportAnswer: String { (try? String(contentsOf: transportFile, encoding: .utf8)) ?? "" }
 
+    /// What the transport's `git credential fill` gave for `host` (its last run there).
+    func transportAnswer(host: String) -> String {
+        (try? String(contentsOf: sandbox.root.appending(path: "transport.\(host).txt"), encoding: .utf8)) ?? ""
+    }
+
+    /// Whether the transport's last run on `host` signed in with `token`.
+    func transportGot(_ token: String, host: String) -> Bool {
+        transportAnswer(host: host).contains("password=\(token)\n")
+    }
+
+    /// The environment the transport's last run on `host` had (`env`).
+    func transportEnvironment(host: String) throws -> String {
+        try String(contentsOf: sandbox.root.appending(path: "transport.\(host).env"), encoding: .utf8)
+    }
+
     func clearTransport() throws {
         if transportRan { try FileManager.default.removeItem(at: transportFile) }
+        for name in try FileManager.default.contentsOfDirectory(atPath: sandbox.root.path)
+        where name.hasPrefix("transport.") {
+            try FileManager.default.removeItem(at: sandbox.root.appending(path: name))
+        }
     }
 
     func hasRef(_ ref: String, in repo: URL) async throws -> Bool {
