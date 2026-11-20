@@ -12,12 +12,16 @@ enum SettingsModalMetrics {
 /// never resizes it.
 struct SettingsModal: View {
     let onClose: () -> Void
+    @Environment(WindowModel.self) private var model
+    /// The header's search (`SettingsSearchField`): open, and its query. Both go with the modal when it closes.
+    @State private var isSearchOpen = false
+    @State private var query = ""
 
     var body: some View {
         PanelContainer(cornerRadius: ModalMetrics.cornerRadius) {
             VStack(spacing: PanelContainerMetrics.padding) {
                 header
-                SettingsSidebarView()
+                SettingsSidebarView(query: $query, isSearchOpen: $isSearchOpen)
             }
         }
         .frame(maxWidth: SettingsModalMetrics.maxWidth, maxHeight: .infinity)
@@ -35,6 +39,8 @@ struct SettingsModal: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
+            SettingsSearchField(isOpen: $isSearchOpen, query: $query, focusToken: model.settingsSearchToken)
+                .padding(.trailing, 8)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 14, weight: .semibold))
@@ -52,7 +58,7 @@ struct SettingsModal: View {
 }
 
 /// A sidebar section. Adding one: a case (its raw value is the `-HistqSelect settings:<section>` value), its row in
-/// `label`, its page in `SettingsSidebarView.content`.
+/// `label`, its page in `SettingsSidebarView.content`, its rows in `SettingsSearchItem.all`.
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general, appearance, profiles, ssh, integrations, ai, terminal
 
@@ -73,11 +79,17 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
 struct SettingsSidebarView: View {
     @Environment(WindowModel.self) private var model
+    /// The header's search query: while not empty, the sidebar lists only the sections with a match (none
+    /// highlighted) and the matching rows show in place of the page.
+    @Binding var query: String
+    @Binding var isSearchOpen: Bool
     /// Sections whose page is built: kept alive like TabView's tabs, so a section keeps its state (and its scroll)
     /// when the user comes back to it. A section joins just after its first select (`onChange(of: section)`).
     @State private var opened: Set<SettingsSection> = []
     /// The profile the Profiles, SSH and Integrations pages edit, shared so all show the same one.
     @State private var profileID: UUID?
+    /// The search result to scroll to and flash once its page shows it.
+    @State private var reveal = SettingsSearchReveal()
     @FocusState private var sidebarFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -101,14 +113,20 @@ struct SettingsSidebarView: View {
                     .id(section)
                 }
                 ForEach(SettingsSection.allCases.filter(opened.contains)) { built in
-                    let selected = built == section
-                    page { content(built) }
+                    let selected = built == section && !searching
+                    page(built) { content(built) }
                         .opacity(selected ? 1 : 0)
                         // The leaving section fades out faster, so the two never show through each other.
                         .animation(switchAnimation(selected: selected), value: selected)
                         .allowsHitTesting(selected)
                         .disabled(!selected)
                         .accessibilityHidden(!selected)
+                }
+                if searching {
+                    SettingsSearchResults(query: query) { item in
+                        select(item.section)
+                        reveal.reveal(item)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -129,18 +147,54 @@ struct SettingsSidebarView: View {
             // The sidebar was disabled behind the modal: take the focus back on the next turn.
             if closed { DispatchQueue.main.async { sidebarFocused = true } }
         }
+        .onChange(of: isSearchOpen) { _, open in
+            // The search closed (Escape, its close button, a result): Up/Down and Escape go to the sidebar again.
+            if !open { DispatchQueue.main.async { sidebarFocused = true } }
+        }
+        .task(id: reveal.target?.id) {
+            // A result whose row and group are not on the page (no profile yet) is dropped once the page has had
+            // time to show it (its build, a group's fallback at 300 ms), so neither flashes when the user adds them.
+            guard let id = reveal.target?.id else { return }
+            try? await Task.sleep(for: .milliseconds(800))
+            _ = reveal.take(id)
+        }
     }
 
-    /// A section's scrolling column of cards.
-    private func page(@ViewBuilder _ cards: () -> some View) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
-                cards()
+    private var searching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    /// Every section, or while searching only those with a match.
+    private var visibleSections: [SettingsSection] {
+        guard searching else { return SettingsSection.allCases }
+        let hits = Set(SettingsSearchItem.matching(query).map(\.section))
+        return SettingsSection.allCases.filter(hits.contains)
+    }
+
+    /// A sidebar row or a search result: ends the search, then shows `row`.
+    private func select(_ row: SettingsSection) {
+        if isSearchOpen {
+            query = ""
+            withAnimation(reduceMotion ? nil : Motion.sheet) { isSearchOpen = false }
+        }
+        if row != section { model.selectSettings(row) }
+        sidebarFocused = true
+    }
+
+    /// A section's scrolling column of cards. A built page (`section`) lets its search anchors scroll it.
+    private func page(_ section: SettingsSection? = nil, @ViewBuilder _ cards: () -> some View) -> some View {
+        let cards = cards()
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
+                    cards
+                }
+                // No top padding: the page's first element is top-aligned with the sidebar card. 12 pt from the
+                // card's trailing edge; the cards end where the header card does.
+                .padding(.leading, SettingsMetrics.sidebarInset)
+                .padding(.bottom, SettingsMetrics.sidebarInset)
             }
-            // No top padding: the page's first element is top-aligned with the sidebar card. 12 pt from the card's
-            // trailing edge; the cards end where the header card does.
-            .padding(.leading, SettingsMetrics.sidebarInset)
-            .padding(.bottom, SettingsMetrics.sidebarInset)
+            .environment(\.settingsSearchReveal, section == nil ? nil : reveal)
+            .environment(\.settingsPageSection, section)
+            .environment(\.settingsScrollProxy, proxy)
         }
         .labeledContentStyle(.settingsRow)
     }
@@ -149,15 +203,15 @@ struct SettingsSidebarView: View {
     /// whole row, so the rows touch. Up/Down move the selection while the card has the focus.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: SidebarItemStyle.spacing) {
-            ForEach(SettingsSection.allCases) { row in
+            ForEach(visibleSections) { row in
+                let selected = row == section && !searching
                 Button {
-                    if row != section { model.selectSettings(row) }
-                    sidebarFocused = true
+                    select(row)
                 } label: {
                     Label(row.label.title, systemImage: row.label.icon)
                 }
-                .buttonStyle(SidebarItemStyle(selected: row == section))
-                .accessibilityAddTraits(row == section ? .isSelected : [])
+                .buttonStyle(SidebarItemStyle(selected: selected))
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
             Spacer(minLength: 0)
         }
@@ -175,6 +229,7 @@ struct SettingsSidebarView: View {
 
     /// Up/Down in the sidebar: the previous or next section, stopping at the ends.
     private func moveSelection(_ direction: MoveCommandDirection) {
+        guard !searching else { return }
         let all = SettingsSection.allCases
         guard let index = all.firstIndex(of: section) else { return }
         switch direction {
@@ -292,6 +347,7 @@ struct SettingsSwitchRow: View {
             Text(title)
             if let hint { SettingsHint(hint) }
         }
+        .settingsSearchAnchor(title)
     }
 }
 

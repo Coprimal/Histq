@@ -213,6 +213,7 @@ struct IntegrationsSettings: View {
                         + "owners, then reload the repositories. A personal access token or the GitHub CLI's token "
                         + "gets its access from that token's own settings.")
                 }
+                .settingsSearchAnchor("Organization access")
             }
             if case .failed(let message) = activity {
                 failureText(message)
@@ -285,6 +286,7 @@ struct IntegrationsSettings: View {
             } label: {
                 Text("Method")
             }
+            .settingsSearchAnchor("Method")
             SettingsDivider()
             switch method {
             case .signIn:
@@ -320,6 +322,7 @@ struct IntegrationsSettings: View {
                 SettingsHint("github.com, or your GitHub Enterprise Server host.")
             }
         }
+        .settingsSearchAnchor("Host")
     }
 
     private func tokenRow(_ profile: Profile) -> some View {
@@ -341,6 +344,7 @@ struct IntegrationsSettings: View {
             SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
                 + "read and write.")
         }
+        .settingsSearchAnchor("Personal access token")
     }
 
     private func cliRow(_ profile: Profile) -> some View {
@@ -382,6 +386,7 @@ struct IntegrationsSettings: View {
                     + "\(draftHost ?? "<host>")).")
             }
         }
+        .settingsSearchAnchor("GitHub CLI")
         .task(id: draftHost) { await loadCLIAccounts(host: draftHost) }
     }
 
@@ -414,6 +419,7 @@ struct IntegrationsSettings: View {
                 SettingsHint("Opens GitHub in your browser, where you enter a one-time code.")
             }
         }
+        .settingsSearchAnchor("Sign in with GitHub")
     }
 
     @ViewBuilder

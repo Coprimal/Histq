@@ -51,6 +51,7 @@ struct AppearanceSettings: View {
                     Text("Tab position")
                     SettingsHint("Top: a strip under the toolbar. Left: a column beside the panels.")
                 }
+                .settingsSearchAnchor("Tab position")
                 SettingsDivider()
                 LabeledContent {
                     HStack(spacing: 8) {
@@ -73,6 +74,7 @@ struct AppearanceSettings: View {
                     SettingsHint("Shown instead of the book on tabs without their own emoji or icon color. Empty: "
                         + "the book.")
                 }
+                .settingsSearchAnchor("Default tab emoji")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleMenuPicker(label: "Default icon color", selection: $tabIconColor,
@@ -87,6 +89,7 @@ struct AppearanceSettings: View {
                     Text("Default icon color")
                     SettingsHint("The book's color on tabs without their own. Default: the tab's text color.")
                 }
+                .settingsSearchAnchor("Default icon color")
             }
             SettingsGroup("Panels") {
                 LabeledContent {
@@ -102,6 +105,7 @@ struct AppearanceSettings: View {
                     SettingsHint("Stacked: a file opens under the graph. Columns: a file opens in a 4th column. "
                         + "Focus (⌥⌘F): the sidebar and detail panel hide.")
                 }
+                .settingsSearchAnchor("Layout")
                 SettingsDivider()
                 SettingsSwitchRow(title: "Card borders", hint: "A thin light edge around each card.",
                                   isOn: $cardBorders)
@@ -115,6 +119,7 @@ struct AppearanceSettings: View {
                     Text("Commit avatars")
                     SettingsHint("Generated: a pattern from each author's email, drawn on this Mac.")
                 }
+                .settingsSearchAnchor("Commit avatars")
                 SettingsDivider()
                 Label {
                     Text("Real avatars send each author's email hash to gravatar.com and GitHub logins to GitHub "
@@ -141,6 +146,7 @@ struct AppearanceSettings: View {
                     Text("Date format")
                     SettingsHint("The commit list's Date column.")
                 }
+                .settingsSearchAnchor("Date format")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $rowDensity, tabs: ["compact", "regular", "comfortable"],
@@ -150,6 +156,7 @@ struct AppearanceSettings: View {
                     Text("Row height")
                     SettingsHint("Compact fits more commits on screen.")
                 }
+                .settingsSearchAnchor("Row height")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $textSize, tabs: TextSize.allCases.map(\.rawValue),
@@ -159,6 +166,7 @@ struct AppearanceSettings: View {
                     Text("Text size")
                     SettingsHint("The graph, sidebar and file lists. Separate from row height.")
                 }
+                .settingsSearchAnchor("Text size")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $commitOrder, tabs: ["date", "branch"],
@@ -169,6 +177,7 @@ struct AppearanceSettings: View {
                     SettingsHint("By date: newest first across branches. By branch: each branch's commits stay "
                         + "together.")
                 }
+                .settingsSearchAnchor("Commit order")
             }
             SettingsGroup("Sidebar", description: "A tab with no section left goes away, except Branches.") {
                 let order = sidebarOrder
@@ -209,6 +218,7 @@ struct AppearanceSettings: View {
                     SettingsHint("Tree: files under their folders. Flat: one row per file. For every "
                         + "list; each list's header switches only that list.")
                 }
+                .settingsSearchAnchor("Layout")
                 SettingsDivider()
                 SettingsSwitchRow(title: "File sizes",
                                   hint: "In the Unstaged card: yellow from 1 MB, red from 10 MB.",
@@ -223,6 +233,7 @@ struct AppearanceSettings: View {
                     Text("Commit box")
                     SettingsHint("Above or under the file cards.")
                 }
+                .settingsSearchAnchor("Commit box")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $stagedPosition, tabs: ["above", "below"],
@@ -232,6 +243,7 @@ struct AppearanceSettings: View {
                     Text("Staged")
                     SettingsHint("The Staged card, above or below Unstaged; also in another worktree's changes.")
                 }
+                .settingsSearchAnchor("Staged")
             }
             SettingsGroup("Diff") {
                 LabeledContent {
@@ -243,6 +255,7 @@ struct AppearanceSettings: View {
                     Text("Default view")
                     SettingsHint("Where a newly opened repository's diffs start. Split: old and new side by side.")
                 }
+                .settingsSearchAnchor("Default view")
                 SettingsDivider()
                 SettingsSwitchRow(title: "Ignore whitespace",
                                   hint: "Line staging is off while whitespace is ignored.",
@@ -259,6 +272,7 @@ struct AppearanceSettings: View {
                     Text("Code font size")
                     SettingsHint("The diff, Blame and the conflict editor.")
                 }
+                .settingsSearchAnchor("Code font size")
                 SettingsDivider()
                 SettingsSwitchRow(title: "Wrap long lines", isOn: $wrapsLines)
             }

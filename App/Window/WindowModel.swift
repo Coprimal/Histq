@@ -80,6 +80,8 @@ final class WindowModel {
     /// Changes with every `selectSettings`, even of the same section: the section's placeholder and content lines
     /// follow it.
     private(set) var settingsToken = 0
+    /// Changes with each ⌘F while Settings shows (`findInSettings`): its header's search opens and takes the focus.
+    private(set) var settingsSearchToken = 0
     /// The open command palette; nil while closed. Read only by `CommandPaletteOverlay` and `MainView`'s backdrop
     /// modifier, so opening it never re-evaluates `MainView`'s body.
     private(set) var palette: CommandPaletteModel?
@@ -961,6 +963,14 @@ final class WindowModel {
         openSettings()
         settingsSection = section
         settingsToken &+= 1
+    }
+
+    /// Settings shows with no modal over it: ⌘F searches its rows.
+    var canFindInSettings: Bool { isSettingsOpen && modal == nil }
+
+    /// ⌘F while Settings shows: opens and focuses its search.
+    func findInSettings() {
+        settingsSearchToken &+= 1
     }
 
     // MARK: Command palette

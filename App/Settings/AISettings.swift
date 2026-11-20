@@ -320,6 +320,7 @@ struct AISettings: View {
                 Text("Active provider")
                 SettingsHint("The AI buttons in the commit box, the commit details and the conflict editor use it.")
             }
+            .settingsSearchAnchor("Active provider")
             SettingsDivider()
             LabeledContent {
                 if let problem = setup.setupProblem(setup.provider) {
@@ -376,6 +377,7 @@ struct AISettings: View {
                 SettingsHint("An OpenAI-compatible server (chat completions). https, or http for this Mac only.")
             }
         }
+        .settingsSearchAnchor("Base URL")
     }
 
     @ViewBuilder
@@ -415,6 +417,7 @@ struct AISettings: View {
                     : "Optional (many local servers take none). Kept in your login Keychain.")
             }
         }
+        .settingsSearchAnchor("API key")
     }
 
     private func hostName(_ provider: AIProvider) -> String {
@@ -464,6 +467,7 @@ struct AISettings: View {
                     : "Empty uses \(provider.defaultModel). Any model id of the provider works.")
             }
         }
+        .settingsSearchAnchor("Model")
     }
 
     /// "N models": picking one fills the model field. The check marks the model in use.
@@ -516,6 +520,7 @@ struct AISettings: View {
                     .textSelection(.enabled)
             }
         }
+        .settingsSearchAnchor("Test connection")
     }
 
     // MARK: Language
@@ -528,6 +533,7 @@ struct AISettings: View {
                 Text("Explanations")
                 SettingsHint("Explain, for a commit and for your changes.")
             }
+            .settingsSearchAnchor("Explanations")
             SettingsDivider()
             LabeledContent {
                 languagePicker("Commit messages language", selection: $commitLanguage)
@@ -535,6 +541,7 @@ struct AISettings: View {
                 Text("Commit messages")
                 SettingsHint("Generate Message. Suggest Resolution keeps the code as it is.")
             }
+            .settingsSearchAnchor("Commit messages")
         }
     }
 
@@ -610,6 +617,7 @@ struct AISettings: View {
                 }
                 .accessibilityLabel("Custom instructions")
         }
+        .settingsSearchAnchor("Custom instructions")
     }
 
     /// The fixed language list; an unknown stored value shows as English.

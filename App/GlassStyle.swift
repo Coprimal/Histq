@@ -1225,7 +1225,10 @@ struct SettingsGroup<Content: View>: View {
             .padding(.vertical, SettingsMetrics.rowPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius))
+            .environment(\.settingsGroupTitle, title)
         }
+        // A search result for the whole group, or for one of its rows that is not on the page.
+        .modifier(SettingsSearchAnchor(title: nil, groupTitle: title))
     }
 }
 

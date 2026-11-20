@@ -73,6 +73,7 @@ struct SSHSettings: View {
                     SettingsHint("Creates a key pair without a passphrase and uses it for this profile. It never "
                         + "replaces an existing file.")
                 }
+                .settingsSearchAnchor("Generate an ed25519 key")
             }
             batchModeNote
         } else {
@@ -199,6 +200,7 @@ struct SSHSettings: View {
                 SkeletonLine(width: 220, height: 11)
             }
         }
+        .settingsSearchAnchor("Public key")
     }
 
     // MARK: Note

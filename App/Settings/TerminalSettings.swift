@@ -38,6 +38,7 @@ struct TerminalSettings: View {
                 } label: {
                     Text("Font size")
                 }
+                .settingsSearchAnchor("Font size")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $cursor, tabs: ["block", "underline", "bar"],
@@ -47,6 +48,7 @@ struct TerminalSettings: View {
                     Text("Cursor")
                     SettingsHint("A program in the shell (vim) may set its own until this changes.")
                 }
+                .settingsSearchAnchor("Cursor")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $scrollback, tabs: scrollbacks, title: { Text($0.formatted()) },
@@ -56,6 +58,7 @@ struct TerminalSettings: View {
                     Text("Scrollback")
                     SettingsHint("Lines kept above the screen. A smaller value drops the oldest at once.")
                 }
+                .settingsSearchAnchor("Scrollback")
                 SettingsDivider()
                 SettingsSwitchRow(title: "Bold text",
                                   hint: "Off shows bold output in the normal weight. Text already on screen keeps "
@@ -121,6 +124,7 @@ struct TerminalSettings: View {
             Text("Font")
             SettingsHint("The monospaced fonts installed on this Mac.")
         }
+        .settingsSearchAnchor("Font")
     }
 
     private static let systemTitle = "SF Mono (system)"
@@ -173,6 +177,7 @@ struct TerminalSettings: View {
                 SettingsHint("Login shell: \(ProfileLibrary.abbreviated(RepoTerminal.userShell())). New terminals "
                     + "use the change; a running shell keeps the one it started with.")
             }
+            .settingsSearchAnchor("Shell")
             if isCustom {
                 SettingsDivider()
                 LabeledContent {

@@ -642,6 +642,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// a text view without a find bar answers `performFindPanelAction(_:)` with a disabled item, which would end the
     /// responder chain there, so this asks the chain itself and only hands the action to a view that takes it.
     @objc func findCommits(_ sender: Any?) {
+        // Settings (with no modal over it) searches its own rows.
+        if let model = target()?.model, model.canFindInSettings {
+            model.findInSettings()
+            return
+        }
         // Off under a modal, Settings or the palette, also for a find bar behind it.
         guard target()?.model.isShowingModal != true else { return }
         if let responder = findPanelResponder() {
@@ -692,6 +697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return patchSession() != nil
         }
         if menuItem.action == #selector(findCommits(_:)) {
+            if target()?.model.canFindInSettings == true { return true }
             guard target()?.model.isShowingModal != true else { return false }
             return findPanelResponder() != nil || searchableSession() != nil
         }

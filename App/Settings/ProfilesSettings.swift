@@ -117,6 +117,7 @@ struct ProfilesSettings: View {
                 Text("Name")
                 SettingsHint("Shown in the tab's profile menu.")
             }
+            .settingsSearchAnchor("Name")
             SettingsDivider()
             LabeledContent {
                 HStack(spacing: 6) {
@@ -130,6 +131,7 @@ struct ProfilesSettings: View {
                 Text("Color")
                 SettingsHint("Marks the tabs that use this profile.")
             }
+            .settingsSearchAnchor("Color")
             SettingsDivider()
             SettingsSwitchRow(
                 title: "Default profile",
@@ -151,6 +153,7 @@ struct ProfilesSettings: View {
                 Text("Name")
                 SettingsHint("user.name of the commits made in its tabs.")
             }
+            .settingsSearchAnchor("Name")
             SettingsDivider()
             LabeledContent {
                 TextField("Email", text: binding(profile, \.identity.email), prompt: Text("jane@example.com"))
@@ -161,6 +164,7 @@ struct ProfilesSettings: View {
                 Text("Email")
                 SettingsHint("user.email; also the comment of a key generated for it.")
             }
+            .settingsSearchAnchor("Email")
             SettingsDivider()
             LabeledContent {
                 Button(importing ? "Reading…" : "Import") { importGlobal(into: profile.id) }
@@ -176,6 +180,7 @@ struct ProfilesSettings: View {
                     SettingsHint("Copies user.name and user.email from git config --global.")
                 }
             }
+            .settingsSearchAnchor("Global git config")
         }
     }
 
@@ -230,6 +235,7 @@ struct ProfilesSettings: View {
                 Text("Sign with")
                 SettingsHint("Passed to git for this profile's tabs only; your git config is not changed.")
             }
+            .settingsSearchAnchor("Sign with")
             switch profile.signing {
             case .none:
                 EmptyView()
@@ -251,6 +257,7 @@ struct ProfilesSettings: View {
                         SigningKeyMissing()
                     }
                 }
+                .settingsSearchAnchor("GPG key")
             case .ssh(let keyPath):
                 SettingsDivider()
                 KeyPathRow(title: "SSH signing key", hint: "A public key (.pub), or a private key ssh-agent holds.",
@@ -466,6 +473,7 @@ struct KeyPathRow: View {
                 SettingsHint(hint)
             }
         }
+        .settingsSearchAnchor(title)
         .onChange(of: path, initial: true) { _, new in
             if !focused { draft = new.isEmpty ? "" : ProfileLibrary.abbreviated(new) }
         }

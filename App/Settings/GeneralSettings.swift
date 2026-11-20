@@ -42,6 +42,7 @@ struct GeneralSettings: View {
                     Text("Pull")
                     SettingsHint("What the toolbar's Pull button does.")
                 }
+                .settingsSearchAnchor("Pull")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $autoStash, tabs: ["ask", "always", "never"],
@@ -52,6 +53,7 @@ struct GeneralSettings: View {
                     SettingsHint("On a checkout or pull. Always stash puts them in a stash first and brings them "
                         + "back after. Never stash carries them to the other branch, and pulls as git does.")
                 }
+                .settingsSearchAnchor("Uncommitted changes")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleTabs(selection: $autoFetchMinutes, tabs: [0, 3, 5, 10, 30],
@@ -62,6 +64,7 @@ struct GeneralSettings: View {
                     SettingsHint("Fetches all remotes of each open tab at this interval, every 3 minutes by default. "
                         + "The repo's own hooks and credential helpers never run in an automatic fetch.")
                 }
+                .settingsSearchAnchor("Fetch automatically")
                 SettingsDivider()
                 SettingsSwitchRow(title: "Prune on fetch",
                                   hint: "Removes remote branches that no longer exist on their remote.",
@@ -83,6 +86,7 @@ struct GeneralSettings: View {
                     SettingsHint("A short card at the bottom right after a push, pull, fetch, commit or other "
                         + "operation, where an error shows with its details. Errors only hides the successes.")
                 }
+                .settingsSearchAnchor("Operation toasts")
             }
             SettingsGroup("Merge tool") {
                 LabeledContent {
@@ -95,6 +99,7 @@ struct GeneralSettings: View {
                     SettingsHint("A git mergetool name (opendiff, vscode, kdiff3…) for \"Open in merge tool\". "
                         + "Empty: the tool your git config names.")
                 }
+                .settingsSearchAnchor("External merge tool")
             }
             gitGroup
         } skeleton: {
@@ -149,6 +154,7 @@ struct GeneralSettings: View {
             Text("Default profile")
             SettingsHint("New tabs use their repo's last profile, else this one. None: git uses your own config.")
         }
+        .settingsSearchAnchor("Default profile")
     }
 
     // MARK: Git
@@ -166,6 +172,7 @@ struct GeneralSettings: View {
                 SettingsHint("Automatic looks in /opt/homebrew/bin, /usr/local/bin and /usr/bin. Histq needs git "
                     + "\(GitExecutable.minimumVersion) or later.")
             }
+            .settingsSearchAnchor("Git executable")
             if isCustom {
                 SettingsDivider()
                 LabeledContent {
