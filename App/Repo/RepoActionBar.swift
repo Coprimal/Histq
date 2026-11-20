@@ -57,8 +57,9 @@ extension RepoSession {
         return defaultRemote.map { ($0, nil, true, nil) }
     }
 
-    /// Pushes `branch` to its upstream (or the default remote with `-u`). `force` asks for a confirmation first, then
-    /// pushes with `--force-with-lease` against the remote-tracking commit.
+    /// Pushes `branch` to its upstream. A branch without one opens the first-push form (the remote and the remote
+    /// branch's name, pushed with `-u`). `force` asks for a confirmation first, then pushes with `--force-with-lease`
+    /// against the remote-tracking commit.
     func push(branch: String, force: Bool = false, key: ActionBarAction? = nil) {
         guard let target = pushTarget(of: branch) else {
             report(OperationFailure(title: "Push \(branch)", write: .push(branch: branch, remote: "", remoteBranch: nil,
@@ -67,7 +68,9 @@ extension RepoSession {
             return
         }
         let destination = "\(target.remote)/\(target.remoteBranch ?? branch)"
-        if force {
+        if target.setUpstream {
+            dialog = .pushNewBranch(branch, key: key)
+        } else if force {
             guard let lease = target.lease else { return }
             confirm("Force push `\(branch)` to `\(destination)`?",
                     message: "`\(destination)` is overwritten if it is still at `\(lease.prefix(7))`. Its commits that are not on `\(branch)` are lost.",

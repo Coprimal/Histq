@@ -1,6 +1,6 @@
 // The forms and confirmations of the repo operations: create and rename a branch, create a tag (lightweight or
 // annotated), the reset mode chooser, add / rename a remote and set its URL, add a submodule and set its URL or
-// branch, add a worktree, the interactive rebase and squash sheet
+// branch, the first push of a branch without upstream (its remote and remote name), add a worktree, the interactive rebase and squash sheet
 // (`InteractiveRebaseView`), and the confirmation of every destructive operation (it names its target). A menu, the action bar or the sidebar sets `RepoSession.dialog` or
 // `RepoSession.confirmation`; `ModalHost` presents them over the window. Every form runs its write
 // through `RepoSession.run`, and new names are checked first as the operation checks them (`git check-ref-format`, no
@@ -25,6 +25,9 @@ enum OperationDialog: Identifiable {
     case setSubmoduleURL(String)
     /// The submodule at this path: the branch it follows (prefilled; empty = the remote's default branch).
     case setSubmoduleBranch(String)
+    /// The first push of a local branch without upstream: the remote and the remote branch's name, pushed with `-u`.
+    /// `key`: the toolbar button that shows the push's progress.
+    case pushNewBranch(String, key: ActionBarAction?)
 
     var id: String {
         switch self {
@@ -38,6 +41,7 @@ enum OperationDialog: Identifiable {
         case .addSubmodule: "add submodule"
         case .setSubmoduleURL(let path): "submodule url \(path)"
         case .setSubmoduleBranch(let path): "submodule branch \(path)"
+        case .pushNewBranch(let branch, _): "push \(branch)"
         }
     }
 }
@@ -125,6 +129,8 @@ struct OperationDialogView: View {
     @State private var url = ""
     @State private var path = ""
     @State private var branch = ""
+    /// The first-push form's remote.
+    @State private var remote = ""
     @State private var message = ""
     @State private var checkout = true
     @State private var recursive = true
@@ -201,6 +207,7 @@ struct OperationDialogView: View {
         case .addSubmodule: "Add a submodule"
         case .setSubmoduleURL(let path): "Set the URL of \(path)"
         case .setSubmoduleBranch(let path): "Set the branch of \(path)"
+        case .pushNewBranch(let branch, _): "Push \(branch) to a remote"
         }
     }
 
@@ -214,6 +221,7 @@ struct OperationDialogView: View {
         case .setRemoteURL, .setSubmoduleURL: "Set URL"
         case .addSubmodule: "Add Submodule"
         case .setSubmoduleBranch: "Set Branch"
+        case .pushNewBranch: "Push"
         }
     }
 
@@ -260,6 +268,15 @@ struct OperationDialogView: View {
             Toggle("Also fetch nested submodules", isOn: $recursive)
         case .setSubmoduleBranch:
             field("Branch") { TextField("Empty: the remote's default branch", text: $branch) }
+        case .pushNewBranch(let local, _):
+            field("Remote", focus: false) {
+                FilterCapsulePicker(label: "Remote", selection: $remote, items: session.remotes.map(\.name))
+            }
+            field("Branch") { TextField(local, text: $name) }
+            Text("The new remote branch becomes the upstream of \(local).")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -287,6 +304,9 @@ struct OperationDialogView: View {
         case .setSubmoduleURL(let path): url = submodule(path)?.url ?? ""
         case .setSubmoduleBranch(let path): branch = submodule(path)?.branch ?? ""
         case .reset(_, _, _, let preselected): mode = preselected
+        case .pushNewBranch(let local, _):
+            name = local
+            remote = session.defaultRemote ?? ""
         default: break
         }
     }
@@ -311,6 +331,7 @@ struct OperationDialogView: View {
         case .setRemoteURL, .setSubmoduleURL: !trimmedURL.isEmpty
         case .addSubmodule: !trimmedURL.isEmpty && !trimmedPath.isEmpty
         case .setSubmoduleBranch: true
+        case .pushNewBranch: !trimmedName.isEmpty && !remote.isEmpty
         }
     }
 
@@ -340,7 +361,7 @@ struct OperationDialogView: View {
 
     private var nameKind: RepoSession.NameKind? {
         switch dialog {
-        case .createBranch, .renameBranch: .branch
+        case .createBranch, .renameBranch, .pushNewBranch: .branch
         case .createTag: .tag
         case .addRemote, .renameRemote: .remote
         case .reset, .setRemoteURL, .addSubmodule, .setSubmoduleURL, .setSubmoduleBranch: nil
@@ -405,6 +426,10 @@ struct OperationDialogView: View {
             session.run(.setSubmoduleBranch(path, branch: trimmedBranch),
                         title: trimmedBranch.isEmpty ? "Follow the default branch in submodule \(path)"
                             : "Set the branch of submodule \(path) to \(trimmedBranch)")
+        case .pushNewBranch(let local, let key):
+            session.run(.push(branch: local, remote: remote, remoteBranch: name == local ? nil : name,
+                              setUpstream: true, forceWithLease: nil),
+                        title: "Push \(local) to \(remote)/\(name)", key: key)
         }
         onClose()
     }
