@@ -302,15 +302,16 @@ final class WindowModel {
         activateSelectedTab()
     }
 
-    /// Selects the selected repo tab's current selection again (creating its session on first use): its detail goes
-    /// to the loading state now and reloads.
+    /// Shows the selected repo tab (creating its session on first use). A new session, or one whose detail is not
+    /// loaded, selects its current selection again: its detail goes to the loading state now and reloads. A loaded
+    /// detail stays as it is: its watcher kept the status and refs current while the tab was hidden.
     private func activateSelectedTab() {
         guard let index = selectedIndex, let url = tabs[index].repoURL, !tabs[index].isMissing else { return }
         let id = tabs[index].id
         let isNew = sessions[id] == nil
         let session = sessions[id] ?? makeSession(for: id, url: url)
         sessions[id] = session
-        session.select(session.selection)
+        if session.detail.value == nil { session.select(session.selection) }
         // Another worktree may have changed in its own tab meanwhile; a new session reads them after its first page.
         if !isNew { session.refreshWorktrees() }
     }

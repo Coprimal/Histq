@@ -16,6 +16,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Copy as Patch next to Save as Patch… in a commit's menu, and patches of several selected commits (adjacent or not, exported oldest first; also from the selected commits card's Patch menu), of the WIP row's Unstaged, Staged or All Changes (untracked files included), and of a single file in the WIP lists or a commit's files. Binary changes are included.
 - Apply Patch… (a .patch or .diff file) and Apply Patch from Clipboard, in the repository menu, the File menu and the command palette: a preview lists the files with their +/− counts and says whether the patch applies cleanly, needs a 3-way merge or does not apply. Apply to Working Tree leaves the changes unstaged (staged after a 3-way merge, conflicts in the Conflicted card); Apply as Commits creates the commits of a patch made from commits, with their author and message, can be undone, and on a conflict shows a banner with Skip, Abort and Continue.
 
+### Changed
+- Clicks react at once: a checkout shows its target branch and a "Checkout X" status in about 3 ms (was 150-200 ms); the commit box clears as soon as you click Commit (was about 200-250 ms) and gets the message back if the commit fails; a pull request opens in about 360 ms instead of 720-1000 ms, with checks and files filling in as they arrive, and opens again in about 45 ms instead of about 720 ms; merging a pull request shows it as merged at once; a pending mergeable state is asked again after about 1 s instead of 3 s; switching back to a tab no longer rereads its repository.
+
 ### Fixed
 - Discard on a submodule now puts it back on the recorded commit (it did nothing before).
 
