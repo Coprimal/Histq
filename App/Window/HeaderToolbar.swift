@@ -2,9 +2,9 @@
 // menu (the window's repo tabs, recent
 // repos, Open…), the branch menu (checks out the picked branch),
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge the green Update button while Sparkle has an update
-// (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
-// Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed. Settings is a modal over
-// the tab (task 9.7), so the repo items stay as they are under it.
+// (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, Row Height ▾ (the graph's
+// row heights), then Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed.
+// Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it.
 //
 // The user can customize it (right-click › Customize Toolbar…): remove, re-add or move whole capsules, and add spaces.
 // AppKit saves the layout in the standard defaults domain, under "NSToolbar Configuration HeaderToolbar"
@@ -49,6 +49,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let createBranchItem = NSToolbarItem(itemIdentifier: ID.createBranch)
     private let stashItem = NSToolbarItem(itemIdentifier: ID.stash)
     private let popItem = NSToolbarItem(itemIdentifier: ID.pop)
+    /// Pulls down the graph's row heights (`PrefKey.rowDensity`, as Settings › Appearance › Row height), its own
+    /// capsule before Tools.
+    private let rowHeightItem = NSMenuToolbarItem(itemIdentifier: ID.rowHeight)
     private let terminalItem = NSToolbarItem(itemIdentifier: ID.terminal)
     private let searchItem = NSToolbarItem(itemIdentifier: ID.search)
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
@@ -78,6 +81,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         static let createBranch = NSToolbarItem.Identifier("createBranch")
         static let stash = NSToolbarItem.Identifier("stash")
         static let pop = NSToolbarItem.Identifier("pop")
+        static let rowHeight = NSToolbarItem.Identifier("rowHeight")
         static let terminal = NSToolbarItem.Identifier("terminal")
         static let search = NSToolbarItem.Identifier("search")
         static let settings = NSToolbarItem.Identifier("settings")
@@ -137,6 +141,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         configureButton(settingsItem, label: "Settings", systemImage: "gearshape")
         settingsItem.action = #selector(toggleSettings(_:))
 
+        // No action: a click pulls the menu down.
+        configureButton(rowHeightItem, label: "Row Height", systemImage: Self.rowHeightSymbol)
+        rowHeightItem.menu = makeMenu(Self.rowHeightMenuID)
+        rowHeightItem.showsIndicator = true
+        groups[ID.rowHeight] = rowHeightItem
+
         configureButton(updateItem, label: "Update", systemImage: Self.updateSymbol)
         updateItem.action = #selector(installUpdate(_:))
         updateItem.visibilityPriority = .high
@@ -165,6 +175,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
                 form.submenu = makeMenu()
                 item.menuFormRepresentation = form
             }
+            // Its own menu, not the item's: AppKit hides the first item of an action-less menu item's menu (the
+            // pull-down's title), here Compact.
+            let rowHeight = hoverButton(rowHeightItem)
+            rowHeight.dropdownMenu = makeMenu(Self.rowHeightMenuID)
+            rowHeightItem.view = ToolbarHoverButton.capsule([rowHeight])
+            let rowHeightForm = NSMenuItem(title: rowHeightItem.label, action: nil, keyEquivalent: "")
+            rowHeightForm.image = rowHeightItem.image
+            rowHeightForm.submenu = makeMenu(Self.rowHeightMenuID)
+            rowHeightItem.menuFormRepresentation = rowHeightForm
             groups[ID.historyGroup] = row(ID.historyGroup, title: "History", [undoItem, redoItem])
             // Pull, Push and Fetch as items of their own, each in its own capsule (`toolbarDefaultItemIdentifiers`):
             // a group of view items shares one.
@@ -183,8 +202,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     /// A menu whose items are built when it opens (`menuNeedsUpdate`), never on a model change.
-    private func makeMenu() -> NSMenu {
+    private func makeMenu(_ identifier: NSUserInterfaceItemIdentifier? = nil) -> NSMenu {
         let menu = NSMenu()
+        menu.identifier = identifier
         menu.autoenablesItems = false
         menu.delegate = self
         return menu
@@ -263,7 +283,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let sync = PlatformFeatures.liquidGlass ? [ID.pull] + gap + [ID.push] + gap + [ID.fetch] : [ID.syncGroup]
         // The Update button right after the flexible space: hidden, it and its gap only widen the empty middle.
         return [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.update] + gap + [ID.historyGroup] + gap + sync + gap + [ID.branchGroup]
-            + gap + [ID.toolsGroup]
+            + gap + [ID.rowHeight] + gap + [ID.toolsGroup]
     }
 
     /// Each default item once, then the spaces (the default set repeats `.space`).
@@ -296,6 +316,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         ID.push: ("Push", ToolbarAction.push.systemImage),
         ID.fetch: ("Fetch", ToolbarAction.fetch.systemImage),
         ID.branchGroup: ("Branch Actions", ToolbarAction.stash.systemImage),
+        ID.rowHeight: ("Row Height", rowHeightSymbol),
         ID.toolsGroup: ("Tools", "terminal"),
         ID.update: ("Update", updateSymbol),
     ]
@@ -443,6 +464,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private static let undoSymbol = "arrow.uturn.backward"
     private static let redoSymbol = "arrow.uturn.forward"
     private static let updateSymbol = "arrow.down.circle.fill"
+    private static let rowHeightSymbol = "arrow.up.and.down.text.horizontal"
+    /// Marks the Row Height menus (the item's, the macOS 26 button's and the overflow's) for `menuNeedsUpdate`.
+    private static let rowHeightMenuID = NSUserInterfaceItemIdentifier("rowHeight")
 
     #if DEBUG
     private var loggedUndoItem: String?
@@ -546,6 +570,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             } else { [] }
         case pullItem.menu, pullItem.menuFormRepresentation?.submenu: model.actionSession.map(RepoMenus.pull) ?? []
         case pushItem.menu, pushItem.menuFormRepresentation?.submenu: model.actionSession.map(RepoMenus.push) ?? []
+        case _ where menu.identifier == Self.rowHeightMenuID: Self.rowHeightEntries()
         default: []
         }
         let built = MenuBuilder.menu(entries)
@@ -559,8 +584,20 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         }
         if let dropdown = [repoItem, branchItem, profileItem].first(where: { $0.menu === menu }) {
             menu.items = [dropdown.titleItem] + items
+        } else if menu.identifier == Self.rowHeightMenuID {
+            menu.items = [NSMenuItem.sectionHeader(title: "Row Height")] + items
         } else {
             menu.items = items
+        }
+    }
+
+    /// The row heights, the current one checked. A pick writes the defaults Settings' picker writes (its
+    /// `@AppStorage`), so every graph and Settings take it at once.
+    private static func rowHeightEntries() -> [MenuEntry] {
+        let key = PrefKey.rowDensity.rawValue
+        let current = Preferences.defaults.string(forKey: key) ?? "regular"
+        return ["compact", "regular", "comfortable"].map { density in
+            .action(density.capitalized, checked: density == current) { Preferences.defaults.set(density, forKey: key) }
         }
     }
 
