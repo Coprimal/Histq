@@ -1,22 +1,3 @@
-// Theme toggle. The saved theme is applied early by a tiny inline script in <head>.
-(() => {
-  const root = document.documentElement;
-  const button = document.getElementById("theme-toggle");
-  if (!button) return;
-
-  button.addEventListener("click", () => {
-    const systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
-    const current = root.dataset.theme || (systemDark ? "dark" : "light");
-    const next = current === "dark" ? "light" : "dark";
-    root.dataset.theme = next;
-    try {
-      localStorage.setItem("histq.theme", next);
-    } catch {
-      // Storage blocked (private mode): the choice lasts for this visit only.
-    }
-  });
-})();
-
 // Docs scroll-spy: the active section is the last one whose top has passed near the viewport top.
 (() => {
   const links = [...document.querySelectorAll(".toc a[href^='#']")];
