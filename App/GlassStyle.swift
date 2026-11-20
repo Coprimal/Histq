@@ -107,7 +107,7 @@ enum Palette {
 
     // MARK: Commit graph (AppKit: the graph draws in `draw(_:)`, so these are `NSColor`s)
 
-    /// The 8 lane colors, in palette order (`GraphRow.color`): blue, orange, green, pink, cyan, yellow, lilac, coral.
+    /// The 8 accent colors, also the Vivid lane colors: blue, orange, green, pink, cyan, yellow, lilac, coral.
     /// Lane 0 (the top level) is the brand blue, a touch lighter than the accent so thin lines read; the other hues sit
     /// far from it and from each other (OKLab ΔE ≥ 0.12, also apart under deuteranopia and protanopia), and each
     /// neighbour jumps ~135° in hue so adjacent lanes stay apart. All bright on `surface` #2C2C2E (≥ 4.4:1).
@@ -116,23 +116,27 @@ enum Palette {
         srgb(0x4091FD), srgb(0xFC9F30), srgb(0x58CD78), srgb(0xE8519F),
         srgb(0x44D4E2), srgb(0xE9DD3C), srgb(0xC58FF3), srgb(0xEF6856),
     ]
-    /// The graph's lane colors (`GraphLayout.colorCount` of them): lines, nodes, the badge connectors.
+    /// The 8 accent colors, for the UI outside the graph too (file states, tab icons and groups, profiles).
     static let graphLanes: [NSColor] = laneValues
-    /// The faint band from a node to the graph column's edge: its lane color at 0.09, so the lane lines over it
-    /// stay easy to see (user, 2026-11-19).
-    static let graphLaneBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.09) }
-    /// The selected row's band: its lane color at 0.28, so the selection reads at a glance (user, 2026-11-19).
-    static let graphLaneSelectedBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.28) }
+    /// The Gradient lane colors, one per column (`GraphLayout.Coloring.column`): in hue order, so side-by-side lanes
+    /// step around the color wheel instead of jumping (user, 2026-11-20): teal, blue, purple, magenta, pink, red,
+    /// orange, yellow, lime, mint.
+    /// #4A9EBC #2D68EE #8218BB #B52EB1 #C72A70 #BC271B #E1673E #ECCC54 #92D755 #66CBA0
+    private static let gradientValues: [NSColor] = [
+        srgb(0x4A9EBC), srgb(0x2D68EE), srgb(0x8218BB), srgb(0xB52EB1), srgb(0xC72A70),
+        srgb(0xBC271B), srgb(0xE1673E), srgb(0xECCC54), srgb(0x92D755), srgb(0x66CBA0),
+    ]
+    /// The graph's colors of each `LaneColors` set.
+    static let graphVivid = GraphLaneSet(laneValues)
+    static let graphGradient = GraphLaneSet(gradientValues)
     /// A stash row's node, band and line to its base, outside the lane colors: a neutral grey. #8E8E93 / at 0.09
     static let graphStash = srgb(0x8E8E93)
     static let graphStashBand = graphStash.withAlphaComponent(0.09)
     static let graphStashSelectedBand = graphStash.withAlphaComponent(0.28)
     /// Another worktree's WIP badge: the grey at a branch badge's 0.38.
     static let graphStashBadgeFill = graphStash.withAlphaComponent(0.38)
-    /// A branch badge's fill: its row's lane color at 0.38.
-    static let graphBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.38) }
-    /// The checked-out branch's badge: brighter, its lane color at 0.6.
-    static let graphHeadBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.6) }
+    /// A tab group's chip: its accent color at 0.38, as a Vivid branch badge.
+    static let graphBadgeFills: [NSColor] = graphVivid.badgeFills
     /// Text and icons on a badge: pure white, so they read on the dark fills (user, 2026-11-17). White
     static let graphBadgeText = NSColor.white
     /// A tag badge's neutral fill. White 0.14

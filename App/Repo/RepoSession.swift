@@ -113,6 +113,8 @@ struct LogSnapshot: Sendable {
     var filter = LogFilter()
     /// The order the log was read in (`PrefKey.commitOrder`).
     var order = LogReader.Order.date
+    /// How the rows took their lane colors (`PrefKey.laneColors`).
+    var coloring = GraphLayout.Coloring.branch
     /// Timing only: the step times of the incremental read that made it (`readLogIncrementally`), for its
     /// `log-reload` line.
     var readSteps = ""
@@ -1001,7 +1003,10 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var autoFetchMinutes = 0
     /// The order the log is read in: `PrefKey.commitOrder`, read in `init` and followed by `followCommitOrder`.
     @ObservationIgnored private var commitOrder = LogReader.Order.date
-    /// Watches `PrefKey.autoFetchMinutes` and `PrefKey.commitOrder`; dropping it (close, deinit) stops the observation.
+    /// How the rows take their lane colors: `PrefKey.laneColors`, read in `init` and followed by `followCommitOrder`.
+    @ObservationIgnored private var laneColoring = GraphLayout.Coloring.branch
+    /// Watches `PrefKey.autoFetchMinutes`, `PrefKey.commitOrder` and `PrefKey.laneColors`; dropping it (close, deinit)
+    /// stops the observation.
     @ObservationIgnored private var preferencesObserver: PreferencesObserver?
 
     /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
@@ -1442,13 +1447,16 @@ final class RepoSession: Identifiable {
         }
     }
 
-    /// Follows `PrefKey.commitOrder`; any other value (a hand-written default) reads as by date. A change reads the
-    /// whole log again in the new order, unless no load has started yet (`log` is `.idle`): the first one reads it.
+    /// Follows `PrefKey.commitOrder` and `PrefKey.laneColors`; any other value (a hand-written default) reads as by
+    /// date, Vivid. A change reads the whole log again and lays it out anew, unless no load has started yet (`log` is
+    /// `.idle`): the first one reads it.
     private func followCommitOrder() {
         let stored = Preferences.defaults.string(forKey: PrefKey.commitOrder.rawValue)
         let order = stored.flatMap(LogReader.Order.init(rawValue:)) ?? .date
-        guard order != commitOrder else { return }
+        let coloring = LaneColors.stored.coloring
+        guard order != commitOrder || coloring != laneColoring else { return }
         commitOrder = order
+        laneColoring = coloring
         if case .idle = log { return }
         refresh(scope: .log)
     }
@@ -2048,12 +2056,13 @@ final class RepoSession: Identifiable {
         let filter: LogFilter? = view == .empty || refs.value != nil ? visibility : nil
         let view = view
         let order = commitOrder
+        let coloring = laneColoring
         // A complete log on screen read with the same hidden branches, none soloed, in the same order: a reload first
         // reads only the commits that are new since it. Hiding, showing or soloing a branch, or changing the order,
         // reads the whole log again (a soloed log always).
         let oldLog = log.value.flatMap { old in
             old.isComplete && filter?.hidden == old.filter.hidden && filter?.solo.isEmpty == true
-                && old.filter.solo.isEmpty && old.order == order ? old : nil
+                && old.filter.solo.isEmpty && old.order == order && old.coloring == coloring ? old : nil
         }
         logTask = Task { [weak self] in
             // Keeps App Nap from throttling the load while the app is in the background.
@@ -2068,7 +2077,7 @@ final class RepoSession: Identifiable {
                     do {
                         incremental = try await Self.readLogIncrementally(
                             backend, previous: oldLog, cwd: cwd, generation: generation, worktrees: worktrees,
-                            filter: filter, order: order)
+                            filter: filter, order: order, coloring: coloring)
                     } catch where !Self.isCancellation(error) {
                         Self.logger.error("incremental log reload failed: \(error, privacy: .public)")
                     }
@@ -2079,7 +2088,7 @@ final class RepoSession: Identifiable {
                 } else {
                     snapshot = try await Self.readLog(
                         backend, cwd: cwd, generation: generation, worktrees: worktrees, filter: filter, view: view,
-                        order: order
+                        order: order, coloring: coloring
                     ) { first in
                         guard isFirstLoad, !Task.isCancelled else { return }
                         await MainActor.run {
@@ -2142,11 +2151,12 @@ final class RepoSession: Identifiable {
     @concurrent
     private nonisolated static func readLog(
         _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo], filter: LogFilter?,
-        view: RepoViewState, order: LogReader.Order, firstPage: @Sendable (LogSnapshot) async -> Void
+        view: RepoViewState, order: LogReader.Order, coloring: GraphLayout.Coloring,
+        firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
-        var snapshot = LogSnapshot(generation: generation, order: order)
+        var snapshot = LogSnapshot(generation: generation, order: order, coloring: coloring)
         if let filter {
             snapshot.filter = filter
         } else {
@@ -2219,14 +2229,14 @@ final class RepoSession: Identifiable {
     @concurrent
     private nonisolated static func readLogIncrementally(
         _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
-        filter: LogFilter, order: LogReader.Order
+        filter: LogFilter, order: LogReader.Order, coloring: GraphLayout.Coloring
     ) async throws -> LogSnapshot? {
         var steps = UITiming.Steps()
         guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
         let env = try await backend.readEnvironment(cwd: cwd)
         async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
         steps.lap("env")
-        var snapshot = LogSnapshot(generation: generation, order: order)
+        var snapshot = LogSnapshot(generation: generation, order: order, coloring: coloring)
         snapshot.filter = filter
         snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
         steps.lap("stashes")
@@ -2283,7 +2293,7 @@ final class RepoSession: Identifiable {
     /// once the log is complete, at the top without a line (they open no lane, so the commit rows stay as they are).
     /// The pinned branches take the leftmost lanes.
     nonisolated private static func beginLayout(_ snapshot: inout LogSnapshot) -> (layout: GraphLayout, top: GraphLayout) {
-        var layout = GraphLayout(pinned: snapshot.filter.pinned)
+        var layout = GraphLayout(pinned: snapshot.filter.pinned, coloring: snapshot.coloring)
         snapshot.syntheticRows = layout.append(snapshot.synthetic.filter { $0.kind == .wip }.map { row in
             isMissingBase(row, in: snapshot) ? GraphSyntheticRow(kind: row.kind, id: row.id, base: nil) : row
         })

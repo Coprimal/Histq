@@ -480,7 +480,7 @@ final class RefBadgeCellView: NSView {
         let lineY = layout.lineY ?? bounds.midY
         let lineEnd = layout.lineEnd ?? bounds.maxX
         guard layout.lineStart < lineEnd else { return }
-        let lane = Palette.graphLane(color)
+        let lane = Palette.graphLane(color, metrics.laneColors)
         // Not beside "+N" alone (no badge drawn): that line is the row's own.
         let onlyGhosts = !layout.badges.isEmpty && layout.badges.allSatisfy { badges[$0.index].isGhost }
         (onlyGhosts ? lane.withAlphaComponent(Palette.graphGhostAlpha) : lane).setStroke()
@@ -592,13 +592,14 @@ final class RefBadgeCellView: NSView {
     {
         let path = CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil)
         let isHead = badge.isHead
-        let lane = self.color % Palette.graphLanes.count
+        let colors = metrics.laneColors.colors
+        let lane = self.color % colors.lines.count
         let color: NSColor = if case .tag = badge.kind {
             Palette.graphTagFill
         } else if self.color == GraphLayout.stashColor {
             Palette.graphStashBadgeFill
         } else {
-            (isHead ? Palette.graphHeadBadgeFills : Palette.graphBadgeFills)[lane]
+            (isHead ? colors.headBadgeFills : colors.badgeFills)[lane]
         }
         (fill == .faint ? color.withAlphaComponent(color.alphaComponent * Style.faintFill) : color).setFill()
         context.addPath(path)

@@ -16,6 +16,7 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
     @AppStorage(PrefKey.commitOrder.rawValue, store: Preferences.defaults) private var commitOrder = "date"
+    @AppStorage(PrefKey.laneColors.rawValue, store: Preferences.defaults) private var laneColors = LaneColors.vivid
     @AppStorage(PrefKey.textSize.rawValue, store: Preferences.defaults) private var textSize = TextSize.regular.rawValue
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
@@ -179,6 +180,17 @@ struct AppearanceSettings: View {
                         + "together.")
                 }
                 .settingsSearchAnchor("Commit order")
+                SettingsDivider()
+                LabeledContent {
+                    CapsuleTabs(selection: $laneColors, tabs: LaneColors.allCases,
+                                title: { Text($0.title) }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Lane colors")
+                    SettingsHint("Vivid: each branch keeps a color far from its neighbours'. Gradient: the lanes run "
+                        + "through the rainbow, column by column.")
+                }
+                .settingsSearchAnchor("Lane colors")
                 SettingsDivider()
                 SettingsSwitchRow(title: "Fade other worktrees",
                                   hint: "Their branches fade from where they fork off this tab's history. Selecting "

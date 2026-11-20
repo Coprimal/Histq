@@ -169,6 +169,8 @@ struct SettingsSearchItem: Identifiable {
               keywords: ["font size", "bigger", "smaller", "zoom"]),
         .init(section: .appearance, group: "Commit list", title: "Commit order",
               keywords: ["by date", "by branch", "sort", "date order"]),
+        .init(section: .appearance, group: "Commit list", title: "Lane colors",
+              keywords: ["vivid", "gradient", "rainbow", "graph colors", "branch colors"]),
         .init(section: .appearance, group: "Commit list", title: "Fade other worktrees",
               keywords: ["worktree", "dim", "fade", "branch"]),
         .init(section: .appearance, group: "Sidebar",

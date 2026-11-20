@@ -5,16 +5,59 @@
 import AppKit
 import HistqCore
 
-/// Sizes of the graph, from the row height (`PrefKey.rowDensity`) and the text size (`PrefKey.textSize`).
+/// The graph's lane color set (`PrefKey.laneColors`): its palette, how lanes take it and its line width.
+enum LaneColors: String, CaseIterable {
+    /// 8 colors far apart in hue, each line keeping its own to its end; 1.5 pt lines. The default.
+    case vivid
+    /// 10 colors in hue order, one per column, so side-by-side lanes run like a rainbow; 2 pt lines.
+    case gradient
+
+    var title: String { rawValue.capitalized }
+    var coloring: GraphLayout.Coloring { self == .gradient ? .column : .branch }
+    var colors: GraphLaneSet { self == .gradient ? Palette.graphGradient : Palette.graphVivid }
+    /// 2 pt lands on whole device pixels on Retina, so Gradient's darker hues stay full (user, 2026-11-20).
+    var lineWidth: CGFloat { self == .gradient ? 2 : 1.5 }
+
+    /// The stored preference; anything else reads as Vivid.
+    static var stored: LaneColors {
+        Preferences.defaults.string(forKey: PrefKey.laneColors.rawValue).flatMap(Self.init(rawValue:)) ?? .vivid
+    }
+}
+
+/// One lane color set's colors, by palette index: lines and nodes, row bands, branch badges.
+struct GraphLaneSet {
+    let lines: [NSColor]
+    /// The faint band from a node to the graph column's edge: its lane color at 0.09, so the lane lines over it stay
+    /// easy to see (user, 2026-11-19).
+    let bands: [NSColor]
+    /// The selected row's band: its lane color at 0.28, so the selection reads at a glance (user, 2026-11-19).
+    let selectedBands: [NSColor]
+    /// A branch badge's fill: its row's lane color at 0.38.
+    let badgeFills: [NSColor]
+    /// The checked-out branch's badge: brighter, its lane color at 0.6.
+    let headBadgeFills: [NSColor]
+
+    init(_ colors: [NSColor]) {
+        lines = colors
+        bands = colors.map { $0.withAlphaComponent(0.09) }
+        selectedBands = colors.map { $0.withAlphaComponent(0.28) }
+        badgeFills = colors.map { $0.withAlphaComponent(0.38) }
+        headBadgeFills = colors.map { $0.withAlphaComponent(0.6) }
+    }
+}
+
+/// Sizes of the graph, from the row height (`PrefKey.rowDensity`) and the text size (`PrefKey.textSize`), and its lane
+/// colors (`PrefKey.laneColors`).
 struct GraphMetrics: Equatable {
     let rowHeight: CGFloat
     /// The cells' fonts; kept apart from `rowHeight`, which a text size changes only in a short row.
     let textSize: TextSize
+    let laneColors: LaneColors
 
     /// "compact", "regular" (the default) or "comfortable"; anything else reads as regular. A row is at least one line
     /// of `textSize`'s body text and 5 pt above and below it: the same heights as before at Regular and Small, Compact
     /// 28 at Large.
-    init(density: String, textSize: TextSize = .regular) {
+    init(density: String, textSize: TextSize = .regular, laneColors: LaneColors = .vivid) {
         // Regular 32 -> 30 and Comfortable 38 -> 34 (user, 2026-11-19): a little tighter, still above Compact.
         let height: CGFloat = switch density {
         case "compact": 26
@@ -23,6 +66,7 @@ struct GraphMetrics: Equatable {
         }
         rowHeight = max(height, textSize.lineHeight + 10)
         self.textSize = textSize
+        self.laneColors = laneColors
     }
 
     /// The height shared by the band, its edge bar, the selection and the node (the avatar), centered in the row: a
@@ -43,7 +87,7 @@ struct GraphMetrics: Equatable {
     var minTrailing: CGFloat { 6 }
     /// A merge commit's dot: scales with the node, kept even so it centers on whole pixels.
     var mergeDotDiameter: CGFloat { 2 * (nodeDiameter * 0.2).rounded() }
-    var lineWidth: CGFloat { 1.5 }
+    var lineWidth: CGFloat { laneColors.lineWidth }
     /// The radius of a line's bend into or out of a node: a third of the node.
     var bendRadius: CGFloat { (nodeDiameter / 3).rounded() }
     /// The band's, the selection's and the badges' inset from the row's top and bottom.
@@ -120,14 +164,14 @@ enum GraphRowDrawing {
         let width = bounds.width
         let nodeX = bounds.minX + metrics.drawnX(lane: row.lane, width: width)
         let midY = bounds.midY
-        let laneColor = Palette.graphLane(row.color)
+        let laneColor = Palette.graphLane(row.color, metrics.laneColors)
 
         // The band, from the node to the column's edge, ending in a 2 pt bar in the lane color (the band's edge bar).
         let band = CGRect(x: nodeX, y: midY - metrics.bandHeight / 2,
                           width: max(0, bounds.maxX - nodeX), height: metrics.bandHeight)
         if band.width > 0 {
             context.setAlpha(nodeAlpha)
-            Palette.graphLaneBand(row.color, selected: selected).setFill()
+            Palette.graphLaneBand(row.color, metrics.laneColors, selected: selected).setFill()
             context.fill(band)
             laneColor.setFill()
             context.fill(CGRect(x: bounds.maxX - 2, y: band.minY, width: 2, height: band.height))
@@ -187,7 +231,7 @@ enum GraphRowDrawing {
             context.setAlpha(nodeAlpha)
             context.beginTransparencyLayer(auxiliaryInfo: nil)
         }
-        drawNode(node, color: laneColor, band: Palette.graphLaneBand(row.color), avatar: avatar,
+        drawNode(node, color: laneColor, band: Palette.graphLaneBand(row.color, metrics.laneColors), avatar: avatar,
                  center: center, metrics: metrics, context: context)
         if fadesNode {
             context.endTransparencyLayer()
@@ -206,7 +250,7 @@ enum GraphRowDrawing {
         let toX = bounds.minX + metrics.drawnX(lane: segment.to, width: bounds.width)
         let midY = bounds.midY
         let radius = min(metrics.bendRadius, abs(toX - fromX), bounds.height / 2)
-        let color = Palette.graphLane(segment.color)
+        let color = Palette.graphLane(segment.color, metrics.laneColors)
         (alpha < 1 ? color.withAlphaComponent(alpha) : color).setStroke()
         if segment.isDashed { context.setLineDash(phase: 0, lengths: [3, 3]) }
         switch (segment.shape, top) {
@@ -285,8 +329,8 @@ enum GraphRowDrawing {
             color.setFill()
             context.fillEllipse(in: rect)
             if let avatar {
-                // A 1.5 pt ring of the lane color around the avatar.
-                let inner = rect.insetBy(dx: 1.5, dy: 1.5)
+                // A ring of the lane color around the avatar, as thick as the lines.
+                let inner = rect.insetBy(dx: metrics.lineWidth, dy: metrics.lineWidth)
                 context.saveGState()
                 context.addEllipse(in: inner)
                 context.clip()
@@ -367,14 +411,16 @@ final class GraphCellView: NSView {
 
 extension Palette {
     /// A `GraphRow` or `GraphSegment` color: its lane color, or the grey of stashes and other worktrees' WIP rows.
-    static func graphLane(_ color: Int) -> NSColor {
-        color == GraphLayout.stashColor ? graphStash : graphLanes[color % graphLanes.count]
+    static func graphLane(_ color: Int, _ set: LaneColors) -> NSColor {
+        guard color != GraphLayout.stashColor else { return graphStash }
+        let lines = set.colors.lines
+        return lines[color % lines.count]
     }
 
     /// The band of a row of `color`, brighter on the selected row.
-    static func graphLaneBand(_ color: Int, selected: Bool = false) -> NSColor {
+    static func graphLaneBand(_ color: Int, _ set: LaneColors, selected: Bool = false) -> NSColor {
         if color == GraphLayout.stashColor { return selected ? graphStashSelectedBand : graphStashBand }
-        let bands = selected ? graphLaneSelectedBands : graphLaneBands
+        let bands = selected ? set.colors.selectedBands : set.colors.bands
         return bands[color % bands.count]
     }
 }

@@ -40,6 +40,8 @@ extension PaletteCommands {
                    TextSize.allCases.map { ($0.rawValue, $0.rawValue.capitalized) }),
             choice(.commitOrder, .appearance, "Commit list", "Commit Order",
                    [("date", "By date"), ("branch", "By branch")]),
+            choice(.laneColors, .appearance, "Commit list", "Lane Colors",
+                   LaneColors.allCases.map { ($0.rawValue, $0.title) }),
             toggle(.graphFadeOtherWorktrees, "Fade Other Worktrees", .appearance, "Commit list"),
             SidebarSectionID.allCases.flatMap { id in
                 toggle("Sidebar Section \(id.title)", show: true, .appearance, "Sidebar",

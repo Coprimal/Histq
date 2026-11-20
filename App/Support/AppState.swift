@@ -105,6 +105,9 @@ enum PrefKey: String, CaseIterable {
     /// its parents, so the branches interleave; `git log --date-order`) or "branch" (each line of history listed whole,
     /// `--topo-order`).
     case commitOrder
+    /// The graph's lane colors: a `LaneColors` raw value, "vivid" (8 colors far apart, one per line) or "gradient"
+    /// (10 colors in hue order, one per column).
+    case laneColors
     /// The graph's, sidebar's and file lists' text: a `TextSize` raw value, "small", "regular" or "large".
     case textSize
     /// Commit avatars: "real" (Gravatar / GitHub), "generated" or "initials".
@@ -247,6 +250,7 @@ enum PrefKey: String, CaseIterable {
         case .dateFormat: "MM/dd/yy @ HH:mm"
         case .rowDensity: "regular"
         case .commitOrder: "date"
+        case .laneColors: "vivid"
         case .textSize: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"

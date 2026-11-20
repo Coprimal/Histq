@@ -137,6 +137,10 @@ struct GraphLayoutTests {
         #expect(rows.map(\.lane) == [1, 2, 0, 0, 0])
         #expect(rows[2].top.contains { $0.shape == .bendIn && $0.from == 2 && $0.to == 0 }, "M2's line joins F2 in lane 0")
         #expect(rows[2].color == rows[1].color, "F2 continues M2's color")
+        var byColumn = GraphLayout(pinned: ["f2"], coloring: .column)
+        let columnRows = byColumn.append(commits)
+        #expect(columnRows.map(\.lane) == rows.map(\.lane), "the coloring never moves a lane")
+        #expect(columnRows.map(\.color) == columnRows.map(\.lane), "by column, each row takes its column's color")
         expectConnected(rows)
 
         for size in [1, 2] {

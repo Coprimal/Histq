@@ -21,7 +21,7 @@ public struct GraphSegment: Sendable, Hashable {
     public let shape: Shape
     public let from: Int
     public let to: Int
-    /// Index into the lane palette, `0..<GraphLayout.colorCount`, or `GraphLayout.stashColor`.
+    /// Index into the lane palette, `0..<GraphLayout.Coloring.colorCount`, or `GraphLayout.stashColor`.
     public let color: Int
     /// The line between a synthetic row (WIP, stash) and its base commit.
     public let isDashed: Bool
@@ -99,11 +99,26 @@ public struct GraphHungRow: Sendable, Hashable {
 /// A parent that never gets a row (shallow or partial history, a record the parser dropped, a synthetic
 /// row fed after its base) keeps its lane open to the end; a duplicate hash is laid out as a new tip.
 public struct GraphLayout: Sendable {
-    public static let colorCount = 8
-    /// The color of a stash row, another worktree's WIP row, and their lines to their base: outside the lane palette
-    /// (the app draws it grey), so such a row never takes a branch's color, and the commit it hangs from never takes
-    /// the row's.
-    public static let stashColor = colorCount
+    /// How lanes get their palette index.
+    public enum Coloring: Sendable {
+        /// Each new line takes the next of 8 colors in turn and keeps it to its end, whatever its column.
+        case branch
+        /// A line takes its column's color, `lane % 10`, so side-by-side lanes step through the palette in order.
+        case column
+
+        /// The palette size the indices cycle through.
+        public var colorCount: Int {
+            switch self {
+            case .branch: 8
+            case .column: 10
+            }
+        }
+    }
+
+    /// The color of a stash row, another worktree's WIP row, and their lines to their base: outside every lane
+    /// palette (the app draws it grey), so such a row never takes a branch's color, and the commit it hangs from never
+    /// takes the row's.
+    public static let stashColor = 10
 
     /// Which kind of edge a lane is waiting along; when several lanes wait for the same commit, the node
     /// continues the most important one so a branch's first-parent chain keeps its lane and color.
@@ -121,6 +136,8 @@ public struct GraphLayout: Sendable {
     }
 
     private var lanes: [Lane?] = []
+    private let coloring: Coloring
+    /// The next color `.branch` hands out.
     private var nextColor = 0
     /// Hung rows whose base has not come yet, in the order they were hung.
     public private(set) var waiting: [GraphSyntheticRow] = []
@@ -139,8 +156,9 @@ public struct GraphLayout: Sendable {
     /// `pinned` are the tips of the pinned branches, in pin order: each tip and its first-parent chain take
     /// the lane of its index, and every other line goes right of them. A tip that never comes leaves its
     /// lane empty.
-    public init(pinned: [String] = []) {
+    public init(pinned: [String] = [], coloring: Coloring = .branch) {
         reserved = pinned.count
+        self.coloring = coloring
         for (lane, tip) in pinned.enumerated() where pins[tip] == nil { pins[tip] = lane }
     }
 
@@ -175,7 +193,7 @@ public struct GraphLayout: Sendable {
 
     private mutating func place(_ row: GraphSyntheticRow) -> GraphRow {
         let lane = freeSlot()
-        let color = row.kind == .wip ? newColor() : Self.stashColor
+        let color = row.kind == .wip ? newColor(lane: lane) : Self.stashColor
         let top = passingSegments()
         if let base = row.base {
             lanes[lane] = Lane(waitingFor: base, color: color, edge: .synthetic)
@@ -200,18 +218,14 @@ public struct GraphLayout: Sendable {
         }
         // A pinned tip moves to its reserved lane, unless it continues a lane further left (another pin's).
         let pin = reserved > 0 ? pins.removeValue(forKey: commit.hash) : nil
-        let color: Int
-        if node >= 0, lanes[node]!.color != Self.stashColor {
-            color = lanes[node]!.color
-        } else {
-            // A tip, or a commit only grey rows hang from: a color of its own.
-            if node < 0 && pin == nil { node = freeSlot() }
-            color = newColor()
-        }
+        // The color of the lane the node continues; a tip, or a commit only grey rows hang from, gets its own.
+        let continued = node >= 0 && lanes[node]!.color != Self.stashColor ? lanes[node]!.color : nil
+        if node < 0 && pin == nil { node = freeSlot() }
         if let pin, node < 0 || pin < node {
             node = pin
             if lanes.count <= pin { lanes += Array(repeating: nil, count: pin + 1 - lanes.count) }
         }
+        let color = coloring == .column ? newColor(lane: node) : continued ?? newColor(lane: node)
         for index in lanes.indices {
             guard let lane = lanes[index] else { continue }
             let dashed = lane.edge == .synthetic
@@ -243,7 +257,7 @@ public struct GraphLayout: Sendable {
                 target = joined
             } else {
                 target = freeSlot()
-                lanes[target] = Lane(waitingFor: parent, color: newColor(), edge: .mergeParent, owner: owner)
+                lanes[target] = Lane(waitingFor: parent, color: newColor(lane: target), edge: .mergeParent, owner: owner)
                 opened.append(target)
             }
             outgoing.append(GraphSegment(
@@ -295,8 +309,10 @@ public struct GraphLayout: Sendable {
         while let last = lanes.last, last == nil { lanes.removeLast() }
     }
 
-    private mutating func newColor() -> Int {
-        defer { nextColor = (nextColor + 1) % Self.colorCount }
+    /// A new line's color in column `lane`: the column's, or the next in turn.
+    private mutating func newColor(lane: Int) -> Int {
+        guard coloring == .branch else { return lane % coloring.colorCount }
+        defer { nextColor = (nextColor + 1) % coloring.colorCount }
         return nextColor
     }
 }

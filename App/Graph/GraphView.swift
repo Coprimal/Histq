@@ -128,6 +128,8 @@ struct GraphView: NSViewRepresentable {
     let dateFormat: String
     let rowDensity: String
     var textSize = TextSize.regular
+    /// `PrefKey.laneColors`: the lanes' palette and line width (the rows carry its palette indices).
+    var laneColors = LaneColors.vivid
     var selection: [GraphItem] = []
     var onSelect: @MainActor ([GraphItem]) -> Void = { _ in }
     /// A double-clicked row; `badge` is the ref badge under the pointer, if any.
@@ -748,7 +750,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let table else { return }
         var reloadVisible = false
 
-        let newMetrics = GraphMetrics(density: view.rowDensity, textSize: view.textSize)
+        let newMetrics = GraphMetrics(density: view.rowDensity, textSize: view.textSize, laneColors: view.laneColors)
         // Not on the first update (`dateFormat` still nil): `makeNSView` has set the widths for this view already, and
         // a refit would drop the DEBUG `-HistqRefColumnWidth`.
         if dateFormat != nil, newMetrics.textSize != metrics.textSize || view.dateFormat != dateFormat {

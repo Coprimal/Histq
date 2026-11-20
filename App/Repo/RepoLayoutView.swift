@@ -545,6 +545,7 @@ private struct CommitListPanel: View {
     let session: RepoSession
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
+    @AppStorage(PrefKey.laneColors.rawValue, store: Preferences.defaults) private var laneColors = LaneColors.vivid
     @AppStorage(PrefKey.textSize.rawValue, store: Preferences.defaults) private var textSize = TextSize.regular
     @AppStorage(PrefKey.graphShowMessage.rawValue, store: Preferences.defaults) private var showMessage = true
     @AppStorage(PrefKey.graphShowAuthor.rawValue, store: Preferences.defaults) private var showAuthor = true
@@ -585,7 +586,7 @@ private struct CommitListPanel: View {
                 // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
                 // pull request in the same frame.
                 GraphView(log: log, refs: session.visibleRefs, status: session.status.value,
-                          dateFormat: dateFormat, rowDensity: rowDensity, textSize: textSize,
+                          dateFormat: dateFormat, rowDensity: rowDensity, textSize: textSize, laneColors: laneColors,
                           selection: session.graphSelection,
                           onSelect: { [session] items in session.selectGraph(items) },
                           onActivate: { [session] item, badge in
