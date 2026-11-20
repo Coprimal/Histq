@@ -338,7 +338,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: State
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
-    /// selected tab's title, its session's refs, running operations, status, stashes, remotes, profile, undo status,
+    /// selected tab's repo, its session's refs, running operations, status, stashes, remotes, profile, undo status,
     /// operation in progress and terminal drawer, the profile store, the page, the Settings modal and whether Sparkle
     /// has an update are read, so
     /// other tabs and the content's own state never wake the toolbar.
@@ -354,7 +354,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private func apply() {
         let selected = model.selectedIndex.map { model.tabs[$0] }
         let session = model.actionSession
-        repoItem.title = selected?.repoURL == nil ? "Histq" : selected?.title ?? "Histq"
+        // The folder's name, never the tab's alias: the alias only shortens the tab itself.
+        repoItem.title = selected?.repoURL?.lastPathComponent ?? "Histq"
         repoItem.toolTip = selected?.repoURL?.path ?? "Switch repository"
 
         if branchItem.item.isHidden != (session == nil) {
@@ -612,7 +613,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let openPaths = Set(repoTabs.compactMap { $0.repoURL?.path })
         let recent = RecentRepos.shared.urls.filter { !openPaths.contains($0.path) }
         var entries: [MenuEntry] = repoTabs.map { tab in
-            .action(tab.title, checked: tab.id == model.selectedTabID) { [model] in model.selectTab(id: tab.id) }
+            .action(tab.repoURL?.lastPathComponent ?? tab.title, checked: tab.id == model.selectedTabID) { [model] in
+                model.selectTab(id: tab.id)
+            }
         }
         if !recent.isEmpty {
             entries += [.separator, .action(Self.recentMarker, enabled: false) {}]
