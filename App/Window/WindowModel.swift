@@ -315,7 +315,8 @@ final class WindowModel {
         if !isNew { session.refreshWorktrees() }
     }
 
-    /// A tab's session, with the profile and commit a restored tab had in the saved session.
+    /// A tab's session, with the profile a restored tab had in the saved session. Its graph opens on the WIP or HEAD,
+    /// as a new tab does.
     private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
         let session = RepoSession(url: url)
         // A worktree's "Open in New Tab" and a double-click on its sidebar row open it in this window, beside this
@@ -330,10 +331,7 @@ final class WindowModel {
         session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         session.worktreeRemoved = { [weak self] path in self?.closeRemovedWorktreeTabs(path) }
         let saved = restored.removeValue(forKey: id)
-        if let saved {
-            if let profile = saved.profile { session.restoreProfile(profile.profileID) }
-            if let commit = saved.commit { session.restoreSelection(commit) }
-        }
+        if let profile = saved?.profile { session.restoreProfile(profile.profileID) }
         // Settings › Terminal "Open terminal with each new tab": a repo the user opens now (Open, a recent repo, a clone
         // or init filling a Welcome tab, a restored Welcome tab too), not a restored repo tab. Only the drawer: its
         // shell starts when the user clicks into it (`showTerminalDrawer`).
@@ -534,10 +532,9 @@ final class WindowModel {
             saved.archived = tab.archived ? true : nil
             return saved
         }
-        let commit: String? = if case .commit(let hash) = session.selection { hash } else { nil }
         // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
         let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
-        return SavedTab(path: path, profile: profile, commit: commit, alias: tab.alias, emoji: tab.emoji,
+        return SavedTab(path: path, profile: profile, alias: tab.alias, emoji: tab.emoji,
                         pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil)
     }
 

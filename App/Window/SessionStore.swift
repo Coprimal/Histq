@@ -42,16 +42,13 @@ struct SavedWindow: Codable, Equatable, Sendable {
     var frame: NSRect { NSRect(x: x, y: y, width: width, height: height) }
 }
 
-/// An app tab: a repo folder with its profile and its graph selection, or a Welcome tab.
+/// An app tab: a repo folder with its profile, or a Welcome tab.
 struct SavedTab: Codable, Equatable, Sendable {
     /// The repo folder; nil for a Welcome tab.
     var path: String?
     /// The tab's profile as chosen in that session; nil when it was not known yet (the repo then resolves its own,
     /// as a new tab does).
     var profile: SavedProfile?
-    /// The commit selected in the graph; nil reopens as a new tab does: the WIP when the working tree has changes,
-    /// else HEAD. A selected WIP is saved as nil for that reason, and a stash or several rows are not kept.
-    var commit: String?
     /// The tab's alias (its menu's Set Alias…); nil shows the folder's name. Absent from files of older builds.
     var alias: String?
     /// The tab's emoji (its menu's Set Emoji…); nil shows none. Absent from files of older builds.

@@ -107,7 +107,7 @@ enum GraphColumn: String, CaseIterable {
 /// `rowDensity` and `textSize` are `PrefKey.dateFormat`, `PrefKey.rowDensity` and `PrefKey.textSize`. `onSelect` gets
 /// the selected rows (in row order) as soon as the selection changes (a click, ⌘/⇧-click, the arrow keys);
 /// `onActivate` gets a double-clicked row.
-/// `selection` is the selection the table follows: a new one (a parent jump) is selected and scrolled to, without an
+/// `selection` is the selection the table follows: a new one (a parent jump) is selected and centred when off screen, without an
 /// `onSelect` echo. ⌘Z / ⇧⌘Z while the table has the focus ask `canUndo` and run `onUndo` (`redo` true for Redo);
 /// a text field keeps its own undo, since its field editor answers first.
 struct GraphView: NSViewRepresentable {
@@ -678,7 +678,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             dimming = view.dimming
             refreshDimming()
         }
-        // Before `syncSelection`, whose `scrollRowToVisible` would leave the row at the edge.
+        // Before `syncSelection`, which then finds the row on screen.
         if view.revealToken != revealToken {
             revealToken = view.revealToken
             if let item = view.selection.first, let row = row(of: item) { centerIfHidden(row) }
@@ -1229,7 +1229,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     /// Selects the rows of `selection` when the table shows another selection (a parent jump, the default selection,
-    /// rows moved by a reload), and scrolls to a new one. `reported` takes it first, so it is not sent back.
+    /// rows moved by a reload), and centres a new one when it is off screen. `reported` takes it first, so it is not sent back.
     private func syncSelection(_ selection: [GraphItem]) {
         guard let table else { return }
         if selection != wanted {
@@ -1245,7 +1245,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         let rows = IndexSet(selection.compactMap(row(of:)))
         table.selectRowIndexes(rows, byExtendingSelection: false)
         if needsScroll, let first = rows.first {
-            table.scrollRowToVisible(first)
+            centerIfHidden(first)
             needsScroll = false
         }
     }
