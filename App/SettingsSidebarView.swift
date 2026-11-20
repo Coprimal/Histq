@@ -22,6 +22,7 @@ struct SettingsModal: View {
             VStack(spacing: PanelContainerMetrics.padding) {
                 header
                 SettingsSidebarView(query: $query, isSearchOpen: $isSearchOpen)
+                footer
             }
         }
         .frame(maxWidth: SettingsModalMetrics.maxWidth, maxHeight: .infinity)
@@ -54,6 +55,17 @@ struct SettingsModal: View {
         }
         .padding(SettingsMetrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Plain text on the container under the cards, like the header: the palette changes the switches and the short
+    /// choices too. As tall as a `ModalCard`'s footer of buttons.
+    private var footer: some View {
+        Text("💡 Tip: press ⌘K to open the command palette and change some settings quickly: switches and short choices.")
+            .font(.settingsCaption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: ModalFooterMetrics.buttonHeight, alignment: .leading)
+            .padding(.horizontal, SettingsMetrics.cardPadding)
+            .padding(.vertical, ModalFooterMetrics.verticalPadding)
     }
 }
 
