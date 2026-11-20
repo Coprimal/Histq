@@ -147,13 +147,17 @@ final class GitHubStore {
         var windowVisible: Bool
         /// The sidebar shows the PRs tab: only then do the lists refresh every `refreshInterval`.
         var listsShown: Bool
+        /// The repo tab is the shown one (`tabIsShown`): a kept-alive tab that is not shown does not refresh, and
+        /// refreshes (when stale) as it shows again.
+        var isShown: Bool
         var isStub: Bool
 
-        /// The source without what only decides the polling (`windowVisible`, `listsShown`).
+        /// The source without what only decides the polling (`windowVisible`, `listsShown`, `isShown`).
         var withoutPolling: Source {
             var source = self
             source.windowVisible = false
             source.listsShown = false
+            source.isShown = false
             return source
         }
     }
@@ -225,14 +229,15 @@ final class GitHubStore {
     /// Runs while the repo tab shows (`GitHubDriver`'s `.task(id: source)`): resolves the connection, loads the lists
     /// when they were never read or are stale, then, while the PRs tab shows, every `refreshInterval` until cancelled.
     /// Returns at once when not connected; returns after the first load while the window is not visible (a background
-    /// launch still gets its lists) or the PRs tab is not shown (the badges need one read, not polling).
+    /// launch still gets its lists), the repo tab is a kept-alive one that is not shown, or the PRs tab is not shown
+    /// (the badges need one read, not polling).
     func watch(_ source: Source, profile: Profile?) async {
         await resolve(source, profile: profile)
         guard case .connected = connection, !Task.isCancelled else { return }
         // A list GitHub refused the token for loads again at once: the account may just have been reconnected.
         let refused = lists.values.contains { $0.error?.reconnect == true }
-        if lastRefresh == nil || (source.windowVisible && (isStale || refused)) { await refresh() }
-        guard source.windowVisible, source.listsShown else { return }
+        if lastRefresh == nil || (source.windowVisible && source.isShown && (isStale || refused)) { await refresh() }
+        guard source.windowVisible, source.isShown, source.listsShown else { return }
         while (try? await Task.sleep(for: Self.refreshInterval)) != nil {
             await refresh()
         }

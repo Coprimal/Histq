@@ -67,7 +67,8 @@ struct SkeletonLine: View {
 }
 
 /// A small spinner that fades in only when a load takes over 150 ms, so a fast load never flashes it. Logs
-/// `spinner <detail>` when it shows. Under Reduce Motion it appears without the fade.
+/// `spinner <detail>` when it shows. Under Reduce Motion it appears without the fade. A kept-alive tab that is not
+/// shown (`tabIsShown`) shows none, and waits the delay again when it shows.
 struct DelayedSpinner: View {
     let detail: String
     /// Checked when the delay ends. A view switched away can still be alive then (SwiftUI delivers its removal with
@@ -75,6 +76,7 @@ struct DelayedSpinner: View {
     var isCurrent: @MainActor () -> Bool = { true }
     @State private var visible = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.tabIsShown) private var tabIsShown
 
     /// How long a load may take before the spinner shows.
     static let delay: Duration = .milliseconds(150)
@@ -83,9 +85,10 @@ struct DelayedSpinner: View {
         ProgressView()
             .controlSize(.small)
             .opacity(visible ? 1 : 0)
-            .task {
-                // Cancelled when the placeholder goes away (the content loaded first).
-                guard (try? await Task.sleep(for: Self.delay)) != nil, isCurrent() else { return }
+            .task(id: tabIsShown) {
+                // Cancelled when the placeholder goes away (the content loaded first) or the tab hides.
+                guard tabIsShown else { return visible = false }
+                guard (try? await Task.sleep(for: Self.delay)) != nil, tabIsShown, isCurrent() else { return }
                 withAnimation(reduceMotion ? nil : Motion.standard) { visible = true }
                 UITiming.spinner(detail)
             }
@@ -94,7 +97,8 @@ struct DelayedSpinner: View {
 
 /// Shows `content` only when `token`'s load takes over `DelayedSpinner.delay`, so a fast load never flashes it (a
 /// commit's file rows while its header already shows). Logs `spinner <detail>` when it shows. Fills the space it is
-/// offered, `content` at its top.
+/// offered, `content` at its top. A kept-alive tab that is not shown (`tabIsShown`) shows none, and waits the delay
+/// again when it shows.
 struct DelayedReveal<Token: Hashable, Content: View>: View {
     /// Changes with each select: a new one hides `content` and waits again.
     let token: Token
@@ -105,6 +109,7 @@ struct DelayedReveal<Token: Hashable, Content: View>: View {
     /// The token whose delay ended: a later token never shows the earlier one's content.
     @State private var shownToken: Token?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.tabIsShown) private var tabIsShown
 
     var body: some View {
         Color.clear
@@ -116,8 +121,10 @@ struct DelayedReveal<Token: Hashable, Content: View>: View {
                     .transition(.opacity)
                 }
             }
-            .task(id: token) {
-                guard (try? await Task.sleep(for: DelayedSpinner.delay)) != nil, isCurrent() else { return }
+            // No token while the tab is not shown: the delay starts again when it shows.
+            .task(id: tabIsShown ? token : nil) {
+                guard tabIsShown else { return shownToken = nil }
+                guard (try? await Task.sleep(for: DelayedSpinner.delay)) != nil, tabIsShown, isCurrent() else { return }
                 withAnimation(reduceMotion ? nil : Motion.standard) { shownToken = token }
                 UITiming.spinner(detail)
             }

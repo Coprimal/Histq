@@ -153,6 +153,7 @@ struct GraphView: NSViewRepresentable {
     var hiddenColumns: Set<GraphColumn> = []
     /// Esc while the table has the focus; true when it was used (the open search bar closed).
     var onEscape: @MainActor () -> Bool = { false }
+    @Environment(\.tabIsShown) private var tabIsShown
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
@@ -202,6 +203,7 @@ struct GraphView: NSViewRepresentable {
         scroll.autohidesScrollers = true
         // `bottomInset` sets the insets; the graph card sits below the title bar, so there is nothing to adjust for.
         scroll.automaticallyAdjustsContentInsets = false
+        scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
         onTable(table)
@@ -209,6 +211,7 @@ struct GraphView: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         if scroll.contentInsets.bottom != bottomInset { scroll.contentInsets.bottom = bottomInset }
         context.coordinator.update(self)
     }

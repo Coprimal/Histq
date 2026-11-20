@@ -454,7 +454,8 @@ private struct RestoresFocus: ViewModifier {
             .onDisappear {
                 guard let view = previous.view else { return }
                 DispatchQueue.main.async {
-                    guard let window = view.window, window.isKeyWindow else { return }
+                    // Not into a tab that is no longer shown.
+                    guard let window = view.window, window.isKeyWindow, !view.isHiddenOrHasHiddenAncestor else { return }
                     window.makeFirstResponder(view)
                 }
             }

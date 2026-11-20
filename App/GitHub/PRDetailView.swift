@@ -1822,6 +1822,7 @@ private struct PRFilesTab: View {
         if let section = file.section, !section.rows(.diff).isEmpty {
             SectionCard(file.change.name, systemImage: file.change.systemImage, contentPadding: 0) {
                 DiffLineTable(section: section, mode: .diff, loadID: detail.loadID,
+                              repo: session.url.lastPathComponent,
                               onApply: { _, _, _ in }, onClose: { [session] in session.closeFile() })
                     .frame(maxHeight: .infinity)
             } accessory: {

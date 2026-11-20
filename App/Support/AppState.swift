@@ -438,6 +438,13 @@ enum UITiming {
         record("tab-shown", detail())
         #endif
     }
+    /// A tab's view took the keyboard focus on purpose: `focus <repo> <kind>`, `kind` `search`, `diff`, `blame` or
+    /// `graph`; `none` when its terminal closed and the focus stayed where it was.
+    static func focus(_ repo: String, _ kind: String) {
+        #if DEBUG || HISTQ_PERF
+        record("focus", "\(repo) \(kind)")
+        #endif
+    }
     /// DEBUG `-HistqTabWalk`: the main actor's holds in the 500 ms after a tab switch: `tab-frame <index> max=<ms>
     /// over16=<ms>`.
     static func tabFrame(_ detail: String) { record("tab-frame", detail) }

@@ -416,14 +416,24 @@ private struct FieldAnchor: NSViewRepresentable {
     final class Box {
         weak var view: NSView?
 
-        /// The editable text field under the anchor, nil before the anchor is in a window.
+        /// The editable text field under the anchor, nil before the anchor is in a window. Searched from the anchor's
+        /// nearest ancestor outwards, up to the window's content, so this bar's field is found before another tab's at
+        /// the same place; hidden views are skipped.
         func textField() -> NSTextField? {
             guard let view, let content = view.window?.contentView else { return nil }
-            return Self.field(in: content, under: view.convert(view.bounds, to: nil))
+            let frame = view.convert(view.bounds, to: nil)
+            var searched: NSView = view
+            while searched !== content, let ancestor = searched.superview {
+                if let match = Self.field(in: ancestor, under: frame, skipping: searched) { return match }
+                searched = ancestor
+            }
+            return nil
         }
 
-        private static func field(in view: NSView, under frame: NSRect) -> NSTextField? {
-            for subview in view.subviews {
+        /// The field in `view`'s subtree, but not in `skipped` (already searched).
+        private static func field(in view: NSView, under frame: NSRect, skipping skipped: NSView? = nil)
+            -> NSTextField? {
+            for subview in view.subviews where subview !== skipped && !subview.isHidden {
                 if let field = subview as? NSTextField, field.isEditable,
                    field.convert(field.bounds, to: nil).intersects(frame) {
                     return field

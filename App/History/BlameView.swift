@@ -179,6 +179,7 @@ private struct BlameLines: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             BlameTable(blame: blame, selectedHash: selectedHash, dateFormat: dateFormat, wrapLines: wrapLines,
+                       repo: session.url.lastPathComponent,
                        onSelect: { [session] hash in session.selectKeepingTool(hash) },
                        onClose: { [session] in session.closeFile() })
                 .frame(maxHeight: .infinity)
@@ -276,15 +277,19 @@ private struct BlameTable: NSViewRepresentable {
     let selectedHash: String?
     let dateFormat: String
     let wrapLines: Bool
+    /// The tab's repo folder name, for the `focus` timing line.
+    let repo: String
     let onSelect: @MainActor (String) -> Void
     let onClose: @MainActor () -> Void
     /// The code font size: a new one lays the rows out again at it.
     @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
+    @Environment(\.tabIsShown) private var tabIsShown
 
     func makeCoordinator() -> BlameTableController { BlameTableController() }
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = BlameTableView()
+        table.repo = repo
         table.style = .plain
         table.backgroundColor = .clear
         table.gridStyleMask = []
@@ -309,12 +314,17 @@ private struct BlameTable: NSViewRepresentable {
         // Unless lines wrap, a long line scrolls sideways.
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
+        scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if scroll.isHidden == tabIsShown {
+            scroll.isHidden = !tabIsShown
+            if tabIsShown { (scroll.documentView as? BlameTableView)?.focusWhenShown() }
+        }
         context.coordinator.update(self)
     }
 }
@@ -388,12 +398,26 @@ private final class BlameTableView: NSTableView {
     weak var controller: BlameTableController?
     /// Takes the keyboard once, when it first shows, so Esc works without a click (`DiffTableView`'s way).
     private var tookFocus = false
+    /// The tab's repo folder name, for the `focus` timing line.
+    var repo = ""
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard let window, !tookFocus else { return }
+        // In a hidden tab it waits until the tab shows (`focusWhenShown`).
+        guard let window, !tookFocus, !isHiddenOrHasHiddenAncestor else { return }
         tookFocus = true
-        window.makeFirstResponder(self)
+        if window.makeFirstResponder(self) { UITiming.focus(repo, "blame") }
+    }
+
+    /// Its tab shows again: on the next turn (once the other tab is hidden), it takes the keyboard when no shown view
+    /// has it.
+    func focusWhenShown() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window, !isHiddenOrHasHiddenAncestor else { return }
+            if let focused = window.firstResponder as? NSView, !focused.isHiddenOrHasHiddenAncestor { return }
+            tookFocus = true
+            if window.makeFirstResponder(self) { UITiming.focus(repo, "blame") }
+        }
     }
 
     /// A new card width fits the column again (and measures wrapped rows again): the table is not told otherwise.

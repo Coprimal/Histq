@@ -26,6 +26,7 @@ struct ConflictLinePane: NSViewRepresentable {
     let sync: ScrollSync
     var onTickLines: @MainActor (Bool, [Int]) -> Void = { _, _ in }
     @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
+    @Environment(\.tabIsShown) private var tabIsShown
 
     func makeCoordinator() -> ConflictPaneController { ConflictPaneController() }
 
@@ -56,6 +57,7 @@ struct ConflictLinePane: NSViewRepresentable {
         // Lines never wrap: a long line scrolls sideways.
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
+        scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
         sync.register(scroll, as: side == .a ? .a : .b)
@@ -63,6 +65,7 @@ struct ConflictLinePane: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         context.coordinator.update(self)
     }
 }

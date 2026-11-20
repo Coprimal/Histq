@@ -99,6 +99,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
     let patch: GitHubHTMLPatch
     let onLoad: @MainActor () -> Void
     let onMeasure: @MainActor (CGFloat, [GitHubHTMLSlot]) -> Void
+    @Environment(\.tabIsShown) private var tabIsShown
 
     /// One store for every page: non-persistent (no cookies, no cache on disk), and one session for all of them
     /// instead of one per page. Each page still starts its own web content process (measured: 41 pages, 41
@@ -136,6 +137,8 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         } else {
             view = Self.newView()
         }
+        view.isHidden = !tabIsShown
+        context.coordinator.isShown = tabIsShown
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.onWidthChange = { [weak coordinator = context.coordinator, weak view] in
@@ -167,13 +170,16 @@ private struct GitHubHTMLPage: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MeasuredWebView, context: Context) {
+        if view.isHidden == tabIsShown { view.isHidden = !tabIsShown }
+        context.coordinator.isShown = tabIsShown
         context.coordinator.onLoad = onLoad
         context.coordinator.onMeasure = onMeasure
         let changed = context.coordinator.measureKey != measureKey || context.coordinator.patch != patch
         context.coordinator.measureKey = measureKey
         context.coordinator.patch = patch
         guard context.coordinator.loadedHTML != html else {
-            if changed { context.coordinator.remeasure(view) }
+            // A page shown again is measured once if it skipped a measurement while hidden.
+            if changed || context.coordinator.skippedMeasure { context.coordinator.remeasure(view) }
             return
         }
         context.coordinator.loadedHTML = html
@@ -240,6 +246,11 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         var measureKey: Int?
         /// The view's last patch, applied by every measurement.
         var patch = GitHubHTMLPatch()
+        /// The tab shows (`tabIsShown`): a page of a kept-alive tab that is not shown skips `remeasure`
+        /// (`skippedMeasure`) and is measured once when it shows again.
+        var isShown = true
+        /// A `remeasure` skipped while the tab was not shown.
+        private(set) var skippedMeasure = false
         /// A measurement is running; `measureAgain` asks for one more after it (the width changed meanwhile).
         private var isMeasuring = false
         private var measureAgain = false
@@ -308,13 +319,15 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         }
 
         /// After a width change, a new `measureKey` or a new patch; nothing before the page is loaded (its load
-        /// measures it, with the patch).
+        /// measures it, with the patch). While its tab is not shown, it waits until the tab shows again.
         func remeasure(_ webView: WKWebView) {
             guard isLoaded, webView.frame.width > 0 else { return }
+            guard isShown else { return skippedMeasure = true }
             measure(webView)
         }
 
         private func measure(_ webView: WKWebView, then completion: (@MainActor () -> Void)? = nil) {
+            skippedMeasure = false
             guard !isMeasuring else {
                 measureAgain = true
                 completion?()

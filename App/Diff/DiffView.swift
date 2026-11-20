@@ -676,7 +676,7 @@ private struct DiffContent: View {
                 .padding(.bottom, 10)
         } else {
             DiffLineTable(
-                section: section, mode: session.diffMode, loadID: detail.loadID,
+                section: section, mode: session.diffMode, loadID: detail.loadID, repo: session.url.lastPathComponent,
                 reverts: session.revertsCommitHunks, readOnly: detail.ignoresWhitespace, wraps: wrapLines,
                 jump: session.diffJump, isFirst: isFirst,
                 onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },

@@ -1316,7 +1316,7 @@ final class RepoSession: Identifiable {
     /// Hides the drawer; the shell keeps running. The graph gets the focus back.
     func closeTerminal() {
         guard isTerminalOpen else { return }
-        terminal?.returnFocusToGraph()
+        terminal?.returnFocusToGraph(graphSearch.table, repo: url.lastPathComponent)
         isTerminalOpen = false
     }
 
