@@ -43,7 +43,7 @@ struct GraphMetrics: Equatable {
     var minTrailing: CGFloat { 6 }
     /// A merge commit's dot: scales with the node, kept even so it centers on whole pixels.
     var mergeDotDiameter: CGFloat { 2 * (nodeDiameter * 0.2).rounded() }
-    var lineWidth: CGFloat { 2 }
+    var lineWidth: CGFloat { 1.5 }
     /// The radius of a line's bend into or out of a node: a third of the node.
     var bendRadius: CGFloat { (nodeDiameter / 3).rounded() }
     /// The band's, the selection's and the badges' inset from the row's top and bottom.
