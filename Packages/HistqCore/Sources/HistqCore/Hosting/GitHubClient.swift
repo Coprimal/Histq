@@ -76,10 +76,10 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     /// `token` nil reads public data only. Throws `HostingError.invalidHost` or `.invalidToken`.
     public init(host: String = "github.com", token: String?, session: URLSession = .shared) throws {
-        guard let host = Self.validatedHost(host), let apiBase = Self.apiBase(forHost: host) else {
+        guard let host = HostingHTTP.validatedHost(host), let apiBase = Self.apiBase(forHost: host) else {
             throw HostingError.invalidHost(host)
         }
-        if let token { guard Self.isUsableToken(token) else { throw HostingError.invalidToken } }
+        if let token { guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken } }
         self.host = host
         self.apiBase = apiBase
         self.token = token
@@ -92,21 +92,9 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     // MARK: - Hosts and remote URLs
 
-    /// `host` lowercased when it is a DNS name (letters, digits, `.`, `-`, `_`, not starting with `.` or `-`)
-    /// with an optional `:port`; nil otherwise. The strict set keeps it safe in a URL and in a git config key
-    /// (`credential.https://<host>.helper`), where `*` would be a wildcard and `/` or `@` would change the URL.
+    /// Forwards to `HostingHTTP.validatedHost(_:)`.
     public static func validatedHost(_ host: String) -> String? {
-        let parts = host.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-        let name = parts[0]
-        let nameOK = !name.isEmpty && name.utf8.count <= 253 && !name.hasPrefix(".") && !name.hasPrefix("-")
-            && name.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0)) }
-        guard nameOK else { return nil }
-        if parts.count == 2 {
-            guard parts[1].allSatisfy({ $0.isASCII && $0.isNumber }), let port = Int(parts[1]), (1...65535).contains(port) else {
-                return nil
-            }
-        }
-        return host.lowercased()
+        HostingHTTP.validatedHost(host)
     }
 
     /// The REST base of `host` (already validated).
@@ -114,50 +102,20 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         host == "github.com" ? URL(string: "https://api.github.com") : URL(string: "https://\(host)/api/v3")
     }
 
-    /// The repository of a GitHub remote URL on any host: `https://[user@]host[:port]/owner/repo[.git][/]`,
-    /// `ssh://[user@]host[:port]/owner/repo[.git]` (also `git+ssh://`, `ssh+git://`) and the scp-like
-    /// `[user@]host:owner/repo[.git]` (a colon before any slash, as in `HostKeyTrust.host(fromRemoteURL:)`). An
-    /// https URL keeps its port (it is the API's port too); an ssh port is dropped. Anything else is nil: other
-    /// schemes, local paths, and paths that are not exactly `owner/repo`.
+    /// The repository of a GitHub remote URL on any host (the forms of `RemoteURL`): its path must be exactly
+    /// `owner/repo`, with ASCII letters, digits, `-` and `_` (and `.` in the name). Anything else is nil: other
+    /// schemes, local paths, and other paths.
     public static func repository(fromRemoteURL url: String) -> HostedRepository? {
-        let lower = url.lowercased()
-        var authority: Substring
-        var path: Substring
-        var keepsPort = false
-        if let scheme = ["https://", "ssh://", "git+ssh://", "ssh+git://"].first(where: { lower.hasPrefix($0) }) {
-            let rest = url.dropFirst(scheme.count)
-            guard let slash = rest.firstIndex(of: "/") else { return nil }
-            authority = rest[..<slash]
-            path = rest[rest.index(after: slash)...]
-            keepsPort = scheme == "https://"
-        } else {
-            guard !url.contains("://"), let colon = url.firstIndex(of: ":"), !url[..<colon].contains("/") else {
-                return nil
-            }
-            authority = url[..<colon]
-            path = url[url.index(after: colon)...]
-            if path.hasPrefix("/") { path = path.dropFirst() }
-        }
-        if let at = authority.lastIndex(of: "@") { authority = authority[authority.index(after: at)...] }
-        if !keepsPort, let colon = authority.firstIndex(of: ":") { authority = authority[..<colon] }
-        guard let host = validatedHost(String(authority)) else { return nil }
-
-        while path.hasSuffix("/") { path = path.dropLast() }
-        if path.lowercased().hasSuffix(".git") { path = path.dropLast(4) }
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count == 2 else { return nil }
-        let owner = String(components[0])
-        let name = String(components[1])
-        guard isSafeSegment(owner, extra: "-_"), isSafeSegment(name, extra: "-_."), name != ".", name != ".." else {
-            return nil
-        }
-        return HostedRepository(host: host, owner: owner, name: name)
+        guard let remote = RemoteURL(url), remote.segments.count == 2 else { return nil }
+        let owner = remote.segments[0]
+        let name = remote.segments[1]
+        guard isSafeSegment(owner, extra: "-_"), isSafeSegment(name, extra: "-_.") else { return nil }
+        return HostedRepository(host: remote.host, owner: owner, name: name)
     }
 
-    /// Printable ASCII without spaces or backslashes: a newline would end the HTTP header (or a credential helper's
-    /// line), and an `echo` that expands backslashes could print `\n` as one. GitHub tokens have neither.
+    /// Forwards to `HostingHTTP.isUsableToken(_:)`.
     public static func isUsableToken(_ token: String) -> Bool {
-        !token.isEmpty && token.unicodeScalars.allSatisfy { (0x21...0x7E).contains($0.value) && $0 != "\\" }
+        HostingHTTP.isUsableToken(token)
     }
 
     private static func isSafeSegment(_ text: String, extra: String) -> Bool {
@@ -167,6 +125,35 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     }
 
     // MARK: - HostingProvider
+
+    public var kind: HostingKind { .github }
+
+    public var capabilities: HostingCapabilities {
+        [.labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests]
+    }
+
+    public var mergeMethods: Set<HostedMergeMethod> { [.merge, .squash, .rebase] }
+
+    /// `pull/<n>/head`, the ref GitHub keeps for every pull request in the base repository, forks' too.
+    public func checkout(of pullRequest: HostedPullRequest) -> HostedCheckout {
+        .ref("pull/\(pullRequest.number)/head")
+    }
+
+    /// `https://<host>/<owner>/<name>`, then `tree/<branch>`, `commit/<sha>`, `pull/<n>` or `issues/<n>`, on the
+    /// repository's own host.
+    public func webURL(_ target: HostedWebTarget, in repo: HostedRepository) -> URL? {
+        let base = "https://\(repo.host)/\(repo.owner)/\(repo.name)"
+        let path: String
+        switch target {
+        case .repository: return URL(string: base)
+        case .branch(let name):
+            path = "tree/" + (name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)
+        case .commit(let sha): path = "commit/\(sha)"
+        case .pullRequest(let number): path = "pull/\(number)"
+        case .issue(let number): path = "issues/\(number)"
+        }
+        return URL(string: "\(base)/\(path)")
+    }
 
     public func currentUser() async throws -> HostedUser {
         try await get(url(["user"]))
@@ -211,8 +198,9 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         try await get(url(try repoPath(repo) + ["issues", String(number)]))
     }
 
-    public func comments(on number: Int, in repo: HostedRepository) async throws -> [HostedComment] {
-        try await list(url(try repoPath(repo) + ["issues", String(number), "comments"]))
+    /// A pull request's conversation comments are its issue's.
+    public func comments(on item: HostedItem, in repo: HostedRepository) async throws -> [HostedComment] {
+        try await list(url(try repoPath(repo) + ["issues", String(item.number), "comments"]))
     }
 
     public func reviews(of number: Int, in repo: HostedRepository) async throws -> [HostedReview] {
@@ -347,42 +335,45 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         return try await send("POST", url(try repoPath(repo) + ["pulls"]), body: body)
     }
 
-    public func requestReviewers(_ logins: [String], on number: Int, in repo: HostedRepository) async throws {
+    public func requestReviewers(_ users: [HostedUser], on number: Int, in repo: HostedRepository) async throws {
         struct Result: Decodable { var number: Int }
         let _: Result = try await send(
             "POST", url(try repoPath(repo) + ["pulls", String(number), "requested_reviewers"]),
-            body: ["reviewers": logins])
+            body: ["reviewers": users.map { $0.reviewerID ?? $0.login }])
     }
 
-    public func addLabels(_ names: [String], to number: Int, in repo: HostedRepository) async throws {
+    public func addLabels(_ names: [String], to item: HostedItem, in repo: HostedRepository) async throws {
         let _: [HostedLabel] = try await send(
-            "POST", url(try repoPath(repo) + ["issues", String(number), "labels"]), body: ["labels": names])
+            "POST", url(try repoPath(repo) + ["issues", String(item.number), "labels"]), body: ["labels": names])
     }
 
-    public func addAssignees(_ logins: [String], to number: Int, in repo: HostedRepository) async throws {
+    public func addAssignees(_ users: [HostedUser], to item: HostedItem, in repo: HostedRepository) async throws {
         struct Result: Decodable { var number: Int }
         let _: Result = try await send(
-            "POST", url(try repoPath(repo) + ["issues", String(number), "assignees"]), body: ["assignees": logins])
+            "POST", url(try repoPath(repo) + ["issues", String(item.number), "assignees"]),
+            body: ["assignees": users.map { $0.reviewerID ?? $0.login }])
     }
 
-    public func comment(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedComment {
-        try await send("POST", url(try repoPath(repo) + ["issues", String(number), "comments"]), body: ["body": body])
+    public func comment(on item: HostedItem, in repo: HostedRepository, body: String) async throws -> HostedComment {
+        try await send(
+            "POST", url(try repoPath(repo) + ["issues", String(item.number), "comments"]), body: ["body": body])
     }
 
-    /// Replies to the review thread whose root comment is `rootID` on pull request `number`. Always the root's id:
-    /// GitHub refuses a reply to a reply.
-    public func replyToReviewComment(rootID: Int, on number: Int, in repo: HostedRepository, body: String)
+    /// Replies to the review thread whose root comment is `thread.rootCommentID` on pull request `number`. Always
+    /// the root's id: GitHub refuses a reply to a reply. Only the root's id is needed, so a reply works without the
+    /// thread's GraphQL state.
+    public func reply(to thread: HostedThreadRef, on number: Int, in repo: HostedRepository, body: String)
         async throws -> HostedReviewComment
     {
         try await send(
-            "POST", url(try repoPath(repo) + ["pulls", String(number), "comments", String(rootID), "replies"]),
+            "POST",
+            url(try repoPath(repo) + ["pulls", String(number), "comments", String(thread.rootCommentID), "replies"]),
             body: ["body": body])
     }
 
-    /// Resolves (`resolved` true) or unresolves the review thread whose GraphQL node id is `id`
-    /// (`HostedReviewThreadState.id`), which only GraphQL can, and returns the thread's `isResolved` as GitHub
-    /// answers it.
-    public func setReviewThread(_ id: String, resolved: Bool) async throws -> Bool {
+    /// Resolves (`resolved` true) or unresolves the review thread whose GraphQL node id is `state.id`, which only
+    /// GraphQL can, and returns the thread's `isResolved` as GitHub answers it.
+    public func setReviewThread(_ state: HostedReviewThreadState, resolved: Bool) async throws -> Bool {
         struct Variables: Encodable { var threadId: String }
         struct Payload: Decodable {
             var thread: Thread?
@@ -400,7 +391,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                   unresolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } }
                 }
                 """
-        let answer: Answer = try await graphQL(query, variables: Variables(threadId: id))
+        let answer: Answer = try await graphQL(query, variables: Variables(threadId: state.id))
         let payload = resolved ? answer.resolveReviewThread : answer.unresolveReviewThread
         guard let isResolved = payload?.thread?.isResolved else {
             throw HostingError.invalidResponse("no review thread in the answer")
@@ -436,10 +427,10 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         }
     }
 
-    public func setOpen(_ open: Bool, number: Int, in repo: HostedRepository) async throws {
+    public func setOpen(_ open: Bool, item: HostedItem, in repo: HostedRepository) async throws {
         struct Result: Decodable { var number: Int }
         let _: Result = try await send(
-            "PATCH", url(try repoPath(repo) + ["issues", String(number)]),
+            "PATCH", url(try repoPath(repo) + ["issues", String(item.number)]),
             body: ["state": open ? "open" : "closed"])
     }
 

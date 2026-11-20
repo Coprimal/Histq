@@ -317,7 +317,7 @@ struct GitHubConnectSection: View {
     /// The host typed in the field (github.com when empty), lowercased, or nil when it is not a host name.
     private var draftHost: String? {
         let text = hostDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        return GitHubClient.validatedHost(text.isEmpty ? "github.com" : text)
+        return HostingHTTP.validatedHost(text.isEmpty ? "github.com" : text)
     }
 
     private func connectGroup(_ profile: Profile) -> some View {
@@ -696,7 +696,7 @@ struct GitHubConnectSection: View {
             throw CLIError.failed(result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         let token = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard GitHubClient.isUsableToken(token) else { throw CLIError.noToken }
+        guard HostingHTTP.isUsableToken(token) else { throw CLIError.noToken }
         return token
     }
 

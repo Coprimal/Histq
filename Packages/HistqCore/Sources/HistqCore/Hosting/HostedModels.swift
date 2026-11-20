@@ -10,13 +10,20 @@ public struct HostedUser: Codable, Sendable, Equatable {
     public var htmlURL: String?
     /// Only `GET /user` and single-user requests have it.
     public var name: String?
+    /// What requesting a review from this user or assigning them sends, when a host takes something else than the
+    /// login; nil means the login (GitHub). Not part of the JSON: the host's mapping sets it.
+    public var reviewerID: String?
 
-    public init(id: Int, login: String, avatarURL: String? = nil, htmlURL: String? = nil, name: String? = nil) {
+    public init(
+        id: Int, login: String, avatarURL: String? = nil, htmlURL: String? = nil, name: String? = nil,
+        reviewerID: String? = nil
+    ) {
         self.id = id
         self.login = login
         self.avatarURL = avatarURL
         self.htmlURL = htmlURL
         self.name = name
+        self.reviewerID = reviewerID
     }
 
     enum CodingKeys: String, CodingKey {
@@ -109,7 +116,9 @@ public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     public var mergeable: Bool?
     /// Why it merges or not: `clean`, `unstable` (failing checks that are not required), `has_hooks`, `blocked`
     /// (required reviews or checks), `behind` (out of date with the base), `dirty` (conflicts), `draft`, or `unknown`
-    /// while GitHub still computes it.
+    /// while GitHub still computes it. The app tells apart only `dirty`, `blocked` and `behind`, which other hosts map
+    /// into; any other value or nil is no obstacle, and the branch shows as mergeable only with `mergeable` true. A
+    /// draft is read from `draft`, not from here.
     public var mergeableState: String?
     public var commits: Int?
     public var additions: Int?
@@ -169,7 +178,7 @@ public struct HostedIssue: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// A conversation comment of an issue or a pull request.
+/// A conversation comment of an issue or a pull request. Its `id` follows the id rule of `HostedReview`.
 public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var user: HostedUser?
@@ -188,10 +197,17 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// A submitted (or pending) review of a pull request.
+///
+/// The id rule, for this, `HostedCheckRun`, `HostedComment` and `HostedReviewComment`: every value a host maps has an
+/// `id` unique within its pull request, since views key on it (`ForEach(runs)`). A host without stable numeric ids
+/// uses a synthetic `Int` from a stable key (a 63-bit FNV-1a hash of the kind and the key, a collision resolved by
+/// probing), and each host's mapping test asserts that the ids are unique.
 public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var user: HostedUser?
-    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`.
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`: the app tells all five apart, and other
+    /// hosts map into them.
     public var state: String
     public var body: String?
     public var bodyHTML: String?
@@ -209,7 +225,7 @@ public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
 /// An inline comment of a pull request review, on a file and a line (`GET .../pulls/<n>/comments`). A reply has
 /// `inReplyToID` set to its thread's root comment; the root's `pullRequestReviewID` is the review the thread
 /// belongs to. Only `id` and `path` are required: GitHub may leave out or null the rest, and one missing field
-/// must not make every thread of the pull request fail to decode.
+/// must not make every thread of the pull request fail to decode. Its `id` follows the id rule of `HostedReview`.
 public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var pullRequestReviewID: Int?
@@ -341,13 +357,18 @@ public struct HostedPullRequestFile: Codable, Sendable, Equatable, Identifiable 
     }
 }
 
+/// A check run on a pull request's head commit. Its `id` follows the id rule of `HostedReview`.
 public struct HostedCheckRun: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var name: String
-    /// `queued`, `in_progress` or `completed` (and a few newer waiting states).
+    /// `queued`, `in_progress` or `completed` (and a few newer waiting states). The app tells apart only `completed`
+    /// from the rest, and shows any other value as it is (underscores as spaces), so other hosts map into `queued`,
+    /// `in_progress` or `completed`.
     public var status: String
     /// Set once completed: `success`, `failure`, `neutral`, `cancelled`, `skipped`, `timed_out`,
-    /// `action_required`...
+    /// `action_required`, `startup_failure`... The app counts `failure`, `timed_out`, `cancelled`, `action_required`
+    /// and `startup_failure` as failed and `success` as passed; any other value is neutral and shown as it is. Other
+    /// hosts map into these.
     public var conclusion: String?
     public var htmlURL: String?
     public var startedAt: Date?

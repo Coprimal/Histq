@@ -108,8 +108,8 @@ public enum GitInvocation {
     /// one wins.
     ///
     /// `token` is the profile's GitHub token. Only `.network` and `.backgroundFetch` use it, and only when the
-    /// profile has a GitHub account whose host passes `GitHubClient.validatedHost` and the token passes
-    /// `GitHubClient.isUsableToken`; every other access drops it. They do not check the URLs: pass it only after
+    /// profile has a GitHub account whose host passes `HostingHTTP.validatedHost` and the token passes
+    /// `HostingHTTP.isUsableToken`; every other access drops it. They do not check the URLs: pass it only after
     /// the gate (`networkToken(for:...)`), as `GitOperations`, `backgroundFetchEnvironment` and `cloneEnvironment` do.
     public static func environment(
         profile: Profile?, base: [String: String], access: Access = .write, token: String? = nil
@@ -202,11 +202,11 @@ public enum GitInvocation {
         return [(key, ""), (key, tokenHelper)]
     }
 
-    /// The profile's GitHub host (`GitHubClient.validatedHost`: lowercase, with its port if it has one) when it
-    /// has an account and `token` passes `GitHubClient.isUsableToken`; nil otherwise.
+    /// The profile's GitHub host (`HostingHTTP.validatedHost`: lowercase, with its port if it has one) when it
+    /// has an account and `token` passes `HostingHTTP.isUsableToken`; nil otherwise.
     static func tokenHost(profile: Profile?, token: String) -> String? {
-        guard let account = profile?.github, let host = GitHubClient.validatedHost(account.host),
-              GitHubClient.isUsableToken(token)
+        guard let account = profile?.github, let host = HostingHTTP.validatedHost(account.host),
+              HostingHTTP.isUsableToken(token)
         else { return nil }
         return host
     }
@@ -489,7 +489,7 @@ public enum GitInvocation {
         return values.filter { !off.contains($0.value) }.map(\.key).sorted()
     }
 
-    /// Whether git may send the token for `host` (as `GitHubClient.validatedHost` gives it) to `url`: exactly
+    /// Whether git may send the token for `host` (as `HostingHTTP.validatedHost` gives it) to `url`: exactly
     /// `https://<host>/…`, with the scheme in lowercase, no userinfo, the same port as `host` (none when it has
     /// none) and only printable ASCII. The authority is everything up to the first `/` and must equal `host` once
     /// validated, so `@`, `?`, `#`, `%`, `\` and a trailing dot all fail.
@@ -500,7 +500,7 @@ public enum GitInvocation {
         }
         let rest = url.dropFirst(scheme.count)
         let authority = rest.prefix { $0 != "/" }
-        guard authority.count < rest.count, let validated = GitHubClient.validatedHost(String(authority)) else {
+        guard authority.count < rest.count, let validated = HostingHTTP.validatedHost(String(authority)) else {
             return false
         }
         return validated == host

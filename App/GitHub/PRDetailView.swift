@@ -109,8 +109,8 @@ enum PullRequestAction: Equatable, Sendable {
     case setOpen(Bool)
     /// `rootID`: the thread's root comment, the only one GitHub takes a reply to.
     case reply(rootID: Int, body: String)
-    /// `threadID`: the thread's GraphQL node id (`HostedReviewThreadState.id`).
-    case resolve(threadID: String, resolved: Bool)
+    /// `thread`: the thread's state, whose GraphQL node id resolving takes.
+    case resolve(thread: HostedReviewThreadState, resolved: Bool)
 
     var progressTitle: String {
         switch self {
@@ -285,7 +285,7 @@ final class PullRequestDetailModel {
         case "resolve", "unresolve":
             let resolved = name == "resolve"
             return threads.lazy.compactMap(\.state).first { $0.isResolved != resolved }
-                .map { .resolve(threadID: $0.id, resolved: resolved) }
+                .map { .resolve(thread: $0, resolved: resolved) }
         default:
             return nil
         }
@@ -524,11 +524,11 @@ final class PullRequestDetailModel {
             switch action {
             case .comment, .review: if self.number == number { draft = "" }
             case .reply(let rootID, _): if self.number == number { replyDrafts[rootID] = nil }
-            case .resolve(let threadID, let resolved):
+            case .resolve(let thread, let resolved):
                 // A thread just resolved collapses at once, and the reload builds it collapsed; one just unresolved
                 // stays as the user expanded it.
                 if resolved, self.number == number,
-                   let root = state.value?.threads.value?.all.first(where: { $0.state?.id == threadID })?.id {
+                   let root = state.value?.threads.value?.all.first(where: { $0.state?.id == thread.id })?.id {
                     threadExpanded[root] = false
                 }
             case .merge, .setOpen:
@@ -569,7 +569,7 @@ final class PullRequestDetailModel {
         _ client: GitHubClient, _ repository: HostedRepository, number: Int, loadID: Int, expanded: [Int: Bool]
     ) async -> Result<PullRequestDetail, any Error> {
         async let pullRequest = client.pullRequest(number, in: repository)
-        async let comments = client.comments(on: number, in: repository)
+        async let comments = client.comments(on: .pullRequest(number), in: repository)
         async let reviews = client.reviews(of: number, in: repository)
         async let reviewComments = part { try await client.reviewComments(of: number, in: repository) }
         async let threadStates = part { try await client.reviewThreadStates(of: number, in: repository) }
@@ -707,12 +707,13 @@ final class PullRequestDetailModel {
             case .merge(let method, let sha): try await client.merge(number, in: repository, method: method, sha: sha)
             case .review(let event, let body):
                 _ = try await client.review(number, in: repository, event: event, body: body.isEmpty ? nil : body)
-            case .comment(let body): _ = try await client.comment(on: number, in: repository, body: body)
-            case .setOpen(let open): try await client.setOpen(open, number: number, in: repository)
+            case .comment(let body): _ = try await client.comment(on: .pullRequest(number), in: repository, body: body)
+            case .setOpen(let open): try await client.setOpen(open, item: .pullRequest(number), in: repository)
             case .reply(let rootID, let body):
-                _ = try await client.replyToReviewComment(rootID: rootID, on: number, in: repository, body: body)
-            case .resolve(let threadID, let resolved):
-                _ = try await client.setReviewThread(threadID, resolved: resolved)
+                _ = try await client.reply(
+                    to: HostedThreadRef(rootCommentID: rootID), on: number, in: repository, body: body)
+            case .resolve(let thread, let resolved):
+                _ = try await client.setReviewThread(thread, resolved: resolved)
             }
             return nil
         } catch {

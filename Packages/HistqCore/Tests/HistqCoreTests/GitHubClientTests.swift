@@ -260,7 +260,7 @@ struct GitHubClientTests {
         #expect(HostingError.headChanged.description == "The pull request's head changed: reload and review it again.")
         await #expect(throws: HostingError.http(
             status: 409, message: "Head branch was modified. Review and try the merge again.")) {
-            try await client.setOpen(false, number: 7, in: repo)
+            try await client.setOpen(false, item: .pullRequest(7), in: repo)
         }
     }
 
@@ -351,9 +351,10 @@ struct GitHubClientTests {
 
         let created = try await client.createPullRequest(
             NewPullRequest(title: "Add a", head: "feature/a", base: "main", body: "Why", draft: true), in: repo)
-        try await client.requestReviewers(["alice", "bob"], on: created.number, in: repo)
-        try await client.addLabels(["bug"], to: created.number, in: repo)
-        try await client.addAssignees(["octo"], to: created.number, in: repo)
+        try await client.requestReviewers(
+            [HostedUser(id: 1, login: "alice"), HostedUser(id: 2, login: "bob")], on: created.number, in: repo)
+        try await client.addLabels(["bug"], to: .pullRequest(created.number), in: repo)
+        try await client.addAssignees([HostedUser(id: 3, login: "octo")], to: .pullRequest(created.number), in: repo)
 
         let requests = stub.requests
         #expect(requests.map { $0.httpMethod } == ["POST", "POST", "POST", "POST"])
@@ -396,7 +397,7 @@ struct GitHubClientTests {
         let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
 
         let comments = try await client.reviewComments(of: 7, in: repo)
-        let reply = try await client.replyToReviewComment(rootID: 10, on: 7, in: repo, body: "Done")
+        let reply = try await client.reply(to: HostedThreadRef(rootCommentID: 10), on: 7, in: repo, body: "Done")
 
         #expect(comments.map(\.path) == ["a.swift", "a.swift"])
         #expect(comments.map(\.line) == [4, nil])
@@ -471,7 +472,11 @@ struct GitHubClientTests {
 
         await #expect(throws: HostingError.graphQL(
             message: "Could not resolve to a node with the global id of 'PRRT_x'")) {
-            try await client.setReviewThread("PRRT_x", resolved: true)
+            try await client.setReviewThread(
+                HostedReviewThreadState(
+                    id: "PRRT_x", isResolved: false, isOutdated: false, viewerCanResolve: true,
+                    viewerCanUnresolve: false),
+                resolved: true)
         }
         let body = try #require(
             JSONSerialization.jsonObject(with: stub.requests.first?.httpBody ?? Data()) as? [String: Any])

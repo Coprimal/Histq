@@ -189,7 +189,7 @@ final class IssueDetailModel {
         _ client: GitHubClient, _ repository: HostedRepository, number: Int, loadID: Int
     ) async -> Result<IssueDetail, any Error> {
         async let issue = client.issue(number, in: repository)
-        async let comments = client.comments(on: number, in: repository)
+        async let comments = client.comments(on: .issue(number), in: repository)
         do {
             let (issue, comments) = try await (issue, comments)
             let timeline = PRTimeline.page(
@@ -208,8 +208,8 @@ final class IssueDetailModel {
     ) async -> (any Error)? {
         do {
             switch action {
-            case .comment(let body): _ = try await client.comment(on: number, in: repository, body: body)
-            case .setOpen(let open): try await client.setOpen(open, number: number, in: repository)
+            case .comment(let body): _ = try await client.comment(on: .issue(number), in: repository, body: body)
+            case .setOpen(let open): try await client.setOpen(open, item: .issue(number), in: repository)
             }
             return nil
         } catch {

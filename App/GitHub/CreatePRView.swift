@@ -50,6 +50,9 @@ struct CreatePRView: View {
         var reviewers: Loadable<[String]>
         var assignees: Loadable<[String]>
         var labels: Loadable<[String]>
+        /// The users the reviewer and assignee logins were picked from, for the follow-ups.
+        var reviewerUsers: [HostedUser] = []
+        var assigneeUsers: [HostedUser] = []
     }
 
     @FocusState private var titleFocused: Bool
@@ -404,20 +407,33 @@ struct CreatePRView: View {
     {
         async let info = try? client.repositoryInfo(repository)
         async let me = try? client.currentUser()
-        async let collaborators = choice { try await client.collaborators(in: repository).map(\.login) }
-        async let assignable = choice { try await client.assignableUsers(in: repository).map(\.login) }
+        async let collaborators = choice { try await client.collaborators(in: repository) }
+        async let assignable = choice { try await client.assignableUsers(in: repository) }
         async let labels = choice { try await client.labels(in: repository).map(\.name) }
-        let (user, reviewers) = await (me, collaborators)
-        let others: Loadable<[String]> = switch reviewers {
-        case .loaded(let logins): .loaded(logins.filter { $0 != user?.login })
+        let (user, reviewers, assignees) = await (me, collaborators, assignable)
+        let others: Loadable<[HostedUser]> = switch reviewers {
+        case .loaded(let users): .loaded(users.filter { $0.login != user?.login })
         default: reviewers
         }
-        return Choices(defaultBranch: await info?.defaultBranch, reviewers: others, assignees: await assignable,
-                       labels: await labels)
+        return Choices(
+            defaultBranch: await info?.defaultBranch, reviewers: logins(others), assignees: logins(assignees),
+            labels: await labels, reviewerUsers: others.value ?? [], assigneeUsers: assignees.value ?? [])
+    }
+
+    /// The logins of a list of users, which its picker shows.
+    private nonisolated static func logins(_ users: Loadable<[HostedUser]>) -> Loadable<[String]> {
+        switch users {
+        case .idle: .idle
+        case .loading: .loading
+        case .loaded(let users): .loaded(users.map(\.login))
+        case .failed(let reason): .failed(reason)
+        }
     }
 
     /// A list, or why it is left out: a 403 or 404 means this token may not read it, which is not an error of the form.
-    private nonisolated static func choice(_ body: () async throws -> [String]) async -> Loadable<[String]> {
+    private nonisolated static func choice<Item: Sendable>(_ body: () async throws -> [Item]) async
+        -> Loadable<[Item]>
+    {
         do {
             return .loaded(try await body())
         } catch HostingError.forbidden, HostingError.notFound {
@@ -453,7 +469,10 @@ struct CreatePRView: View {
         let body = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = NewPullRequest(title: trimmedTitle, head: head, base: base, body: body.isEmpty ? nil : body,
                                      draft: draft)
-        let extras = Extras(reviewers: reviewers.sorted(), assignees: assignees.sorted(), labels: labels.sorted())
+        let extras = Extras(
+            reviewers: reviewers.sorted().compactMap { login in choices.reviewerUsers.first { $0.login == login } },
+            assignees: assignees.sorted().compactMap { login in choices.assigneeUsers.first { $0.login == login } },
+            labels: labels.sorted())
         let session = session
         let formID = form.id
         Task {
@@ -478,8 +497,8 @@ struct CreatePRView: View {
     }
 
     private struct Extras: Sendable {
-        let reviewers: [String]
-        let assignees: [String]
+        let reviewers: [HostedUser]
+        let assignees: [HostedUser]
         let labels: [String]
     }
 
@@ -512,12 +531,12 @@ struct CreatePRView: View {
         }
         if !extras.labels.isEmpty {
             await followUp("the labels were not added") {
-                try await client.addLabels(extras.labels, to: pull.number, in: repository)
+                try await client.addLabels(extras.labels, to: .pullRequest(pull.number), in: repository)
             }
         }
         if !extras.assignees.isEmpty {
             await followUp("the assignees were not added") {
-                try await client.addAssignees(extras.assignees, to: pull.number, in: repository)
+                try await client.addAssignees(extras.assignees, to: .pullRequest(pull.number), in: repository)
             }
         }
         return .success(Created(number: pull.number, problems: problems))

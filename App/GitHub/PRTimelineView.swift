@@ -422,7 +422,7 @@ private struct PRReplyRow: View {
                 .help(reason)
         } else if let state = thread.state, state.isResolved ? state.viewerCanUnresolve : state.viewerCanResolve {
             Button {
-                session.pullDetail.perform(.resolve(threadID: state.id, resolved: !state.isResolved), on: number,
+                session.pullDetail.perform(.resolve(thread: state, resolved: !state.isResolved), on: number,
                                            github: session.github)
             } label: {
                 HStack(spacing: 6) {
@@ -444,7 +444,7 @@ private struct PRReplyRow: View {
 
     /// This thread is being resolved or unresolved.
     private func resolving(_ action: PullRequestAction?) -> Bool {
-        if case .resolve(let id, _)? = action { return id == thread.state?.id }
+        if case .resolve(let state, _)? = action { return state.id == thread.state?.id }
         return false
     }
 }

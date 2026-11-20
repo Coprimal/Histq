@@ -38,17 +38,7 @@ extension HostedRow {
     }
 }
 
-/// What panel2 shows instead of the graph after a click in the PRs tab.
-enum HostedItem: Hashable, Sendable {
-    case pullRequest(Int)
-    case issue(Int)
-
-    var number: Int {
-        switch self {
-        case .pullRequest(let number), .issue(let number): number
-        }
-    }
-
+extension HostedItem {
     /// The timing log's detail: `pr 1`, `issue 2`.
     var timingDetail: String {
         switch self {

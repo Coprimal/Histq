@@ -1,7 +1,8 @@
 import Foundation
 
-/// What the client and the device flow share: loading with the redirect guard, status mapping, JSON, `Link`.
-enum HostingHTTP {
+/// What the client and the device flow share: loading with the redirect guard, status mapping, JSON, `Link`,
+/// and the host and token checks.
+public enum HostingHTTP {
     static func load(_ request: URLRequest, session: URLSession) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: URLResponse
@@ -71,6 +72,29 @@ enum HostingHTTP {
             if isNext { return URL(string: String(target.dropFirst().dropLast())) }
         }
         return nil
+    }
+
+    /// `host` lowercased when it is a DNS name (letters, digits, `.`, `-`, `_`, not starting with `.` or `-`)
+    /// with an optional `:port`; nil otherwise. The strict set keeps it safe in a URL and in a git config key
+    /// (`credential.https://<host>.helper`), where `*` would be a wildcard and `/` or `@` would change the URL.
+    public static func validatedHost(_ host: String) -> String? {
+        let parts = host.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let name = parts[0]
+        let nameOK = !name.isEmpty && name.utf8.count <= 253 && !name.hasPrefix(".") && !name.hasPrefix("-")
+            && name.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-".unicodeScalars.contains($0)) }
+        guard nameOK else { return nil }
+        if parts.count == 2 {
+            guard parts[1].allSatisfy({ $0.isASCII && $0.isNumber }), let port = Int(parts[1]), (1...65535).contains(port) else {
+                return nil
+            }
+        }
+        return host.lowercased()
+    }
+
+    /// Printable ASCII without spaces or backslashes: a newline would end the HTTP header (or a credential helper's
+    /// line), and an `echo` that expands backslashes could print `\n` as one. GitHub tokens have neither.
+    public static func isUsableToken(_ token: String) -> Bool {
+        !token.isEmpty && token.unicodeScalars.allSatisfy { (0x21...0x7E).contains($0.value) && $0 != "\\" }
     }
 
     static func isSameOrigin(_ a: URL, _ b: URL) -> Bool {
