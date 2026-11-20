@@ -46,7 +46,8 @@ enum GraphColumn: String, CaseIterable {
 
     var defaultWidth: CGFloat {
         switch self {
-        case .refs: 116
+        // Fits a 20-character branch name with its icon whole (user, 2026-11-19: 116 cut most names).
+        case .refs: 150
         // Four lanes at the regular row density.
         case .graph: GraphMetrics(density: "regular").width(lanes: 4)
         case .message: 240

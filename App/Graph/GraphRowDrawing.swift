@@ -98,7 +98,7 @@ enum GraphRowDrawing {
     /// Draws `row` in `bounds` (a flipped view's bounds, the graph column's cell), clipped to it. `hasRefs` draws the
     /// line from the column's left edge (where the ref badges' line ends) to the node, at `refsAlpha` (a ghost badge's
     /// is faded). `avatar`, when given, fills the node. `nodeAlpha` fades the row's own band, refs line and node
-    /// (another worktree's WIP row), not the lanes passing by.
+    /// (another worktree's WIP row), not the lanes passing by. `selected` draws the band brighter (the selected row).
     ///
     /// When `bounds` is too narrow for the log's `logLanes`, the right-most lanes fold continuously
     /// (`GraphMetrics.drawnX`): their nodes are pushed left, over their neighbours' lines, and the lines of a pinned
@@ -109,7 +109,7 @@ enum GraphRowDrawing {
     /// the branches apart.
     static func draw(
         _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, nodeAlpha: CGFloat = 1,
-        avatar: NSImage?, metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
+        selected: Bool = false, avatar: NSImage?, metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
     ) {
         context.saveGState()
         defer { context.restoreGState() }
@@ -125,7 +125,7 @@ enum GraphRowDrawing {
                           width: max(0, bounds.maxX - nodeX), height: metrics.bandHeight)
         if band.width > 0 {
             context.setAlpha(nodeAlpha)
-            Palette.graphLaneBand(row.color).setFill()
+            Palette.graphLaneBand(row.color, selected: selected).setFill()
             context.fill(band)
             laneColor.setFill()
             context.fill(CGRect(x: bounds.maxX - 2, y: band.minY, width: 2, height: band.height))
@@ -351,7 +351,8 @@ final class GraphCellView: NSView {
         guard let row, let context = NSGraphicsContext.current?.cgContext else { return }
         GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef,
                              refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha,
-                             nodeAlpha: isFaded ? Palette.graphOtherWorktreeAlpha : 1, avatar: avatar, metrics: metrics,
+                             nodeAlpha: isFaded ? Palette.graphOtherWorktreeAlpha : 1,
+                             selected: (superview as? NSTableRowView)?.isSelected ?? false, avatar: avatar, metrics: metrics,
                              logLanes: logLanes, in: bounds, context: context)
     }
 }
@@ -362,8 +363,10 @@ extension Palette {
         color == GraphLayout.stashColor ? graphStash : graphLanes[color % graphLanes.count]
     }
 
-    /// The band of a row of `color`.
-    static func graphLaneBand(_ color: Int) -> NSColor {
-        color == GraphLayout.stashColor ? graphStashBand : graphLaneBands[color % graphLaneBands.count]
+    /// The band of a row of `color`, brighter on the selected row.
+    static func graphLaneBand(_ color: Int, selected: Bool = false) -> NSColor {
+        if color == GraphLayout.stashColor { return selected ? graphStashSelectedBand : graphStashBand }
+        let bands = selected ? graphLaneSelectedBands : graphLaneBands
+        return bands[color % bands.count]
     }
 }

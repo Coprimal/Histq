@@ -119,11 +119,15 @@ enum Palette {
     ]
     /// The graph's lane colors (`GraphLayout.colorCount` of them): lines, nodes, the badge connectors.
     static let graphLanes: [NSColor] = laneValues
-    /// The faint band from a node to the graph column's edge: its lane color at 0.16.
-    static let graphLaneBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.16) }
-    /// A stash row's node, band and line to its base, outside the lane colors: a neutral grey. #8E8E93 / at 0.16
+    /// The faint band from a node to the graph column's edge: its lane color at 0.09, so the lane lines over it
+    /// stay easy to see (user, 2026-11-19).
+    static let graphLaneBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.09) }
+    /// The selected row's band: its lane color at 0.28, so the selection reads at a glance (user, 2026-11-19).
+    static let graphLaneSelectedBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.28) }
+    /// A stash row's node, band and line to its base, outside the lane colors: a neutral grey. #8E8E93 / at 0.09
     static let graphStash = srgb(0x8E8E93)
-    static let graphStashBand = graphStash.withAlphaComponent(0.16)
+    static let graphStashBand = graphStash.withAlphaComponent(0.09)
+    static let graphStashSelectedBand = graphStash.withAlphaComponent(0.28)
     /// Another worktree's WIP badge: the grey at a branch badge's 0.38.
     static let graphStashBadgeFill = graphStash.withAlphaComponent(0.38)
     /// A branch badge's fill: its row's lane color at 0.38.

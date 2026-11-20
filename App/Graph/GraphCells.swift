@@ -166,18 +166,18 @@ final class RefBadgeCellView: NSView {
             style.lineBreakMode = .byTruncatingTail
             return style
         }()
-        /// The name's attributes by text size: normal weight, 12 pt at Regular (user, 2026-11-18: a bit smaller than
+        /// The name's attributes by text size: normal weight, 11.5 pt at Regular (user, 2026-11-19: a bit smaller than
         /// the body text), in pure white like the checked-out branch's so it reads sharp (user, 2026-11-18).
         static let text: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
             uniqueKeysWithValues: TextSize.allCases.map {
-                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12)), .foregroundColor: Palette.graphBadgeText,
+                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(11.5)), .foregroundColor: Palette.graphBadgeText,
                       .paragraphStyle: paragraph])
             })
-        /// The checked-out branch's name: the body text (13 pt at Regular) in pure white, so it stands out from the
-        /// others without a border (user, 2026-11-18).
+        /// The checked-out branch's name: 12.5 pt at Regular, a point above the others, in pure white, so it stands
+        /// out from them without a border (user, 2026-11-18; 2026-11-19: a bit smaller).
         static let headText: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
             uniqueKeysWithValues: TextSize.allCases.map {
-                ($0, [.font: $0.bodyNSFont, .foregroundColor: Palette.graphBadgeText, .paragraphStyle: paragraph])
+                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12.5)), .foregroundColor: Palette.graphBadgeText, .paragraphStyle: paragraph])
             })
         /// ↑↓, "#N" and "+N" by text size: the counts' font (11 pt at Regular).
         static let count: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
@@ -899,12 +899,12 @@ final class GraphTextCellView: NSView {
 
 /// A graph row: the selection is a neutral square fill (no accent, no edge) from the row's node to the table's right
 /// edge, as tall as the band and the node (`GraphMetrics.bandHeight`); drawn under the cells so the
-/// lanes stay on top. Its text cells draw in full white while it is selected.
+/// lanes stay on top. Its text cells draw in full white and its band brighter while it is selected.
 final class GraphRowView: NSTableRowView {
     override var isSelected: Bool {
         didSet {
             guard isSelected != oldValue else { return }
-            for cell in subviews where cell is GraphTextCellView { cell.needsDisplay = true }
+            for cell in subviews where cell is GraphTextCellView || cell is GraphCellView { cell.needsDisplay = true }
         }
     }
 
