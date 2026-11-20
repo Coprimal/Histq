@@ -306,21 +306,26 @@ public struct UndoJournal: Sendable {
 
     /// Takes the before-snapshot. nil when the operation cannot be journaled (the index has conflicts, the branch
     /// has no commit to stash against...): it still runs, and the next undo refuses because the state moved on.
+    /// `noOperation`: the caller already found none of `RepoState.readOperation`'s files (no operation in progress).
     func begin(
-        _ ops: GitOperations, refs: [String], content scope: ContentScope?, completesOperation: Bool
+        _ ops: GitOperations, refs: [String], content scope: ContentScope?, completesOperation: Bool,
+        noOperation: Bool = false
     ) async -> Start? {
-        guard let operation = try? await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env)
+        // `RepoState.Operation.none`, not `Optional.none`.
+        guard let operation = noOperation
+            ? RepoState.Operation.none
+            : try? await RepoState.readOperation(runner: ops.runner, cwd: ops.cwd, env: ops.env)
         else { return nil }
         if operation != .none {
             return .continuing(operation: String(describing: operation), completes: completesOperation)
         }
         do {
             var names = refs
-            let headRef = try await Self.headRef(ops)
-            if let headRef, headRef.hasPrefix("refs/heads/"), !names.contains(headRef) {
+            let head = try await Self.head(ops)
+            if let headRef = head.ref, headRef.hasPrefix("refs/heads/"), !names.contains(headRef) {
                 names.append(headRef)
             }
-            let before = try await Self.capture(ops, names: names, upstreamOf: Set(refs), headRef: .some(headRef))
+            let before = try await Self.capture(ops, names: names, upstreamOf: Set(refs), head: head)
             var content: Content?
             if let scope { content = try await Self.captureContent(ops, scope: scope) }
             return .fresh(names: names, before: before, content: content)
@@ -792,15 +797,26 @@ public struct UndoJournal: Sendable {
         return trimmed(text)
     }
 
+    /// HEAD's ref and commit from one `rev-parse` (detached: its ref line is `HEAD`). An unborn HEAD (git exits 128)
+    /// or any other output is read as `headRef` and `rev-parse --verify` read it.
+    static func head(_ ops: GitOperations) async throws -> Head {
+        let lines = (try? await ops.exec(["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"]))?.text
+            .split(separator: "\n").map(String.init) ?? []
+        if lines.count == 2, GitOperations.isObjectID(lines[0]), lines[1] == "HEAD" || lines[1].hasPrefix("refs/") {
+            return Head(ref: lines[1] == "HEAD" ? nil : lines[1], commit: lines[0])
+        }
+        let commit = trimmed(
+            try await ops.exec(["rev-parse", "-q", "--verify", "HEAD"], allowedExitCodes: [0, 1]).text)
+        return Head(ref: try await headRef(ops), commit: commit)
+    }
+
     /// HEAD, the branches `names` (in that order) and the index. `upstreamOf` lists the branches whose upstream is
-    /// recorded too. `headRef`: HEAD's ref when the caller just read it (`.some(nil)` when detached), else read here.
+    /// recorded too. `head`: HEAD when the caller just read it, else read here.
     /// Throws when the index has conflicts (`write-tree` refuses).
     static func capture(
-        _ ops: GitOperations, names: [String], upstreamOf: Set<String>, headRef knownHeadRef: String?? = nil
+        _ ops: GitOperations, names: [String], upstreamOf: Set<String>, head knownHead: Head? = nil
     ) async throws -> Snapshot {
-        let headRef = if let knownHeadRef { knownHeadRef } else { try await headRef(ops) }
-        let headCommit = trimmed(
-            try await ops.exec(["rev-parse", "-q", "--verify", "HEAD"], allowedExitCodes: [0, 1]).text)
+        let head = if let knownHead { knownHead } else { try await Self.head(ops) }
         var oids: [String: String] = [:]
         if !names.isEmpty {
             // Patterns match a ref or a folder of refs: keep exact names only.
@@ -826,7 +842,7 @@ public struct UndoJournal: Sendable {
             refs.append(RefValue(name: name, oid: oids[name], upstream: upstream))
         }
         let index = try await ops.exec(["write-tree"]).text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Snapshot(head: Head(ref: headRef, commit: headCommit), refs: refs, index: index)
+        return Snapshot(head: head, refs: refs, index: index)
     }
 
     /// An upstream remote that can only be read as a remote's name: `.` (a local branch's upstream) or
