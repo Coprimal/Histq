@@ -819,12 +819,16 @@ public enum GitInvocation {
         "'" + text.replacing("'", with: "'\\''") + "'"
     }
 
-    /// `author.*` and `committer.*` too: a repo's own `author.name` would otherwise beat `user.name`.
+    /// `author.*` and `committer.*` too: a repo's own `author.name` would otherwise beat `user.name`. An empty (or
+    /// blank) name or email is left out, so git uses the user's own config for it: never an empty ident.
     private static func identityConfig(_ profile: Profile) -> [(String, String)] {
         let name = profile.identity.name
         let email = profile.identity.email
-        return [("user.name", name), ("user.email", email), ("author.name", name), ("author.email", email),
-                ("committer.name", name), ("committer.email", email)]
+        let hasName = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasEmail = !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return ["user", "author", "committer"].flatMap { scope in
+            (hasName ? [("\(scope).name", name)] : []) + (hasEmail ? [("\(scope).email", email)] : [])
+        }
     }
 
     /// A signing method without a key (`Signing.isUsable` false) signs nothing, as `.none`: never an empty

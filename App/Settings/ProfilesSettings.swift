@@ -180,6 +180,10 @@ struct ProfilesSettings: View {
             } label: {
                 Text("Email")
                 SettingsHint("user.email; also the comment of a key generated for it.")
+                if profile.identity.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || profile.identity.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    SettingsHint("No commit name/email: git uses your own git config (user.name, user.email).")
+                }
             }
             .settingsSearchAnchor("Email")
             SettingsDivider()

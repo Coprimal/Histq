@@ -40,6 +40,56 @@ struct GitInvocationTests {
         }
     }
 
+    /// The identity keys of `env`'s command-scope config, in order.
+    static func identityEntries(_ env: [String: String]) -> [String] {
+        configEntries(env).filter { entry in
+            ["user.name=", "user.email=", "author.", "committer."].contains { entry.hasPrefix($0) }
+        }
+    }
+
+    @Test(
+        "an empty or blank profile name or email passes no key for it, in the write and terminal environments",
+        arguments: [
+            ("", "", [String]()),
+            (" \t", "\n ", []),
+            ("Profile Person", "", ["user.name=Profile Person", "author.name=Profile Person",
+                                    "committer.name=Profile Person"]),
+            ("  ", "profile@histq.invalid", ["user.email=profile@histq.invalid", "author.email=profile@histq.invalid",
+                                             "committer.email=profile@histq.invalid"]),
+            ("Profile Person", "profile@histq.invalid", [
+                "user.name=Profile Person", "user.email=profile@histq.invalid",
+                "author.name=Profile Person", "author.email=profile@histq.invalid",
+                "committer.name=Profile Person", "committer.email=profile@histq.invalid",
+            ]),
+        ])
+    func identityConfigSkipsEmptyFields(name: String, email: String, expected: [String]) {
+        let profile = Profile(name: "Work", color: "#E5B13A", identity: .init(name: name, email: email))
+        let write = GitInvocation.environment(profile: profile, base: [:])
+        let terminal = GitInvocation.terminalEnvironment(profile: profile)
+        #expect(Self.identityEntries(write) == expected)
+        #expect(Self.identityEntries(terminal) == expected)
+    }
+
+    @Test("git falls back to its own config for what the profile leaves empty, never an empty ident")
+    func emptyProfileIdentityFallsBackToGitConfig() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        let cases: [(name: String, email: String, ident: String)] = [
+            ("", "", "Repo Local <local@histq.invalid> "),
+            ("Profile Person", " ", "Profile Person <local@histq.invalid> "),
+            ("", "profile@histq.invalid", "Repo Local <profile@histq.invalid> "),
+        ]
+        for (name, email, expected) in cases {
+            let profile = Profile(name: "Work", color: "#E5B13A", identity: .init(name: name, email: email))
+            let env = GitInvocation.environment(profile: profile, base: sandbox.base)
+            for variable in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
+                let ident = try await sandbox.runner.run(["var", variable], cwd: repo, env: env).text
+                #expect(ident.hasPrefix(expected), "\(variable) for (\(name), \(email)): \(ident)")
+            }
+        }
+    }
+
     @Test("an SSH key path with a space and a single quote reaches ssh as one -i argument")
     func sshKeyPathIsOneArgument() async throws {
         let sandbox = try await Sandbox()
