@@ -494,7 +494,8 @@ struct SidebarItemStyle: ButtonStyle {
     }
 }
 
-/// The white label of a primary (`Palette.primaryFill`) button gets a faint dark shadow, so it stands out from the blue.
+/// The white label of a primary (`Palette.primaryFill`) button, and of the selected `CapsuleTabs` pill, gets a faint
+/// dark shadow, so it stands out from the blue.
 /// On the label only, before the fill, so the capsule itself casts nothing.
 private struct PrimaryLabelShadow: ViewModifier {
     let isOn: Bool
@@ -928,6 +929,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
                     .font(fillsWidth || compact ? .settingsCaption : .callout)
                     .lineLimit(1)
                     .foregroundStyle(selected ? Palette.onAccent : Color.secondary)
+                    .modifier(PrimaryLabelShadow(isOn: selected))
                     .padding(.horizontal, fillsWidth ? 4 : compact ? 10 : 12)
                     // Takes the width `ContentWidthRow` gives it; its label's width is its ideal.
                     .frame(minWidth: fillsWidth ? 0 : nil, maxWidth: fillsWidth ? .infinity : nil)
