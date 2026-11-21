@@ -1086,17 +1086,6 @@ final class WindowModel {
     /// The number of pinned tabs, which come first in `tabs`.
     var pinnedCount: Int { tabs.prefix { $0.pinned }.count }
 
-
-    /// Moves the tab at `source` to `destination` (its index once moved), one of `moveDestinations(from:)`; the
-    /// selection stays on the same tab.
-    func moveTab(from source: Int, to destination: Int) {
-        guard tabs.indices.contains(source), source != destination,
-              moveDestinations(from: source).contains(destination)
-        else { return }
-        let tab = tabs.remove(at: source)
-        tabs.insert(tab, at: destination)
-    }
-
     // MARK: Tab groups
 
     /// The runs of two or more neighboring tabs of one repository (worktree boxes), in tab order. The popped-out
@@ -1139,8 +1128,9 @@ final class WindowModel {
         TabArrangement.segments(arrangementEntries)
     }
 
-    /// The tabs as `TabArrangement` sees them; a group with no entry in `groups` counts as none.
-    private var arrangementEntries: [TabArrangement.Entry] {
+    /// The tabs as `TabArrangement` sees them, in order (`arrangementEntries[i]` is `tabs[i]`); a group with no entry
+    /// in `groups` counts as none. The tab strip's and the vertical tabs' drags read them (`TabGroupLayout.dragTarget`).
+    var arrangementEntries: [TabArrangement.Entry] {
         let ids = Set(groups.map(\.id))
         return tabs.map { tab in
             let group = tab.groupID.flatMap { ids.contains($0) ? $0 : nil }
@@ -1149,28 +1139,11 @@ final class WindowModel {
         }
     }
 
-    /// Where the tab at `source` may be dropped (indices once moved): a tab of a worktree box only within its box; a
-    /// tab of a manual group only within its group, never inside a box; another tab anywhere but inside a box or
-    /// between two tabs of a group, so a box or a group is never split. A pinned tab only among the pinned tabs, an
-    /// unpinned one only among the others (before the popped-out archived tab, which never moves).
-    func moveDestinations(from source: Int) -> [Int] {
-        guard tabs.indices.contains(source), !tabs[source].archived else { return [] }
-        if let box = worktreeBoxes.first(where: { $0.range.contains(source) }) { return Array(box.range) }
-        var rest = tabs
-        rest.remove(at: source)
-        let inBox: (Int) -> Bool = { index in
-            index > 0 && index < rest.count && rest[index].repoKey != nil
-                && rest[index - 1].repoKey == rest[index].repoKey
-        }
-        if let group = manualGroups.first(where: { $0.range.contains(source) }) {
-            return group.range.filter { !inBox($0) }
-        }
-        let inGroup: (Int) -> Bool = { index in
-            index > 0 && index < rest.count && rest[index].groupID != nil
-                && rest[index - 1].groupID == rest[index].groupID
-        }
-        let area = tabs[source].pinned ? 0..<pinnedCount : pinnedCount..<normalEnd
-        return (0...rest.count).filter { area.contains($0) && !inBox($0) && !inGroup($0) }
+    /// Drops a dragged tab, worktree box or whole group (`TabArrangement.move`) at `index` (its first tab's index once
+    /// moved) in `group`, as `TabGroupLayout.dragTarget` gives them; any other place leaves the tabs as they are. The
+    /// selection stays on the same tab.
+    func moveUnit(_ unit: TabArrangement.Unit, to index: Int, group: UUID?) {
+        apply(TabArrangement.move(unit: unit, to: index, group: group, in: arrangementEntries))
     }
 
     /// The manual group `id` is collapsed to its chip.
@@ -1442,7 +1415,11 @@ final class WindowModel {
     /// manual group's boxes and tabs after its first one, pinned tabs first and out of every group, the popped-out
     /// archived tab last. Drops the groups left with no tab. The selection stays.
     private func normalize() {
-        let arrangement = TabArrangement.normalized(arrangementEntries)
+        apply(TabArrangement.normalized(arrangementEntries))
+    }
+
+    /// Writes `arrangement` back: the tabs' order, groups and pins; drops the groups left with no tab.
+    private func apply(_ arrangement: TabArrangement.Arrangement) {
         let byID = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
         let ordered = arrangement.tabs.compactMap { entry -> Tab? in
             guard var tab = byID[entry.id] else { return nil }

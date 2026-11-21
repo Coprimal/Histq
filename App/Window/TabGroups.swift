@@ -1,5 +1,6 @@
 // Tab groups: the tabs of one repository's worktrees sit side by side in a worktree box, and manual groups (as
 // Chrome's) gather tabs and boxes under one color and an optional name.
+import HistqCore
 import Observation
 import SwiftUI
 
@@ -88,6 +89,8 @@ struct TabGroupLayout {
     struct Positions {
         var tabs: [Int: CGFloat] = [:]
         var headers: [String: CGFloat] = [:]
+        /// Each group's last tab's end (its header's end when collapsed); set by `positions(order:moving:membership:)`.
+        var ends: [String: CGFloat] = [:]
     }
 
     let items: [Item]
@@ -154,21 +157,47 @@ struct TabGroupLayout {
         extents.indices.contains(index) ? extents[index] : tabExtent
     }
 
-    /// The tab indices in order with the tab at `from` dropped at `to` (its index once moved).
-    static func moved(_ count: Int, _ from: Int, _ to: Int) -> [Int] {
+    // MARK: Dragging a unit
+
+    // A drag moves a `TabArrangement.Unit`: a tab, a whole worktree box or a whole group. `entries` are the tabs as
+    // `TabArrangement` sees them, in order: `entries[i]` is the tab at index `i`. An index is where the unit's first
+    // tab stands once moved, as `TabArrangement.destinations(for:targetGroup:in:)` and `move(unit:to:group:in:)` read
+    // it.
+
+    /// The tab indices of `unit` (always neighbors); nil when it has none.
+    static func range(of unit: TabArrangement.Unit, in entries: [TabArrangement.Entry]) -> ClosedRange<Int>? {
+        let indices = entries.indices.filter { index in
+            let entry = entries[index]
+            switch unit {
+            case .tab(let id): return entry.id == id
+            case .box(let repo): return entry.repo == repo && !entry.archived
+            case .group(let id): return entry.group == id && !entry.pinned && !entry.archived
+            }
+        }
+        guard let first = indices.first, let last = indices.last else { return nil }
+        return first...last
+    }
+
+    /// The tab indices in order with the tabs at `range` (a unit's) dropped at `destination`, their first tab's index
+    /// once moved.
+    static func moved(_ count: Int, _ range: ClosedRange<Int>, to destination: Int) -> [Int] {
         var order = Array(0..<count)
-        guard order.indices.contains(from), order.indices.contains(to) else { return order }
-        order.insert(order.remove(at: from), at: to)
+        guard range.lowerBound >= 0, range.upperBound < count, (0...(count - range.count)).contains(destination)
+        else { return order }
+        order.removeSubrange(range)
+        order.insert(contentsOf: range, at: destination)
         return order
     }
 
-    /// Where the tabs and headers stand with the tabs in `order` (a group's tabs stay neighbors in every allowed order).
-    func positions(order: [Int]) -> Positions {
+    /// Where the tabs and headers stand with the tabs in `order` and the tabs at `moving` (the dragged unit's) in the
+    /// group `membership` (pass `dragTarget`'s group; `moving: nil` at rest). A group left with no tab (its only unit
+    /// dragged into another group) has no header position: it would go.
+    func positions(order: [Int], moving: ClosedRange<Int>?, membership: UUID?) -> Positions {
         var positions = Positions()
         var x: CGFloat = 0
         var previous: String?
         for index in order {
-            let key = groupKey[index]
+            let key = moving?.contains(index) == true ? membership?.uuidString : groupKey[index]
             if let key, key != previous {
                 positions.headers[key] = x
                 x += (headerExtents[key] ?? 0) + gap
@@ -176,27 +205,88 @@ struct TabGroupLayout {
             previous = key
             positions.tabs[index] = x
             // A collapsed group's tabs stand at its header's end, with no room.
-            if let key, collapsed.contains(key) { continue }
+            if let key, collapsed.contains(key) {
+                positions.ends[key] = x - gap
+                continue
+            }
+            if let key { positions.ends[key] = x + extent(of: index) }
             x += extent(of: index) + gap
         }
         return positions
     }
 
-    /// From a group's header start to its last tab's end (its header's end when collapsed).
-    func span(of key: String) -> CGFloat {
-        let range = collapsed.contains(key) ? nil : groupRange[key]
-        let tabs = range.map { $0.reduce(0) { $0 + extent(of: $1) + gap } } ?? 0
-        return (headerExtents[key] ?? 0) + tabs
+    /// From a group's header start to its last tab's end (its header's end when collapsed) at `positions` (from
+    /// `positions(order:moving:membership:)`); nil when it has no tab there.
+    func span(of key: String, at positions: Positions) -> CGFloat? {
+        guard let start = positions.headers[key], let end = positions.ends[key] else { return nil }
+        return end - start
     }
 
-    /// The allowed drop index (`destinations`) where the tab at `from` would stand nearest `from`'s start moved by
-    /// `translation`.
-    func nearestDestination(from: Int, count: Int, translation: CGFloat, destinations: [Int]) -> Int {
-        let pointer = (positions(order: Array(0..<count)).tabs[from] ?? 0) + translation
-        let distances = destinations.map { destination in
-            (destination, abs((positions(order: Self.moved(count, from, destination)).tabs[from] ?? 0) - pointer))
+    /// The group `unit`'s tabs are in before it moves: a `.group` unit's own id, nil for a pinned unit. The drag's
+    /// first `current` for `dragTarget`.
+    func group(of unit: TabArrangement.Unit, in entries: [TabArrangement.Entry]) -> UUID? {
+        if case .group(let id) = unit { return id }
+        return Self.range(of: unit, in: entries).flatMap { group(at: $0.lowerBound)?.id }
+    }
+
+    /// Where `unit` would drop, dragged `translation` along the axis (x for the top tabs, y for the vertical ones).
+    /// `index` is its first tab's index once moved, the allowed one (`TabArrangement.destinations`) nearest the
+    /// pointer; `group` is the group its tabs are in once dropped (a `.group` unit's own id, a box tab's box's group,
+    /// nil for a pinned unit). Draw the drag with `positions(order: moved(count, range, to: index), moving: range,
+    /// membership: group)`, drop it with `TabArrangement.move(unit:to:group:in:)`, and pass `group` back as the next
+    /// call's `current` (`group(of:in:)` at the drag's start).
+    func dragTarget(unit: TabArrangement.Unit, translation: CGFloat, current: UUID?,
+                    entries: [TabArrangement.Entry]) -> (index: Int, group: UUID?) {
+        guard let range = Self.range(of: unit, in: entries) else { return (0, current) }
+        let group = membership(of: unit, range: range, translation: translation, current: current, entries: entries)
+        // A group moves by its header, the others by their first tab.
+        let anchor: (Positions) -> CGFloat = { positions in
+            if case .group(let id) = unit { return positions.headers[id.uuidString] ?? 0 }
+            return positions.tabs[range.lowerBound] ?? 0
         }
-        return distances.min { $0.1 < $1.1 }?.0 ?? from
+        let pointer = anchor(positions(order: Array(entries.indices), moving: nil, membership: nil)) + translation
+        let distances = TabArrangement.destinations(for: unit, targetGroup: group, in: entries).map { destination in
+            let order = Self.moved(entries.count, range, to: destination)
+            return (destination, abs(anchor(positions(order: order, moving: range, membership: group)) - pointer))
+        }
+        return (distances.min { $0.1 < $1.1 }?.0 ?? range.lowerBound, group)
+    }
+
+    /// The group the unit at `range` is dragged into: the expanded group whose span, measured without the unit, holds
+    /// the unit's center taken into that frame (moved back by half the room the unit takes, its extent and a gap: its
+    /// start + `translation` - half a gap, where it would be inserted). Leaving `current` takes a quarter tab past its
+    /// edge and joining another a quarter tab inside it, so it never flickers at an edge. A collapsed group is never
+    /// joined. A unit that is its group's only content keeps that group (`TabArrangement.destinations`) unless it
+    /// joins another. A `.group` unit, a pinned unit and a box tab's own unit keep their group.
+    private func membership(of unit: TabArrangement.Unit, range: ClosedRange<Int>, translation: CGFloat,
+                            current: UUID?, entries: [TabArrangement.Entry]) -> UUID? {
+        if case .group(let id) = unit { return id }
+        let first = entries[range.lowerBound]
+        if first.pinned { return nil }
+        let own = group(at: range.lowerBound)
+        if case .tab = unit, let repo = first.repo, !first.archived,
+           entries.contains(where: { $0.id != first.id && $0.repo == repo && !$0.archived }) {
+            return own?.id
+        }
+        let start = positions(order: Array(entries.indices), moving: nil, membership: nil).tabs[range.lowerBound] ?? 0
+        let probe = start + translation - gap / 2
+        let rest = positions(order: entries.indices.filter { !range.contains($0) }, moving: nil, membership: nil)
+        let margin = tabExtent / 4
+        // Each expanded group's span without the unit; none for a group the unit is all of.
+        let spans = groupByKey.values.filter { !collapsed.contains($0.key) }.compactMap {
+            group -> (id: UUID, start: CGFloat, end: CGFloat)? in
+            guard let start = rest.headers[group.key],
+                  let last = group.range.last(where: { !range.contains($0) })
+            else { return nil }
+            return (id: group.id, start: start, end: (rest.tabs[last] ?? 0) + extent(of: last))
+        }
+        if let span = spans.first(where: { $0.id == current }),
+           probe >= span.start - margin, probe <= span.end + margin { return current }
+        if let span = spans.first(where: { span in
+            span.id != current && probe >= span.start + margin && probe <= span.end - margin
+        }) { return span.id }
+        if let own, rest.headers[own.key] == nil { return own.id }
+        return nil
     }
 }
 

@@ -1,6 +1,7 @@
 // The tab strip under the toolbar: the window's tabs, then New tab and the tab list (the command palette is the
 // toolbar's Search), on the window glass. The selected tab is a tab of the page's sheet under it (`TabSheetShape`).
 import AppKit
+import HistqCore
 import SwiftUI
 
 /// Sizes of the tab strip. The unpinned tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the
@@ -178,13 +179,14 @@ private struct TabTrack: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The tab under the current mouse press, so a press selects once.
     @State private var pressedID: WindowModel.Tab.ID?
-    /// The dragged tab, its offset, and the index it came from and would land at. `dragFrom`/`dragTarget` stay stale
-    /// after a cancelled drag on purpose: clearing them would change the neighbors' animation value and cancel the
-    /// slide back.
-    @State private var draggedID: WindowModel.Tab.ID?
+    /// The group chip under the current mouse press, so its mouse-up collapses only a press it took.
+    @State private var pressedChip: UUID?
+    /// A drag is under way (a tab, a worktree box or a group by its chip), its offset along the row, and what it moves
+    /// and where it would land. `drag` stays stale after a drag on purpose: clearing it would change the neighbors'
+    /// animation value and cancel the slide back.
+    @State private var dragging = false
     @State private var dragOffset: CGFloat = 0
-    @State private var dragFrom = 0
-    @State private var dragTarget = 0
+    @State private var drag: TabDrag?
     /// Where the scroll arrows move the row; a selection still scrolls through the `ScrollViewReader`.
     @State private var position = ScrollPosition()
     /// Whether the row can scroll each way: the arrows' enabled states, set only when one flips.
@@ -192,6 +194,9 @@ private struct TabTrack: View {
     /// The row's last scroll geometry, outside the view's state so scrolling does not redraw the tabs.
     @State private var scrollGeometry = ScrollGeometryBox()
 
+    /// The row's coordinate space: a press's pointer along the row, where the layout's positions stand (each item's
+    /// frame starts at its position).
+    private static let rowSpace = "tabRow"
     /// Between the tabs and the scroll arrows: as far as the strip puts New Tab from the tabs.
     private static let arrowSpacing: CGFloat = 12
     /// The scroll arrows, with their spacing before them.
@@ -299,17 +304,22 @@ private struct TabTrack: View {
     }
 
     private func row(layout: TabGroupLayout) -> some View {
-        let current = layout.positions(order: Array(model.tabs.indices))
-        // While a tab is dragged, the others (and the chips) stand where they would with the tab dropped at its target.
-        let order = draggedID == nil ? Array(model.tabs.indices)
-            : TabGroupLayout.moved(model.tabs.count, dragFrom, dragTarget)
-        let target = draggedID == nil ? current : layout.positions(order: order)
-        // The selected tab's start as drawn: it follows the pointer while dragged (the dragged tab is the selected one,
-        // a press selects it), so each group's line opens right under it. None while the popped-out archived tab is
-        // selected: it stands beside the archive button, not at its zero-width place here.
+        let current = layout.positions(order: Array(model.tabs.indices), moving: nil, membership: nil)
+        let active = dragging ? drag : nil
+        // While a unit is dragged, the others (and the chips) stand where they would with it dropped at its target, in
+        // the group it would be in; its own tabs (and a dragged group's chip) follow the pointer.
+        let target = active.map { drag in
+            layout.positions(order: TabGroupLayout.moved(model.tabs.count, drag.range, to: drag.index),
+                             moving: drag.range, membership: drag.group)
+        } ?? current
+        // The selected tab's start as drawn, so each group's line opens right under it and each box's hole follows it:
+        // a tab or box drag holds the selected tab (a drag selects the pressed tab), which follows the pointer; a chip
+        // drag selects nothing, so the selected tab follows it when in the dragged group, else stands at its target.
+        // None while the popped-out archived tab is selected: it stands beside the archive button, not at its
+        // zero-width place here.
         let selected = model.selectedIndex.flatMap { model.tabs[$0].archived ? nil : $0 }
         let selectedX = selected.map { index in
-            (current.tabs[index] ?? 0) + (model.tabs[index].id == draggedID ? dragOffset : 0)
+            active?.range.contains(index) == true ? (current.tabs[index] ?? 0) + dragOffset : target.tabs[index] ?? 0
         }
         // Each item carries its flares' room on both sides (overlapping its neighbors' by the negative spacing), so
         // scrolling to a tab at an edge keeps its flares in view; the items still sit `gap` apart.
@@ -317,18 +327,27 @@ private struct TabTrack: View {
             ForEach(layout.items.filter(isShown)) { item in
                 switch item {
                 case .header(let group):
-                    let chipX = target.headers[group.key] ?? 0
+                    let dragged = active?.unit == .group(group.id)
+                    // A group left with no tab by the drag has no target header: hidden (still in the row, which
+                    // `current` counts), it goes on the drop.
+                    let targetX = target.headers[group.key]
+                    let chipX = dragged ? (current.headers[group.key] ?? 0) + dragOffset : targetX ?? 0
                     // The selected tab, flares included, along the line (outside it when no tab of the group is).
                     let opening = selectedX.map { $0 - chipX - TabStripMetrics.flare } ?? -.greatestFiniteMagnitude
                     TabGroupChip(model: model, group: group, collapsed: layout.collapsed.contains(group.key),
                                  width: layout.headerExtents[group.key] ?? 0,
-                                 span: layout.span(of: group.key), opening: opening,
+                                 span: layout.span(of: group.key, at: target) ?? 0, opening: opening,
                                  openingWidth: (selected.map(layout.extent(of:)) ?? layout.tabExtent)
                                      + 2 * TabStripMetrics.flare,
+                                 press: chipPress(group, layout: layout),
                                  onToggle: { withAnimation(animation) { model.toggleGroup(group.id) } })
                         .padding(.horizontal, TabStripMetrics.flare)
                         .offset(x: chipX - (current.headers[group.key] ?? 0))
-                        .animation(draggedID != nil ? animation : nil, value: dragTarget)
+                        .opacity(dragged || targetX != nil ? 1 : 0)
+                        .allowsHitTesting(dragged || targetX != nil)
+                        // Others slide aside; the dragged chip tracks the pointer without lag.
+                        .animation(dragging && !dragged ? animation : nil, value: drag)
+                        .zIndex(dragged ? 2 : 0)
                         // So its popover's opening can scroll it into view.
                         .id(group.id)
                 case .tab(let index, let tab):
@@ -337,16 +356,19 @@ private struct TabTrack: View {
             }
         }
         // Inside the selection's animation, so each box's hole slides with the selected tab's shape.
-        .background { boxes(layout: layout, target: target, selectedX: selectedX) }
+        .background { boxes(layout: layout, current: current, target: target, selectedX: selectedX) }
+        .coordinateSpace(.named(Self.rowSpace))
         .padding(.top, TabStripMetrics.rowInset)
         // The selected tab's shape slides, also for a selection made elsewhere (a menu, the tab list).
         .animation(animation, value: model.selectedTabID)
     }
 
-    /// The worktree boxes behind their tabs, at the tabs' target positions (so they move with a drag), each with the
-    /// selected tab's shape cut out where it reaches: at `selectedX` (as drawn, following the pointer), or the popped-out
-    /// archived tab's beside the archive button, whose flare reaches a first box. Decorative.
-    private func boxes(layout: TabGroupLayout, target: TabGroupLayout.Positions, selectedX: CGFloat?) -> some View {
+    /// The worktree boxes behind their tabs, at the tabs' target positions (so they move with a drag; a dragged box,
+    /// or one in a dragged group, follows the pointer with its tabs), each with the selected tab's shape cut out where
+    /// it reaches: at `selectedX` (as drawn), or the popped-out archived tab's beside the archive button, whose flare
+    /// reaches a first box. Decorative.
+    private func boxes(layout: TabGroupLayout, current: TabGroupLayout.Positions, target: TabGroupLayout.Positions,
+                       selectedX: CGFloat?) -> some View {
         let flare = TabStripMetrics.flare
         // The selected shape's rect along the row: a tab's frame stands at its position plus its flare room.
         var hole: (start: CGFloat, end: CGFloat) = (0, 0)
@@ -358,7 +380,11 @@ private struct TabTrack: View {
         }
         return ZStack {
             ForEach(layout.boxes, id: \.key) { box in
-                if let span = layout.boxSpan(box, at: target) {
+                let follows = followsDrag(box)
+                let drawn = follows
+                    ? layout.boxSpan(box, at: current).map { (start: $0.start + dragOffset, end: $0.end + dragOffset) }
+                    : layout.boxSpan(box, at: target)
+                if let span = drawn {
                     let shape = WorktreeBoxShape(axis: .horizontal,
                                                  start: span.start + flare - TabStripMetrics.boxOutset,
                                                  end: span.end + flare + TabStripMetrics.boxOutset,
@@ -367,14 +393,25 @@ private struct TabTrack: View {
                                                  crossEndInset: TabStripMetrics.boxBottomInset,
                                                  holeCrossStart: 0, radius: TabStripMetrics.boxRadius,
                                                  holeRadius: TabStripMetrics.tabRadius, flare: flare)
-                    shape.fill(Palette.worktreeBoxFill)
-                    shape.edge.fill(Palette.worktreeBoxBorder)
+                    ZStack {
+                        shape.fill(Palette.worktreeBoxFill)
+                        shape.edge.fill(Palette.worktreeBoxBorder)
+                    }
+                    // Others slide with their tabs; a box that follows the pointer does so without lag.
+                    .animation(dragging && !follows ? animation : nil, value: drag)
                 }
             }
         }
-        .animation(draggedID != nil ? animation : nil, value: dragTarget)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    /// The box moves with the drag: it is the dragged box or in the dragged group (not while one of its tabs reorders
+    /// inside it).
+    private func followsDrag(_ box: WorktreeBox) -> Bool {
+        guard dragging, let drag else { return false }
+        if case .tab = drag.unit { return false }
+        return drag.range.contains(box.range.lowerBound)
     }
 
     /// Every item but the popped-out archived tab, which `ArchiveCluster` draws.
@@ -386,9 +423,12 @@ private struct TabTrack: View {
     private func tabView(index: Int, tab: WindowModel.Tab, layout: TabGroupLayout, current: TabGroupLayout.Positions,
                          target: TabGroupLayout.Positions) -> some View {
         let selected = tab.id == model.selectedTabID
-        let dragged = tab.id == draggedID
+        // In the dragged unit: the tab, its box or its group.
+        let dragged = dragging && drag?.range.contains(index) == true
         let profile = model.profile(of: tab)
-        let group = layout.group(at: index)
+        // A dragged tab's outline takes the group it would drop in, so its flares meet that group's line.
+        let group = dragged ? drag?.group.flatMap { id in model.manualGroups.first { $0.id == id } }
+            : layout.group(at: index)
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
         return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji,
                        symbol: TabIcon.symbol(of: tab), pinned: tab.pinned, iconColor: tab.iconColor,
@@ -404,20 +444,21 @@ private struct TabTrack: View {
             .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
             .padding(.horizontal, TabStripMetrics.flare)
             .offset(x: offset)
-            // Neighbors slide aside; the dragged tab tracks the pointer without lag.
-            .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
-            // The selected tab's flares lie over its neighbors' edges.
-            .zIndex(dragged ? 2 : selected ? 1 : 0)
+            // Neighbors slide aside; the dragged tabs track the pointer without lag.
+            .animation(dragging && !dragged ? animation : nil, value: drag)
+            // The dragged tabs above the others; the selected tab's flares lie over its neighbors' edges.
+            .zIndex((dragged ? 2 : 0) + (selected ? 1 : 0))
             .gesture(press(tab.id, index: index, layout: layout))
             .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: false)) }
             .id(tab.id)
     }
 
     /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); ⇧/⌘ pick it into the
-    /// multi-selection instead (`TabPress`). Past `dragThreshold` it reorders, to the allowed place
-    /// (`WindowModel.moveDestinations`) nearest the pointer.
+    /// multi-selection instead (`TabPress`). Past `dragThreshold` it moves as a `TabArrangement.Unit` to the allowed
+    /// place nearest the pointer (`TabGroupLayout.dragTarget`): a plain tab joins or leaves groups (a pinned one never
+    /// joins); a worktree box's tab reorders inside its box until the pointer leaves the box, then drags the whole box.
     private func press(_ id: WindowModel.Tab.ID, index: Int, layout: TabGroupLayout) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.rowSpace))
             .onChanged { value in
                 // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this tab.
                 if pressedID != id {
@@ -427,43 +468,117 @@ private struct TabTrack: View {
                     pressedID = id
                 }
                 let translation = value.translation.width
-                guard draggedID != nil || abs(translation) >= TabStripMetrics.dragThreshold else { return }
-                if draggedID == nil {
+                guard dragging || abs(translation) >= TabStripMetrics.dragThreshold else { return }
+                let entries = model.arrangementEntries
+                if !dragging {
                     // A ⇧/⌘ press turns into a plain drag: the dragged tab is always the selected one, alone.
                     model.clearSelection()
                     model.selectTab(id: id)
-                    draggedID = id
-                    dragFrom = index
-                    dragTarget = index
+                    startDrag(.tab(id), layout: layout, entries: entries)
+                }
+                guard dragging, var next = drag else { return }
+                // Once the pointer leaves its box (as the box stands at rest), a box tab drags the whole box, to the
+                // drag's end. A tab's frame starts at its position, its content `flare` in.
+                if case .tab = next.unit, let box = layout.boxes.first(where: { $0.range.contains(index) }),
+                   let span = layout.boxSpan(box, at: layout.positions(order: Array(entries.indices), moving: nil,
+                                                                      membership: nil)) {
+                    let pointer = value.location.x - TabStripMetrics.flare
+                    let unit = TabArrangement.Unit.box(box.key)
+                    if pointer < span.start || pointer > span.end,
+                       let range = TabGroupLayout.range(of: unit, in: entries) {
+                        let group = layout.group(of: unit, in: entries)
+                        next = TabDrag(unit: unit, range: range, index: range.lowerBound, group: group, origin: group)
+                    }
                 }
                 dragOffset = translation
-                let target = layout.nearestDestination(from: dragFrom, count: model.tabs.count,
-                                                       translation: translation,
-                                                       destinations: model.moveDestinations(from: dragFrom))
-                if target != dragTarget { dragTarget = target }
+                retarget(next, translation: translation, layout: layout, entries: entries)
             }
             .onEnded { _ in
                 pressedID = nil
-                guard draggedID != nil else { return }
-                if dragFrom == dragTarget {
-                    // Back into its slot with the lifted look.
-                    withAnimation(animation) {
-                        dragOffset = 0
-                        draggedID = nil
-                    }
+                drop()
+            }
+    }
+
+    /// Zero distance, so the chip tells a click from a drag itself. Released before `dragThreshold` it collapses or
+    /// shows the group, on mouse-up: a deliberate exception to "a click reacts at once", needed to tell the click from
+    /// a drag. Past it the whole group moves among the top-level places (`TabGroupLayout.dragTarget`), selecting
+    /// nothing. A ⌃-click is a right-click (`RightClickCatcher` opens the popover): never taken, so it never collapses.
+    private func chipPress(_ group: TabGroup, layout: TabGroupLayout) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.rowSpace))
+            .onChanged { value in
+                if pressedChip != group.id {
+                    guard TabPress.current != .secondary else { return }
+                    pressedChip = group.id
+                }
+                let translation = value.translation.width
+                guard dragging || abs(translation) >= TabStripMetrics.dragThreshold else { return }
+                let entries = model.arrangementEntries
+                if !dragging { startDrag(.group(group.id), layout: layout, entries: entries) }
+                guard dragging, let next = drag else { return }
+                dragOffset = translation
+                retarget(next, translation: translation, layout: layout, entries: entries)
+            }
+            .onEnded { _ in
+                guard pressedChip == group.id else { return }
+                pressedChip = nil
+                if dragging {
+                    drop()
                 } else {
-                    // Reset without animation before the move, so the tabs render at their new places directly.
-                    draggedID = nil
-                    dragOffset = 0
-                    model.moveTab(from: dragFrom, to: dragTarget)
+                    withAnimation(animation) { model.toggleGroup(group.id) }
                 }
             }
+    }
+
+    /// A drag of `unit` begins where it stands, in its own group.
+    private func startDrag(_ unit: TabArrangement.Unit, layout: TabGroupLayout, entries: [TabArrangement.Entry]) {
+        guard let range = TabGroupLayout.range(of: unit, in: entries) else { return }
+        let group = layout.group(of: unit, in: entries)
+        drag = TabDrag(unit: unit, range: range, index: range.lowerBound, group: group, origin: group)
+        dragging = true
+    }
+
+    /// The drag `next` aimed at the place and group it would drop in, dragged `translation` along the row.
+    private func retarget(_ next: TabDrag, translation: CGFloat, layout: TabGroupLayout,
+                          entries: [TabArrangement.Entry]) {
+        var next = next
+        let target = layout.dragTarget(unit: next.unit, translation: translation, current: next.group,
+                                       entries: entries)
+        next.index = target.index
+        next.group = target.group
+        if next != drag { drag = next }
+    }
+
+    /// Ends a drag: back into its place with the lifted look when it would land where it stands, else moved there.
+    private func drop() {
+        guard dragging, let drag else { return }
+        if drag.index == drag.range.lowerBound, drag.group == drag.origin {
+            withAnimation(animation) {
+                dragOffset = 0
+                dragging = false
+            }
+        } else {
+            // Reset without animation before the move, so the tabs render at their new places directly.
+            dragging = false
+            dragOffset = 0
+            model.moveUnit(drag.unit, to: drag.index, group: drag.group)
+        }
     }
 
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
     private func close(_ id: WindowModel.Tab.ID) {
         TabMenu.close(id, model)
     }
+}
+
+/// What a tab drag moves (a tab, a worktree box or a whole group), its tabs' indices before it moves, and where it
+/// would land: its first tab's index once moved and the group it would be in (`TabGroupLayout.dragTarget`), with the
+/// group it started in. Shared by the tab strip and the vertical tabs.
+struct TabDrag: Equatable {
+    var unit: TabArrangement.Unit
+    var range: ClosedRange<Int>
+    var index: Int
+    var group: UUID?
+    let origin: UUID?
 }
 
 /// Whether a scrolled row has more to show before (`leading`) and after (`trailing`) its visible part.
@@ -775,9 +890,10 @@ enum TabMenu {
 
 /// A manual group's chip before its first tab: a rounded rect in the group's color, a plain square without a name, else
 /// wider with the name inside; the group's line under it and its tabs (`span` long), open at `opening` for
-/// `openingWidth`: the selected tab, its flares included. A click collapses the group to the chip alone, with no line,
-/// and shows its tabs again, as Chrome's; a right click or ⌃-click opens its popover (`TabGroupPopover`).
-private struct TabGroupChip: View {
+/// `openingWidth`: the selected tab, its flares included. `press` (the track's) tells a click from a drag: a click
+/// collapses the group to the chip alone, with no line, and shows its tabs again, as Chrome's; a drag moves the whole
+/// group. A right click or ⌃-click opens its popover (`TabGroupPopover`).
+private struct TabGroupChip<Press: Gesture>: View {
     let model: WindowModel
     let group: TabGroup
     let collapsed: Bool
@@ -785,23 +901,23 @@ private struct TabGroupChip: View {
     let span: CGFloat
     let opening: CGFloat
     let openingWidth: CGFloat
+    let press: Press
+    /// The click's action, for accessibility (`press` runs it for a real click).
     let onToggle: () -> Void
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: TabStripMetrics.groupChipRadius, style: .continuous)
-        Button(action: onToggle) {
-            Text(group.name)
-                .font(Font(TabStripMetrics.groupChipFont))
-                .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.horizontal, group.name.isEmpty ? 0 : TabStripMetrics.groupChipPadding)
-                .frame(width: width, height: TabStripMetrics.groupChipHeight)
-                .background(shape.fill(TabGroupColors.chip(group.group.colorIndex)))
-                .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .tabGroupPopover(model: model, groupID: group.id, arrowEdge: .bottom)
+        Text(group.name)
+            .font(Font(TabStripMetrics.groupChipFont))
+            .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, group.name.isEmpty ? 0 : TabStripMetrics.groupChipPadding)
+            .frame(width: width, height: TabStripMetrics.groupChipHeight)
+            .background(shape.fill(TabGroupColors.chip(group.group.colorIndex)))
+            .contentShape(shape)
+            .gesture(press)
+            .tabGroupPopover(model: model, groupID: group.id, arrowEdge: .bottom)
         .frame(height: TabStripMetrics.tabHeight)
         .overlay(alignment: .bottomLeading) {
             if !collapsed {
@@ -812,8 +928,11 @@ private struct TabGroupChip: View {
             }
         }
         .help(group.help(collapsed: collapsed))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(group.accessibilityLabel)
         .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, onToggle)
     }
 }
 

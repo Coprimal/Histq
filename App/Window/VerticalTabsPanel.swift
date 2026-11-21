@@ -2,6 +2,7 @@
 // every page, the selected row joined to the page's sheet, the pinned tabs as a grid of icons above the rows, with the
 // archive button (once the window has an archive), New tab and the tab list at the bottom, and the popped-out archived
 // tab right above them. The tab strip under the toolbar does not show then.
+import HistqCore
 import SwiftUI
 
 /// Where the window's app tabs show: the strip under the toolbar, or panel 0 on the left.
@@ -76,7 +77,8 @@ struct VerticalTabsPanel: View {
 
 /// The pinned tabs as a grid of icons (`VerticalPinnedGrid`), then the others as Settings sidebar rows
 /// (`VerticalTabRow`), in a scroll view that takes the panel's free height and shows its scroller: a press selects at
-/// once (on mouse-down), a drag past a few points reorders a row (pinned tabs are reordered in the top strip only).
+/// once (on mouse-down), a drag past a few points moves a row, its worktree box or (by its header) its group, as the
+/// tab strip does (pinned tabs are reordered in the top strip only).
 /// The popped-out archived tab is not here: it stands above the footer (`VerticalArchiveFooter`); last in `tabs`, it
 /// takes no room, so no other row moves.
 private struct VerticalTabList: View {
@@ -86,14 +88,24 @@ private struct VerticalTabList: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The tab under the current mouse press, so a press selects once.
     @State private var pressedID: WindowModel.Tab.ID?
-    /// The dragged tab, its offset, and the index it came from and would land at. `dragFrom`/`dragTarget` stay stale
-    /// after a cancelled drag on purpose, as in the tab strip: clearing them would cancel the neighbors' slide back.
-    @State private var draggedID: WindowModel.Tab.ID?
+    /// The group header under the current mouse press, so its mouse-up collapses only a press it took.
+    @State private var pressedHeader: UUID?
+    /// A drag is under way (a tab, a worktree box or a group by its header), its offset down the list, and what it
+    /// moves and where it would land. `drag` stays stale after a drag on purpose, as in the tab strip: clearing it would
+    /// change the neighbors' animation value and cancel the slide back.
+    @State private var dragging = false
     @State private var dragOffset: CGFloat = 0
-    @State private var dragFrom = 0
-    @State private var dragTarget = 0
+    @State private var drag: TabDrag?
+
+    /// The rows' coordinate space: a press's pointer down the list, where a row's frame starts at its position less
+    /// `base`.
+    private static let listSpace = "verticalTabList"
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
+
+    /// The pinned tabs' gaps before the first row, which positions count (a pinned tab takes no height): taken off
+    /// wherever a position meets the rows' frames, which start at the list's top.
+    private var base: CGFloat { CGFloat(model.pinnedCount) * SidebarItemStyle.spacing }
 
     var body: some View {
         ScrollViewReader { scroller in
@@ -125,11 +137,10 @@ private struct VerticalTabList: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    /// The unpinned tabs and their groups' names. The pinned tabs (and their groups' names) and the popped-out archived
-    /// tab are not rows: they take no height, and their items are skipped. The archived tab is last, so it shifts
-    /// nothing. Their gaps (and names) still count in `positions`, but only as one shift
-    /// of every row, since they stand first in every order a row's drag can make (`WindowModel.moveDestinations`), and
-    /// the rows use positions only as differences. Indices stay `model.tabs`' own.
+    /// The unpinned tabs and their groups' names. The pinned tabs and the popped-out archived tab are not rows: they
+    /// take no height, and their items are skipped. The archived tab is last, so it shifts nothing. The pinned tabs'
+    /// gaps still count in `positions`, but only as one shift of every row (`base`), since they stand first in every
+    /// order a drag can make (`TabArrangement.destinations`). Indices stay `model.tabs`' own.
     private var rows: some View {
         // A pinned box shows in the grid (`VerticalPinnedGrid`), each cell on the box's fill.
         let listBoxes = model.worktreeBoxes.filter { !model.tabs[$0.range.lowerBound].pinned }
@@ -145,22 +156,37 @@ private struct VerticalTabList: View {
             case .tab(_, let tab): !tab.pinned && !tab.archived
             }
         }
-        let current = layout.positions(order: Array(model.tabs.indices))
-        // While a tab is dragged, the others (and the group names) stand where they would with it dropped at its target.
-        let target = draggedID == nil ? current
-            : layout.positions(order: TabGroupLayout.moved(model.tabs.count, dragFrom, dragTarget))
+        let current = layout.positions(order: Array(model.tabs.indices), moving: nil, membership: nil)
+        let active = dragging ? drag : nil
+        // While a unit is dragged, the others (and the group names) stand where they would with it dropped at its
+        // target, in the group it would be in; its own rows (and a dragged group's name) follow the pointer.
+        let target = active.map { drag in
+            layout.positions(order: TabGroupLayout.moved(model.tabs.count, drag.range, to: drag.index),
+                             moving: drag.range, membership: drag.group)
+        } ?? current
         return VStack(alignment: .leading, spacing: SidebarItemStyle.spacing) {
             ForEach(items) { item in
                 switch item {
                 case .header(let group):
-                    // The line runs from under the name to the group's last row's end.
+                    let dragged = active?.unit == .group(group.id)
+                    // A group left with no tab by the drag has no target header: hidden (still in the list, which
+                    // `current` counts), it goes on the drop.
+                    let targetY = target.headers[group.key]
+                    let headerY = dragged ? (current.headers[group.key] ?? 0) + dragOffset : targetY ?? 0
+                    // The line runs from under the name to a gap short of the group's last row's end, as the group
+                    // stands at its target (its span ends at that row's end).
                     VerticalTabGroupHeader(model: model, group: group,
                                            collapsed: layout.collapsed.contains(group.key),
-                                           lineLength: layout.span(of: group.key)
+                                           lineLength: (layout.span(of: group.key, at: target) ?? 0)
                                                - VerticalTabsMetrics.groupHeaderHeight - 2 * SidebarItemStyle.spacing,
+                                           press: headerPress(group, layout: layout),
                                            onToggle: { withAnimation(animation) { model.toggleGroup(group.id) } })
-                        .offset(y: (target.headers[group.key] ?? 0) - (current.headers[group.key] ?? 0))
-                        .animation(draggedID != nil ? animation : nil, value: dragTarget)
+                        .offset(y: headerY - (current.headers[group.key] ?? 0))
+                        .opacity(dragged || targetY != nil ? 1 : 0)
+                        .allowsHitTesting(dragged || targetY != nil)
+                        // Others slide aside; the dragged header tracks the pointer without lag.
+                        .animation(dragging && !dragged ? animation : nil, value: drag)
+                        .zIndex(dragged ? 2 : 0)
                         // So its popover's opening can scroll it into view.
                         .id(group.id)
                 case .tab(let index, let tab):
@@ -170,6 +196,7 @@ private struct VerticalTabList: View {
         }
         // Inside the selection's animation, so each box's hole slides with the selected row's shape.
         .background { boxes(layout: layout, current: current, target: target) }
+        .coordinateSpace(.named(Self.listSpace))
         // Room for the selected row's flares inside the scroll view, which clips; none on the trailing side, where
         // the selected row meets the sheet.
         .padding(.vertical, TabStripMetrics.flare)
@@ -180,10 +207,13 @@ private struct VerticalTabList: View {
 
     private func row(index: Int, tab: WindowModel.Tab, layout: TabGroupLayout, current: TabGroupLayout.Positions,
                      target: TabGroupLayout.Positions) -> some View {
-        let dragged = tab.id == draggedID
+        // In the dragged unit: the tab, its box or its group.
+        let dragged = dragging && drag?.range.contains(index) == true
         let selected = tab.id == model.selectedTabID
         let profile = model.profile(of: tab)
-        let group = layout.group(at: index)
+        // A dragged row takes the group it would drop in, with its indent.
+        let group = dragged ? drag?.group.flatMap { id in model.manualGroups.first { $0.id == id } }
+            : layout.group(at: index)
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
         return VerticalTabRow(title: tab.title, systemImage: TabIcon.symbol(of: tab), emoji: tab.emoji,
                               iconColor: tab.iconColor,
@@ -198,36 +228,40 @@ private struct VerticalTabList: View {
             // A group's rows sit right of its line.
             .padding(.leading, group == nil ? 0 : VerticalTabsMetrics.groupIndent)
             .offset(y: offset)
-            // Neighbors slide aside; the dragged tab tracks the pointer without lag.
-            .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
-            // The selected row's flares lie over its neighbors' edges.
-            .zIndex(dragged ? 2 : selected ? 1 : 0)
+            // Neighbors slide aside; the dragged rows track the pointer without lag.
+            .animation(dragging && !dragged ? animation : nil, value: drag)
+            // The dragged rows above the others; the selected row's flares lie over its neighbors' edges.
+            .zIndex((dragged ? 2 : 0) + (selected ? 1 : 0))
             .gesture(press(tab.id, index: index, layout: layout))
             .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: true)) }
             .id(tab.id)
     }
 
-    /// The worktree boxes behind their rows, at the rows' target positions (so they move with a drag), each with the
-    /// selected row's shape cut out where it reaches, as drawn (following the pointer while dragged). Positions count
-    /// the pinned tabs' gaps before the first row: taken off here, as the rows' frames start at the list's top.
-    /// Decorative.
+    /// The worktree boxes behind their rows, at the rows' target positions (so they move with a drag; a dragged box, or
+    /// one in a dragged group, follows the pointer with its rows), each with the selected row's shape cut out where it
+    /// reaches, as drawn. Positions are taken off `base`, as the rows' frames start at the list's top. Decorative.
     private func boxes(layout: TabGroupLayout, current: TabGroupLayout.Positions,
                        target: TabGroupLayout.Positions) -> some View {
-        let base = CGFloat(model.pinnedCount) * SidebarItemStyle.spacing
         let flare = TabStripMetrics.flare
         var hole: (start: CGFloat, end: CGFloat) = (0, 0)
         var holeLeading: CGFloat = 0
         if let index = model.selectedIndex, !model.tabs[index].pinned, !model.tabs[index].archived {
-            let y = (model.tabs[index].id == draggedID ? (current.tabs[index] ?? 0) + dragOffset
-                : target.tabs[index] ?? 0) - base
+            // A tab or box drag holds the selected tab (a drag selects the pressed tab), which follows the pointer; a
+            // header drag selects nothing, so the selected row follows it when in the dragged group, else stands at
+            // its target.
+            let y = (inDrag(index) ? (current.tabs[index] ?? 0) + dragOffset : target.tabs[index] ?? 0) - base
             hole = (y - flare, y + SidebarItemStyle.height + flare)
-            holeLeading = layout.group(at: index) == nil ? 0 : VerticalTabsMetrics.groupIndent
+            holeLeading = indent(group(of: index, layout: layout))
         }
         return ZStack {
             ForEach(layout.boxes, id: \.key) { box in
-                if let span = layout.boxSpan(box, at: target) {
+                let follows = followsDrag(box)
+                let drawn = follows
+                    ? layout.boxSpan(box, at: current).map { (start: $0.start + dragOffset, end: $0.end + dragOffset) }
+                    : layout.boxSpan(box, at: target)
+                if let span = drawn {
                     // A grouped box's rows sit right of the group's line.
-                    let leading = layout.group(at: box.range.lowerBound) == nil ? 0 : VerticalTabsMetrics.groupIndent
+                    let leading = indent(group(of: box.range.lowerBound, layout: layout))
                     let shape = WorktreeBoxShape(axis: .vertical,
                                                  start: span.start - base - VerticalTabsMetrics.boxOutset,
                                                  end: span.end - base + VerticalTabsMetrics.boxOutset,
@@ -236,57 +270,151 @@ private struct VerticalTabList: View {
                                                  crossEndInset: VerticalTabsMetrics.boxTrailing,
                                                  holeCrossStart: holeLeading, radius: VerticalTabsMetrics.boxRadius,
                                                  holeRadius: VerticalTabsMetrics.rowRadius, flare: flare)
-                    shape.fill(Palette.worktreeBoxFill)
-                    shape.edge.fill(Palette.worktreeBoxBorder)
+                    ZStack {
+                        shape.fill(Palette.worktreeBoxFill)
+                        shape.edge.fill(Palette.worktreeBoxBorder)
+                    }
+                    // Others slide with their rows; a box that follows the pointer does so without lag.
+                    .animation(dragging && !follows ? animation : nil, value: drag)
                 }
             }
         }
-        .animation(draggedID != nil ? animation : nil, value: dragTarget)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
+    /// The tab at `index` is in the unit being dragged.
+    private func inDrag(_ index: Int) -> Bool {
+        dragging && drag?.range.contains(index) == true
+    }
+
+    /// The group the tab at `index` stands in as drawn: the one it would drop in while dragged.
+    private func group(of index: Int, layout: TabGroupLayout) -> UUID? {
+        inDrag(index) ? drag?.group : layout.group(at: index)?.id
+    }
+
+    /// A row's (or box's) leading room in a group, right of its line.
+    private func indent(_ group: UUID?) -> CGFloat {
+        group == nil ? 0 : VerticalTabsMetrics.groupIndent
+    }
+
+    /// The box moves with the drag: it is the dragged box or in the dragged group (not while one of its rows reorders
+    /// inside it).
+    private func followsDrag(_ box: WorktreeBox) -> Bool {
+        guard dragging, let drag else { return false }
+        if case .tab = drag.unit { return false }
+        return drag.range.contains(box.range.lowerBound)
+    }
+
     /// The tab strip's press, vertically: zero distance, so the tab is selected on mouse-down (⇧/⌘ pick it into the
-    /// multi-selection instead, `TabPress`); past `dragThreshold` it reorders, to the allowed place
-    /// (`WindowModel.moveDestinations`) nearest the pointer.
+    /// multi-selection instead, `TabPress`). Past `dragThreshold` it moves as a `TabArrangement.Unit` to the allowed
+    /// place nearest the pointer (`TabGroupLayout.dragTarget`): a plain row joins or leaves groups; a worktree box's
+    /// row reorders inside its box until the pointer leaves the box, then drags the whole box.
     private func press(_ id: WindowModel.Tab.ID, index: Int, layout: TabGroupLayout) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.listSpace))
             .onChanged { value in
+                // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this row.
                 if pressedID != id {
-                    // A ⌃-click (a right-click) changes nothing and is not taken (its menu may skip `onEnded`).
+                    // A ⌃-click (a right-click) changes nothing and is not taken (its menu may skip `onEnded`), nor
+                    // ever drags.
                     guard TabPress.current.pick(id, in: model) else { return }
                     pressedID = id
                 }
                 let translation = value.translation.height
-                guard draggedID != nil || abs(translation) >= TabStripMetrics.dragThreshold else { return }
-                if draggedID == nil {
+                guard dragging || abs(translation) >= TabStripMetrics.dragThreshold else { return }
+                let entries = model.arrangementEntries
+                if !dragging {
                     // A ⇧/⌘ press turns into a plain drag: the dragged tab is always the selected one, alone.
                     model.clearSelection()
                     model.selectTab(id: id)
-                    draggedID = id
-                    dragFrom = index
-                    dragTarget = index
+                    startDrag(.tab(id), layout: layout, entries: entries)
+                }
+                guard dragging, var next = drag else { return }
+                // Once the pointer leaves its box (as the box stands at rest), a box row drags the whole box, to the
+                // drag's end. A row's frame starts at its position less `base`.
+                if case .tab = next.unit, let box = layout.boxes.first(where: { $0.range.contains(index) }),
+                   let span = layout.boxSpan(box, at: layout.positions(order: Array(entries.indices), moving: nil,
+                                                                      membership: nil)) {
+                    let pointer = value.location.y + base
+                    let unit = TabArrangement.Unit.box(box.key)
+                    if pointer < span.start || pointer > span.end,
+                       let range = TabGroupLayout.range(of: unit, in: entries) {
+                        let group = layout.group(of: unit, in: entries)
+                        next = TabDrag(unit: unit, range: range, index: range.lowerBound, group: group, origin: group)
+                    }
                 }
                 dragOffset = translation
-                let target = layout.nearestDestination(from: dragFrom, count: model.tabs.count,
-                                                       translation: translation,
-                                                       destinations: model.moveDestinations(from: dragFrom))
-                if target != dragTarget { dragTarget = target }
+                retarget(next, translation: translation, layout: layout, entries: entries)
             }
             .onEnded { _ in
                 pressedID = nil
-                guard draggedID != nil else { return }
-                if dragFrom == dragTarget {
-                    withAnimation(animation) {
-                        dragOffset = 0
-                        draggedID = nil
-                    }
+                drop()
+            }
+    }
+
+    /// The tab strip's chip press, vertically: zero distance, so the header tells a click from a drag itself. Released
+    /// before `dragThreshold` it collapses or shows the group, on mouse-up (needed to tell the click from a drag). Past
+    /// it the whole group moves among the top-level places (`TabGroupLayout.dragTarget`), selecting nothing. A ⌃-click
+    /// is a right-click (`RightClickCatcher` opens the popover): never taken, so it never collapses.
+    private func headerPress(_ group: TabGroup, layout: TabGroupLayout) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.listSpace))
+            .onChanged { value in
+                if pressedHeader != group.id {
+                    guard TabPress.current != .secondary else { return }
+                    pressedHeader = group.id
+                }
+                let translation = value.translation.height
+                guard dragging || abs(translation) >= TabStripMetrics.dragThreshold else { return }
+                let entries = model.arrangementEntries
+                if !dragging { startDrag(.group(group.id), layout: layout, entries: entries) }
+                guard dragging, let next = drag else { return }
+                dragOffset = translation
+                retarget(next, translation: translation, layout: layout, entries: entries)
+            }
+            .onEnded { _ in
+                guard pressedHeader == group.id else { return }
+                pressedHeader = nil
+                if dragging {
+                    drop()
                 } else {
-                    draggedID = nil
-                    dragOffset = 0
-                    model.moveTab(from: dragFrom, to: dragTarget)
+                    withAnimation(animation) { model.toggleGroup(group.id) }
                 }
             }
+    }
+
+    /// A drag of `unit` begins where it stands, in its own group.
+    private func startDrag(_ unit: TabArrangement.Unit, layout: TabGroupLayout, entries: [TabArrangement.Entry]) {
+        guard let range = TabGroupLayout.range(of: unit, in: entries) else { return }
+        let group = layout.group(of: unit, in: entries)
+        drag = TabDrag(unit: unit, range: range, index: range.lowerBound, group: group, origin: group)
+        dragging = true
+    }
+
+    /// The drag `next` aimed at the place and group it would drop in, dragged `translation` down the list.
+    private func retarget(_ next: TabDrag, translation: CGFloat, layout: TabGroupLayout,
+                          entries: [TabArrangement.Entry]) {
+        var next = next
+        let target = layout.dragTarget(unit: next.unit, translation: translation, current: next.group,
+                                       entries: entries)
+        next.index = target.index
+        next.group = target.group
+        if next != drag { drag = next }
+    }
+
+    /// Ends a drag: back into its place with the lifted look when it would land where it stands, else moved there.
+    private func drop() {
+        guard dragging, let drag else { return }
+        if drag.index == drag.range.lowerBound, drag.group == drag.origin {
+            withAnimation(animation) {
+                dragOffset = 0
+                dragging = false
+            }
+        } else {
+            // Reset without animation before the move, so the rows render at their new places directly.
+            dragging = false
+            dragOffset = 0
+            model.moveUnit(drag.unit, to: drag.index, group: drag.group)
+        }
     }
 
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
@@ -440,32 +568,33 @@ private struct VerticalTabsStatus: View {
 
 /// A manual group's header above its rows, as Chrome's vertical tabs: a rounded rect in the group's color, a plain
 /// square without a name, else the row's width with the name in white; then the group's line down the left of its rows
-/// (`lineLength` long, from under the header to the last row's end). A click collapses the group to its header alone,
-/// with no line, and shows its rows again; a right click or ⌃-click opens its popover (`TabGroupPopover`).
-private struct VerticalTabGroupHeader: View {
+/// (`lineLength` long, from under the header to the last row's end). `press` (the list's) tells a click from a drag: a
+/// click collapses the group to its header alone, with no line, and shows its rows again; a drag moves the whole group.
+/// A right click or ⌃-click opens its popover (`TabGroupPopover`).
+private struct VerticalTabGroupHeader<Press: Gesture>: View {
     let model: WindowModel
     let group: TabGroup
     let collapsed: Bool
     let lineLength: CGFloat
+    let press: Press
+    /// The click's action, for accessibility (`press` runs it for a real click).
     let onToggle: () -> Void
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: VerticalTabsMetrics.groupHeaderRadius, style: .continuous)
         let named = !group.name.isEmpty
-        Button(action: onToggle) {
-            Text(group.name)
-                .font(VerticalTabsMetrics.groupHeaderFont)
-                .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.horizontal, named ? 8 : 0)
-                .frame(maxWidth: named ? .infinity : VerticalTabsMetrics.groupHeaderHeight, alignment: .leading)
-                .frame(height: VerticalTabsMetrics.groupHeaderHeight)
-                .background(shape.fill(TabGroupColors.chip(group.group.colorIndex)))
-                .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .tabGroupPopover(model: model, groupID: group.id, arrowEdge: .trailing)
+        Text(group.name)
+            .font(VerticalTabsMetrics.groupHeaderFont)
+            .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, named ? 8 : 0)
+            .frame(maxWidth: named ? .infinity : VerticalTabsMetrics.groupHeaderHeight, alignment: .leading)
+            .frame(height: VerticalTabsMetrics.groupHeaderHeight)
+            .background(shape.fill(TabGroupColors.chip(group.group.colorIndex)))
+            .contentShape(shape)
+            .gesture(press)
+            .tabGroupPopover(model: model, groupID: group.id, arrowEdge: .trailing)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .topLeading) {
             if !collapsed {
@@ -479,8 +608,11 @@ private struct VerticalTabGroupHeader: View {
         }
         .padding(.trailing, VerticalTabsMetrics.groupHeaderTrailing)
         .help(group.help(collapsed: collapsed))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(group.accessibilityLabel)
         .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, onToggle)
     }
 }
 

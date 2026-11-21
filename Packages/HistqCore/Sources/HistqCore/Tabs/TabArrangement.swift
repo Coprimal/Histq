@@ -113,6 +113,99 @@ public enum TabArrangement {
         return segments
     }
 
+    /// What a drag moves: one tab, a whole worktree box (the non-archived tabs of its repo), or a whole manual group.
+    public enum Unit: Equatable, Sendable {
+        case tab(UUID)
+        case box(String)
+        case group(UUID)
+    }
+
+    /// The allowed places for `unit` once moved (pass `tabs` in `normalized` order). A place is the index of the
+    /// unit's first tab in the resulting order, that is where its tabs go among the other tabs. The unit stays in the
+    /// pinned or unpinned area, before the archived tab; it never splits a box, nor a group other than
+    /// `targetGroup`; with `targetGroup` set it stays inside that group's tabs (either edge joins it), with nil it stays
+    /// out of every group. A box tab's own unit only reorders inside its box. `targetGroup` is ignored for a pinned
+    /// unit, a box tab's own unit and a `.group` unit (always among top-level places), and when the move leaves the
+    /// target group with no other tab (the unit then keeps it, at any top-level place). Empty for the archived tab.
+    public static func destinations(for unit: Unit, targetGroup: UUID?, in tabs: [Entry]) -> [Int] {
+        let moved = members(of: unit, in: tabs)
+        guard !moved.isEmpty, !moved.contains(where: \.archived) else { return [] }
+        let ids = Set(moved.map(\.id))
+        let rest = tabs.filter { !ids.contains($0.id) }
+
+        if case .tab = unit, let start = boxStart(of: moved[0], in: rest) {
+            let end = rest[start...].firstIndex { $0.repo != moved[0].repo || $0.archived } ?? rest.count
+            return Array(start...end)
+        }
+
+        let pinnedCount = rest.prefix { $0.pinned }.count
+        let normalEnd = rest.firstIndex(where: \.archived) ?? rest.count
+        let pinned = moved[0].pinned
+        var target = pinned ? nil : targetGroup
+        if case .group = unit { target = nil }
+        let span = target.flatMap { group -> ClosedRange<Int>? in
+            guard let first = rest.firstIndex(where: { groupOf($0) == group }),
+                  let last = rest.lastIndex(where: { groupOf($0) == group })
+            else { return nil }
+            return first...(last + 1)
+        }
+        let area = pinned ? 0...pinnedCount : pinnedCount...normalEnd
+        return area.filter { index in
+            if splitsBox(at: index, in: rest) { return false }
+            if let span { return span.contains(index) }
+            return insideGroup(at: index, in: rest) == nil
+        }
+    }
+
+    /// Moves `unit` to `index`, one of `destinations(for:targetGroup:in:)` with `targetGroup` = `group` (pass `tabs`
+    /// in `normalized` order; any other index leaves the order as it is). The unit's tabs take `group`, except a pinned
+    /// tab (never in a group), a `.group` unit (keeps its id) and a box tab's own unit (keeps its box's group).
+    public static func move(unit: Unit, to index: Int, group: UUID?, in tabs: [Entry]) -> Arrangement {
+        guard destinations(for: unit, targetGroup: group, in: tabs).contains(index) else { return normalized(tabs) }
+        var moved = members(of: unit, in: tabs)
+        let ids = Set(moved.map(\.id))
+        var rest = tabs.filter { !ids.contains($0.id) }
+        var keepsGroup = false
+        if case .group = unit { keepsGroup = true }
+        if case .tab = unit, boxStart(of: moved[0], in: rest) != nil { keepsGroup = true }
+        if !keepsGroup {
+            moved = moved.map { entry in
+                var entry = entry
+                entry.group = entry.pinned ? nil : group
+                return entry
+            }
+        }
+        rest.insert(contentsOf: moved, at: index)
+        return normalized(rest)
+    }
+
+    /// The tabs `unit` stands for, in order.
+    private static func members(of unit: Unit, in tabs: [Entry]) -> [Entry] {
+        switch unit {
+        case let .tab(id): tabs.filter { $0.id == id }
+        case let .box(repo): tabs.filter { $0.repo == repo && !$0.archived }
+        case let .group(id): tabs.filter { groupOf($0) == id }
+        }
+    }
+
+    /// Where the rest of `entry`'s box starts in `rest` (the tabs without it), or nil when no other tab shares its box.
+    private static func boxStart(of entry: Entry, in rest: [Entry]) -> Int? {
+        guard let repo = entry.repo, !entry.archived else { return nil }
+        return rest.firstIndex { $0.repo == repo && !$0.archived }
+    }
+
+    /// A place between two tabs of one box.
+    private static func splitsBox(at index: Int, in tabs: [Entry]) -> Bool {
+        guard index > 0, index < tabs.count, let repo = tabs[index].repo else { return false }
+        return tabs[index - 1].repo == repo && !tabs[index].archived && !tabs[index - 1].archived
+    }
+
+    /// The group a place sits strictly inside, between two of its tabs.
+    private static func insideGroup(at index: Int, in tabs: [Entry]) -> UUID? {
+        guard index > 0, index < tabs.count, let group = groupOf(tabs[index]) else { return nil }
+        return groupOf(tabs[index - 1]) == group ? group : nil
+    }
+
     /// The group a tab is drawn in: none for a pinned or archived tab.
     private static func groupOf(_ entry: Entry) -> UUID? {
         entry.pinned || entry.archived ? nil : entry.group
