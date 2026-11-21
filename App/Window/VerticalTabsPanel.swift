@@ -115,6 +115,12 @@ private struct VerticalTabList: View {
                 guard let id else { return }
                 withAnimation(animation) { scroller.scrollTo(id) }
             }
+            .onChange(of: model.groupPopoverID) { _, id in
+                guard let id else { return }
+                // On the next turn (a new group's header is not laid out yet), and unanimated, so the popover
+                // (`TabGroupPopoverAnchor`) anchors to the header where it stops.
+                DispatchQueue.main.async { scroller.scrollTo(id) }
+            }
         }
         .frame(maxHeight: .infinity, alignment: .top)
     }
@@ -148,12 +154,15 @@ private struct VerticalTabList: View {
                 switch item {
                 case .header(let group):
                     // The line runs from under the name to the group's last row's end.
-                    VerticalTabGroupHeader(group: group, collapsed: layout.collapsed.contains(group.key),
+                    VerticalTabGroupHeader(model: model, group: group,
+                                           collapsed: layout.collapsed.contains(group.key),
                                            lineLength: layout.span(of: group.key)
                                                - VerticalTabsMetrics.groupHeaderHeight - 2 * SidebarItemStyle.spacing,
                                            onToggle: { withAnimation(animation) { model.toggleGroup(group.id) } })
                         .offset(y: (target.headers[group.key] ?? 0) - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
+                        // So its popover's opening can scroll it into view.
+                        .id(group.id)
                 case .tab(let index, let tab):
                     row(index: index, tab: tab, layout: layout, current: current, target: target)
                 }
@@ -180,7 +189,8 @@ private struct VerticalTabList: View {
                               iconColor: tab.iconColor,
                               help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color, profileName: profile?.name,
                               groupName: group?.group.name,
-                              selected: selected, dragged: dragged, namespace: namespace,
+                              selected: selected, multiSelected: !selected && model.multiSelection.contains(tab.id),
+                              dragged: dragged, namespace: namespace,
                               onSelect: { model.selectTab(id: tab.id) },
                               onClose: { close(tab.id) })
             .frame(height: SidebarItemStyle.height)
@@ -236,18 +246,23 @@ private struct VerticalTabList: View {
         .accessibilityHidden(true)
     }
 
-    /// The tab strip's press, vertically: zero distance, so the tab is selected on mouse-down; past
-    /// `dragThreshold` it reorders, to the allowed place (`WindowModel.moveDestinations`) nearest the pointer.
+    /// The tab strip's press, vertically: zero distance, so the tab is selected on mouse-down (⇧/⌘ pick it into the
+    /// multi-selection instead, `TabPress`); past `dragThreshold` it reorders, to the allowed place
+    /// (`WindowModel.moveDestinations`) nearest the pointer.
     private func press(_ id: WindowModel.Tab.ID, index: Int, layout: TabGroupLayout) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 if pressedID != id {
+                    // A ⌃-click (a right-click) changes nothing and is not taken (its menu may skip `onEnded`).
+                    guard TabPress.current.pick(id, in: model) else { return }
                     pressedID = id
-                    model.selectTab(id: id)
                 }
                 let translation = value.translation.height
                 guard draggedID != nil || abs(translation) >= TabStripMetrics.dragThreshold else { return }
                 if draggedID == nil {
+                    // A ⇧/⌘ press turns into a plain drag: the dragged tab is always the selected one, alone.
+                    model.clearSelection()
+                    model.selectTab(id: id)
                     draggedID = id
                     dragFrom = index
                     dragTarget = index
@@ -381,7 +396,8 @@ private struct VerticalArchiveFooter: View {
                               iconColor: tab.iconColor,
                               help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
                               profileName: profile?.name, groupName: nil,
-                              selected: tab.id == model.selectedTabID, dragged: false, namespace: namespace,
+                              selected: tab.id == model.selectedTabID, multiSelected: false, dragged: false,
+                              namespace: namespace,
                               onSelect: { model.selectTab(id: tab.id) },
                               onClose: { TabMenu.close(tab.id, model) })
             .frame(height: SidebarItemStyle.height)
@@ -396,14 +412,14 @@ private struct VerticalArchiveFooter: View {
             .id(tab.id)
     }
 
-    /// Zero distance, so the row is selected on mouse-down (a tap would wait for mouse-up); no drag reorder.
+    /// Zero distance, so the row is selected on mouse-down (a tap would wait for mouse-up); no drag reorder. ⇧/⌘
+    /// press it as a plain click, ⌃ leaves everything alone (`TabPress.pickAlone`).
     private func press(_ id: WindowModel.Tab.ID) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { _ in
                 // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this row.
-                if pressedID != id {
+                if pressedID != id, TabPress.current.pickAlone(id, in: model) {
                     pressedID = id
-                    model.selectTab(id: id)
                 }
             }
             .onEnded { _ in pressedID = nil }
@@ -425,8 +441,9 @@ private struct VerticalTabsStatus: View {
 /// A manual group's header above its rows, as Chrome's vertical tabs: a rounded rect in the group's color, a plain
 /// square without a name, else the row's width with the name in white; then the group's line down the left of its rows
 /// (`lineLength` long, from under the header to the last row's end). A click collapses the group to its header alone,
-/// with no line, and shows its rows again.
+/// with no line, and shows its rows again; a right click or ⌃-click opens its popover (`TabGroupPopover`).
 private struct VerticalTabGroupHeader: View {
+    let model: WindowModel
     let group: TabGroup
     let collapsed: Bool
     let lineLength: CGFloat
@@ -448,6 +465,7 @@ private struct VerticalTabGroupHeader: View {
                 .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .tabGroupPopover(model: model, groupID: group.id, arrowEdge: .trailing)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .topLeading) {
             if !collapsed {
@@ -486,6 +504,8 @@ private struct VerticalTabRow: View {
     /// The tab's manual group's name (`WindowModel.manualGroups`); nil outside a group or for an unnamed one.
     let groupName: String?
     let selected: Bool
+    /// In the multi-selection (`WindowModel.multiSelection`) but not the shown tab: a dim capsule.
+    let multiSelected: Bool
     let dragged: Bool
     let namespace: Namespace.ID
     let onSelect: () -> Void
@@ -521,9 +541,9 @@ private struct VerticalTabRow: View {
                     .fill(Palette.sheet)
                     .padding(.vertical, -TabStripMetrics.flare)
                     .matchedGeometryEffect(id: "selectedTab", in: namespace)
-            } else if hovered || dragged {
+            } else if multiSelected || hovered || dragged {
                 Capsule()
-                    .fill(Palette.hoverFill)
+                    .fill(multiSelected ? Palette.multiSelectFill : Palette.hoverFill)
                     .padding(.trailing, VerticalTabsMetrics.hoverTrailing)
             }
         }
@@ -551,7 +571,7 @@ private struct VerticalTabRow: View {
 
 /// The pinned tabs (`WindowModel.pinnedCount`, first in `tabs`) as a grid of icon cells above the rows, about 4 to a
 /// row: each its `TabIcon` (the emoji, else its book) with the profile's dot. The selected cell sits on the sheet's
-/// color, a hovered one on a subtle fill, a worktree box's cells on the box's fill. A press selects on mouse-down; the
+/// color, a multi-selected one on the multi-select fill, a hovered one on a subtle fill, a worktree box's cells on the box's fill. A press selects on mouse-down; the
 /// cells do not reorder (the top strip does).
 private struct VerticalPinnedGrid: View {
     let model: WindowModel
@@ -585,6 +605,7 @@ private struct VerticalPinnedGrid: View {
                                   profileColor: profile?.color, profileName: profile?.name,
                                   boxed: boxed,
                                   selected: tab.id == model.selectedTabID,
+                                  multiSelected: tab.id != model.selectedTabID && model.multiSelection.contains(tab.id),
                                   onSelect: { model.selectTab(id: tab.id) })
             .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
             .gesture(press(tab.id))
@@ -594,13 +615,13 @@ private struct VerticalPinnedGrid: View {
             .id(tab.id)
     }
 
-    /// Selects the tab on mouse-down, once per press; no drag.
+    /// Selects the tab on mouse-down, once per press; no drag. ⇧/⌘ press it as a plain click (a cell joins the
+    /// multi-selection only through a ⇧-click on a row), ⌃ leaves everything alone (`TabPress.pickAlone`).
     private func press(_ id: WindowModel.Tab.ID) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { _ in
-                guard pressedID != id else { return }
+                guard pressedID != id, TabPress.current.pickAlone(id, in: model) else { return }
                 pressedID = id
-                model.selectTab(id: id)
             }
             .onEnded { _ in pressedID = nil }
     }
@@ -620,6 +641,8 @@ private struct VerticalPinnedCell: View {
     /// The tab is in a worktree box: the box's fill when not selected.
     let boxed: Bool
     let selected: Bool
+    /// In the multi-selection but not the selected tab: the multi-select fill.
+    let multiSelected: Bool
     let onSelect: () -> Void
     @State private var hovered = false
 
@@ -636,6 +659,8 @@ private struct VerticalPinnedCell: View {
             .background {
                 if selected {
                     shape.fill(Palette.sheet)
+                } else if multiSelected {
+                    shape.fill(Palette.multiSelectFill)
                 } else if hovered {
                     shape.fill(Palette.hoverFill)
                 } else if boxed {

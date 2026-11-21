@@ -84,6 +84,20 @@ enum TabGroupColors {
         return (colorIndex % count + count) % count
     }
 
+    /// A dot in the group's line color, for its entry in a tab's Add Tab to Group menu. Not a template image, so the
+    /// menu keeps its color.
+    static func dot(_ colorIndex: Int) -> NSImage {
+        let color = NSColor(line(colorIndex))
+        let image = NSImage(size: NSSize(width: 10, height: 10), flipped: false) { _ in
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 8, height: 8)).fill()
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = "Group color"
+        return image
+    }
+
     /// The archive's lane: index 1, the orange (#FC9F30), whatever the repos' groups take.
     private static let archiveLane = 1
 
@@ -234,6 +248,12 @@ private struct TabTrack: View {
                         // has laid it out, so scrolling now would stop short of it.
                         DispatchQueue.main.async { withAnimation(animation) { scroller.scrollTo(id) } }
                     }
+                    .onChange(of: model.groupPopoverID) { _, id in
+                        guard let id else { return }
+                        // On the next turn, as a selection (a new group's chip is not laid out yet), and unanimated,
+                        // so the popover (`TabGroupPopoverAnchor`) anchors to the chip where it stops.
+                        DispatchQueue.main.async { scroller.scrollTo(id) }
+                    }
                 }
                 Spacer(minLength: 0)
                 scrollArrows
@@ -300,7 +320,7 @@ private struct TabTrack: View {
                     let chipX = target.headers[group.key] ?? 0
                     // The selected tab, flares included, along the line (outside it when no tab of the group is).
                     let opening = selectedX.map { $0 - chipX - TabStripMetrics.flare } ?? -.greatestFiniteMagnitude
-                    TabGroupChip(group: group, collapsed: layout.collapsed.contains(group.key),
+                    TabGroupChip(model: model, group: group, collapsed: layout.collapsed.contains(group.key),
                                  width: layout.headerExtents[group.key] ?? 0,
                                  span: layout.span(of: group.key), opening: opening,
                                  openingWidth: (selected.map(layout.extent(of:)) ?? layout.tabExtent)
@@ -309,6 +329,8 @@ private struct TabTrack: View {
                         .padding(.horizontal, TabStripMetrics.flare)
                         .offset(x: chipX - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
+                        // So its popover's opening can scroll it into view.
+                        .id(group.id)
                 case .tab(let index, let tab):
                     tabView(index: index, tab: tab, layout: layout, current: current, target: target)
                 }
@@ -373,7 +395,8 @@ private struct TabTrack: View {
                        profileColor: profile?.color,
                        profileName: profile?.name, groupName: group?.group.name,
                        groupColor: group.map { TabGroupColors.line($0.group.colorIndex) },
-                       selected: selected, dragged: dragged, namespace: namespace,
+                       selected: selected, multiSelected: !selected && model.multiSelection.contains(tab.id),
+                       dragged: dragged, namespace: namespace,
                        onSelect: { model.selectTab(id: tab.id) },
                        onClose: { close(tab.id) })
             .frame(width: layout.extent(of: index), height: TabStripMetrics.tabHeight)
@@ -390,19 +413,25 @@ private struct TabTrack: View {
             .id(tab.id)
     }
 
-    /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); past `dragThreshold` it
-    /// reorders, to the allowed place (`WindowModel.moveDestinations`) nearest the pointer.
+    /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); ⇧/⌘ pick it into the
+    /// multi-selection instead (`TabPress`). Past `dragThreshold` it reorders, to the allowed place
+    /// (`WindowModel.moveDestinations`) nearest the pointer.
     private func press(_ id: WindowModel.Tab.ID, index: Int, layout: TabGroupLayout) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this tab.
                 if pressedID != id {
+                    // A ⌃-click is a right-click: its menu acts on the tab or the multi-selection, so nothing changes
+                    // and the press is not taken (its menu may skip `onEnded`), nor ever drags.
+                    guard TabPress.current.pick(id, in: model) else { return }
                     pressedID = id
-                    model.selectTab(id: id)
                 }
                 let translation = value.translation.width
                 guard draggedID != nil || abs(translation) >= TabStripMetrics.dragThreshold else { return }
                 if draggedID == nil {
+                    // A ⇧/⌘ press turns into a plain drag: the dragged tab is always the selected one, alone.
+                    model.clearSelection()
+                    model.selectTab(id: id)
                     draggedID = id
                     dragFrom = index
                     dragTarget = index
@@ -529,7 +558,7 @@ private struct ArchiveCluster: View {
                        symbol: TabIcon.symbol(of: tab), pinned: false, iconColor: tab.iconColor,
                        profileColor: profile?.color, profileName: profile?.name, groupName: nil,
                        groupColor: TabGroupColors.archiveLine,
-                       selected: selected, dragged: false, namespace: namespace,
+                       selected: selected, multiSelected: false, dragged: false, namespace: namespace,
                        onSelect: { model.selectTab(id: tab.id) },
                        onClose: { TabMenu.close(tab.id, model) })
             .frame(width: TabStripMetrics.archivedTabWidth, height: TabStripMetrics.tabHeight)
@@ -545,27 +574,66 @@ private struct ArchiveCluster: View {
             .id(tab.id)
     }
 
-    /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); no drag reorder.
+    /// Zero distance, so the tab is selected on mouse-down (a tap would wait for mouse-up); no drag reorder. It is
+    /// never in a multi-selection: ⇧/⌘ press it as a plain click, ⌃ leaves everything alone (`TabPress.pickAlone`).
     private func press(_ id: WindowModel.Tab.ID) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { _ in
                 // `!= id` rather than `== nil`: a press that never ends (`onEnded` skipped) blocks only this tab.
-                if pressedID != id {
+                if pressedID != id, TabPress.current.pickAlone(id, in: model) {
                     pressedID = id
-                    model.selectTab(id: id)
                 }
             }
             .onEnded { _ in pressedID = nil }
     }
 }
 
+/// What a mouse-down on a tab does, from the modifier keys held as it goes down: a plain click ends the
+/// multi-selection and selects the tab; ⇧ extends the multi-selection to it and ⌘ toggles it, neither changing the
+/// shown tab; ⌃ (a right-click on macOS) changes nothing, so the tab's menu can act on the multi-selection.
+enum TabPress {
+    case plain, extend, toggle, secondary
+
+    static var current: TabPress {
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.control) { return .secondary }
+        if flags.contains(.command) { return .toggle }
+        if flags.contains(.shift) { return .extend }
+        return .plain
+    }
+
+    /// Applies the press to the tab `id` of the tab list; false for a ⌃ press, which does nothing.
+    @MainActor
+    func pick(_ id: WindowModel.Tab.ID, in model: WindowModel) -> Bool {
+        switch self {
+        case .plain:
+            model.clearSelection()
+            model.selectTab(id: id)
+        case .extend: model.extendSelection(to: id)
+        case .toggle: model.toggleSelection(id)
+        case .secondary: return false
+        }
+        return true
+    }
+
+    /// Applies the press to a tab that is never grouped (a vertical pinned cell, the popped-out archived tab): ⇧/⌘
+    /// count as a plain click; false for a ⌃ press, which does nothing.
+    @MainActor
+    func pickAlone(_ id: WindowModel.Tab.ID, in model: WindowModel) -> Bool {
+        (self == .secondary ? self : .plain).pick(id, in: model)
+    }
+}
+
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
-/// Tabs to the Right (Below), each off when it has no tab to close (they never close the popped-out archived tab), then
+/// Tabs to the Right (Below), each off when it has no tab to close (they never close the popped-out archived tab), with
+/// Close Tabs on a multi-selection; then the group items (`groupEntries`): Add Tab to New Group, Add Tab to Group ›
+/// and Remove from Group, plural on a multi-selection, which they act on whole when the tab is in it; then
 /// Copy Path (off for a Welcome tab), Reveal in Finder (the tab's repo or worktree folder; off for a Welcome tab or a
 /// missing folder), Set Alias…, Set Emoji…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Worktree Tabs / Unpin
 /// Worktree Tabs for a tab of a worktree box, which pins with it) and Archive This Tab, these five off for a Welcome
 /// tab. On the popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the
-/// Right (Below) are off.
+/// Right (Below) are off. Every item but Close Tabs and the group items acts on the right-clicked tab alone, even in a
+/// multi-selection.
 @MainActor
 enum TabMenu {
     static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
@@ -577,13 +645,18 @@ enum TabMenu {
         let pinTitle = (tab.pinned ? "Unpin " : "Pin ") + (boxed ? "Worktree Tabs" : "Tab")
         // The normal tabs: the popped-out archived tab, last, is never closed with others.
         let normalCount = model.tabs.count - (model.archivedOut == nil ? 0 : 1)
-        return [
-            .action("Close Tab") { close(id, model) },
+        // A right-click in a multi-selection acts on all of it; outside it, on this tab alone (the selection stays).
+        let targets = model.multiSelection.contains(id) ? model.multiSelection : [id]
+        let closeAll: [MenuEntry] = targets.count > 1
+            ? [.action("Close Tabs") { if !model.closeTabs(targets) { model.closeWindow() } }] : []
+        return [.action("Close Tab") { close(id, model) }] + closeAll + [
             .action("Close Other Tabs", enabled: normalCount - (tab.archived ? 0 : 1) > 0) {
                 model.closeOtherTabs(id)
             },
             .action(vertical ? "Close Tabs Below" : "Close Tabs to the Right",
                     enabled: !tab.archived && index < normalCount - 1) { model.closeTabs(after: id) },
+            .separator,
+        ] + groupEntries(targets, model) + [
             .separator,
             .action("Copy Path", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository.") {
                 if let url = tab.repoURL { RepoMenus.copy(url.path(percentEncoded: false)) }
@@ -608,6 +681,49 @@ enum TabMenu {
             },
             archive(id, tab, isRepo, model),
         ] + profile(id, tab, revealable, model)
+    }
+
+    /// Add Tab(s) to New Group (its popover opens), Add Tab(s) to Group › (each other group: its color dot and its
+    /// name, else its first two tabs' titles and "+N" for more) and Remove from Group (when one of the tabs is
+    /// grouped), for the tabs `ids`; the model brings each worktree tab's whole box. All off when a tab is pinned or is
+    /// the popped-out archived tab, which are never grouped.
+    private static func groupEntries(_ ids: Set<WindowModel.Tab.ID>, _ model: WindowModel) -> [MenuEntry] {
+        let tabs = model.tabs.filter { ids.contains($0.id) }
+        let noun = ids.count > 1 ? "Tabs" : "Tab"
+        let blocked = tabs.contains(where: \.pinned) ? "Unpin the tab to group it."
+            : tabs.contains(where: \.archived) ? "Unarchive the tab to group it." : nil
+        let groupIDs = Set(tabs.compactMap(\.groupID))
+        // A group every tab is already in is left out: adding to it would do nothing.
+        let others = model.manualGroups.filter { group in !tabs.allSatisfy { $0.groupID == group.id } }
+        var entries: [MenuEntry] = [
+            .action("Add \(noun) to New Group", enabled: blocked == nil, toolTip: blocked) { [weak model] in
+                guard let model, let group = model.createGroup(from: ids) else { return }
+                model.groupPopoverID = group
+            },
+        ]
+        if !others.isEmpty {
+            let title = "Add \(noun) to Group"
+            entries.append(blocked.map { .action(title, enabled: false, toolTip: $0) {} }
+                ?? .submenu(title, others.map { group in
+                    .action(groupTitle(group, model), image: TabGroupColors.dot(group.group.colorIndex)) {
+                        [weak model] in model?.addToGroup(group.id, ids: ids)
+                    }
+                }))
+        }
+        if !groupIDs.isEmpty {
+            entries.append(.action("Remove from Group", enabled: blocked == nil, toolTip: blocked) { [weak model] in
+                model?.removeFromGroup(ids: ids)
+            })
+        }
+        return entries
+    }
+
+    /// A group's entry in Add Tab to Group ›: its name, else its first two tabs' titles, with "+N" for the rest.
+    private static func groupTitle(_ group: TabGroup, _ model: WindowModel) -> String {
+        if !group.name.isEmpty { return group.name }
+        let titles = model.tabs[group.range].map(\.title)
+        let more = titles.count > 2 ? " +\(titles.count - 2)" : ""
+        return titles.prefix(2).joined(separator: ", ") + more
     }
 
     /// Archive This Tab (off for a Welcome tab), or Unarchive Tab on the popped-out archived tab.
@@ -660,8 +776,9 @@ enum TabMenu {
 /// A manual group's chip before its first tab: a rounded rect in the group's color, a plain square without a name, else
 /// wider with the name inside; the group's line under it and its tabs (`span` long), open at `opening` for
 /// `openingWidth`: the selected tab, its flares included. A click collapses the group to the chip alone, with no line,
-/// and shows its tabs again, as Chrome's.
+/// and shows its tabs again, as Chrome's; a right click or ⌃-click opens its popover (`TabGroupPopover`).
 private struct TabGroupChip: View {
+    let model: WindowModel
     let group: TabGroup
     let collapsed: Bool
     let width: CGFloat
@@ -684,6 +801,7 @@ private struct TabGroupChip: View {
                 .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .tabGroupPopover(model: model, groupID: group.id, arrowEdge: .bottom)
         .frame(height: TabStripMetrics.tabHeight)
         .overlay(alignment: .bottomLeading) {
             if !collapsed {
@@ -746,6 +864,8 @@ struct TabItem: View {
     let groupName: String?
     let groupColor: Color?
     let selected: Bool
+    /// In the multi-selection (`WindowModel.multiSelection`) but not the shown tab: a dim capsule.
+    let multiSelected: Bool
     let dragged: Bool
     let namespace: Namespace.ID
     let onSelect: () -> Void
@@ -776,7 +896,7 @@ struct TabItem: View {
                         .matchedGeometryEffect(id: "selectedTab", in: namespace)
                 } else {
                     Capsule(style: .circular)
-                        .fill(hovered || dragged ? Palette.tabFill : .clear)
+                        .fill(multiSelected ? Palette.multiSelectFill : hovered || dragged ? Palette.tabFill : .clear)
                         .padding(.bottom, 3)
                 }
             }

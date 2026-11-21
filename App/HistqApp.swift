@@ -298,6 +298,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         DocumentWindow.configure(window, model: model) { [weak self] window in self?.openNativeTab(of: window) }
         model.closeWindow = { [weak window] in window?.performClose(nil) }
+        // A group's menu › Move Group to New Window: its tabs open in a new window, as a session restore does.
+        model.openWindow = { [weak self] tabs, groups, selected, missing in
+            guard let self else { return }
+            let entry = newWindow()
+            entry.model.restore(tabs, selected: selected, missing: missing, groups: groups)
+            show(entry)
+        }
         model.window = window
         let entry = Entry(window: window, model: model, state: state, toolbar: toolbar)
         entry.tabGroupObservation = window.observe(\.tabGroup) { _, _ in

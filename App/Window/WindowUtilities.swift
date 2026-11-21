@@ -133,6 +133,72 @@ struct MiddleClickCatcher: NSViewRepresentable {
     }
 }
 
+/// A right click, or a ⌃-click, pressed on the view it backs runs `action` (a tab group's chip opens its popover).
+/// Built as `MiddleClickCatcher`: a local monitor, live while the view is in a window, takes the press when it lands in
+/// the view's visible part and `action` returns true (false, as under a modal, lets it go on); any other click goes on
+/// as before (the view takes no hits). A taken ⌃-click's mouse-up is taken too, so the view under it (the chip's
+/// collapse button) never sees half a click.
+struct RightClickCatcher: NSViewRepresentable {
+    /// Whether it took the click.
+    let action: () -> Bool
+
+    func makeNSView(context: Context) -> CatcherView { CatcherView(action: action) }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) { nsView.action = action }
+
+    final class CatcherView: NSView {
+        var action: () -> Bool
+        private var monitor: Any?
+        /// A ⌃-click's mouse-down was taken: its mouse-up is too.
+        private var takingMouseUp = false
+
+        init(action: @escaping () -> Bool) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            takingMouseUp = false
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown, .leftMouseUp]) {
+                [weak self] event in
+                let type = event.type
+                let control = event.modifierFlags.contains(.control)
+                let eventWindow = event.window
+                let point = event.locationInWindow
+                let taken = MainActor.assumeIsolated {
+                    guard let self else { return false }
+                    if type == .leftMouseUp {
+                        guard self.takingMouseUp else { return false }
+                        self.takingMouseUp = false
+                        return true
+                    }
+                    // A new press: a taken ⌃-click's mouse-up may never have come (released outside the app).
+                    if type == .leftMouseDown { self.takingMouseUp = false }
+                    guard type == .rightMouseDown || control, eventWindow === self.window,
+                          !self.isHiddenOrHasHiddenAncestor
+                    else { return false }
+                    // Both: the visible rect alone can reach past the view's bounds (seen in the tab strip).
+                    let local = self.convert(point, from: nil)
+                    guard self.bounds.contains(local), self.visibleRect.contains(local) else { return false }
+                    guard self.action() else { return false }
+                    if type == .leftMouseDown { self.takingMouseUp = true }
+                    return true
+                }
+                return taken ? nil : event
+            }
+        }
+
+        override nonisolated func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
 #if DEBUG
 // MARK: - Double-click probe (DEBUG)
 
