@@ -346,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let windows = group.map { saved in
                 let entry = newWindow(frame: saved.frame)
                 entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded.missing,
-                                    groups: saved.tabGroups)
+                                    groups: saved.manualTabGroups)
                 return entry
             }
             // The group's selected tab goes on screen first (no other tab flashes); the others join it in their saved
@@ -389,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     isSelectedInGroup: tabGroup.map { $0.selectedWindow === window } ?? true,
                     tabs: entry.model.savedTabs,
                     selectedTab: entry.model.selectedIndex,
-                    tabGroups: entry.model.savedTabGroups))
+                    manualTabGroups: entry.model.savedTabGroups))
             }
         }
         return SavedSession(windows: windows)

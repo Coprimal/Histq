@@ -649,7 +649,7 @@ final class WindowModel {
             } else if entry.path != nil {
                 // An archived tab is in no group.
                 var entry = entry
-                entry.group = nil
+                entry.tabGroup = nil
                 if offset == selected { popped = entry } else { archivedTabs.append(entry) }
             }
         }
@@ -662,7 +662,7 @@ final class WindowModel {
             return Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
                        isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias, emoji: tab.emoji,
                        pinned: archived ? false : tab.pinned ?? false, iconColor: tab.iconColor, archived: archived,
-                       groupID: archived ? nil : tab.group)
+                       groupID: archived ? nil : tab.tabGroup)
         }
         restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), entries))
         if tabs.isEmpty { tabs = [Tab()] }
@@ -713,14 +713,14 @@ final class WindowModel {
             saved.pinned = tab.pinned ? true : nil
             saved.iconColor = tab.iconColor
             saved.archived = tab.archived ? true : nil
-            saved.group = tab.groupID
+            saved.tabGroup = tab.groupID
             return saved
         }
         // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
         let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
         return SavedTab(path: path, profile: profile, alias: tab.alias, emoji: tab.emoji,
                         pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil,
-                        group: tab.groupID)
+                        tabGroup: tab.groupID)
     }
 
     /// "Repo not found" › Locate: the tab opens `url` instead (the tab that already shows it when there is one, or
@@ -892,7 +892,7 @@ final class WindowModel {
             var entry = saved(tab)
             entry.archived = true
             entry.pinned = nil
-            entry.group = nil
+            entry.tabGroup = nil
             archivedTabs.insert(entry, at: 0)
         } else if tab.repoURL != nil, !tab.isMissing {
             let group = tab.groupID.flatMap { id in groups.first { $0.id == id } }

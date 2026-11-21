@@ -39,7 +39,7 @@ struct SavedWindow: Codable, Equatable, Sendable {
     /// The selected app tab's index.
     var selectedTab: Int?
     /// The window's manual tab groups, in order; nil when it has none. Absent from files of older builds.
-    var tabGroups: [SavedTabGroup]?
+    var manualTabGroups: [SavedTabGroup]?
 
     var frame: NSRect { NSRect(x: x, y: y, width: width, height: height) }
 }
@@ -65,8 +65,8 @@ struct SavedTab: Codable, Equatable, Sendable {
     /// written as nil. Archived entries come after every other tab; the selected one is the tab popped out beside the
     /// archive button. Absent from files of older builds.
     var archived: Bool?
-    /// The manual group it is in (`SavedWindow.tabGroups`); nil for none. Absent from files of older builds.
-    var group: UUID?
+    /// The manual group it is in (`SavedWindow.manualTabGroups`); nil for none. Absent from files of older builds.
+    var tabGroup: UUID?
 
     /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab: an archived tab's row in the archive's
     /// list.
