@@ -119,13 +119,15 @@ public enum RefReader {
     /// Reads the refs and HEAD of the repository (worktree) at `cwd`. `env` must be the read environment
     /// built by `GitInvocation.readEnvironment` for this `cwd`. Throws `GitError`.
     public static func read(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> Refs {
-        let output = try await runner.run(arguments, cwd: cwd, env: env).text
-        let headRef = try await runner.run(
-            ["symbolic-ref", "-q", "HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1]
-        ).text.trimmingCharacters(in: .newlines)
-        let headCommit = try await runner.run(
-            ["rev-parse", "-q", "--verify", "HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1]
-        ).text.trimmingCharacters(in: .newlines)
+        // The three run at once; awaited in this order, so a failure throws the same error as one after another.
+        async let refs = runner.run(arguments, cwd: cwd, env: env)
+        async let symbolic = runner.run(
+            ["symbolic-ref", "-q", "HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1])
+        async let verified = runner.run(
+            ["rev-parse", "-q", "--verify", "HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1])
+        let output = try await refs.text
+        let headRef = try await symbolic.text.trimmingCharacters(in: .newlines)
+        let headCommit = try await verified.text.trimmingCharacters(in: .newlines)
         return parse(output, headRef: headRef, headCommit: headCommit)
     }
 

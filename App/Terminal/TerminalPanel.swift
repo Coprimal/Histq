@@ -144,30 +144,28 @@ final class RepoTerminal: NSObject {
 
     // MARK: Focus
 
-    /// Gives the terminal the keyboard focus when an open asked for it and the view is in a window now.
+    /// Gives the terminal the keyboard focus when an open asked for it and the view is in a window now, shown (a hidden
+    /// tab's request waits).
     func focusIfRequested() {
-        guard wantsFocus, let window = view.window else { return }
+        guard wantsFocus, let window = view.window, !view.isHiddenOrHasHiddenAncestor else { return }
         wantsFocus = false
         window.makeFirstResponder(view)
     }
 
-    /// The drawer closes: the graph gets the focus when the terminal had it (AppKit would leave it on the window, so
-    /// the arrow keys would do nothing). A focused field elsewhere keeps it.
-    func returnFocusToGraph() {
-        guard let window = view.window else { return }
+    /// The drawer closes: the tab's own graph table (`graph`) gets the focus when the terminal had it (AppKit would
+    /// leave it on the window, so the arrow keys would do nothing). A focused field elsewhere keeps it, and so does
+    /// anything when the tab's graph is not shown in this window; a hidden tab's drawer leaves it alone. `repo` names
+    /// the tab in the timing line.
+    func returnFocusToGraph(_ graph: NSView?, repo: String) {
+        guard let window = view.window, !view.isHiddenOrHasHiddenAncestor else { return }
         if let responder = window.firstResponder as? NSView, responder !== view, !responder.isDescendant(of: view) {
-            return
+            return UITiming.focus(repo, "none")
         }
-        guard let content = window.contentView, let graph = Self.descendant(of: content, as: GraphTableView.self)
-        else { return }
+        guard let graph, graph.window === window, !graph.isHiddenOrHasHiddenAncestor else {
+            return UITiming.focus(repo, "none")
+        }
         window.makeFirstResponder(graph)
-    }
-
-    private static func descendant<T: NSView>(of view: NSView, as type: T.Type) -> T? {
-        for subview in view.subviews {
-            if let match = subview as? T ?? descendant(of: subview, as: type) { return match }
-        }
-        return nil
+        UITiming.focus(repo, "graph")
     }
 
     // MARK: Shell and environment
@@ -418,14 +416,17 @@ struct TerminalDrawer: View {
 /// taking the drawer down only detaches it.
 private struct TerminalHost: NSViewRepresentable {
     let terminal: RepoTerminal
+    @Environment(\.tabIsShown) private var tabIsShown
 
     func makeNSView(context: Context) -> TerminalContainerView {
         let container = TerminalContainerView()
+        container.isHidden = !tabIsShown
         container.attach(terminal)
         return container
     }
 
     func updateNSView(_ container: TerminalContainerView, context: Context) {
+        if container.isHidden == tabIsShown { container.isHidden = !tabIsShown }
         if terminal.view.superview !== container { container.attach(terminal) }
     }
 

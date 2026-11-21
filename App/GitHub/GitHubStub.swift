@@ -342,7 +342,26 @@ enum GitHubStub {
 final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func stopLoading() {}
+    /// The delayed answer's timer (`-HistqGitHubStubDelay`), dropped when the request is cancelled.
+    private var delayTimer: Timer?
+
+    override func stopLoading() {
+        delayTimer?.invalidate()
+        delayTimer = nil
+    }
+
+    /// DEBUG `-HistqGitHubStubDelay "<ms>[,<path part>=<ms>…]"`: every stub answer comes `ms` late, or the ms of the
+    /// first path part its URL's path contains; none: at once.
+    private static let delays: (all: Int, parts: [(String, Int)]) = {
+        var all = 0
+        var parts: [(String, Int)] = []
+        for item in (AppState.launchFlag("-HistqGitHubStubDelay") ?? "").split(separator: ",") {
+            let pair = item.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            if pair.count == 2, let ms = Int(pair[1]) { parts.append((pair[0], ms)) }
+            else if let ms = Int(pair[0]) { all = ms }
+        }
+        return (all, parts)
+    }()
 
     override func startLoading() {
         let reply = request.url.map {
@@ -356,9 +375,17 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        let answer: @Sendable () -> Void = { [self] in
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(reply.body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        let delay = Self.delays.parts.first { url.path.contains($0.0) }?.1 ?? Self.delays.all
+        guard delay > 0 else { return answer() }
+        // On the loading thread's run loop, where URLSession expects the client calls.
+        let timer = Timer(timeInterval: Double(delay) / 1000, repeats: false) { _ in answer() }
+        delayTimer = timer
+        RunLoop.current.add(timer, forMode: .common)
     }
 
     /// A request's body: URLSession hands it to the protocol as a stream.

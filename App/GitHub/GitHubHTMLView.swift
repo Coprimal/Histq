@@ -15,6 +15,9 @@ import WebKit
 /// the page's body: GitHub's `body_html` as GitHub sanitized it, and markup Histq built around it with every other
 /// value passed through `GitHubHTML.escape`.
 struct GitHubHTMLView: View {
+    /// Starts a web view with a blank page, for the next new page to take (a pull request's while it loads).
+    static func warmUp() { GitHubHTMLPage.warmUp() }
+
     let html: String
     /// A new value measures the page again without a load or a width change (a quiet reload of the same page).
     var measureKey = 0
@@ -96,15 +99,57 @@ private struct GitHubHTMLPage: NSViewRepresentable {
     let patch: GitHubHTMLPatch
     let onLoad: @MainActor () -> Void
     let onMeasure: @MainActor (CGFloat, [GitHubHTMLSlot]) -> Void
+    @Environment(\.tabIsShown) private var tabIsShown
 
     /// One store for every page: non-persistent (no cookies, no cache on disk), and one session for all of them
     /// instead of one per page. Each page still starts its own web content process (measured: 41 pages, 41
     /// processes), and there is no process pool to share: `WKProcessPool` has had no effect since macOS 12.
     private static let dataStore = WKWebsiteDataStore.nonPersistent()
+    /// The last 2 loaded pages that left the screen, newest last, each with its coordinator (still its delegate, so a
+    /// parked page stays locked down): the same page shown again (a pull request opened again) takes its view back
+    /// instead of starting a new web content process and loading again. Memory only.
+    private static var parked: [(view: MeasuredWebView, coordinator: Coordinator)] = []
+    /// A blank page started while a pull request loads (`GitHubHTMLView.warmUp`), with its own coordinator as its
+    /// delegate: the next new page takes it once its load finished, so its web content process runs already.
+    private static var warm: (view: MeasuredWebView, coordinator: Coordinator)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    /// Starts the warm view, unless one is there.
+    static func warmUp() {
+        guard warm == nil else { return }
+        let coordinator = Coordinator()
+        let view = newView()
+        view.navigationDelegate = coordinator
+        view.uiDelegate = coordinator
+        coordinator.expectsLoad = true
+        view.loadHTMLString(GitHubHTML.document(body: ""), baseURL: nil)
+        warm = (view, coordinator)
+    }
+
     func makeNSView(context: Context) -> MeasuredWebView {
+        let view: MeasuredWebView
+        if let index = Self.parked.lastIndex(where: { $0.view.parkedHTML == html }) {
+            view = Self.parked.remove(at: index).view
+        } else if let warm = Self.warm, warm.coordinator.isLoaded {
+            Self.warm = nil
+            view = warm.view
+        } else {
+            view = Self.newView()
+        }
+        view.isHidden = !tabIsShown
+        context.coordinator.isShown = tabIsShown
+        view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
+        view.onWidthChange = { [weak coordinator = context.coordinator, weak view] in
+            guard let coordinator, let view else { return }
+            coordinator.remeasure(view)
+        }
+        return view
+    }
+
+    /// A new web view, locked down, hidden until its first page is laid out.
+    private static func newView() -> MeasuredWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = Self.dataStore
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
@@ -112,18 +157,12 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         configuration.preferences.isElementFullscreenEnabled = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         let view = MeasuredWebView(frame: .zero, configuration: configuration)
-        view.navigationDelegate = context.coordinator
-        view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = false
         view.allowsMagnification = false
         view.allowsLinkPreview = false
         view.underPageBackgroundColor = GitHubHTML.background
         // Hidden until the first page is laid out: no white frame before the dark stylesheet applies.
         view.alphaValue = 0
-        view.onWidthChange = { [weak coordinator = context.coordinator, weak view] in
-            guard let coordinator, let view else { return }
-            coordinator.remeasure(view)
-        }
         #if DEBUG
         GitHubHTMLProbe.paintWhenOccluded(view)
         #endif
@@ -131,16 +170,25 @@ private struct GitHubHTMLPage: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MeasuredWebView, context: Context) {
+        if view.isHidden == tabIsShown { view.isHidden = !tabIsShown }
+        context.coordinator.isShown = tabIsShown
         context.coordinator.onLoad = onLoad
         context.coordinator.onMeasure = onMeasure
         let changed = context.coordinator.measureKey != measureKey || context.coordinator.patch != patch
         context.coordinator.measureKey = measureKey
         context.coordinator.patch = patch
         guard context.coordinator.loadedHTML != html else {
-            if changed { context.coordinator.remeasure(view) }
+            // A page shown again is measured once if it skipped a measurement while hidden.
+            if changed || context.coordinator.skippedMeasure { context.coordinator.remeasure(view) }
             return
         }
         context.coordinator.loadedHTML = html
+        if view.parkedHTML == html {
+            // A parked page taken back: loaded already, so it is measured and shown as after its load.
+            view.parkedHTML = nil
+            context.coordinator.webView(view, didFinish: nil)
+            return
+        }
         context.coordinator.expectsLoad = true
         context.coordinator.isLoaded = false
         view.loadHTMLString(GitHubHTML.document(body: html), baseURL: nil)
@@ -148,6 +196,14 @@ private struct GitHubHTMLPage: NSViewRepresentable {
 
     static func dismantleNSView(_ view: MeasuredWebView, coordinator: Coordinator) {
         view.onWidthChange = nil
+        if coordinator.isLoaded, let html = coordinator.loadedHTML {
+            coordinator.onLoad = {}
+            coordinator.onMeasure = { _, _ in }
+            view.parkedHTML = html
+            parked.append((view, coordinator))
+            if parked.count > 2 { parked.removeFirst() }
+            return
+        }
         view.stopLoading()
         view.navigationDelegate = nil
         view.uiDelegate = nil
@@ -157,6 +213,8 @@ private struct GitHubHTMLPage: NSViewRepresentable {
     /// are not reported, since they follow the measurement itself.
     final class MeasuredWebView: WKWebView {
         var onWidthChange: (@MainActor () -> Void)?
+        /// The loaded page's html while the view is parked (`GitHubHTMLPage.parked`).
+        var parkedHTML: String?
 
         override func setFrameSize(_ newSize: NSSize) {
             let oldWidth = frame.width
@@ -188,6 +246,11 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         var measureKey: Int?
         /// The view's last patch, applied by every measurement.
         var patch = GitHubHTMLPatch()
+        /// The tab shows (`tabIsShown`): a page of a kept-alive tab that is not shown skips `remeasure`
+        /// (`skippedMeasure`) and is measured once when it shows again.
+        var isShown = true
+        /// A `remeasure` skipped while the tab was not shown.
+        private(set) var skippedMeasure = false
         /// A measurement is running; `measureAgain` asks for one more after it (the width changed meanwhile).
         private var isMeasuring = false
         private var measureAgain = false
@@ -241,6 +304,8 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// measured on its first width change.
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoaded = true
+            // The warm view's blank page: nothing to show or measure.
+            guard loadedHTML != nil else { return }
             let reveal: @MainActor () -> Void = { [onLoad] in
                 webView.alphaValue = 1
                 onLoad()
@@ -254,13 +319,15 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         }
 
         /// After a width change, a new `measureKey` or a new patch; nothing before the page is loaded (its load
-        /// measures it, with the patch).
+        /// measures it, with the patch). While its tab is not shown, it waits until the tab shows again.
         func remeasure(_ webView: WKWebView) {
             guard isLoaded, webView.frame.width > 0 else { return }
+            guard isShown else { return skippedMeasure = true }
             measure(webView)
         }
 
         private func measure(_ webView: WKWebView, then completion: (@MainActor () -> Void)? = nil) {
+            skippedMeasure = false
             guard !isMeasuring else {
                 measureAgain = true
                 completion?()
@@ -272,7 +339,10 @@ private struct GitHubHTMLPage: NSViewRepresentable {
             webView.callAsyncJavaScript(
                 Self.measureScript, arguments: arguments, in: nil, in: .defaultClient
             ) { [weak self] result in
-                if case .success(let value) = result, let page = value as? [String: Any],
+                // A page still at no width (a parked page taken back: SwiftUI sizes its view to zero first) has every
+                // word on its own line: it is measured again instead.
+                let noWidth = ((try? result.get()) as? [String: Any])?["width"] as? NSNumber == 0
+                if !noWidth, case .success(let value) = result, let page = value as? [String: Any],
                    let height = (page["height"] as? NSNumber)?.doubleValue, height > 0 {
                     let slots = (page["slots"] as? [[String: Any]] ?? []).compactMap(GitHubHTMLSlot.init(measured:))
                     self?.onMeasure(CGFloat(height), slots)
@@ -284,11 +354,19 @@ private struct GitHubHTMLPage: NSViewRepresentable {
                 completion?()
                 guard let self else { return }
                 isMeasuring = false
-                if measureAgain {
+                if measureAgain || noWidth {
                     measureAgain = false
                     remeasure(webView)
                 }
             }
+        }
+
+        /// A parked or warm page whose web content process ended would come back blank: it is dropped, and one on
+        /// screen is no longer loaded, so it is not parked when it leaves.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            isLoaded = false
+            GitHubHTMLPage.parked.removeAll { $0.view === webView }
+            if GitHubHTMLPage.warm?.view === webView { GitHubHTMLPage.warm = nil }
         }
 
         /// `target="_blank"` links: the link click already went to the browser; no window is ever made.

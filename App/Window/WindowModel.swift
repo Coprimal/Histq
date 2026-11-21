@@ -1,6 +1,6 @@
 // One window's tabs: each is a repo, or a Welcome tab (no repo), with the selection, the page the window shows and
 // the Settings modal over it.
-import Foundation
+import AppKit
 import HistqCore
 import os
 
@@ -56,8 +56,26 @@ final class WindowModel {
     /// saves them (`savedTabs`).
     private(set) var archivedTabs: [SavedTab] = []
     private(set) var selectedTabID: Tab.ID? {
-        didSet { expandSelectedGroup() }
+        didSet {
+            expandSelectedGroup()
+            // A hidden tab holds its watcher's refreshes; the shown one reads what it held (`RepoSession.isShown`).
+            guard oldValue != selectedTabID else { return }
+            oldValue.flatMap { sessions[$0] }?.isShown = false
+            selectedTabID.flatMap { sessions[$0] }?.isShown = true
+            // The new tab's session may not exist yet (`activateSelectedTab` makes it next): it goes first anyway.
+            if let selectedTabID {
+                let older = recentlyShown.filter { $0 != selectedTabID && sessions[$0] != nil }
+                recentlyShown = [selectedTabID] + older.prefix(Self.keptLayouts - 1)
+            }
+        }
     }
+    /// The tabs shown last, most recent first: `TabContent` keeps the layouts of those with a session mounted (hidden
+    /// but the selected one), so a switch back shows the tab as it was without building it again. Pruned when a tab
+    /// closes or is archived (`remove(at:)`).
+    private(set) var recentlyShown: [Tab.ID] = []
+    /// At most this many repo layouts stay mounted: each holds its graph table, diff and detail views, so the memory
+    /// a window takes stays bounded however many tabs it has. 4 covers going back and forth between a few repos.
+    private static let keptLayouts = 4
     /// The tab groups (by key) collapsed with a click on their name, as Chrome's: only the name shows. The selected
     /// tab is never in one: a group opens again when one of its tabs is selected (the tab list, ⇧⌘T, a worktree).
     private(set) var collapsedGroups: Set<String> = []
@@ -89,6 +107,8 @@ final class WindowModel {
     private(set) var modal: WindowModal?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
+    /// The window; set by the AppDelegate. A tab switch moves its keyboard focus (`focusShownTab`).
+    @ObservationIgnored weak var window: NSWindow?
     /// The terminal drawer's height in this window's tabs (dragged with its handle); each tab has its own terminal.
     var terminalHeight: CGFloat = TerminalDrawerMetrics.defaultHeight
     /// The operation toasts at the window's bottom right (`ToastHost`), oldest first. Read only by `ToastHost`.
@@ -105,6 +125,8 @@ final class WindowModel {
 
     init() {
         selectedTabID = tabs.first?.id
+        // `didSet` does not run in `init`: a repo opened in this first tab must be kept when another tab shows.
+        recentlyShown = tabs.first.map { [$0.id] } ?? []
     }
 
     var selectedIndex: Int? { tabs.firstIndex { $0.id == selectedTabID } }
@@ -304,17 +326,63 @@ final class WindowModel {
         activateSelectedTab()
     }
 
-    /// Selects the selected repo tab's current selection again (creating its session on first use): its detail goes
-    /// to the loading state now and reloads.
+    /// Shows the selected repo tab (creating its session on first use). A new session, or one whose detail is not
+    /// loaded, selects its current selection again: its detail goes to the loading state now and reloads. A loaded
+    /// detail stays as it is; the changes its watcher held while the tab was hidden are read as it shows
+    /// (`RepoSession.isShown`), a held status with the WIP or the overview on its placeholder until read.
     private func activateSelectedTab() {
         guard let index = selectedIndex, let url = tabs[index].repoURL, !tabs[index].isMissing else { return }
         let id = tabs[index].id
         let isNew = sessions[id] == nil
         let session = sessions[id] ?? makeSession(for: id, url: url)
         sessions[id] = session
-        session.select(session.selection)
+        if session.detail.value == nil { session.select(session.selection) }
         // Another worktree may have changed in its own tab meanwhile; a new session reads them after its first page.
         if !isNew { session.refreshWorktrees() }
+    }
+
+    /// After a tab switch (`TabContent`, in the view update's turn): the shown tab's view takes the keyboard, so no
+    /// hidden tab's view keeps it (its arrows, Esc, ⌘Z and typing would act on a repo not shown). The open graph
+    /// search, else panel 2's diff or blame, else the graph while panel 2 shows it, else nothing (the window). A target
+    /// not in the window or not shown yet gets one main-queue hop, the window holding the focus meanwhile. Logs
+    /// `focus <repo> <kind>` once.
+    func focusShownTab(repo: String) {
+        guard let window else { return }
+        let targets = focusTargets()
+        if let first = targets.first, take(first.view, in: window) { return UITiming.focus(repo, first.kind) }
+        let resigned = window.makeFirstResponder(nil)
+        guard !targets.isEmpty else { return UITiming.focus(repo, "none") }
+        let id = selectedTabID
+        DispatchQueue.main.async { [weak self, weak window] in
+            // A newer switch moves the focus itself.
+            guard let self, let window, selectedTabID == id else { return }
+            // The old responder refused to resign: ask again before taking the target.
+            if !resigned { window.makeFirstResponder(nil) }
+            for target in focusTargets() where take(target.view, in: window) {
+                return UITiming.focus(repo, target.kind)
+            }
+            UITiming.focus(repo, "none")
+        }
+    }
+
+    /// The shown tab's focus targets, best first, from what it shows (a tool stays mounted under the diff opened from
+    /// it, so a live view alone says nothing). The graph only while panel 2 shows it, not under a file, a pull
+    /// request or a tool. None under the tab's own modal (one opened while it was hidden), which takes the keyboard.
+    private func focusTargets() -> [(kind: String, view: NSView?)] {
+        guard let session = selectedSession, !session.hasModal else { return [] }
+        let showsGraph = session.openFile == nil && session.openHosted == nil && session.openTool == nil
+        var targets: [(kind: String, view: NSView?)] = []
+        if showsGraph, session.graphSearch.isOpen { targets.append(("search", session.graphSearch.field)) }
+        if let file = session.openFile, !file.isConflict { targets.append(("diff", session.diffTable)) }
+        if session.openFile == nil, case .blame? = session.openTool { targets.append(("blame", session.blameTable)) }
+        if showsGraph, session.log.value != nil { targets.append(("graph", session.graphSearch.table)) }
+        return targets
+    }
+
+    /// Gives `view` the keyboard when it is in `window` and shown; false when it is not (yet), or refuses.
+    private func take(_ view: NSView?, in window: NSWindow) -> Bool {
+        guard let view, view.window === window, !view.isHiddenOrHasHiddenAncestor else { return false }
+        return window.firstResponder === view || window.makeFirstResponder(view)
     }
 
     /// A tab's session, with the profile a restored tab had in the saved session. Its graph opens on the WIP or HEAD,
@@ -470,6 +538,61 @@ final class WindowModel {
             }
             defaults.removeObject(forKey: key)
         }
+    }
+
+    /// DEBUG `-HistqTabWalk <rounds>[,<ms>]` (timing of tab switches; started once per launch by the app): once the
+    /// open sessions' logs are complete, selects each tab in turn through `selectTab(at:)`, the click path, `ms` apart
+    /// (default 1500), `rounds` times (the first visits create the sessions). After the rounds it selects tab 0, logs
+    /// `walk tail` (the harness changes tab 2's repo now), waits 3 s, selects tab 1 and then tab 2 once more, and logs
+    /// `walk done`. Each switch logs a `tab-frame` line (`tabWalkSelect`).
+    func runTabWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let rounds = parts.first ?? nil, rounds > 0 else {
+            return Self.logger.error("-HistqTabWalk: expected <rounds>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 1 ? parts[1] : nil) ?? 1500
+        for _ in 0..<600 {
+            if !sessions.isEmpty, sessions.values.allSatisfy({ $0.log.value?.isComplete == true }) { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        // Lets the launch's last frames go by, so the first switch is not timed against them.
+        try? await Task.sleep(for: .milliseconds(500))
+        UITiming.walk("start tabs \(tabs.count) rounds \(rounds) every \(interval) ms")
+        for round in 1...rounds {
+            UITiming.walk("round \(round)")
+            for index in tabs.indices where tabs[index].id != selectedTabID {
+                await tabWalkSelect(index, interval: interval)
+            }
+        }
+        await tabWalkSelect(0, interval: 0)
+        UITiming.walk("tail")
+        try? await Task.sleep(for: .seconds(3))
+        await tabWalkSelect(1, interval: interval)
+        await tabWalkSelect(2, interval: 0)
+        UITiming.walk("done")
+    }
+
+    /// Selects tab `index` as a click does, then ticks every 5 ms on the main actor for 500 ms and logs `tab-frame
+    /// <index> max=<ms> over16=<ms>`: the largest gap between two ticks (from just before the select) and the sum of
+    /// the gaps longer than 16 ms (the main thread's holds, the switch's later runloop turns included). Then waits
+    /// until `interval` ms after the select.
+    private func tabWalkSelect(_ index: Int, interval: Int) async {
+        let start = ContinuousClock.now
+        var last = start
+        var longest = Duration.zero
+        var over16 = Duration.zero
+        selectTab(at: index)
+        while last - start < .milliseconds(500) {
+            try? await Task.sleep(for: .milliseconds(5))
+            let now = ContinuousClock.now
+            let gap = now - last
+            longest = max(longest, gap)
+            if gap > .milliseconds(16) { over16 += gap }
+            last = now
+        }
+        let ms: (Duration) -> String = { String(format: "%.1f", Double($0 / .microseconds(1)) / 1000) }
+        UITiming.tabFrame("\(index) max=\(ms(longest)) over16=\(ms(over16))")
+        try? await Task.sleep(for: .milliseconds(interval) - (ContinuousClock.now - start))
     }
     #endif
 
@@ -670,6 +793,7 @@ final class WindowModel {
         }
         restored.removeValue(forKey: tab.id)
         sessions.removeValue(forKey: tab.id)?.close()
+        recentlyShown.removeAll { $0 == tab.id }
         welcomes.removeValue(forKey: tab.id)?.cancel()
     }
 

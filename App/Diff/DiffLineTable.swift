@@ -337,6 +337,8 @@ struct DiffLineTable: NSViewRepresentable {
     let section: DiffSection
     let mode: DiffMode
     let loadID: Int
+    /// The tab's repo folder name, for the `focus` timing line.
+    let repo: String
     /// A commit's diff (file history or graph): its hunks (or selected lines) can be reverted in the working tree.
     var reverts = false
     /// Read with whitespace ignored: its hunks no longer match the files, so nothing stages, discards or reverts them.
@@ -347,10 +349,13 @@ struct DiffLineTable: NSViewRepresentable {
     /// file (`isFirst`) when none has it.
     var jump: DiffJump?
     var isFirst = true
+    /// Gets the table once made (the session's `diffTable`, the keyboard's target when the tab shows).
+    var onTable: @MainActor (NSView) -> Void = { _ in }
     var onApply: @MainActor (PatchBuilder.Action, Set<DiffLineID>, FileDiff) -> Void = { _, _, _ in }
     var onClose: @MainActor () -> Void = {}
     /// The code font size: a new one reloads the rows at it.
     @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private(set) var fontSize = 12.0
+    @Environment(\.tabIsShown) private var tabIsShown
 
     func makeCoordinator() -> DiffTableController { DiffTableController() }
 
@@ -368,6 +373,7 @@ struct DiffLineTable: NSViewRepresentable {
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.focusRingType = .none
         table.headerView = nil
+        table.repo = repo
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("line"))
         column.resizingMask = []
         table.addTableColumn(column)
@@ -380,12 +386,16 @@ struct DiffLineTable: NSViewRepresentable {
         // Unwrapped, a long line scrolls sideways (wrapped or split, the table is the card's width).
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
+        scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
+        onTable(table)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        // The tab showing again moves the keyboard itself (`WindowModel.focusShownTab`).
+        if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         context.coordinator.update(self)
     }
 }
@@ -549,6 +559,8 @@ final class DiffTableView: NSTableView {
     weak var controller: DiffTableController?
     /// Takes the keyboard once, when it first shows, so ⌘C and Esc work without a click.
     private var tookFocus = false
+    /// The tab's repo folder name, for the `focus` timing line.
+    var repo = ""
 
     override func tile() {
         super.tile()
@@ -580,10 +592,12 @@ final class DiffTableView: NSTableView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard let window, !tookFocus else { return }
+        // In a hidden tab it waits until the tab shows (`WindowModel.focusShownTab`).
+        guard let window, !tookFocus, !isHiddenOrHasHiddenAncestor else { return }
         tookFocus = true
-        // The other tables of the same diff do not steal it.
-        if !(window.firstResponder is DiffTableView) { window.makeFirstResponder(self) }
+        // The other tables of the same diff do not steal it; a hidden tab's table does not keep it.
+        if let focused = window.firstResponder as? DiffTableView, !focused.isHiddenOrHasHiddenAncestor { return }
+        if window.makeFirstResponder(self) { UITiming.focus(repo, "diff") }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -787,9 +801,11 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         table.enclosingScrollView?.reflectScrolledClipView(clip)
     }
 
-    /// The table with the keyboard focus, else the file's first table.
+    /// The table with the keyboard focus, else the file's first table. A hidden tab's table with the focus counts as
+    /// none.
     private func isJumpTarget(_ table: NSTableView, _ view: DiffLineTable) -> Bool {
-        guard let responder = table.window?.firstResponder as? DiffTableView else { return view.isFirst }
+        guard let responder = table.window?.firstResponder as? DiffTableView, !responder.isHiddenOrHasHiddenAncestor
+        else { return view.isFirst }
         return responder === table
     }
 

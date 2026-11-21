@@ -4,7 +4,8 @@
 // the actions, reviewers, assignees and labels), Commits, Files changed (the file list and the selected file's patch in
 // a read-only `DiffLineTable`, parsed from GitHub's `patch` with git's diff parser, so no local git is needed) and
 // Checks. The row click shows the header and skeleton cards in the same frame (`PlaceholderCard`); everything loads
-// off the main actor in one go (`PullRequestDetailModel`). The actions call GitHub through the tab's `GitHubStore`
+// off the main actor (`PullRequestDetailModel`): the Conversation's parts first, then commits, files and checks as each
+// arrives. The actions call GitHub through the tab's `GitHubStore`
 // client; Merge and Close/Reopen ask first; Checkout locally is a repo write (`RepoSession.Write.checkoutPullRequest`).
 import AppKit
 import HistqCore
@@ -79,7 +80,8 @@ struct PRThreads: Sendable {
 }
 
 /// Everything the detail shows, read in one load. Commits, files, checks and threads may fail on their own (a token
-/// without the checks permission still reads the pull request): their tab or part then says why.
+/// without the checks permission still reads the pull request): their tab or part then says why. Commits, files and
+/// checks are `.loading` until they fill in, after the Conversation's parts.
 struct PullRequestDetail: Sendable {
     let loadID: Int
     /// Replaced alone by the model's re-poll while GitHub still computes whether the branch merges.
@@ -89,9 +91,9 @@ struct PullRequestDetail: Sendable {
     /// (`PRTimeline.page`).
     let timeline: PRTimelineHTML
     let reviewers: [PRReviewer]
-    let commits: Loadable<[GitHubCommit]>
-    let files: Loadable<[PRFile]>
-    let checks: Loadable<[GitHubCheckRun]>
+    var commits: Loadable<[GitHubCommit]>
+    var files: Loadable<[PRFile]>
+    var checks: Loadable<[GitHubCheckRun]>
     let threads: Loadable<PRThreads>
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
@@ -207,7 +209,9 @@ final class PullRequestDetailModel {
     }
 
     private(set) var number: Int?
-    private(set) var state: Loadable<PullRequestDetail> = .idle
+    private(set) var state: Loadable<PullRequestDetail> = .idle {
+        didSet { if let detail = state.value, let repository { remember(detail, of: repository) } }
+    }
     var tab: PRTab = .conversation
     /// The Files changed tab's file (its `filename`).
     var selectedFile: String?
@@ -236,6 +240,11 @@ final class PullRequestDetailModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadCount = 0
+    /// The repository of the load that is shown or on its way, for `cache`.
+    @ObservationIgnored private var repository: HostedRepository?
+    /// The last 8 loaded details, newest last, one per pull request, so a revisit shows at once while it loads
+    /// again. Memory only, for this session: third-party content, never written to disk.
+    @ObservationIgnored private var cache: [(repository: HostedRepository, detail: PullRequestDetail)] = []
 
     /// DEBUG `-HistqPRTab commits|files|checks`: the tab a pull request opens on (QA shots of each tab).
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
@@ -299,7 +308,12 @@ final class PullRequestDetailModel {
             actionError = nil
         }
         self.number = number
-        if !quiet || state.value == nil { state = .loading }
+        repository = github.api?.repository
+        if !quiet || state.value == nil {
+            // A detail loaded before in this session shows at once, until this load replaces it.
+            state = cache.last { $0.repository == repository && $0.detail.pull.number == number }
+                .map { .loaded($0.detail) } ?? .loading
+        }
         guard let api = github.api else {
             state = .failed("GitHub is not connected for this tab: connect it in Settings › Integrations.")
             return
@@ -309,36 +323,50 @@ final class PullRequestDetailModel {
         let loadID = loadCount
         // The page is built with the threads the user expanded or collapsed by now.
         let expanded = threadExpanded
+        let rowSHA = github.row(for: .pullRequest(number))?.headSHA
+        let warmsUp = state.value == nil
         task = Task { [weak self] in
-            let result = await Self.fetch(
-                api.client, api.repository, number: number, loadID: loadID, expanded: expanded)
-            guard let self, generation == self.generation, !Task.isCancelled else { return }
-            switch result {
-            case .success(let detail):
-                state = .loaded(detail)
-                Self.logMergeable(detail.pull)
-                Self.logThreads(detail)
-                if quiet { UITiming.content("pr \(number) reloaded") }
-                #if DEBUG
-                if let action = Self.launchAction {
-                    Self.launchAction = nil
-                    if GitHubHTMLProbe.slotsEnabled {
-                        // The slot probe's reload comes after its passes at both widths, so the page is laid out
-                        // and the reload measures it again (`measureKey`).
-                        Task { [weak self] in
-                            try? await Task.sleep(for: .seconds(6))
-                            self?.perform(action, on: number, github: github)
-                        }
-                    } else {
-                        perform(action, on: number, github: github)
-                    }
-                    if Self.closesAfterLaunchAction { close() }
+            let (client, repository) = (api.client, api.repository)
+            await withTaskGroup(of: Part?.self) { [weak self] group in
+                // Commits, files and checks load beside the Conversation's parts and fill in as each arrives; the
+                // checks start with the row's head, asked again below only when the pull request's is another one.
+                group.addTask { await Self.fetchCommits(client, repository, number: number) }
+                group.addTask { await Self.fetchFiles(client, repository, number: number) }
+                if let rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: rowSHA) } }
+                async let fetched = Self.fetch(
+                    client, repository, number: number, loadID: loadID, expanded: expanded)
+                // A first visit's page takes a web view started meanwhile: the main actor is free while GitHub answers.
+                // It starts after the placeholder's frame, never in front of it.
+                if warmsUp {
+                    try? await Task.sleep(for: .milliseconds(20))
+                    if !Task.isCancelled { GitHubHTMLView.warmUp() }
                 }
-                if let name = Self.threadLaunchActionName {
-                    Self.threadLaunchActionName = nil
-                    if let action = Self.threadLaunchAction(name, in: detail) {
+                let result = await fetched
+                guard let self, generation == self.generation, !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
+                switch result {
+                case .success(var detail):
+                    let sha = detail.pull.head.sha
+                    if sha != rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: sha) } }
+                    // The parts shown for the same head stay until this load's arrive (a revisit, a reload after an
+                    // action), so their tabs do not go back to loading.
+                    if let shown = state.value, shown.pull.number == number, shown.pull.head.sha == sha {
+                        detail.commits = shown.commits
+                        detail.files = shown.files
+                        detail.checks = shown.checks
+                    }
+                    state = .loaded(detail)
+                    Self.logMergeable(detail.pull)
+                    Self.logThreads(detail)
+                    if quiet { UITiming.content("pr \(number) reloaded") }
+                    #if DEBUG
+                    if let action = Self.launchAction {
+                        Self.launchAction = nil
                         if GitHubHTMLProbe.slotsEnabled {
-                            // Like `launchAction`: after the slot probe's passes at both widths.
+                            // The slot probe's reload comes after its passes at both widths, so the page is laid out
+                            // and the reload measures it again (`measureKey`).
                             Task { [weak self] in
                                 try? await Task.sleep(for: .seconds(6))
                                 self?.perform(action, on: number, github: github)
@@ -346,32 +374,83 @@ final class PullRequestDetailModel {
                         } else {
                             perform(action, on: number, github: github)
                         }
+                        if Self.closesAfterLaunchAction { close() }
                     }
-                }
-                #endif
-                let names = detail.files.value?.map(\.id) ?? []
-                if selectedFile.map({ !names.contains($0) }) ?? true { selectedFile = names.first }
-                await pollMergeable(api.client, api.repository, number: number, generation: generation)
-            case .failure(let error):
-                if quiet, state.value != nil {
-                    actionError = "Could not reload the pull request: \(Self.message(for: error))"
-                } else {
-                    state = .failed(Self.message(for: error))
+                    if let name = Self.threadLaunchActionName {
+                        Self.threadLaunchActionName = nil
+                        if let action = Self.threadLaunchAction(name, in: detail) {
+                            if GitHubHTMLProbe.slotsEnabled {
+                                // Like `launchAction`: after the slot probe's passes at both widths.
+                                Task { [weak self] in
+                                    try? await Task.sleep(for: .seconds(6))
+                                    self?.perform(action, on: number, github: github)
+                                }
+                            } else {
+                                perform(action, on: number, github: github)
+                            }
+                        }
+                    }
+                    #endif
+                    group.addTask {
+                        await self.pollMergeable(client, repository, number: number, generation: generation)
+                        return nil
+                    }
+                    // Each part as it arrives, into the detail as it is now (the re-poll may have replaced its pull).
+                    for await part in group {
+                        guard generation == self.generation, !Task.isCancelled else {
+                            group.cancelAll()
+                            return
+                        }
+                        guard let part, case .loaded(var shown) = state else { continue }
+                        switch part {
+                        case .commits(let commits):
+                            shown.commits = commits
+                        case .files(let files):
+                            shown.files = files
+                            let names = files.value?.map(\.id) ?? []
+                            if selectedFile.map({ !names.contains($0) }) ?? true { selectedFile = names.first }
+                            #if DEBUG || HISTQ_PERF
+                            UITiming.content("pr \(number) files loaded")
+                            #endif
+                        case .checks(let sha, let checks):
+                            // The row's head, when the pull request has moved on since the list was read.
+                            guard sha == shown.pull.head.sha else { continue }
+                            shown.checks = checks
+                            #if DEBUG || HISTQ_PERF
+                            UITiming.content("pr \(number) checks loaded")
+                            #endif
+                        }
+                        state = .loaded(shown)
+                    }
+                case .failure(let error):
+                    group.cancelAll()
+                    if quiet, state.value != nil {
+                        actionError = "Could not reload the pull request: \(Self.message(for: error))"
+                    } else {
+                        state = .failed(Self.message(for: error))
+                    }
                 }
             }
         }
     }
 
+    /// Keeps `detail` as the newest of `cache`.
+    private func remember(_ detail: PullRequestDetail, of repository: HostedRepository) {
+        cache.removeAll { $0.repository == repository && $0.detail.pull.number == detail.pull.number }
+        cache.append((repository, detail))
+        if cache.count > 8 { cache.removeFirst() }
+    }
+
     /// GitHub answers `mergeable` null while it still computes whether the branch merges (right after an open or a
-    /// push): asks again for the pull request alone, 3 s apart and at most 3 times, so "Checking…" clears without a
-    /// reload. It runs in the load's task, so a newer load or `close` stops it. An answer with another head than the
-    /// shown one is dropped and ends it: Merge pins the head the user reviewed, and GitHub refuses it once it moved.
+    /// push): asks again for the pull request alone, 1, 2 then 3 s apart, so "Checking…" clears without a reload. It
+    /// runs in the load's task, so a newer load or `close` stops it. An answer with another head than the shown one is
+    /// dropped and ends it: Merge pins the head the user reviewed, and GitHub refuses it once it moved.
     private func pollMergeable(
         _ client: GitHubClient, _ repository: HostedRepository, number: Int, generation: Int
     ) async {
-        for _ in 0..<3 {
+        for delay in [1, 2, 3] {
             guard case .loaded(let shown) = state, shown.isOpen, shown.pull.mergeable == nil else { return }
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(delay))
             guard generation == self.generation, !Task.isCancelled else { return }
             // A failed fetch only uses up a try: the box keeps saying it checks.
             guard let pull = await Self.fetchPull(client, repository, number: number) else { continue }
@@ -452,10 +531,29 @@ final class PullRequestDetailModel {
                    let root = state.value?.threads.value?.all.first(where: { $0.state?.id == threadID })?.id {
                     threadExpanded[root] = false
                 }
-            case .merge, .setOpen: break
+            case .merge, .setOpen:
+                // The result shows at once (pill, Actions box); the reload below confirms it and, since it bumps the
+                // generation, drops an older load's answer that would bring the old state back.
+                if showing, case .loaded(var shown) = state, shown.pull.number == number {
+                    if case .setOpen(let open) = action {
+                        shown.pull.state = open ? "open" : "closed"
+                    } else {
+                        shown.pull.state = "closed"
+                        shown.pull.merged = true
+                        shown.pull.mergedAt = .now
+                    }
+                    state = .loaded(shown)
+                    let result = shown.isMerged ? "merged" : shown.isOpen ? "open" : "closed"
+                    UITiming.content("pr \(number) state \(result)")
+                }
             }
             github.refreshNow()
-            if showing { load(number, github: github, quiet: true) }
+            if showing {
+                load(number, github: github, quiet: true)
+            } else {
+                // Its kept detail is from before the action.
+                cache.removeAll { $0.detail.pull.number == number }
+            }
         }
     }
 
@@ -473,30 +571,57 @@ final class PullRequestDetailModel {
         async let pullRequest = client.pullRequest(number, in: repository)
         async let comments = client.comments(on: number, in: repository)
         async let reviews = client.reviews(of: number, in: repository)
-        async let commits = part { try await client.pullRequestCommits(number, in: repository) }
-        async let files = part { try await client.pullRequestFiles(number, in: repository) }
         async let reviewComments = part { try await client.reviewComments(of: number, in: repository) }
         async let threadStates = part { try await client.reviewThreadStates(of: number, in: repository) }
         do {
             let pull = try await pullRequest
-            async let checks = part { try await client.checkRuns(for: pull.head.sha, in: repository) }
             let (comments, reviews) = try await (comments, reviews)
-            let fileList: Loadable<[PRFile]> = switch await files {
-            case .loaded(let files): .loaded(files.map(prFile))
-            case .failed(let message): .failed(message)
-            case .idle, .loading: .idle
-            }
             let threads = Self.threads(await reviewComments, await threadStates)
             let timeline = PRTimeline.page(
                 author: pull.user, action: "opened this pull request", date: pull.createdAt, html: pull.bodyHTML,
                 markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded)
             return .success(PullRequestDetail(
                 loadID: loadID, pull: pull, timelineCount: timeline.count, timeline: timeline,
-                reviewers: reviewers(pull, reviews), commits: await commits, files: fileList, checks: await checks,
+                reviewers: reviewers(pull, reviews), commits: .loading, files: .loading, checks: .loading,
                 threads: threads))
         } catch {
             return .failure(error)
         }
+    }
+
+    /// A part the Conversation does not need, read beside it (`load`).
+    private enum Part: Sendable {
+        case commits(Loadable<[GitHubCommit]>)
+        case files(Loadable<[PRFile]>)
+        /// The check runs of head `sha`.
+        case checks(sha: String, Loadable<[GitHubCheckRun]>)
+    }
+
+    @concurrent
+    private nonisolated static func fetchCommits(
+        _ client: GitHubClient, _ repository: HostedRepository, number: Int
+    ) async -> Part? {
+        .commits(await part { try await client.pullRequestCommits(number, in: repository) })
+    }
+
+    @concurrent
+    private nonisolated static func fetchFiles(
+        _ client: GitHubClient, _ repository: HostedRepository, number: Int
+    ) async -> Part? {
+        let read = await part { try await client.pullRequestFiles(number, in: repository) }
+        let files: Loadable<[PRFile]> = switch read {
+        case .loaded(let files): .loaded(files.map(prFile))
+        case .failed(let message): .failed(message)
+        case .idle, .loading: .idle
+        }
+        return .files(files)
+    }
+
+    @concurrent
+    private nonisolated static func fetchChecks(
+        _ client: GitHubClient, _ repository: HostedRepository, sha: String
+    ) async -> Part? {
+        .checks(sha: sha, await part { try await client.checkRuns(for: sha, in: repository) })
     }
 
     /// Joins the threads' comments (REST) and states (GraphQL): without the comments there are no threads, so their
@@ -637,6 +762,8 @@ struct PRDetailView: View {
                 case .loaded(let value):
                     PRContent(session: session, detail: value)
                         .onAppear { UITiming.content("pr \(number)") }
+                        // A kept detail replaces another pull request's in one frame: a new page, as after a load.
+                        .id(number)
                 case .failed(let message):
                     DiffNoticeCard(title: "Pull request", systemImage: "exclamationmark.triangle", message: message)
                         .onAppear { UITiming.content("pr \(number) failed") }
@@ -918,7 +1045,8 @@ private struct PRContent: View {
     }
 
     private static func count<T>(_ part: Loadable<[T]>) -> String {
-        part.value.map { "\($0.count)" } ?? "failed"
+        if case .loading = part { return "loading" }
+        return part.value.map { "\($0.count)" } ?? "failed"
     }
 }
 
@@ -1600,7 +1728,9 @@ private struct PRCommitsTab: View {
             }
         case .failed(let message):
             DiffNoticeCard(title: "Commits", systemImage: "exclamationmark.triangle", message: message)
-        case .idle, .loading:
+        case .loading:
+            PRPartLoading(tab: .commits)
+        case .idle:
             DiffNoticeCard(title: "Commits", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
@@ -1687,7 +1817,9 @@ private struct PRFilesTab: View {
             }
         case .failed(let message):
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: message)
-        case .idle, .loading:
+        case .loading:
+            PRPartLoading(tab: .files)
+        case .idle:
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
@@ -1696,6 +1828,7 @@ private struct PRFilesTab: View {
         if let section = file.section, !section.rows(.diff).isEmpty {
             SectionCard(file.change.name, systemImage: file.change.systemImage, contentPadding: 0) {
                 DiffLineTable(section: section, mode: .diff, loadID: detail.loadID,
+                              repo: session.url.lastPathComponent,
                               onApply: { _, _, _ in }, onClose: { [session] in session.closeFile() })
                     .frame(maxHeight: .infinity)
             } accessory: {
@@ -1808,7 +1941,9 @@ private struct PRChecksTab: View {
             }
         case .failed(let message):
             DiffNoticeCard(title: "Checks", systemImage: "exclamationmark.triangle", message: message)
-        case .idle, .loading:
+        case .loading:
+            PRPartLoading(tab: .checks)
+        case .idle:
             DiffNoticeCard(title: "Checks", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
@@ -1887,6 +2022,18 @@ private struct PRCheckRow: View {
 }
 
 // MARK: Skeleton
+
+/// A tab's part while it still loads (the Conversation shows first): its card, with a spinner once that takes a while.
+private struct PRPartLoading: View {
+    let tab: PRTab
+
+    var body: some View {
+        SectionCard(tab.title, systemImage: tab.systemImage, countIsLoading: true) {
+            DelayedSpinner(detail: "pr \(tab.rawValue)")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
 
 /// The loading detail in the loaded Conversation's arrangement: the Conversation card's lines, the merge box and the
 /// comment box under it, and the side column's cards on the right, or at the end of the column when panel2 is narrow.

@@ -140,14 +140,14 @@ struct ModalHost: View {
                                 .padding(ModalMetrics.margin)
                         }
                         .id("ai \(cover.run.id)")
-                        .modifier(RestoresFocus())
+                        .modifier(RestoresFocus(model: model))
                     }
                 }
                 // The scrim fills the window under the toolbar: a tall form fits its card in that (`CreatePRView`).
                 .onGeometryChange(for: CGFloat.self, of: \.size.height) { layerHeight = $0 }
                 // A new view per modal: the focus to restore starts over.
                 .id(shown.id)
-                .modifier(RestoresFocus())
+                .modifier(RestoresFocus(model: model))
                 .onExitCommand {
                     if let cover { cover.session.closeAI() } else { cancel(shown) }
                 }
@@ -430,7 +430,7 @@ private struct SettingsLayer: View {
         }
         // The window's toasts while it is open (Settings › AI › Save's too), over the card, not under the scrim.
         .overlay(alignment: .bottomTrailing) { ToastHost(model: model, overSettings: true) }
-        .modifier(RestoresFocus())
+        .modifier(RestoresFocus(model: model))
         .onExitCommand { model.closeSettings() }
         // Behind a modal it opened, like the window content behind any modal.
         .modifier(ModalBackdrop(isActive: isCovered))
@@ -438,13 +438,18 @@ private struct SettingsLayer: View {
 }
 
 /// Remembers the view that had the focus when the modal opened (not a text field's editor) and gives it the focus
-/// back once the modal closes, on the next turn (Escape releases the field editor on its own turn).
+/// back once the modal closes, on the next turn (Escape releases the field editor on its own turn). Not after a tab
+/// switch: the old tab stays in the window, hidden, and `WindowModel.focusShownTab` moves the focus itself.
 private struct RestoresFocus: ViewModifier {
+    let model: WindowModel
     @State private var previous = WeakView()
+    /// The tab shown when the modal opened.
+    @State private var openedTab: WindowModel.Tab.ID?
 
     func body(content: Content) -> some View {
         content
             .onAppear {
+                openedTab = model.selectedTabID
                 if let responder = NSApp.keyWindow?.firstResponder as? NSView,
                    !((responder as? NSTextView)?.isFieldEditor ?? false)
                 {
@@ -452,9 +457,12 @@ private struct RestoresFocus: ViewModifier {
                 }
             }
             .onDisappear {
-                guard let view = previous.view else { return }
+                guard let view = previous.view, model.selectedTabID == openedTab else { return }
+                let tab = openedTab
                 DispatchQueue.main.async {
-                    guard let window = view.window, window.isKeyWindow else { return }
+                    // Not into a tab that is no longer shown.
+                    guard model.selectedTabID == tab, let window = view.window, window.isKeyWindow,
+                          !view.isHiddenOrHasHiddenAncestor else { return }
                     window.makeFirstResponder(view)
                 }
             }

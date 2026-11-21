@@ -56,24 +56,39 @@ struct RepoDirectories: Sendable {
 }
 
 /// FSEvents on a repo's worktree and git dirs. Events are classified and debounced on a private queue; `onChange`
-/// runs on the main actor with the coalesced scope. Reads by Histq write nothing in these folders (they run with
-/// `GIT_OPTIONAL_LOCKS=0` and no index refresh), so a refresh never triggers another one. Call `stop()` when the
-/// repo closes; it is idempotent and also stops a `start` that has not happened yet.
+/// runs on the main actor with the coalesced scope and the time of its last change. Reads by Histq write nothing in
+/// these folders (they run with `GIT_OPTIONAL_LOCKS=0` and no index refresh), so a refresh never triggers another
+/// one. Call `stop()` when the repo closes; it is idempotent and also stops a `start` that has not happened yet.
 final class RepoWatcher: @unchecked Sendable {
     // Every mutable property is only touched on `queue`.
     private let queue = DispatchQueue(label: "com.math2it.histq.watcher", qos: .utility)
-    private var onChange: (@MainActor @Sendable (RefreshScope) -> Void)?
+    private var onChange: (@MainActor @Sendable (RefreshScope, UInt64, [String]?) -> Void)?
     private var stream: FSEventStreamRef?
     private var directories: RepoDirectories?
     private var pending: RefreshScope = []
+    /// The latest change time of the paths `pending` holds (`changeTime(_:)`).
+    private var pendingChange: UInt64 = 0
+    /// The worktree paths (relative to it) behind `pending`'s `status`; nil when a `status` came from anything else
+    /// (the index, a submodule's state, a rescan) or more than `maxPaths` paths changed.
+    private var pendingPaths: Set<String>? = []
+    /// Whether every watched root is on APFS, whose change times are exact and from this Mac's clock (other file
+    /// systems may round them, a network volume takes the server's): else every change time is `.max`.
+    private var exactTimes = false
     private var debounce: DispatchWorkItem?
     private var stopped = false
 
     /// The quiet time after the last change before the refresh runs.
     static let debounceInterval: DispatchTimeInterval = .milliseconds(250)
+    /// The most worktree paths handed on with a change; more are not listed (nil).
+    static let maxPaths = 200
 
-    /// Starts watching `directories` (once; later calls are ignored). `onChange` gets each coalesced scope.
-    func start(_ directories: RepoDirectories, onChange: @escaping @MainActor @Sendable (RefreshScope) -> Void) {
+    /// Starts watching `directories` (once; later calls are ignored). `onChange` gets each coalesced scope, the time
+    /// of its last change, in ns since 1970 (`.max` when unknown), and the worktree paths behind its `status` (nil
+    /// when not only worktree paths, or too many).
+    func start(
+        _ directories: RepoDirectories,
+        onChange: @escaping @MainActor @Sendable (RefreshScope, UInt64, [String]?) -> Void
+    ) {
         queue.async { [self] in
             guard !stopped, stream == nil else { return }
             self.directories = directories
@@ -85,6 +100,7 @@ final class RepoWatcher: @unchecked Sendable {
                 roots.removeAll { Self.isInside($0, path) }
                 roots.append(path)
             }
+            exactTimes = roots.allSatisfy(Self.isAPFS)
             var context = FSEventStreamContext(
                 version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil,
                 copyDescription: nil)
@@ -129,17 +145,37 @@ final class RepoWatcher: @unchecked Sendable {
     private func received(paths: [String], flags: [FSEventStreamEventFlags]) {
         guard !stopped, let directories else { return }
         var scope: RefreshScope = []
+        var changed: UInt64 = 0
         for (index, path) in paths.enumerated() {
             let flag = index < flags.count ? Int(flags[index]) : 0
             // The kernel dropped events or a root moved: reload everything.
             if flag & (kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged) != 0 {
                 scope.formUnion([.status, .refs])
+                changed = .max
+                pendingPaths = nil
             } else {
-                scope.formUnion(Self.scope(of: path, in: directories))
+                let found = Self.scope(of: path, in: directories)
+                scope.formUnion(found)
+                if !found.isEmpty, changed != .max { changed = max(changed, exactTimes ? Self.changeTime(path) : .max) }
+                if found.contains(.status), let count = pendingPaths?.count {
+                    // A worktree file, not the index or a submodule's state in a git dir. An ignore or attributes
+                    // file changes other paths' status even when it is ignored itself, and a leading `:` would be
+                    // read as pathspec magic by `git check-ignore`: these are not listed.
+                    let inGitDir = [directories.gitDir, directories.commonDir].contains { Self.isInside(path, $0.path) }
+                    let name = (path as NSString).lastPathComponent
+                    if !inGitDir, name != ".gitignore", name != ".gitattributes",
+                       let relative = Self.relativePath(path, in: directories.worktree.path),
+                       !relative.isEmpty, !relative.hasPrefix(":"), count < Self.maxPaths {
+                        pendingPaths?.insert(relative)
+                    } else {
+                        pendingPaths = nil
+                    }
+                }
             }
         }
         guard !scope.isEmpty else { return }
         pending.formUnion(scope)
+        pendingChange = max(pendingChange, changed)
         debounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.fire() }
         debounce = work
@@ -150,11 +186,15 @@ final class RepoWatcher: @unchecked Sendable {
     private func fire() {
         guard !stopped, !pending.isEmpty, let onChange else { return }
         let scope = pending
+        let changed = pendingChange
+        let paths = pendingPaths.map { $0.sorted() }
         pending = []
+        pendingChange = 0
+        pendingPaths = []
         debounce = nil
         Task { @MainActor in
             UITiming.refresh(scope.description)
-            onChange(scope)
+            onChange(scope, changed, paths)
         }
     }
 
@@ -185,6 +225,25 @@ final class RepoWatcher: @unchecked Sendable {
             }
         }
         return isInside(path, directories.worktree.path) ? .status : []
+    }
+
+    /// When `path` last changed, in ns since 1970: its ctime, which every write and a rename onto it set from the clock
+    /// (never a copy that keeps the dates, which sets only the mtime); its folder's when it is gone, which the removal
+    /// set. `.max` when neither can be read.
+    private static func changeTime(_ path: String) -> UInt64 {
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            guard errno == ENOENT, lstat((path as NSString).deletingLastPathComponent, &info) == 0 else { return .max }
+        }
+        return UInt64(info.st_ctimespec.tv_sec) * 1_000_000_000 + UInt64(info.st_ctimespec.tv_nsec)
+    }
+
+    /// Whether `path` is on an APFS volume.
+    private static func isAPFS(_ path: String) -> Bool {
+        var info = statfs()
+        guard statfs(path, &info) == 0 else { return false }
+        let name = withUnsafeBytes(of: info.f_fstypename) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return name == "apfs"
     }
 
     /// `modules/<name>/HEAD`, `modules/<name>/index` or `modules/<name>/refs/…`, nested submodules' too (`<name>` may

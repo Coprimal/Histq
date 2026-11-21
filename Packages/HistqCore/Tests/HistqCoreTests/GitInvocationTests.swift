@@ -120,9 +120,11 @@ struct GitInvocationTests {
         try config.seekToEnd()
         try config.write(contentsOf: Data("[\(section) \"".utf8) + Data([0xFF, 0xFE]) + Data("\"]\n\tx = y\n".utf8))
         try config.close()
-        await #expect(throws: error) {
-            try await GitInvocation.readEnvironment(
-                profile: Self.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo)
+        for cache in [nil, ReadEnvironmentCache()] {
+            await #expect(throws: error) {
+                try await GitInvocation.readEnvironment(
+                    profile: Self.profile, base: sandbox.base, runner: sandbox.runner, cwd: repo, cache: cache)
+            }
         }
     }
 
@@ -230,6 +232,25 @@ struct GitInvocationTests {
         }
     }
 
+    @Test("a filter driver and a diff driver in the repo config are both disabled by one read environment")
+    func filterAndDiffDriversFromOneListing() async throws {
+        // Each control fires one driver only: status runs the clean filter on the stat-dirty file, show runs
+        // the textconv; the reads omit --no-ext-diff and --no-textconv, so the overrides are the guard.
+        let show: Command = { _ in ["show", "HEAD"] }
+        try await expectReadsRunNothing(
+            controls: [{ _ in ["status"] }, show], reads: [{ _ in Self.statusRead }, show, { _ in ["diff"] }],
+            readsMayFail: true
+        ) { sandbox in
+            let repo = try await sandbox.makeRepo("repo")
+            try await sandbox.git(["config", "filter.evilfilter.clean", sandbox.evil.path], in: repo)
+            try await sandbox.git(["config", "diff.evildiff.textconv", sandbox.evil.path], in: repo)
+            try Data("* filter=evilfilter diff=evildiff\n".utf8)
+                .write(to: repo.appending(path: ".git/info/attributes"))
+            try Sandbox.makeStatDirty(repo.appending(path: "tracked.txt"))
+            return Built(repo: repo)
+        }
+    }
+
     @Test(
         "a partial clone's promisor remote does not fetch a missing blob or branch tip through its uploadpack during a read",
         arguments: [nil, "GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL"])
@@ -278,6 +299,214 @@ struct GitInvocationTests {
             try Sandbox.makeStatDirty(repo.appending(path: "tracked.txt"))
             return Built(repo: repo)
         }
+    }
+
+    // MARK: - Read environment cache
+
+    /// Where a filter driver configured after the cache was filled comes from.
+    enum DriverOrigin: String, CaseIterable, Sendable {
+        case repoConfig, worktreeConfig, globalCreated, relativeInclude, includeIfGitdir, onBranchInclude
+    }
+
+    @Test(
+        "a cache hit runs no git process, and a filter driver configured after the fill is still neutralised",
+        arguments: DriverOrigin.allCases)
+    func cacheSeesNewDriver(origin: DriverOrigin) async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let counted = try sandbox.countingRunner()
+        let repo = try await sandbox.makeRepo("repo")
+        let evil = sandbox.evil.path
+        var base = sandbox.base
+        var cwd = repo
+        let file = { (name: String) in sandbox.root.appending(path: name).path }
+        switch origin {
+        case .repoConfig:
+            break
+        case .worktreeConfig:
+            try await sandbox.git(["config", "extensions.worktreeConfig", "true"], in: repo)
+            cwd = sandbox.root.appending(path: "linked", directoryHint: .isDirectory)
+            try await sandbox.git(["worktree", "add", "-q", cwd.path], in: repo)
+        case .globalCreated:
+            base["GIT_CONFIG_GLOBAL"] = nil
+        case .relativeInclude:
+            try await sandbox.git(["config", "-f", file("included.cfg"), "core.abbrev", "12"], in: sandbox.root)
+            try await sandbox.git(["config", "include.path", "../../included.cfg"], in: repo)
+        case .includeIfGitdir:
+            // The target is absent when the cache is filled: creating it must invalidate. A pattern, since the
+            // temp folder's path and the git dir's real path differ by `/private`.
+            try await sandbox.git(["config", "includeIf.gitdir:**/repo/.git.path", file("gitdir.cfg")], in: repo)
+        case .onBranchInclude:
+            try await sandbox.git(["config", "-f", file("branch.cfg"), "filter.evil.clean", evil], in: sandbox.root)
+            try await sandbox.git(["config", "includeIf.onbranch:x.path", "../../branch.cfg"], in: repo)
+        }
+        // A file changed less than 2 s before a listing is never cached (ctime cannot be set back).
+        try await Task.sleep(for: .milliseconds(2100))
+        let cache = ReadEnvironmentCache()
+        let read = { [base, cwd] in
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: base, runner: counted.runner, cwd: cwd, cache: cache)
+        }
+        let filled = try await read()
+        #expect(!filled.values.contains("filter.evil.clean"))
+        let processes = try counted.count()
+        #expect(processes > 0)
+        #expect(try await read() == filled, "a hit returns the same environment")
+        #expect(try counted.count() == processes, "a hit runs no git process")
+
+        switch origin {
+        case .repoConfig:
+            try await sandbox.git(["config", "filter.evil.clean", evil], in: repo)
+        case .worktreeConfig:
+            try await sandbox.git(["config", "--worktree", "filter.evil.clean", evil], in: cwd)
+        case .globalCreated:
+            try await sandbox.git(
+                ["config", "-f", sandbox.root.appending(path: "home/.gitconfig").path, "filter.evil.clean", evil],
+                in: sandbox.root)
+        case .relativeInclude:
+            try await sandbox.git(["config", "-f", file("included.cfg"), "filter.evil.clean", evil], in: sandbox.root)
+        case .includeIfGitdir:
+            try await sandbox.git(["config", "-f", file("gitdir.cfg"), "filter.evil.clean", evil], in: sandbox.root)
+        case .onBranchInclude:
+            try await sandbox.git(["checkout", "-q", "-b", "x"], in: repo)
+        }
+        let changed = try await read()
+        #expect(changed.values.contains("filter.evil.clean"), "the new driver is neutralised")
+
+        // The plain environment runs the new driver on a stat-dirty file; the cached read environment does not.
+        try Data("* filter=evil\n".utf8).write(to: cwd.appending(path: ".gitattributes"))
+        try Sandbox.makeStatDirty(cwd.appending(path: "tracked.txt"))
+        let plain = GitInvocation.environment(profile: nil, base: base)
+        _ = try? await sandbox.runner.run(["status"], cwd: cwd, env: plain, allowedExitCodes: Set(0...255))
+        #expect(sandbox.markerExists, "positive control: the plain status runs the new driver")
+        try? FileManager.default.removeItem(at: sandbox.marker)
+        try Sandbox.makeStatDirty(cwd.appending(path: "tracked.txt"))
+        _ = try await sandbox.runner.run(Self.statusRead, cwd: cwd, env: changed, allowedExitCodes: Set(0...255))
+        #expect(!sandbox.markerExists, "the read ran the new driver")
+    }
+
+    @Test("a cached read environment is not shared between a superproject and its submodule")
+    func cacheKeyedByFolder() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let source = try await sandbox.makeRepo("sub-source")
+        let repo = try await sandbox.makeRepo("super")
+        let sub = try await sandbox.addSubmodule(source, as: "sub", in: repo)
+        try await sandbox.git(["config", "filter.evil.clean", sandbox.evil.path], in: sub)
+        // Past the 2 s race margin, so the superproject's entry is cached and a shared key would be a stale hit.
+        try await Task.sleep(for: .milliseconds(2100))
+        let counted = try sandbox.countingRunner()
+        let cache = ReadEnvironmentCache()
+        let read = { (cwd: URL) in
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: sandbox.base, runner: counted.runner, cwd: cwd, cache: cache)
+        }
+        let superEnv = try await read(repo)
+        #expect(!superEnv.values.contains("filter.evil.clean"))
+        let processes = try counted.count()
+        #expect(try await read(repo) == superEnv)
+        #expect(try counted.count() == processes, "the superproject's second read is a hit")
+        #expect(try await read(sub).values.contains("filter.evil.clean"))
+    }
+
+    @Test("a nested repo whose git dir breaks after the fill gives the drivers of the repo git falls back to")
+    func cacheMissesWhenGitDirBreaks() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let outer = try await sandbox.makeRepo("outer")
+        try await sandbox.git(["config", "filter.evil.clean", sandbox.evil.path], in: outer)
+        let inner = try await sandbox.makeRepo("outer/inner")
+        // Past the 2 s race margin, so the inner repo's entry is cached.
+        try await Task.sleep(for: .milliseconds(2100))
+        let cache = ReadEnvironmentCache()
+        let read = {
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: sandbox.base, runner: sandbox.runner, cwd: inner, cache: cache)
+        }
+        #expect(try await !read().values.contains("filter.evil.clean"))
+        // Without HEAD the folder is no git dir, so git searches the parent folders and finds the outer repo.
+        try FileManager.default.removeItem(at: inner.appending(path: ".git/HEAD"))
+        #expect(try await read().values.contains("filter.evil.clean"))
+    }
+
+    @Test("a folder symlink repointed to another repo after the fill gives that repo's drivers")
+    func cacheFollowsRepointedSymlink() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let first = try await sandbox.makeRepo("first")
+        let second = try await sandbox.makeRepo("second")
+        try await sandbox.git(["config", "filter.evil.clean", sandbox.evil.path], in: second)
+        let link = sandbox.root.appending(path: "link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+        // Past the 2 s race margin, so the first read is cached and the second would be a stale hit.
+        try await Task.sleep(for: .milliseconds(2100))
+        let counted = try sandbox.countingRunner()
+        let cache = ReadEnvironmentCache()
+        let read = {
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: sandbox.base, runner: counted.runner, cwd: link, cache: cache)
+        }
+        #expect(try await !read().values.contains("filter.evil.clean"))
+        let processes = try counted.count()
+        _ = try await read()
+        #expect(try counted.count() == processes, "the second read through the link is a hit")
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
+        #expect(try await read().values.contains("filter.evil.clean"))
+    }
+
+    /// Listings a fake `git config --show-origin --list` prints, and the error the read must fail with (nil: it
+    /// lists `filter.bare` from a key without a value and `diff.d` from the record after it).
+    static let listings: [(String, GitInvocation.ReadSafetyError?)] = [
+        ("file:.git/config\0filter.bare.required\0file:.git/config\0diff.d.textconv\nx\0", nil),
+        ("file:.git/config\0filter.cut.clean\nx", .configListingMalformed),
+        ("file:.git/config\0filter.odd.clean\nx\0file:.git/config\0", .configListingMalformed),
+    ]
+
+    @Test("the cache reads its config listing as whole records and fails closed on anything else", arguments: listings)
+    func cacheListingRecords(listing: String, error: GitInvocation.ReadSafetyError?) async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        let output = sandbox.root.appending(path: "listing")
+        try Data(listing.utf8).write(to: output)
+        let script = sandbox.root.appending(path: "bin/listing-git")
+        try Fixtures.writeScript(
+            "if [ \"$1\" = config ] && [ \"$3\" = --show-origin ]; then cat '\(output.path)'; exit 0; fi\n"
+                + "exec '\(Fixtures.git.path)' \"$@\"", to: script)
+        let read = {
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: sandbox.base, runner: GitRunner(executable: script), cwd: repo,
+                cache: ReadEnvironmentCache())
+        }
+        if let error {
+            await #expect(throws: error) { try await read() }
+        } else {
+            let env = try await read()
+            #expect(env.values.contains("filter.bare.clean"))
+            #expect(env.values.contains("diff.d.textconv"))
+        }
+    }
+
+    @Test("a read environment whose config includes a path the cache cannot resolve is never cached")
+    func unresolvableIncludeIsNotCached() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let counted = try sandbox.countingRunner()
+        let repo = try await sandbox.makeRepo("repo")
+        // Git expands `%(prefix)/` to its own install folder; the cache does not resolve it.
+        try await sandbox.git(["config", "include.path", "%(prefix)/histq-absent.cfg"], in: repo)
+        // Past the 2 s race margin, so only the include keeps it out of the cache.
+        try await Task.sleep(for: .milliseconds(2100))
+        let cache = ReadEnvironmentCache()
+        let read = {
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: sandbox.base, runner: counted.runner, cwd: repo, cache: cache)
+        }
+        _ = try await read()
+        let processes = try counted.count()
+        _ = try await read()
+        #expect(try counted.count() > processes, "the second read listed again")
     }
 
     // MARK: - GitHub token
@@ -549,6 +778,11 @@ struct GitInvocationTests {
         let indexDate = try Sandbox.modificationDate(index)
         var env = try await GitInvocation.readEnvironment(
             profile: Self.profile, base: sandbox.base, runner: sandbox.runner, cwd: built.repo)
+        // The cache's own listing (`--show-origin --list`) must find the same drivers.
+        let cached = try await GitInvocation.readEnvironment(
+            profile: Self.profile, base: sandbox.base, runner: sandbox.runner, cwd: built.repo,
+            cache: ReadEnvironmentCache())
+        #expect(cached == env, "the cached read environment differs from the listed one")
         if let withoutVariable {
             #expect(env.removeValue(forKey: withoutVariable) != nil, "the read environment sets \(withoutVariable)")
         }
@@ -589,6 +823,19 @@ struct Sandbox: Sendable {
     }
 
     func remove() { Fixtures.removeTempDirectory(root) }
+
+    /// A runner whose git is a script that logs one line per process to a file before running the real git, and
+    /// the number of processes it ran so far.
+    func countingRunner() throws -> (runner: GitRunner, count: @Sendable () throws -> Int) {
+        let log = root.appending(path: "git-processes.log")
+        let script = root.appending(path: "bin/counting-git")
+        try Fixtures.writeScript("echo run >> '\(log.path)'\nexec '\(Fixtures.git.path)' \"$@\"", to: script)
+        let count: @Sendable () throws -> Int = {
+            guard FileManager.default.fileExists(atPath: log.path) else { return 0 }
+            return try String(contentsOf: log, encoding: .utf8).split(separator: "\n").count
+        }
+        return (GitRunner(executable: script), count)
+    }
 
     /// Runs a setup command with the hermetic environment; returns its trimmed stdout.
     @discardableResult

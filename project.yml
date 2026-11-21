@@ -52,6 +52,8 @@ targets:
         ENABLE_APP_SANDBOX: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # Empty unless a measurement build passes HISTQ_SEAMS='HISTQ_PERF DEBUG' (scripts/perf-ux.sh); app target only.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(HISTQ_SEAMS)"
         # Debug is Developer ID-signed like Release, so Keychain items and macOS grants survive rebuilds and are shared with the installed app
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "Developer ID Application"

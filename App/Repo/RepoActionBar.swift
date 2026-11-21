@@ -174,14 +174,26 @@ extension RepoSession {
 }
 
 /// The newest operation still running, whatever started it (a toolbar button, a menu, the palette, a panel's button,
-/// the automatic fetch): a spinner and its title, from the click's frame on.
+/// the automatic fetch): a spinner and its title, from the click's frame on. A checkout's spinner fades in only after
+/// 150 ms, so a fast checkout never flashes one.
 struct RunningStatus: View {
     let session: RepoSession
 
     var body: some View {
         if let operation = session.running.last {
             HStack(spacing: 6) {
-                ProgressView().controlSize(.mini)
+                if operation.key == .checkout {
+                    // The mini spinner's own place, filled after the delay (`DelayedSpinner` is a bigger one); not
+                    // once the checkout has ended, as this view can outlive it by a display.
+                    ProgressView().controlSize(.mini).hidden().overlay {
+                        DelayedReveal(token: operation.id, detail: "status",
+                                      isCurrent: { session.running.contains { $0.id == operation.id } }) {
+                            ProgressView().controlSize(.mini)
+                        }
+                    }
+                } else {
+                    ProgressView().controlSize(.mini)
+                }
                 Text(operation.title + "…")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
@@ -190,6 +202,7 @@ struct RunningStatus: View {
             }
             .padding(.trailing, 6)
             .layoutPriority(-1)
+            .onChange(of: operation.id, initial: true) { UITiming.opFeedback("status \(operation.title)") }
         }
     }
 }

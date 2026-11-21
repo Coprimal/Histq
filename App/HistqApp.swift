@@ -119,6 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if let spec = AppState.launchFind {
             Task { @MainActor in await self.debugFind(spec) }
         }
+        // `-HistqTabWalk <rounds>[,<ms>]`: at window level, once per launch (a session's flag would run in every tab).
+        if let spec = AppState.launchFlag("-HistqTabWalk") {
+            Task { @MainActor in await self.target()?.model.runTabWalk(spec) }
+        }
         if let row = AppState.launchDoubleClick, AppState.isStateDirMode {
             // The click monitor only with the seam, so other QA runs' timing.log keeps only its own lines.
             DoubleClickProbe.install()
@@ -294,6 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         DocumentWindow.configure(window, model: model) { [weak self] window in self?.openNativeTab(of: window) }
         model.closeWindow = { [weak window] in window?.performClose(nil) }
+        model.window = window
         let entry = Entry(window: window, model: model, state: state, toolbar: toolbar)
         entry.tabGroupObservation = window.observe(\.tabGroup) { _, _ in
             Task { @MainActor in SessionStore.schedule() }

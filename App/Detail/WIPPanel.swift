@@ -792,6 +792,20 @@ private struct CommitBox: View {
         }
         #if DEBUG
         .task {
+            // `-HistqCommitBox "<message>"`: types the message into the box and clicks Commit, once, after the launch's
+            // reads (refs, whole log, worktrees, as `-HistqRun` waits) (the click path; `-HistqCommit` skips the box).
+            if let message = AppState.launchFlag("-HistqCommitBox"), !Self.commitBoxSeamTaken {
+                Self.commitBoxSeamTaken = true
+                for _ in 0..<100 {
+                    if session.refs.value != nil, session.log.value?.isComplete == true, session.worktrees.value != nil {
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard !Task.isCancelled else { return }
+                session.commitDraft.summary = message
+                return commit()
+            }
             // `-HistqAI generate,amend`: Amend on as the toggle does, so the last message loads before the click.
             guard AIStub.seamHook == "generate", AIStub.seamOptions.contains("amend"), !session.commitDraft.amend
             else { return }
@@ -800,6 +814,11 @@ private struct CommitBox: View {
         }
         #endif
     }
+
+    #if DEBUG
+    /// `-HistqCommitBox` typed and clicked once.
+    private static var commitBoxSeamTaken = false
+    #endif
 
     /// Why Generate Message cannot run: nothing staged (Amend covers the last commit), or the amended message still
     /// loading, so a click never takes a stale one.
@@ -874,18 +893,43 @@ private struct CommitBox: View {
         guard canCommit else { return }
         let write: RepoSession.Write = session.commitDraft.amend ? .amend(message: message) : .commit(message: message)
         let title = session.commitDraft.amend ? "Amend" : "Commit"
+        let timingID = UITiming.nextOpID()
+        UITiming.opClick(timingID, write, repo: session.url.lastPathComponent)
+        // Cleared at once, so text typed while the commit runs is kept; the draft comes back if it fails.
+        let draft = session.commitDraft
+        let sent = message
+        session.commitDraft = CommitDraft()
+        UITiming.opFeedback("commit-box cleared")
         busy.insert(.commit)
         error = nil
         let endOperation = session.beginOperation(title)
         Task {
             do {
-                try await session.perform(write)
-                session.commitDraft = CommitDraft()
+                try await session.perform(write, timingID: timingID)
                 session.postToast(.success(title))
             } catch {
-                // Only in its toast, not in the card too.
-                session.report(OperationFailure(title: title, write: write, error: error,
-                                                message: RepoSession.writeMessage(for: error)))
+                // Back whole only into an empty box: text typed meanwhile (or Amend turned on) wins, and the failed
+                // message goes into the toast's text (its copy button) and its "Put Back Message" puts it back.
+                let text = RepoSession.writeMessage(for: error)
+                let now = session.commitDraft
+                if now.summary.isEmpty, now.description.isEmpty, !now.amend {
+                    session.commitDraft = draft
+                    UITiming.opFeedback("commit-box restored")
+                    // Only in its toast, not in the card too.
+                    session.report(OperationFailure(title: title, write: write, error: error, message: text))
+                } else {
+                    // As `report`, with an action, so the toast stays until the message is put back or it is closed.
+                    let failure = OperationFailure(title: title, write: write, error: error,
+                                                   message: text + "\n\nCommit message:\n" + sent)
+                    session.failure = failure
+                    var toast = OperationToast.failure(title, error: error, message: failure.message,
+                                                       hint: FailureHints.hint(for: failure).text)
+                    // Set after: `failure` drops the action of a conflict ("unmerged files").
+                    toast.action = OperationToast.Action(title: "Put Back Message") { [weak session] in
+                        session?.commitDraft = draft
+                    }
+                    session.postToast(toast)
+                }
             }
             endOperation()
             busy.remove(.commit)

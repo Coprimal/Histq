@@ -46,6 +46,8 @@ struct CommandPaletteView: View {
     @State private var selectedID: PaletteItem.ID?
     /// Where the focus was when the palette opened. Restored on Escape or a click on the scrim.
     @State private var previousResponder = WeakResponder()
+    /// The tab shown when the palette opened: no restore after a switch (`WindowModel.focusShownTab` moves the focus).
+    @State private var openedTab: WindowModel.Tab.ID?
     @State private var didPerform = false
     @State private var loggedContent = false
 
@@ -61,6 +63,7 @@ struct CommandPaletteView: View {
         .onExitCommand { model.closePalette() }
         .onAppear {
             UITiming.placeholder("palette")
+            openedTab = model.selectedTabID
             if let responder = NSApp.keyWindow?.firstResponder as? NSView,
                !((responder as? NSTextView)?.isFieldEditor ?? false)
             {
@@ -70,10 +73,13 @@ struct CommandPaletteView: View {
             DispatchQueue.main.async { fieldFocused = true }
         }
         .onDisappear {
-            guard !didPerform, let view = previousResponder.view else { return }
+            guard !didPerform, let view = previousResponder.view, model.selectedTabID == openedTab else { return }
+            let tab = openedTab
             // Escape releases the field editor on its own turn. Restore after it.
             DispatchQueue.main.async {
-                guard let window = view.window, window.isKeyWindow else { return }
+                // Not into a tab that is no longer shown.
+                guard model.selectedTabID == tab, let window = view.window, window.isKeyWindow,
+                      !view.isHiddenOrHasHiddenAncestor else { return }
                 window.makeFirstResponder(view)
             }
         }

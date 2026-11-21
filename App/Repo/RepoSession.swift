@@ -1,8 +1,8 @@
 // One tab's repository: its git runner, what it has read (status, refs, the log and its graph layout), the selected
 // detail with its loading state, and the watcher that keeps them current. Every git call runs off the main actor;
 // the main actor only publishes results.
+import AppKit
 import CryptoKit
-import Foundation
 import HistqCore
 import os
 
@@ -817,14 +817,21 @@ final class RepoSession: Identifiable {
     var commitDraft = CommitDraft()
     private(set) var status: Loadable<WorkingStatus> = .idle
     /// Counts the status reads, even those that found the same status (an edit to a file already modified): the WIP
-    /// panel reads its files' sizes again on each.
+    /// panel reads its files' sizes again on each. A select's read that found the same status does not count.
     private(set) var statusReads = 0
+    /// The tab showed with a status change it held (`isShown`): the WIP or the overview shows its placeholder, not
+    /// the old status, until a status read publishes.
+    private(set) var statusHeld = false
     private(set) var refs: Loadable<Refs> = .idle
     private(set) var log: Loadable<LogSnapshot> = .idle {
         didSet { graphSearch.logDidChange() }
     }
     /// The graph's ⌘F search (`GraphSearch`): searched again with every new log snapshot.
     let graphSearch = GraphSearch()
+    /// The open diff's first table and the open blame's table, set by their views: the keyboard goes to them when the
+    /// tab shows (`WindowModel.focusShownTab`).
+    @ObservationIgnored weak var diffTable: NSView?
+    @ObservationIgnored weak var blameTable: NSView?
     /// The branch each commit of `log` is on, computed off the main actor for each log snapshot and refs change.
     private(set) var branchMap = BranchMap()
     /// The commits of `log` on another worktree's branch only, computed off the main actor with `branchMap` and when
@@ -977,6 +984,23 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     /// The scope of the refresh in flight: a newer refresh cancels it and takes over its scope.
     @ObservationIgnored private var refreshScope: RefreshScope = []
+    /// The scope of the last refresh and when it started (ns since 1970): a change made before is in its read.
+    @ObservationIgnored private var refreshStart: (scope: RefreshScope, time: UInt64) = ([], 0)
+    /// The watcher's changes seen while the tab is hidden, read once it shows again (`isShown`).
+    @ObservationIgnored private var heldScope: RefreshScope = []
+    /// The `git check-ignore` runs of `hold(_:paths:)` in flight: a tab shown meanwhile reads its status as held.
+    @ObservationIgnored private var ignoreChecks = 0
+    /// Whether the tab is its window's selected one (in a background window too); set by the window. A hidden tab's
+    /// watcher refreshes wait in `heldScope`: showing it again reads them in one refresh.
+    @ObservationIgnored var isShown = true {
+        didSet {
+            guard isShown, !heldScope.isEmpty || ignoreChecks > 0 else { return }
+            let held = ignoreChecks > 0 ? heldScope.union(.status) : heldScope
+            heldScope = []
+            if held.contains(.status) { statusHeld = true }
+            refresh(scope: held)
+        }
+    }
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var branchMapTask: Task<Void, Never>?
     @ObservationIgnored private var worktreeMapTask: Task<Void, Never>?
@@ -1104,12 +1128,18 @@ final class RepoSession: Identifiable {
         let view: RepoViewState
 
         /// The read environment for this folder, built once per load: it lists the repo's filter and diff drivers
-        /// first, so they can be disabled. Never with the tab's profile: a read needs no identity, signing or SSH key,
-        /// and a profile's signing settings have no business in an automatic read of an untrusted repo.
+        /// first, so they can be disabled, or takes them from `readEnvironmentCache` while no config file it read
+        /// changed. Never with the tab's profile: a read needs no identity, signing or SSH key, and a profile's signing
+        /// settings have no business in an automatic read of an untrusted repo.
         func readEnvironment(cwd: URL) async throws -> [String: String] {
-            try await GitInvocation.readEnvironment(profile: nil, base: base, runner: runner, cwd: cwd)
+            try await GitInvocation.readEnvironment(
+                profile: nil, base: base, runner: runner, cwd: cwd, cache: RepoSession.readEnvironmentCache)
         }
     }
+
+    /// The driver listings of every tab's folders (`Backend.readEnvironment(cwd:)`), checked against the config files
+    /// they came from on each use.
+    nonisolated static let readEnvironmentCache = ReadEnvironmentCache()
 
     init(url: URL) {
         self.url = url
@@ -1225,9 +1255,17 @@ final class RepoSession: Identifiable {
         if undos + redos > 0 {
             Task { [weak self] in await self?.runLaunchHistory(undos: undos, redos: redos) }
         }
-        // `-HistqSelectWalk <n>[,<ms>]`: times switches between commits (`runSelectWalk`).
+        // `-HistqSelectWalk <n>[,<ms>[,<stride>[,wip]]]`: times switches between commits (`runSelectWalk`).
         if let spec = AppState.launchFlag("-HistqSelectWalk") {
             Task { [weak self] in await self?.runSelectWalk(spec) }
+        }
+        // `-HistqFileWalk <n>[,<ms>]`: times switches between the selected commit's or the WIP's files (`runFileWalk`).
+        if let spec = AppState.launchFlag("-HistqFileWalk") {
+            Task { [weak self] in await self?.runFileWalk(spec) }
+        }
+        // `-HistqPRWalk <number>,<n>[,<ms>]`: times opening a pull request and going back to HEAD (`runPRWalk`).
+        if let spec = AppState.launchFlag("-HistqPRWalk") {
+            Task { [weak self] in await self?.runPRWalk(spec) }
         }
         // `-HistqHistoryWalk <n>[,<ms>]` (with `-HistqSelect history:<path>`): times switches between history rows.
         if let spec = AppState.launchFlag("-HistqHistoryWalk") {
@@ -1321,7 +1359,7 @@ final class RepoSession: Identifiable {
     /// Hides the drawer; the shell keeps running. The graph gets the focus back.
     func closeTerminal() {
         guard isTerminalOpen else { return }
-        terminal?.returnFocusToGraph()
+        terminal?.returnFocusToGraph(graphSearch.table, repo: url.lastPathComponent)
         isTerminalOpen = false
     }
 
@@ -1509,7 +1547,8 @@ final class RepoSession: Identifiable {
     /// Switches the detail to `selection` now, in the click's frame: a commit read before shows whole from the cache
     /// (no load), a commit of the log shows its header with its files loading, the WIP shows from the last status (a
     /// read refreshes it), anything else is `.loading` (the placeholder). The load runs in a task that a newer select
-    /// cancels. Selecting the current selection again (a tab switch) reloads it, unless the cache has it. A commit on
+    /// cancels. Selecting the current selection again (a tab switch) reloads it, unless the cache has it; the WIP's
+    /// read publishes nothing when the status is equal (no `statusReads` bump, no reload of the open file). A commit on
     /// screen whole prefetches its neighbours (`prefetchNeighbours`); a newer select cancels that too. `keepsPanel2`:
     /// another selection leaves panel2 as it is (a blame gutter's click keeps the blame).
     func select(_ selection: Selection, keepsPanel2: Bool = false) {
@@ -1675,7 +1714,7 @@ final class RepoSession: Identifiable {
             let loaded: Detail
             switch selection {
             case .overview, .wip:
-                if try await readStatusAndRefs(backend, scope: [.status, .refs]) { loadLog(backend) }
+                if try await readStatusAndRefs(backend, scope: [.status, .refs], forSelect: true) { loadLog(backend) }
                 guard token == selectToken else { return }
                 if selection == .wip {
                     loaded = .wip
@@ -1887,14 +1926,57 @@ final class RepoSession: Identifiable {
     // MARK: Refresh
 
     /// Rereads what `scope` names. A refresh in flight is cancelled and its scope added to this one. `refs` also
-    /// reloads the log when a ref moved.
-    func refresh(scope: RefreshScope) {
-        let scope = refreshTask == nil ? scope : scope.union(refreshScope)
+    /// reloads the log when a ref moved. `changed`: when the watcher's last change was made; what the last refresh
+    /// covers is dropped from `scope` when that refresh started after it (its read sees the change), and a refresh in
+    /// flight is not cancelled for it. A watcher change in a hidden tab is held until the tab shows (`isShown`);
+    /// `paths`: the worktree files behind its `status`, when known (`hold(_:paths:)`).
+    func refresh(scope: RefreshScope, changed: UInt64? = nil, paths: [String]? = nil) {
+        let covered = if let changed, changed < refreshStart.time { refreshStart.scope } else { RefreshScope() }
+        let uncovered = scope.subtracting(covered)
+        guard !uncovered.isEmpty else { return }
+        guard changed == nil || isShown else { return hold(uncovered, paths: paths) }
+        // A refresh that starts now reads every held change in its scope: all were made before it.
+        heldScope.subtract(uncovered)
+        let scope = refreshTask == nil ? uncovered : uncovered.union(refreshScope)
         refreshTask?.cancel()
         refreshScope = scope
+        refreshStart = (scope, clock_gettime_nsec_np(CLOCK_REALTIME))
         refreshTask = Task { [weak self] in
             await self?.performRefresh(scope)
         }
+    }
+
+    /// Holds a hidden tab's watcher change until the tab shows. A `status` from worktree files only (`paths`) is held
+    /// only when git does not ignore one of them: a build or an editor writing ignored files leaves the status as it
+    /// was, and the tab comes back with its WIP as it was instead of a placeholder (`statusHeld`). A tab shown while
+    /// git answers reads its status as held.
+    private func hold(_ scope: RefreshScope, paths: [String]?) {
+        guard scope.contains(.status), let paths, !paths.isEmpty, !heldScope.contains(.status) else {
+            return heldScope.formUnion(scope)
+        }
+        heldScope.formUnion(scope.subtracting(.status))
+        ignoreChecks += 1
+        Task { [weak self] in
+            guard let self else { return }
+            let ignored = await allIgnored(paths)
+            ignoreChecks -= 1
+            // Shown meanwhile: its refresh read the status already (`isShown`).
+            if !ignored, !isShown { heldScope.insert(.status) }
+        }
+    }
+
+    /// Whether git ignores every one of `paths` (relative to the worktree; a tracked file never is). Any failure is
+    /// read as not ignored.
+    private func allIgnored(_ paths: [String]) async -> Bool {
+        guard let backend = try? await backend() else { return false }
+        let cwd = backend.directories.worktree
+        guard let env = try? await backend.readEnvironment(cwd: cwd),
+              let result = try? await backend.runner.run(
+                ["check-ignore", "-z", "--stdin"], cwd: cwd, env: env,
+                stdin: Data(paths.map { $0 + "\0" }.joined().utf8), allowedExitCodes: [0, 1])
+        else { return false }
+        let ignored = Set(result.stdout.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
+        return paths.allSatisfy(ignored.contains)
     }
 
     private func performRefresh(_ scope: RefreshScope) async {
@@ -1903,9 +1985,18 @@ final class RepoSession: Identifiable {
             // A newer refresh took over (it owns `refreshTask` now).
             try Task.checkCancellation()
             let readStart = DispatchTime.now().uptimeNanoseconds
-            let refsMoved = try await readStatusAndRefs(backend, scope: scope)
+            // Read here when the log reload below can reuse it, with the status and the stashes this read publishes.
+            let env = try await scope.isSuperset(of: [.status, .refs]) ? backend.readEnvironment(cwd: url) : nil
+            let refsMoved = try await readStatusAndRefs(backend, scope: scope, env: env)
             UITiming.refreshRead(since: readStart)
-            if scope.contains(.log) || refsMoved { loadLog(backend) }
+            if scope.contains(.log) || refsMoved {
+                // Published just now, with no suspension since: a newer watcher event would have cancelled this read.
+                if let env, let read = status.value, let stashes {
+                    loadLog(backend, reusing: (env, read, stashes))
+                } else {
+                    loadLog(backend)
+                }
+            }
             // A worktree added or removed, or a commit made in one, shows as a refs change. Never before the first log
             // page: that one starts the first read.
             if scope.contains(.refs), log.value != nil { loadWorktrees(backend) }
@@ -1917,23 +2008,31 @@ final class RepoSession: Identifiable {
             guard !Self.isCancellation(error) else { return }
             Self.logger.error("refresh \(scope.description, privacy: .public) failed: \(error, privacy: .public)")
             failUnread(Self.message(for: error))
+            statusHeld = false
             refreshTask = nil
             refreshScope = []
+            // A failed read covers nothing.
+            refreshStart = ([], 0)
         }
     }
 
     /// Reads the status and the refs (those `scope` names) off the main actor, then publishes them. Returns whether
     /// a ref moved since the last read (a commit, a checkout, a fetch: the log changed). Throws `CancellationError`
-    /// when cancelled, so nothing stale is published.
-    private func readStatusAndRefs(_ backend: Backend, scope: RefreshScope) async throws -> Bool {
+    /// when cancelled, so nothing stale is published. `forSelect`: a status equal to the last one is not published
+    /// (no `statusReads` bump, no reload of the open WIP file); a refresh's read always is, since an edit to a file
+    /// already modified leaves the status equal while its diff changes. `env`: the read environment, else read here.
+    private func readStatusAndRefs(
+        _ backend: Backend, scope: RefreshScope, forSelect: Bool = false, env: [String: String]? = nil
+    ) async throws -> Bool {
         guard scope.contains(.status) || scope.contains(.refs) else { return false }
         let (newStatus, newState, newRefs, newStashes, newRemotes, newUndo) = try await Self.read(
-            backend, cwd: url, status: scope.contains(.status), refs: scope.contains(.refs))
+            backend, cwd: url, env: env, status: scope.contains(.status), refs: scope.contains(.refs))
         try Task.checkCancellation()
         if let newState, newState != repoState { repoState = newState }
         if let newUndo, newUndo != undoStatus { undoStatus = newUndo }
         if newState != nil { removeRebaseFilesIfDone() }
-        if let newStatus {
+        if newStatus != nil, statusHeld { statusHeld = false }
+        if let newStatus, !(forSelect && status.value == newStatus) {
             status = .loaded(newStatus)
             statusReads &+= 1
             if let target = openFile, target.source == .wip {
@@ -1994,10 +2093,10 @@ final class RepoSession: Identifiable {
     }
 
     @concurrent
-    private nonisolated static func read(_ backend: Backend, cwd: URL, status: Bool, refs: Bool) async throws
-        -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?, UndoStatus?)
+    private nonisolated static func read(_ backend: Backend, cwd: URL, env: [String: String]?, status: Bool, refs: Bool)
+        async throws -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?, UndoStatus?)
     {
-        let env = try await backend.readEnvironment(cwd: cwd)
+        let env = if let env { env } else { try await backend.readEnvironment(cwd: cwd) }
         async let newStatus = status ? StatusReader.read(runner: backend.runner, cwd: cwd, env: env) : nil
         // The banner is secondary: a state that cannot be read keeps the last one rather than failing the status.
         async let newState = status ? (try? await RepoState.read(runner: backend.runner, cwd: cwd, env: env)) : nil
@@ -2042,8 +2141,11 @@ final class RepoSession: Identifiable {
 
     /// (Re)loads the log and lays out its graph off the main actor. The first load publishes the first page as soon as
     /// it is parsed; a reload first tries to read only the new commits (`readLogIncrementally`), else reads the whole
-    /// log, and keeps the old log on screen until the new one is complete. A newer load cancels this one.
-    private func loadLog(_ backend: Backend) {
+    /// log, and keeps the old log on screen until the new one is complete. A newer load cancels this one. `read`: the
+    /// read environment, status and stashes a refresh published just now, which the incremental read then reuses.
+    private func loadLog(
+        _ backend: Backend, reusing read: (env: [String: String], status: WorkingStatus, stashes: [Stash])? = nil
+    ) {
         logTask?.cancel()
         let isFirstLoad = log.value == nil
         if isFirstLoad { log = .loading }
@@ -2077,7 +2179,7 @@ final class RepoSession: Identifiable {
                     do {
                         incremental = try await Self.readLogIncrementally(
                             backend, previous: oldLog, cwd: cwd, generation: generation, worktrees: worktrees,
-                            filter: filter, order: order, coloring: coloring)
+                            filter: filter, order: order, coloring: coloring, reusing: read)
                     } catch where !Self.isCancellation(error) {
                         Self.logger.error("incremental log reload failed: \(error, privacy: .public)")
                     }
@@ -2229,16 +2331,21 @@ final class RepoSession: Identifiable {
     @concurrent
     private nonisolated static func readLogIncrementally(
         _ backend: Backend, previous: LogSnapshot, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
-        filter: LogFilter, order: LogReader.Order, coloring: GraphLayout.Coloring
+        filter: LogFilter, order: LogReader.Order, coloring: GraphLayout.Coloring,
+        reusing read: (env: [String: String], status: WorkingStatus, stashes: [Stash])?
     ) async throws -> LogSnapshot? {
         var steps = UITiming.Steps()
         guard previous.isComplete, !previous.isShallow, !isShallow(backend), !hasGrafts(backend) else { return nil }
-        let env = try await backend.readEnvironment(cwd: cwd)
-        async let status = StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        let env = if let read { read.env } else { try await backend.readEnvironment(cwd: cwd) }
+        async let status = if let read { read.status } else {
+            try await StatusReader.read(runner: backend.runner, cwd: cwd, env: env)
+        }
         steps.lap("env")
         var snapshot = LogSnapshot(generation: generation, order: order, coloring: coloring)
         snapshot.filter = filter
-        snapshot.stashes = try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        snapshot.stashes = if let read { read.stashes } else {
+            try await StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env)
+        }
         steps.lap("stashes")
         let tips = previous.tips
         steps.lap("tips")
@@ -3474,12 +3581,15 @@ final class RepoSession: Identifiable {
                 runner: runner, cwd: cwd, env: env, paths: paths, ignoringWhitespace: ignoresWhitespace)
             async let stagedFull = DiffReader.staged(
                 runner: runner, cwd: cwd, env: env, paths: paths, context: full, ignoringWhitespace: ignoresWhitespace)
+            let picked = (pick(try await unstaged, file), pick(try await unstagedFull, file), pick(try await staged, file),
+                          pick(try await stagedFull, file))
+            steps.lap("diff")
             let sections = [
-                DiffSection(side: .unstaged, diff: pick(try await unstaged, file), full: pick(try await unstagedFull, file),
-                            language: language),
-                DiffSection(side: .staged, diff: pick(try await staged, file), full: pick(try await stagedFull, file),
-                            language: language),
+                DiffSection(side: .unstaged, diff: picked.0, full: picked.1, language: language),
+                DiffSection(side: .staged, diff: picked.2, full: picked.3, language: language),
             ]
+            steps.lap("rows")
+            UITiming.fileLoad("\(file.path) \(steps.description) lines=\(lineCount(sections))")
             return FileDiffDetail(loadID: loadID, sections: sections.compactMap { $0 })
         case .commit(let hash) where file.kind == .unchanged:
             // A file the commit did not change ("View all files"): its blob at that commit, every line as context.
@@ -3498,7 +3608,7 @@ final class RepoSession: Identifiable {
             steps.lap("diff")
             let section = DiffSection(side: .commit, diff: picked.0, full: picked.1, language: language)
             steps.lap("rows")
-            UITiming.fileLoad("\(file.path) \(steps.description)")
+            UITiming.fileLoad("\(file.path) \(steps.description) lines=\(lineCount([section]))")
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         case .compare(let base, let head):
             // Read-only (no hunk buttons).
@@ -3508,10 +3618,18 @@ final class RepoSession: Identifiable {
             async let diffFull = DiffReader.compare(
                 base: base, head: head, runner: runner, cwd: cwd, env: env, paths: paths, context: full,
                 ignoringWhitespace: ignoresWhitespace)
-            let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
-                                      language: language)
+            let picked = (pick(try await diff, file), pick(try await diffFull, file))
+            steps.lap("diff")
+            let section = DiffSection(side: .commit, diff: picked.0, full: picked.1, language: language)
+            steps.lap("rows")
+            UITiming.fileLoad("\(file.path) \(steps.description) lines=\(lineCount([section]))")
             return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
         }
+    }
+
+    /// The file's line count for a `file-load` timing line: the last new-side line number of the sections' full rows.
+    private nonisolated static func lineCount(_ sections: [DiffSection?]) -> Int {
+        sections.compactMap { $0?.fullRows.last { $0.newLine != nil }?.newLine }.max() ?? 0
     }
 
     /// A submodule row's pointer change, one per side that has one: a commit's or a stash's against its first parent
@@ -4700,27 +4818,111 @@ final class RepoSession: Identifiable {
         RepoMenus.debugLog("done history")
     }
 
-    /// DEBUG `-HistqSelectWalk <n>[,<ms>]` (timing of commit switches): once the whole log is laid out and the launch's
-    /// detail is loaded, selects the log's first n commit rows one by one (the WIP and stash rows are not commits)
-    /// through `selectGraph`, the click path, `ms` apart (default 250), then walks back up from row n-1 to row 1
-    /// (revisits), and logs `walk done`. Each select logs its own `select`, `content-info` (a commit of the log; else
-    /// `placeholder`) and `content` lines.
+    /// DEBUG `-HistqSelectWalk <n>[,<ms>[,<stride>[,wip]]]` (timing of commit switches): once the whole log is laid out
+    /// and the launch's detail is loaded, selects the log's first n commit rows one by one (the WIP and stash rows are
+    /// not commits) through `selectGraph`, the click path, `ms` apart (default 250), then walks back up from row n-1 to
+    /// row 1 (revisits), and logs `walk done`. A `stride` above 1 selects every stride-th commit row instead, n of them,
+    /// down only (rows the neighbour prefetch never read: cold selects). `wip` selects the WIP row after each commit,
+    /// `ms` later. Each select logs its own `select`, `content-info` (a commit of the log; else `placeholder`) and
+    /// `content` lines.
     private func runSelectWalk(_ spec: String) async {
-        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let tokens = spec.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let parts = tokens.prefix(3).map { Int($0) }
         guard let count = parts.first ?? nil, count > 0 else {
-            return Self.logger.error("-HistqSelectWalk: expected <n>[,<ms>], got \(spec, privacy: .public)")
+            return Self.logger.error(
+                "-HistqSelectWalk: expected <n>[,<ms>[,<stride>[,wip]]], got \(spec, privacy: .public)")
         }
         let interval = (parts.count > 1 ? parts[1] : nil) ?? 250
+        let step = max((parts.count > 2 ? parts[2] : nil) ?? 1, 1)
+        let walksWIP = tokens.count > 3 && tokens[3] == "wip"
         for _ in 0..<600 {
             if log.value?.isComplete == true, detail.value != nil { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
         // Lets the launch's last frames go by, so the first select is not timed against them.
         try? await Task.sleep(for: .milliseconds(500))
-        let hashes = (log.value?.commits ?? []).prefix(count).map(\.hash)
-        UITiming.walk("start \(hashes.count) every \(interval) ms")
-        for hash in hashes + hashes.dropLast().reversed() {
+        let commits = log.value?.commits ?? []
+        let hashes = stride(from: 0, to: commits.count, by: step).prefix(count).map { commits[$0].hash }
+        UITiming.walk("start \(hashes.count) every \(interval) ms" + (step > 1 ? " stride \(step)" : "")
+            + (walksWIP ? " wip" : ""))
+        for hash in step > 1 ? hashes : hashes + hashes.dropLast().reversed() {
             selectGraph([.commit(hash)])
+            try? await Task.sleep(for: .milliseconds(interval))
+            if walksWIP {
+                selectGraph([.wip])
+                try? await Task.sleep(for: .milliseconds(interval))
+            }
+        }
+        UITiming.walk("done")
+    }
+
+    /// DEBUG `-HistqFileWalk <n>[,<ms>]` (timing of file switches, with `-HistqSelect commit:<sha>|wip`): once the whole
+    /// log is laid out and the selected row's detail is ready, clicks its first n files one every `ms` (default 250),
+    /// down and back up: a commit's through `selectFile`, the WIP's through `selectWIPFile`, as a click on their row
+    /// does. On the WIP row it then keeps the last file open, selects the WIP row again 5 times 300 ms apart with
+    /// `keepsPanel2` (the Stacked and Columns click path: Classic's would close the file), logs `walk tail` (the
+    /// harness changes the open file now) and 3 s later `walk done`.
+    private func runFileWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let count = parts.first ?? nil, count > 0 else {
+            return Self.logger.error("-HistqFileWalk: expected <n>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 1 ? parts[1] : nil) ?? 250
+        for _ in 0..<600 {
+            if log.value?.isComplete == true, detail.value?.isReady == true { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        // Lets the launch's `-HistqSelect` and last frames go by, then waits for that row's files.
+        try? await Task.sleep(for: .milliseconds(500))
+        for _ in 0..<150 {
+            if detail.value?.isReady == true { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let isWIP = if case .wip? = detail.value { true } else { false }
+        let paths = isWIP ? (status.value?.entries ?? []).prefix(count).map(\.path) : []
+        let targets: [FileTarget] = if case .commit(let commit)? = detail.value {
+            (commit.files ?? []).prefix(count).map { FileTarget(source: .commit(commit.hash), file: $0) }
+        } else { [] }
+        let rows = Array(0..<(isWIP ? paths.count : targets.count))
+        guard !rows.isEmpty else { return Self.logger.error("-HistqFileWalk: no commit or WIP files") }
+        UITiming.walk("start files \(rows.count) every \(interval) ms")
+        for row in rows + rows.dropLast().reversed() {
+            if isWIP { selectWIPFile(paths[row]) } else { selectFile(targets[row]) }
+            try? await Task.sleep(for: .milliseconds(interval))
+        }
+        if isWIP {
+            for _ in 0..<5 {
+                selectGraph([.wip], keepsPanel2: true)
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            UITiming.walk("tail")
+            try? await Task.sleep(for: .seconds(3))
+        }
+        UITiming.walk("done")
+    }
+
+    /// DEBUG `-HistqPRWalk <number>,<n>[,<ms>]` (timing of the pull request page, with `-HistqGitHubStub YES`): once
+    /// the whole log is laid out and the PRs tab's lists are read, clicks pull request `number`'s row (`selectHosted`),
+    /// then HEAD's graph row, each `ms` apart (default 2500), n times (a first open, then revisits), and logs
+    /// `walk done`.
+    private func runPRWalk(_ spec: String) async {
+        let parts = spec.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count > 1, let number = parts[0], let count = parts[1], count > 0 else {
+            return Self.logger.error("-HistqPRWalk: expected <number>,<n>[,<ms>], got \(spec, privacy: .public)")
+        }
+        let interval = (parts.count > 2 ? parts[2] : nil) ?? 2500
+        selectSidebarTab(.prs)
+        for _ in 0..<600 {
+            if log.value?.isComplete == true, github.isRead(.allOpen), detail.value != nil { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        guard let head = refs.value?.head.commit else { return Self.logger.error("-HistqPRWalk: no HEAD commit") }
+        UITiming.walk("start pr \(number) \(count) every \(interval) ms")
+        for _ in 0..<count {
+            selectHosted(github.item(numbered: number))
+            try? await Task.sleep(for: .milliseconds(interval))
+            selectGraph([.commit(head)])
             try? await Task.sleep(for: .milliseconds(interval))
         }
         UITiming.walk("done")
@@ -4915,7 +5117,16 @@ final class RepoSession: Identifiable {
     /// or an interactive rebase's outcome (`.autostashPending`: it stopped, on conflicts or at an `edit`, with git
     /// holding the local changes) or a stash apply's.
     @discardableResult
-    func perform(_ write: Write) async throws -> WriteOutcome {
+    func perform(_ write: Write, timingID: Int? = nil) async throws -> WriteOutcome {
+        let id: Int
+        if let timingID {
+            id = timingID
+        } else {
+            id = UITiming.nextOpID()
+            UITiming.opClick(id, write, repo: url.lastPathComponent)
+        }
+        UITiming.opStart(id, write, repo: url.lastPathComponent)
+        defer { UITiming.opSettled(id) }
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
@@ -4936,11 +5147,14 @@ final class RepoSession: Identifiable {
         let outcome: WriteOutcome
         do {
             outcome = try await Self.run(write, profile: profile, backend: backend, cwd: url)
+            UITiming.opEnd(id, ok: true)
         } catch GitError.autostashKept(let hash) where { if case .commit = write { true } else { false } }() {
+            UITiming.opEnd(id, ok: false)
             // A commit that concluded a stopped pull is made (the WIP panel calls `perform`, not `run`).
             postToast(.warning("Commit", detail: "Changes kept in stash \(hash.prefix(7))."))
             outcome = .done
         } catch {
+            UITiming.opEnd(id, ok: false)
             // A pull or an interactive rebase whose local changes stayed in a stash still ran.
             let ran = switch write { case .pull, .interactiveRebase: true; default: false }
             if case GitError.autostashKept = error, ran, lastNotUndoable != write.notUndoable {
@@ -4958,8 +5172,9 @@ final class RepoSession: Identifiable {
         return outcome
     }
 
-    /// Waits for the reread to publish: the watcher may see the write's own changes and start a refresh that cancels
-    /// this one (and takes its scope over), so it waits for the newer one too, a few times at most.
+    /// Waits for the reread to publish: the watcher may see a change made after this refresh started and start a
+    /// refresh that cancels this one (and takes its scope over), so it waits for the newer one too, a few times at
+    /// most. The write's own changes, made before, are in this read: the watcher's refresh for them is dropped.
     private func refreshAfterWrite() async {
         refresh(scope: [.status, .refs])
         for _ in 0..<5 {
@@ -5122,6 +5337,8 @@ final class RepoSession: Identifiable {
     /// when this returns (with `key`, the action bar button that shows it). Its outcome shows as a toast
     /// (`postToast`); a failure also goes to `failure` (`report`), which a new operation clears.
     func run(_ write: Write, title: String, key: ActionBarAction? = nil) {
+        let timingID = UITiming.nextOpID()
+        UITiming.opClick(timingID, write, repo: url.lastPathComponent)
         nextOperationID &+= 1
         let operation = RunningOperation(id: nextOperationID, title: title, key: key)
         running.append(operation)
@@ -5134,7 +5351,7 @@ final class RepoSession: Identifiable {
             // The commits HEAD records for the submodules, when this write may move them (`autoUpdateSubmodules`).
             let submodulesBefore = movesSubmodules(write) ? await recordedSubmodules() : nil
             do {
-                let outcome = try await perform(write)
+                let outcome = try await perform(write, timingID: timingID)
                 if case .removeWorktree(let path, _) = write { worktreeRemoved(path) }
                 // Started one (a rebase at an `edit` step), or Continue / Skip went on to the next stop.
                 let resumes = switch write { case .continueOperation, .skipOperation: true; default: false }
@@ -5565,8 +5782,9 @@ final class RepoSession: Identifiable {
         if setUpTask == nil {
             let cwd = url
             let watcher = watcher
-            let onChange: @MainActor @Sendable (RefreshScope) -> Void = { [weak self] scope in
-                self?.refresh(scope: scope)
+            let onChange: @MainActor @Sendable (RefreshScope, UInt64, [String]?) -> Void = {
+                [weak self] scope, changed, paths in
+                self?.refresh(scope: scope, changed: changed, paths: paths)
             }
             setUpTask = Task.detached(priority: .userInitiated) {
                 let toolchain = try await GitToolchain.resolve()

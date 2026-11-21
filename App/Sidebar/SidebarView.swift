@@ -883,14 +883,16 @@ struct CardSearchField: View {
     @Binding var isSearching: Bool
     @Binding var query: String
     @FocusState private var focused: Bool
+    @Environment(\.tabIsShown) private var tabIsShown
 
     var body: some View {
         TextField(prompt, text: $query, prompt: Text(prompt))
             .textFieldStyle(.settings)
             .labelsHidden()
             .focused($focused)
-            // Next run-loop turn, once the field is in the window.
-            .onAppear { DispatchQueue.main.async { focused = true } }
+            // Next run-loop turn, once the field is in the window. Not in a hidden tab: its card, collapsed while it
+            // had no rows, can show it again there when rows come back.
+            .onAppear { if tabIsShown { DispatchQueue.main.async { focused = true } } }
             .onKeyPress(.escape) {
                 isSearching = false
                 query = ""

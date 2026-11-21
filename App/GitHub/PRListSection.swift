@@ -9,12 +9,13 @@ import SwiftUI
 
 /// Drives the tab's `GitHubStore` while the repo tab shows: `watch` resolves the connection, reads the lists once (the
 /// graph's PR badges), and keeps them fresh while the PRs tab shows; it restarts when the profile, the remotes, the
-/// window's visibility or the sidebar tab change, stops when the repo tab or the window goes away, and pauses while the
-/// window is hidden or covered. Draws nothing.
+/// window's visibility, the shown tab (`tabIsShown`) or the sidebar tab change, stops when the repo tab or the window
+/// goes away, and pauses while the window is hidden or covered or a kept-alive tab is not shown. Draws nothing.
 struct GitHubDriver: View {
     let session: RepoSession
     @Environment(WindowModel.self) private var model
     @Environment(WindowState.self) private var windowState
+    @Environment(\.tabIsShown) private var tabIsShown
     @AppStorage(PrefKey.sidebarSectionOrder.rawValue, store: Preferences.defaults) private var sectionOrder = ""
     @AppStorage(PrefKey.hiddenSidebarSections.rawValue, store: Preferences.defaults) private var hiddenSections = ""
 
@@ -25,11 +26,12 @@ struct GitHubDriver: View {
                 await session.github.watch(source, profile: session.profile)
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                if windowState.isVisible, listsShown { session.github.refreshIfStale() }
+                if windowState.isVisible, tabIsShown, listsShown { session.github.refreshIfStale() }
             }
-            // The store reads only the shown lists: a list shown again loads now, not at the next refresh.
+            // The store reads only the shown lists: a list shown again loads now, not at the next refresh. Only in the
+            // shown tab: the setting is app-wide, and the kept-alive tabs must not all read GitHub at once.
             .onChange(of: layout.pullRequestLists) { old, new in
-                if new.contains(where: { !old.contains($0) }) { session.github.refreshNow() }
+                if tabIsShown, new.contains(where: { !old.contains($0) }) { session.github.refreshNow() }
             }
     }
 
@@ -53,7 +55,7 @@ struct GitHubDriver: View {
         return GitHubStore.Source(
             profilesLoaded: profilesLoaded, profileID: profile?.id, account: profile?.github,
             remotes: session.remotes, remotesKnown: session.refs.value != nil, settingsOpen: model.isSettingsOpen,
-            windowVisible: windowState.isVisible, listsShown: listsShown, isStub: isStub)
+            windowVisible: windowState.isVisible, listsShown: listsShown, isShown: tabIsShown, isStub: isStub)
     }
 }
 

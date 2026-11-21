@@ -1128,10 +1128,12 @@ public struct GitOperations: Sendable {
         return (try? await exec(["ls-files", "--unmerged"]))?.stdout.isEmpty == true
     }
 
+    private static let autostashFiles = ["MERGE_AUTOSTASH", "rebase-merge/autostash", "rebase-apply/autostash"]
+
     /// Whether a stopped merge or rebase holds an auto-stash (`MERGE_AUTOSTASH`, `rebase-merge/autostash`,
     /// `rebase-apply/autostash`), which git puts back on continue or abort.
     func autostashPending() async -> Bool {
-        let names = ["MERGE_AUTOSTASH", "rebase-merge/autostash", "rebase-apply/autostash"]
+        let names = Self.autostashFiles
         guard let paths = try? await exec(["rev-parse", "--path-format=absolute"] + names.flatMap { ["--git-path", $0] })
         else { return false }
         return paths.text.split(separator: "\n").contains { FileManager.default.fileExists(atPath: String($0)) }
@@ -1342,11 +1344,21 @@ public struct GitOperations: Sendable {
         try await lane { ops in
             // A stopped pull's auto-stash comes back on a commit, continue or skip, and a reset, checkout or stash push
             // that drops a merge's state saves it: git keeps it in `refs/stash` and exits 0. Read before `before`,
-            // whose stash push is such a drop.
-            let held = await ops.autostashPending()
+            // whose stash push is such a drop. Without `before`, the same `rev-parse` looks for the files of
+            // `RepoState.readOperation`: when none exists no operation is in progress, and `begin` need not read it.
+            let stashes = Self.autostashFiles.count
+            let files = Self.autostashFiles
+                + RepoState.operationMarkers
+            let found = before != nil ? nil : (try? await ops.exec(
+                ["rev-parse", "--path-format=absolute"] + files.flatMap { ["--git-path", $0] }))?.text
+                .split(separator: "\n").map { FileManager.default.fileExists(atPath: String($0)) }
+            let read = found?.count == files.count
+            let held = read ? found?.prefix(stashes).contains(true) == true : await ops.autostashPending()
+            let noOperation = read && found?.dropFirst(stashes).contains(true) == false
             let top = held ? try await ops.stashTop() : nil
             let saved = try await before?(ops) ?? nil
-            let start = await ops.journal?.begin(ops, refs: refs, content: content, completesOperation: completesOperation)
+            let start = await ops.journal?.begin(
+                ops, refs: refs, content: content, completesOperation: completesOperation, noOperation: noOperation)
             do {
                 try await body(ops)
             } catch {

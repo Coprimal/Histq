@@ -174,6 +174,7 @@ struct GraphView: NSViewRepresentable {
     /// the top with the selection revealed. `onScroll` gets the position when the view goes away.
     var scrollPosition: GraphScrollPosition?
     var onScroll: @MainActor (GraphScrollPosition) -> Void = { _ in }
+    @Environment(\.tabIsShown) private var tabIsShown
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
@@ -227,6 +228,7 @@ struct GraphView: NSViewRepresentable {
         scroll.autohidesScrollers = true
         // `bottomInset` sets the insets; the graph card sits below the title bar, so there is nothing to adjust for.
         scroll.automaticallyAdjustsContentInsets = false
+        scroll.isHidden = !tabIsShown
 
         context.coordinator.attach(table)
         onTable(table)
@@ -234,6 +236,7 @@ struct GraphView: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         if scroll.contentInsets.bottom != bottomInset { scroll.contentInsets.bottom = bottomInset }
         context.coordinator.update(self)
     }

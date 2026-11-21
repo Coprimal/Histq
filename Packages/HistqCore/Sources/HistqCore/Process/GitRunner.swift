@@ -90,6 +90,13 @@ public actor GitRunner {
         public let text: String
     }
 
+    /// Timing hook (the app's DEBUG and `HISTQ_PERF` builds set it once at launch, before any process runs): called
+    /// once per finished child process with its verb (the first argument after leading `-c <key=value>`, `-C <dir>`
+    /// and `--option` arguments), its wall time in ms, its folder's name, its exit status and, when a signal ended it,
+    /// the signal number. Nil in shipped builds.
+    nonisolated(unsafe) public static var processObserver: (@Sendable (
+        _ verb: String, _ ms: Double, _ repo: String, _ exit: Int32, _ signal: Int32?) -> Void)?
+
     public let executable: URL
     /// The tail of the `mutate` lane: the last queued write, finished or not.
     private var lane: Task<Void, Never>?
@@ -234,6 +241,8 @@ final class ChildProcess: @unchecked Sendable {
     private var outcome: Outcome?
     private var waiter: CheckedContinuation<Outcome, Never>?
     private var timer: Task<Void, Never>?
+    /// When `start()` launched the process, in uptime nanoseconds (for `GitRunner.processObserver`).
+    private var startNanos: UInt64 = 0
 
     /// `delimiter` and `onLine` go together: both nil collects stdout, both set streams lines.
     init(
@@ -268,6 +277,7 @@ final class ChildProcess: @unchecked Sendable {
         process.terminationHandler = { [self] process in
             exited(status: process.terminationStatus, reason: process.terminationReason)
         }
+        startNanos = DispatchTime.now().uptimeNanoseconds
         do {
             try process.run()
         } catch {
@@ -344,6 +354,8 @@ final class ChildProcess: @unchecked Sendable {
     }
 
     private func read(_ data: Data, from source: GitRunner.Line.Source) {
+        var finish: (() -> Void)?
+        defer { finish?() }  // Declared first, so it runs after the unlock below.
         lock.lock()
         defer { lock.unlock() }
         guard outcome == nil else { return }
@@ -351,7 +363,7 @@ final class ChildProcess: @unchecked Sendable {
             (source == .stdout ? stdoutPipe : stderrPipe).fileHandleForReading.readabilityHandler = nil
             flush(source)
             openStreams -= 1
-            finishIfReady(force: false)
+            finish = finishIfReady(force: false)
             return
         }
         switch source {
@@ -402,18 +414,23 @@ final class ChildProcess: @unchecked Sendable {
     }
 
     private func exited(status: Int32, reason: Process.TerminationReason) {
-        lock.withLock {
+        let finish = lock.withLock {
             exit = (status, reason)
-            finishIfReady(force: false)
+            return finishIfReady(force: false)
         }
+        finish?()
         DispatchQueue.global().asyncAfter(deadline: .now() + Self.eofGracePeriod) { [self] in
-            lock.withLock { finishIfReady(force: true) }
+            let finish = lock.withLock { finishIfReady(force: true) }
+            finish?()
         }
     }
 
     /// Publishes the outcome once the process exited and both pipes closed (or `force`). Lock held.
-    private func finishIfReady(force: Bool) {
-        guard outcome == nil, let exit, force || openStreams == 0 else { return }
+    /// Returns what the caller runs once it released the lock (nil when not finished): the observer, then the
+    /// waiter's resume. Neither runs under the lock: resuming can wait for the task's status lock, which a thread
+    /// cancelling that task holds while `stop()` waits for this lock.
+    private func finishIfReady(force: Bool) -> (() -> Void)? {
+        guard outcome == nil, let exit, force || openStreams == 0 else { return nil }
         if force {
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -427,7 +444,27 @@ final class ChildProcess: @unchecked Sendable {
         outcome = result
         let continuation = waiter
         waiter = nil
-        continuation?.resume(returning: result)
+        return { [self] in
+            // Before the waiter resumes, so the process's timing line comes before what its caller logs next.
+            if let observer = GitRunner.processObserver { observe(exit, with: observer) }
+            continuation?.resume(returning: result)
+        }
+    }
+
+    /// Reports this finished process to `observer` (only its verb: other arguments can hold remote URLs).
+    private func observe(
+        _ exit: (status: Int32, reason: Process.TerminationReason),
+        with observer: @Sendable (String, Double, String, Int32, Int32?) -> Void
+    ) {
+        let args = process.arguments ?? []
+        var index = 0
+        while index < args.count, args[index].hasPrefix("--") || args[index] == "-c" || args[index] == "-C" {
+            index += args[index].hasPrefix("--") ? 1 : 2
+        }
+        let verb = index < args.count ? args[index] : args.first ?? ""
+        let ms = Double(DispatchTime.now().uptimeNanoseconds &- startNanos) / 1_000_000
+        let repo = process.currentDirectoryURL?.lastPathComponent ?? "-"
+        observer(verb, ms, repo, exit.status, exit.reason == .uncaughtSignal ? exit.status : nil)
     }
 }
 

@@ -39,6 +39,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let profileItem = ToolbarDropdown(ID.profile, label: "Profile", width: nil, image: nil)
     /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
     private var profileDot: String?
+    #if DEBUG || HISTQ_PERF
+    /// The branch button's last `<title> busy=<0|1>`, for its `op-feedback branch` timing line.
+    private var branchFeedback: String?
+    #endif
     /// The space between the profile chip's dot and its title.
     private static let profileDotGap: CGFloat = 5
     private let undoItem = NSToolbarItem(itemIdentifier: ID.undo)
@@ -370,11 +374,21 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         }
         if let session {
             let isBusy = session.isRunning(.checkout)
-            let title = Self.branchTitle(session.refs.value?.head)
+            // While a checkout runs, its target at once; the refs' head again once it ends (failed too).
+            let target = Self.checkoutTarget(session)
+            let title = target ?? Self.branchTitle(session.refs.value?.head)
             branchItem.title = title
             branchItem.isEnabled = !isBusy && session.refs.value != nil
             // The full name, as the title may be cut.
-            branchItem.toolTip = isBusy ? "Checking out…" : "\(title): check out another branch"
+            branchItem.toolTip = isBusy ? target.map { "Checking out \($0)…" } ?? "Checking out…"
+                : "\(title): check out another branch"
+            #if DEBUG || HISTQ_PERF
+            let feedback = "\(title) busy=\(isBusy ? 1 : 0)"
+            if branchFeedback != feedback {
+                branchFeedback = feedback
+                UITiming.opFeedback("branch \(feedback)")
+            }
+            #endif
         }
 
         // Hidden, like the branch menu, where no repo tab shows (Welcome).
@@ -458,6 +472,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         guard let image = NSImage.icon(systemImage, accessibilityDescription: label, size: 20) else { return }
         item.image = image
         hoverButtons[ObjectIdentifier(item)]?.image = image
+        if systemImage == Self.busySymbol { UITiming.opFeedback("toolbar \(label)") }
     }
 
     /// In place of a running action's icon (there is no spinner in a toolbar button without a custom view).
@@ -507,6 +522,16 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         case .detached(let commit): "\(commit.prefix(7)) detached"
         case nil: "…"
         }
+    }
+
+    /// The name a running checkout's title gives after "Checkout ": every `.checkout` operation is titled
+    /// "Checkout \(name)" in `GraphMenus.swift` (`checkoutAskingIfDirty`; `confirmDetached` names the tag or the
+    /// short hash). Nil when no checkout runs or its title has another form.
+    private static func checkoutTarget(_ session: RepoSession) -> String? {
+        let prefix = "Checkout "
+        guard let title = session.running.last(where: { $0.key == .checkout })?.title, title.hasPrefix(prefix)
+        else { return nil }
+        return String(title.dropFirst(prefix.count))
     }
 
     /// `text` cut with "…" after `limit` characters (a toolbar button without a view has no width limit; the repo and

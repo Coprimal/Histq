@@ -1343,9 +1343,22 @@ extension View {
 
 private struct SettingsTextEditorStyle: ViewModifier {
     @FocusState private var focused: Bool
+    @Environment(\.tabIsShown) private var tabIsShown
+    /// Set while the tab is hidden and until the turn after it shows again.
+    @State private var deferred = false
 
     func body(content: Content) -> some View {
-        content
+        // Unmounted in a kept-alive tab that is not shown: `.disabled` leaves a TextEditor's NSTextView selectable, so
+        // it stays in the key view loop and Tab would type into the hidden tab. The text lives in the binding. On a
+        // switch back it mounts the turn after, so building it is not part of the switch's frame.
+        Group { if tabIsShown && !deferred { content } else { Color.clear } }
+            .onChange(of: tabIsShown, initial: true) { _, shown in
+                if !shown {
+                    deferred = true
+                } else if deferred {
+                    DispatchQueue.main.async { deferred = false }
+                }
+            }
             .scrollContentBackground(.hidden)
             .focused($focused)
             .padding(.horizontal, 6)

@@ -154,22 +154,47 @@ private struct WindowBackdrop: ViewModifier {
 }
 
 /// The selected tab's area: the three-panel layout of a repo tab, "Repo not found" for a restored repo that is gone,
-/// or the Welcome page of a new tab. A new identity
-/// per tab: switching tabs shows the new tab's placeholder (or its Welcome state), never the old tab's view.
+/// or the Welcome page of a new tab. The last tabs shown (`WindowModel.recentlyShown`) keep their layout mounted,
+/// hidden while another tab shows, so a switch back shows the tab as it was without building it again. "Repo not
+/// found" and Welcome get a new identity per tab: a switch never shows the old tab's page.
 private struct TabContent: View {
     @Environment(WindowModel.self) private var model
 
     var body: some View {
+        let selected = model.selectedSession
+        // In tab order, not most recent first: a switch moves no layout in the stack. The selected one is there even
+        // before `recentlyShown` has it.
+        let kept = model.tabs.compactMap { tab in
+            model.recentlyShown.contains(tab.id) || tab.id == model.selectedTabID ? model.sessions[tab.id] : nil
+        }
         // In a container, so the page's slide (`MainView.pageTransition`) applies to this page as a whole and not to
         // each tab's view: a tab switch swaps them in one frame, the old tab never slides out over the new one.
         ZStack {
-            if let session = model.selectedSession {
-                RepoLayoutView(session: session).id(session.id)
-            } else if let index = model.selectedIndex, model.tabs[index].isMissing, let url = model.tabs[index].repoURL {
-                RepoNotFoundView(model: model, tabID: model.tabs[index].id, url: url).id(model.tabs[index].id)
-            } else if let id = model.selectedTabID {
-                WelcomeView(model: model.welcome(for: id)).id(id)
+            // A hidden layout takes no clicks, no keys (its shortcuts are off), is not read by VoiceOver, and its
+            // AppKit views and background work follow `tabIsShown`.
+            ForEach(kept) { session in
+                let isShown = session === selected
+                RepoLayoutView(session: session)
+                    .equatable()
+                    .opacity(isShown ? 1 : 0)
+                    .allowsHitTesting(isShown)
+                    .accessibilityHidden(!isShown)
+                    .disabled(!isShown)
+                    .environment(\.tabIsShown, isShown)
             }
+            if selected == nil {
+                if let index = model.selectedIndex, model.tabs[index].isMissing, let url = model.tabs[index].repoURL {
+                    RepoNotFoundView(model: model, tabID: model.tabs[index].id, url: url).id(model.tabs[index].id)
+                } else if let id = model.selectedTabID {
+                    WelcomeView(model: model.welcome(for: id)).id(id)
+                }
+            }
+        }
+        // Every switch, whether or not the tab's view is rebuilt: the shown tab takes the keyboard in this update.
+        .onChange(of: model.selectedTabID) {
+            let repo = model.selectedIndex.flatMap { model.tabs[$0].repoURL?.lastPathComponent } ?? "-"
+            UITiming.tabShown("\(model.selectedIndex ?? -1) \(repo)")
+            model.focusShownTab(repo: repo)
         }
         #if DEBUG
         .task { await model.debugTabWalk() }
