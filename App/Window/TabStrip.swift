@@ -53,10 +53,11 @@ enum TabStripMetrics {
 
     /// A worktree box (`WorktreeBoxShape`): this far out from its tabs along the row, inside the gap, so two boxes
     /// side by side (and a box beside a plain tab) keep a clear line between them; from the row's top to the hover
-    /// fill's bottom, clear of the sheet and of a group's line.
+    /// fill's bottom, clear of the sheet and of a group's line. A capsule, so its round ends meet the selected tab's
+    /// arcs when that tab is first or last in the box.
     static let boxOutset: CGFloat = 1.5
     static let boxBottomInset: CGFloat = 3
-    static let boxRadius: CGFloat = 10
+    static let boxRadius: CGFloat = .infinity
 
     /// A group's chip width for its name: a square without one.
     static func groupChipWidth(_ name: String) -> CGFloat {

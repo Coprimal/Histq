@@ -340,14 +340,17 @@ struct WorktreeBoxShape: Shape {
             ? CGRect(x: start, y: crossStart, width: end - start, height: rect.maxY - crossEndInset - crossStart)
             : CGRect(x: crossStart, y: start, width: rect.maxX - crossEndInset - crossStart, height: end - start)
         guard box.width > 0, box.height > 0 else { return Path() }
+        // A radius past half the box's thickness makes a capsule, with circular ends like the selected tab's arcs.
+        let corner = min(radius, min(box.width, box.height) / 2)
+        let style: RoundedCornerStyle = corner < radius ? .circular : .continuous
         let shape: Path
         if border {
             // The edge inside the box, so cutting it keeps exactly the part on the shown box.
             let inner = box.insetBy(dx: 1, dy: 1)
-            shape = Path(roundedRect: box, cornerRadius: radius, style: .continuous)
-                .subtracting(Path(roundedRect: inner, cornerRadius: max(radius - 1, 0), style: .continuous))
+            shape = Path(roundedRect: box, cornerRadius: corner, style: style)
+                .subtracting(Path(roundedRect: inner, cornerRadius: max(corner - 1, 0), style: style))
         } else {
-            shape = Path(roundedRect: box, cornerRadius: radius, style: .continuous)
+            shape = Path(roundedRect: box, cornerRadius: corner, style: style)
         }
         guard holeEnd > holeStart else { return shape }
         let hole = axis == .horizontal
