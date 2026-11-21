@@ -178,6 +178,7 @@ extension RepoSession {
 /// 150 ms, so a fast checkout never flashes one.
 struct RunningStatus: View {
     let session: RepoSession
+    var font: Font = .settingsCaption
 
     var body: some View {
         if let operation = session.running.last {
@@ -195,7 +196,7 @@ struct RunningStatus: View {
                     ProgressView().controlSize(.mini)
                 }
                 Text(operation.title + "…")
-                    .font(.settingsCaption)
+                    .font(font)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)

@@ -207,12 +207,15 @@ private struct TabContent: View {
 /// version and Detail at the trailing edge. A fixed height, so a status coming and going never moves the page.
 struct WindowFooter: View {
     let model: WindowModel
-    static let height: CGFloat = 28
+    static let height: CGFloat = 30
     @AppStorage(PrefKey.showSidebar.rawValue, store: Preferences.defaults) private var sidebarShown = true
     @AppStorage(PrefKey.showDetail.rawValue, store: Preferences.defaults) private var detailShown = true
     @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var storedPreset = "classic"
 
     private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+    /// A step above `settingsCaption` (user, 2026-11-20): the footer's text and its toggles' icons.
+    private static let textFont: Font = .callout
+    private static let iconFont: Font = .system(size: 15)
 
     var body: some View {
         // Each toggle is off while its panel is hidden whatever it says (`RepoLayoutView`): without a repo tab, in
@@ -226,17 +229,17 @@ struct WindowFooter: View {
                 // The repo's folder, shortened in the middle before the running status gives way.
                 let path = (session.url.path as NSString).abbreviatingWithTildeInPath
                 Text(path)
-                    .font(.settingsCaption)
+                    .font(Self.textFont)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(path)
                     .layoutPriority(-2)
-                RunningStatus(session: session)
+                RunningStatus(session: session, font: Self.textFont)
             }
             Spacer(minLength: 0)
-            Text("Histq v\(Self.version)")
-                .font(.settingsCaption)
+            Text("v\(Self.version)")
+                .font(Self.textFont.monospaced())
                 .foregroundStyle(.secondary)
             toggle("Detail", systemImage: "sidebar.right", shown: $detailShown)
                 .disabled(session.map { RepoLayoutView.hidesDetail(session: $0, preset: preset) } ?? true)
@@ -248,7 +251,7 @@ struct WindowFooter: View {
     private func toggle(_ name: String, systemImage: String, shown: Binding<Bool>) -> some View {
         let help = (shown.wrappedValue ? "Hide " : "Show ") + name
         return Button { shown.wrappedValue.toggle() } label: {
-            Label(help, systemImage: systemImage).labelStyle(.iconOnly)
+            Label(help, systemImage: systemImage).labelStyle(.iconOnly).font(Self.iconFont)
         }
         .buttonStyle(RowIconButtonStyle())
         .foregroundStyle(.secondary)
