@@ -135,7 +135,8 @@ struct TabStripButtons: View {
 /// equal widths; no fill (a subtle one on hover), and the selected tab's sheet-colored shape that slides to the next
 /// selection. A tab group (a repo's worktrees, `WindowModel.tabGroups`) has its name chip
 /// before its first tab, its color as one line under the chip and its tabs (`TabGroupLine`, open where the selected
-/// tab stands, live during a drag), and as the selected tab's outline. The popped-out archived tab is not here: it
+/// tab stands, live during a drag), and as the selected tab's outline. Two arrows at the strip's end (before New Tab)
+/// scroll the row a page each way, disabled while the tabs fit; a cut edge fades out. The popped-out archived tab is not here: it
 /// stands beside the archive button (`ArchiveCluster`); last in `tabs`, it takes no room, so no other tab moves.
 private struct TabTrack: View {
     let model: WindowModel
@@ -151,6 +152,18 @@ private struct TabTrack: View {
     @State private var dragOffset: CGFloat = 0
     @State private var dragFrom = 0
     @State private var dragTarget = 0
+    /// Where the scroll arrows move the row; a selection still scrolls through the `ScrollViewReader`.
+    @State private var position = ScrollPosition()
+    /// Whether the row can scroll each way: the arrows' enabled states, set only when one flips.
+    @State private var edges = ScrollEdges()
+    /// The row's last scroll geometry, outside the view's state so scrolling does not redraw the tabs.
+    @State private var scrollGeometry = ScrollGeometryBox()
+
+    /// Between the tabs and the scroll arrows: as far as the strip puts New Tab from the tabs.
+    private static let arrowSpacing: CGFloat = 12
+    /// The scroll arrows, with their spacing before them.
+    private static let arrowsWidth = arrowSpacing + 2 * TabStripMetrics.buttonHeight + TabStripMetrics.gap
+        + 2 * TabStripMetrics.rowInset
 
     var body: some View {
         GeometryReader { proxy in
@@ -165,28 +178,46 @@ private struct TabTrack: View {
             let items = count + groups.count
             let gaps = TabStripMetrics.gap * CGFloat(max(items - 1, 0)) + 2 * TabStripMetrics.flare
             let pinnedWidth = pinned * TabStripMetrics.pinnedTabWidth
+            // The scroll arrows always stand at the strip's end, before New Tab; the tabs get the rest.
+            let available = proxy.size.width - Self.arrowsWidth
             // The unpinned tabs share what the pinned ones, the chips and the gaps leave.
             let tabWidth = min(TabStripMetrics.maxTabWidth,
                                max(TabStripMetrics.minTabWidth,
-                                   (proxy.size.width - gaps - chips - pinnedWidth) / max(unpinned, 1)))
+                                   (available - gaps - chips - pinnedWidth) / max(unpinned, 1)))
             let rowWidth = tabWidth * unpinned + pinnedWidth + chips + gaps
-            ScrollViewReader { scroller in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    row(layout: TabGroupLayout(tabs: model.tabs, groups: groups,
-                                               collapsed: model.collapsedGroups, tabExtent: tabWidth,
-                                               gap: TabStripMetrics.gap,
-                                               extent: { model.tabs[$0].archived ? 0
-                                                   : model.tabs[$0].pinned ? TabStripMetrics.pinnedTabWidth
-                                                   : tabWidth },
-                                               headerExtent: { TabStripMetrics.groupChipWidth($0.name) }))
+            let overflows = rowWidth > available
+            HStack(spacing: 0) {
+                ScrollViewReader { scroller in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        row(layout: TabGroupLayout(tabs: model.tabs, groups: groups,
+                                                   collapsed: model.collapsedGroups, tabExtent: tabWidth,
+                                                   gap: TabStripMetrics.gap,
+                                                   extent: { model.tabs[$0].archived ? 0
+                                                       : model.tabs[$0].pinned ? TabStripMetrics.pinnedTabWidth
+                                                       : tabWidth },
+                                                   headerExtent: { TabStripMetrics.groupChipWidth($0.name) }))
+                    }
+                    .scrollPosition($position)
+                    .scrollDisabled(!overflows)
+                    .onScrollGeometryChange(for: ScrollGeometry.self, of: { $0 }) { _, geometry in
+                        scrollGeometry.value = geometry
+                        let next = ScrollEdges(geometry)
+                        if next != edges { withAnimation(animation) { edges = next } }
+                    }
+                    // The tabs cut by an edge fade out into the strip, rather than end on a hard line.
+                    .mask(EdgeFade(leading: edges.leading, trailing: edges.trailing))
+                    .frame(width: min(rowWidth, available))
+                    .background(WindowDragBlocker())
+                    .onChange(of: model.selectedTabID) { _, id in
+                        guard let id else { return }
+                        // On the next turn: a new tab is selected in the same update that adds it, before the row
+                        // has laid it out, so scrolling now would stop short of it.
+                        DispatchQueue.main.async { withAnimation(animation) { scroller.scrollTo(id) } }
+                    }
                 }
-                .scrollDisabled(rowWidth <= proxy.size.width)
-                .frame(width: min(rowWidth, proxy.size.width))
-                .background(WindowDragBlocker())
-                .onChange(of: model.selectedTabID) { _, id in
-                    guard let id else { return }
-                    withAnimation(animation) { scroller.scrollTo(id) }
-                }
+                Spacer(minLength: 0)
+                scrollArrows
+                    .padding(.leading, Self.arrowSpacing)
             }
             // Only the tabs take clicks: the empty space after them drags the window.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -195,6 +226,37 @@ private struct TabTrack: View {
     }
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
+
+    /// Scroll the row a page left or right, styled as New Tab and the tab list; each is disabled at its end, both
+    /// while the tabs fit.
+    private var scrollArrows: some View {
+        HStack(spacing: TabStripMetrics.gap) {
+            Button { scrollRow(by: -1) } label: {
+                Label("Scroll Tabs Left", systemImage: "chevron.left")
+            }
+            .help("Scroll Tabs Left")
+            .disabled(!edges.leading)
+            Button { scrollRow(by: 1) } label: {
+                Label("Scroll Tabs Right", systemImage: "chevron.right")
+            }
+            .help("Scroll Tabs Right")
+            .disabled(!edges.trailing)
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(BottomBarButtonStyle(height: TabStripMetrics.buttonHeight, horizontalPadding: 0))
+        .padding(TabStripMetrics.rowInset)
+        .background(WindowDragBlocker())
+    }
+
+    /// Scrolls the row by its visible width less one tab (so a tab stays in view across the jump), within its ends.
+    private func scrollRow(by direction: CGFloat) {
+        guard let geometry = scrollGeometry.value else { return }
+        let visible = geometry.visibleRect
+        let step = max(visible.width - TabStripMetrics.minTabWidth, TabStripMetrics.minTabWidth)
+        let end = max(geometry.contentSize.width - visible.width, 0)
+        let x = min(max(visible.minX + direction * step, 0), end)
+        withAnimation(animation) { position.scrollTo(x: x) }
+    }
 
     private func row(layout: TabGroupLayout) -> some View {
         let current = layout.positions(order: Array(model.tabs.indices))
@@ -318,6 +380,41 @@ private struct TabTrack: View {
     private func close(_ id: WindowModel.Tab.ID) {
         TabMenu.close(id, model)
     }
+}
+
+/// Whether a scrolled row has more to show before (`leading`) and after (`trailing`) its visible part.
+private struct ScrollEdges: Equatable {
+    var leading = false
+    var trailing = false
+
+    init() {}
+
+    init(_ geometry: ScrollGeometry) {
+        leading = geometry.visibleRect.minX > 0.5
+        trailing = geometry.visibleRect.maxX < geometry.contentSize.width - 0.5
+    }
+}
+
+/// The scrolled row's mask: opaque, fading out over `width` at each edge that has more beyond it.
+private struct EdgeFade: View {
+    let leading: Bool
+    let trailing: Bool
+    static let width: CGFloat = 28
+
+    var body: some View {
+        HStack(spacing: 0) {
+            LinearGradient(colors: [leading ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
+                .frame(width: Self.width)
+            Rectangle()
+            LinearGradient(colors: [.black, trailing ? .clear : .black], startPoint: .leading, endPoint: .trailing)
+                .frame(width: Self.width)
+        }
+    }
+}
+
+/// Holds the latest scroll geometry without being observed, so writing it on every scroll frame redraws nothing.
+private final class ScrollGeometryBox {
+    var value: ScrollGeometry?
 }
 
 /// The strip's far left, before the pinned tabs: the archive button and the archived tab popped out beside it
