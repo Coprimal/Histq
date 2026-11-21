@@ -1,5 +1,6 @@
 // The repository's pull request template (a GitLab merge request template), read from a commit (the host reads it
-// from the default branch), never from the working tree. Its text is repo content, so it only ever goes into an AI prompt's data block. A symlink entry
+// from the default branch), never from the working tree. Its text is repo content: it prefills the Create Pull Request
+// form's description (the user sees and edits it) and goes into an AI prompt only as a data block. A symlink entry
 // is refused (its target could be any path, or point outside the repository), and so is anything but a regular
 // file; a big file is skipped, and the text is cut to `maxBytes`. The blob is read by the object id `ls-tree`
 // listed, so the bytes are those whose mode and size were checked.
@@ -21,10 +22,12 @@ public enum PullRequestTemplate {
     /// `pull_request_template.md` in any case in the root, `.github/` or `docs/` (GitLab: `Default.md` in any case in
     /// `.gitlab/merge_request_templates/`, else that folder's first `.md` file by name); nil when there is none or the
     /// read fails (a missing ref, too). A candidate whose root-relative path `ignore` (the worktree's `.aiignore`) matches
-    /// is skipped, and the search goes on. `env` must be the read environment for `cwd`.
+    /// is skipped, and the search goes on. `defaultOnly`: only the template the host's own form starts with (GitLab's
+    /// `Default.md`, no other file of the folder), for the Create form's description; the AI prompt takes any.
+    /// `env` must be the read environment for `cwd`.
     public static func read(
         ref: String, runner: GitRunner, cwd: URL, env: [String: String], ignore: AIIgnore? = nil,
-        kind: HostingKind = .github
+        kind: HostingKind = .github, defaultOnly: Bool = false
     ) async -> String? {
         let paths = switch kind {
         case .github: ["."] + folders.filter { !$0.isEmpty }
@@ -34,7 +37,7 @@ public enum PullRequestTemplate {
             ["ls-tree", "-z", "-l", "--full-tree", "--end-of-options", ref, "--"] + paths,
             cwd: cwd, env: env, timeout: .seconds(30))
         else { return nil }
-        for oid in candidates(in: listing.stdout, ignore: ignore, kind: kind) {
+        for oid in candidates(in: listing.stdout, ignore: ignore, kind: kind, defaultOnly: defaultOnly) {
             guard let blob = try? await runner.run(
                 ["show", "--no-ext-diff", "--no-textconv", "--end-of-options", oid], cwd: cwd, env: env,
                 timeout: .seconds(30))
@@ -46,8 +49,10 @@ public enum PullRequestTemplate {
 
     /// The object ids of the template files `ls-tree -z -l` lists, in search order: regular files (mode 100644 or
     /// 100755) of at most `maxBlobBytes`, directly in one of `folders` (GitLab: in `gitLabFolder`, `Default.md`
-    /// first), and not matched by `ignore`.
-    static func candidates(in listing: Data, ignore: AIIgnore? = nil, kind: HostingKind = .github) -> [String] {
+    /// first, alone with `defaultOnly`), and not matched by `ignore`.
+    static func candidates(
+        in listing: Data, ignore: AIIgnore? = nil, kind: HostingKind = .github, defaultOnly: Bool = false
+    ) -> [String] {
         var found: [(rank: Int, oid: String)] = []
         for record in listing.split(separator: 0) {
             // `<mode> SP <type> SP <oid> SP <padded size> TAB <path>`: the path can hold any byte but NUL.
@@ -61,7 +66,9 @@ public enum PullRequestTemplate {
             let name = path[slash...].lowercased(), folder = String(path[..<slash])
             let rank: Int? = switch kind {
             case .github: name == fileName ? folders.firstIndex(of: folder) : nil
-            case .gitlab: folder == gitLabFolder && name.hasSuffix(".md") ? (name == "default.md" ? 0 : 1) : nil
+            case .gitlab:
+                folder != gitLabFolder || !name.hasSuffix(".md") ? nil
+                    : name == "default.md" ? 0 : defaultOnly ? nil : 1
             }
             guard let rank, ignore?.matches(path) != true else { continue }
             found.append((rank, String(meta[2])))

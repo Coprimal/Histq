@@ -199,7 +199,8 @@ struct ModalHost: View {
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
                               isDestructive: confirmation.isDestructive, secondary: confirmation.secondary?.button,
                               always: confirmation.asksAlways ? $alwaysDo : nil) {
-                accept(confirmation, session, write: confirmation.write, remember: "always")
+                accept(confirmation, session, write: confirmation.write, remember: "always",
+                       then: confirmation.afterSuccess)
             } onCancel: {
                 session.confirmation = nil
             } onSecondary: {
@@ -238,13 +239,13 @@ struct ModalHost: View {
 
     /// Runs a confirmation's `write`; with "Always do this" ticked, stores `remember` as `PrefKey.autoStash` first.
     private func accept(_ confirmation: OperationConfirmation, _ session: RepoSession, write: RepoSession.Write,
-                        remember: String)
+                        remember: String, then afterSuccess: (@MainActor () -> Void)? = nil)
     {
         if confirmation.asksAlways, alwaysDo {
             Preferences.defaults.set(remember, forKey: PrefKey.autoStash.rawValue)
         }
         session.confirmation = nil
-        session.run(write, title: confirmation.operation, key: confirmation.key)
+        session.run(write, title: confirmation.operation, key: confirmation.key, then: afterSuccess)
     }
 
     /// The AI card over the rebase or pull request form (`shown` keeps the form, so its card is not re-created).

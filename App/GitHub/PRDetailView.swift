@@ -423,7 +423,9 @@ final class PullRequestDetailModel {
     /// Runs `action` on pull request `number` (the one whose detail the user acted on), then reloads it and the PRs
     /// tab's lists. A failure shows above the tabs while that pull request shows; otherwise it names the number in
     /// the PRs tab (`HostingStore.actionNotice`), since the shown detail is another one's.
-    func perform(_ action: PullRequestAction, on number: Int, github: HostingStore) {
+    func perform(_ action: PullRequestAction, on number: Int, github: HostingStore,
+                 then afterSuccess: (@MainActor () -> Void)? = nil)
+    {
         guard busy[number] == nil else { return }
         guard let api = github.api else {
             actionError = "No account is connected for this tab."
@@ -470,6 +472,7 @@ final class PullRequestDetailModel {
                 }
             case .merge, .setOpen, .unapprove: break
             }
+            afterSuccess?()
             github.refreshNow()
             if showing { load(number, github: github, quiet: true) }
         }
@@ -638,6 +641,13 @@ final class PullRequestDetailModel {
         default:
             error.localizedDescription
         }
+    }
+}
+
+extension HostedPullRequest {
+    /// The head is a branch of the base's repository, not of a fork: its label's owner is the base's.
+    var isFromSameRepository: Bool {
+        head.label != nil && head.label?.split(separator: ":").first == base.label?.split(separator: ":").first
     }
 }
 
@@ -831,9 +841,7 @@ private struct PRHeaderCard: View {
     /// The head as the sentence names it: GitHub's `owner:branch`; on GitLab the branch alone when it is in the same
     /// project (its label's owner is the base's), as GitLab writes it.
     private func headName(_ pull: HostedPullRequest) -> String {
-        let sameProject = pull.head.label != nil
-            && pull.head.label?.split(separator: ":").first == pull.base.label?.split(separator: ":").first
-        return session.github.kind == .gitlab && sameProject ? pull.head.ref : pull.head.label ?? pull.head.ref
+        session.github.kind == .gitlab && pull.isFromSameRepository ? pull.head.ref : pull.head.label ?? pull.head.ref
     }
 
     /// A branch of the sentence: monospaced in a brand blue capsule, at most `maxWidth` wide and cut in the middle, so
@@ -1484,8 +1492,12 @@ private struct PRActionsCard: View {
             message: "\(kind.name) merges \(count) \(count == 1 ? "commit" : "commits") of \(pull.head.ref) into "
                 + "\(pull.base.ref), \(how). Histq cannot undo a merge on \(kind.name).",
             button: method.buttonTitle, isDestructive: false,
-            perform: { [session, sha = pull.head.sha, number = pull.number] in
-                session.pullDetail.perform(.merge(method, sha: sha), on: number, github: session.github)
+            perform: { [session, sha = pull.head.sha, number = pull.number, head = pull.head.ref,
+                        sameRepository = pull.isFromSameRepository] in
+                session.pullDetail.perform(.merge(method, sha: sha), on: number, github: session.github) {
+                    // A fork's branch is not on this remote.
+                    if sameRepository { session.pruneMergedBranch(head) }
+                }
             })))
     }
 

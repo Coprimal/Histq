@@ -144,6 +144,27 @@ extension RepoSession {
                 button: "Stash & Rebase", write: write(true), operation: title, isDestructive: false, asksAlways: true)
     }
 
+    /// After a pull request of `branch` (a branch of the tab's hosting remote) merged: when the host deleted the branch,
+    /// its remote-tracking branch goes and a toast says so. Quiet otherwise, a failure too (the merge went through). The
+    /// host may delete the branch a moment after the merge (GitLab in a background job): a branch still there is asked
+    /// about once more, 3 s later.
+    func pruneMergedBranch(_ branch: String) {
+        guard let remote = github.api?.remote else { return }
+        let host = github.kind.name
+        Task { [weak self] in
+            var outcome = try? await self?.perform(.pruneMergedBranch(branch, remote: remote))
+            if outcome == .done {
+                try? await Task.sleep(for: .seconds(3))
+                outcome = try? await self?.perform(.pruneMergedBranch(branch, remote: remote))
+            }
+            guard let self else { return }
+            UITiming.content("pr merged-branch \(outcome == .remoteBranchPruned ? "pruned" : "kept")")
+            guard outcome == .remoteBranchPruned else { return }
+            postToast(.success("\(branch) was deleted on \(host)",
+                               detail: "Its remote-tracking branch \(remote)/\(branch) is removed."))
+        }
+    }
+
     func fetchAll() {
         let prune = Preferences.defaults.bool(forKey: PrefKey.pruneOnFetch.rawValue)
         run(.fetchAll(prune: prune), title: "Fetch", key: .fetch)

@@ -1264,7 +1264,7 @@ enum RepoMenus {
     }
 
     /// Opens the Create Pull Request form for `head` (and `base`, else the default branch), by their names on the
-    /// GitHub remote.
+    /// hosting remote.
     static func openCreatePullRequest(head: SidebarItem, base: SidebarItem?, _ session: RepoSession) {
         guard let headBranch = gitHubBranch(of: head, session) else { return }
         session.pullRequestForm = PullRequestForm(head: headBranch, base: base.flatMap { gitHubBranch(of: $0, session) })
@@ -1474,7 +1474,8 @@ enum RepoMenus {
             perform()
             if let confirmation = session.confirmation {
                 session.confirmation = nil
-                session.run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+                session.run(confirmation.write, title: confirmation.operation, key: confirmation.key,
+                            then: confirmation.afterSuccess)
             }
             while !session.running.isEmpty { try? await Task.sleep(for: .milliseconds(50)) }
             debugLog(session.failure.map { "fail \(step): \($0.message)" } ?? "ok \(step)")

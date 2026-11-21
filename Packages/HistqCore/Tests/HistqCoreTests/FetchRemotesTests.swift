@@ -255,4 +255,31 @@ struct FetchRemotesTests {
         #expect(!(try await box.hasRef("refs/remotes/skipped/main", in: repo)))
         #expect(!(try await box.hasRef("refs/remotes/older/main", in: repo)))
     }
+
+    @Test("After a merge: a branch the host deleted loses its remote-tracking ref alone (with the token); one still there is kept")
+    func pruneMergedBranch() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let (repo, source) = try await Self.makeRepo(box)
+        for branch in ["feature", "kept", "stale"] {
+            try await box.sandbox.git(["branch", branch], in: source)
+        }
+        let ops = box.operations(naive: false, in: repo)
+        try await ops.fetch(remote: "origin")
+        try await box.sandbox.git(["branch", "-D", "feature", "stale"], in: source)
+
+        #expect(try await ops.pruneRemoteBranchIfDeleted(remote: "origin", branch: "feature"))
+        #expect(!(try await box.hasRef("refs/remotes/origin/feature", in: repo)))
+        // Only that branch: another one gone from the remote stays until a prune.
+        #expect(try await box.hasRef("refs/remotes/origin/stale", in: repo))
+        #expect(box.transportGot(NetworkTokenTests.token, host: NetworkTokenTests.host), "ls-remote got no token")
+
+        #expect(!(try await ops.pruneRemoteBranchIfDeleted(remote: "origin", branch: "kept")))
+        #expect(try await box.hasRef("refs/remotes/origin/kept", in: repo))
+        // Already gone locally: nothing to delete.
+        #expect(!(try await ops.pruneRemoteBranchIfDeleted(remote: "origin", branch: "feature")))
+        await #expect(throws: GitOperationError.self) {
+            try await ops.pruneRemoteBranchIfDeleted(remote: "-x", branch: "kept")
+        }
+    }
 }

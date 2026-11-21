@@ -405,6 +405,32 @@ public struct GitOperations: Sendable {
         try await lane { ops in try await ops.fetchRemote(remote, prune: prune) }
     }
 
+    /// After a pull request of `branch` was merged on the host: asks `remote` whether it still has `branch`
+    /// (`ls-remote` of `refs/heads/<branch>`, through the gate like a fetch of that remote) and, when it does not, deletes that branch's
+    /// remote-tracking ref `refs/remotes/<remote>/<branch>` alone, whatever the prune setting. True when it deleted
+    /// it; false when the remote still has the branch or there was no such ref. The names are checked as Fetch and
+    /// `fetchRefspec` check them.
+    public func pruneRemoteBranchIfDeleted(remote: String, branch: String) async throws -> Bool {
+        let remotes = try await GitInvocation.remoteNames(runner: runner, cwd: cwd, env: env)
+        guard !remote.hasPrefix("-"), remotes.contains(remote) else {
+            throw GitOperationError.invalidRemoteName(remote)
+        }
+        try await validateBranchName(branch)
+        return try await lane { ops in
+            let listed = try await ops.networkExec(
+                ["ls-remote", "--end-of-options", remote, "refs/heads/\(branch)"],
+                target: .fetch(remotes: [remote]))
+            // `<oid> TAB refs/heads/<branch>`: only an exact match counts (a pattern would also match `x/<branch>`).
+            let stillThere = listed.text.split(separator: "\n").contains { $0.hasSuffix("\trefs/heads/\(branch)") }
+            let tracking = "refs/remotes/\(remote)/\(branch)"
+            guard !stillThere,
+                  (try? await ops.exec(["rev-parse", "--verify", "--quiet", "--end-of-options", tracking])) != nil
+            else { return false }
+            try await ops.exec(["update-ref", "-d", "--end-of-options", tracking])
+            return true
+        }
+    }
+
     /// A fetch nobody clicked (auto-fetch) of every remote `fetch --all` goes through (`fetchAllRemotes`), one
     /// `fetch [--prune] <remote>` each in the runner's write lane, with the background fetch environment and `profile`
     /// (a fetch is network: its SSH key). The repo may be downloaded, so its config, hooks and credential helpers run

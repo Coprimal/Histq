@@ -11,7 +11,7 @@ struct PullRequestTemplateTests {
     /// symlinks; returns the template `kind` reads at HEAD, skipping what `ignore` (`.aiignore` text) matches.
     private func read(
         files: [String: String] = [:], links: [String: String] = [:], ref: String = "HEAD", ignore: String? = nil,
-        kind: HostingKind = .github
+        kind: HostingKind = .github, defaultOnly: Bool = false
     ) async throws -> String?
     {
         let sandbox = try await Sandbox()
@@ -32,7 +32,8 @@ struct PullRequestTemplateTests {
         let env = try await GitInvocation.readEnvironment(
             profile: nil, base: sandbox.base, runner: sandbox.runner, cwd: repo)
         return await PullRequestTemplate.read(
-            ref: ref, runner: sandbox.runner, cwd: repo, env: env, ignore: ignore.map(AIIgnore.init(text:)), kind: kind)
+            ref: ref, runner: sandbox.runner, cwd: repo, env: env, ignore: ignore.map(AIIgnore.init(text:)), kind: kind,
+            defaultOnly: defaultOnly)
     }
 
     @Test("a template in .github/ is found whatever its name's case")
@@ -47,6 +48,16 @@ struct PullRequestTemplateTests {
                      ".gitlab/merge_request_templates/Default.md": "## Default\n",
                      ".github/pull_request_template.md": "## GitHub\n"]
         #expect(try await read(files: files, kind: .gitlab) == "## Default\n")
+    }
+
+    @Test("without Default.md, the prefill (defaultOnly) gets no GitLab template; the AI prompt still gets the first")
+    func gitLabWithoutDefault() async throws {
+        let files = [".gitlab/merge_request_templates/Bug.md": "## Bug\n",
+                     ".gitlab/merge_request_templates/Feature.md": "## Feature\n"]
+        #expect(try await read(files: files, kind: .gitlab, defaultOnly: true) == nil)
+        #expect(try await read(files: files, kind: .gitlab) == "## Bug\n")
+        let withDefault = files.merging([".gitlab/merge_request_templates/default.MD": "## Default\n"]) { $1 }
+        #expect(try await read(files: withDefault, kind: .gitlab, defaultOnly: true) == "## Default\n")
     }
 
     @Test("a symlink named like a template is ignored, never followed")

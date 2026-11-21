@@ -505,6 +505,8 @@ enum WriteOutcome: Equatable, Sendable {
     case stash(GitOperations.StashApplyOutcome, pop: Bool)
     /// A patch applied to the working tree: plainly, with a 3-way merge, or with conflicts.
     case patch(GitOperations.PatchApplyOutcome)
+    /// `pruneMergedBranch` found the branch gone from the remote and removed its remote-tracking branch.
+    case remoteBranchPruned
 }
 
 /// A user operation in flight: what the action bar shows while it runs.
@@ -682,6 +684,9 @@ final class RepoSession: Identifiable {
         /// (`branch -d`, which git checks against the upstream still there), then the remote one.
         case deleteBranchAndRemote(String, remote: String, remoteBranch: String)
         case deleteRemoteTag(String, remote: String)
+        /// After a pull request of the branch merged on the host: its remote-tracking branch on `remote` alone is
+        /// removed when the host deleted the branch (`GitOperations.pruneRemoteBranchIfDeleted`).
+        case pruneMergedBranch(String, remote: String)
 
         case createBranch(String, from: String, checkout: Bool)
         case renameBranch(String, to: String)
@@ -783,7 +788,8 @@ final class RepoSession: Identifiable {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
                  .deleteRemoteBranch(_, let remote), .deleteBranchAndRemote(_, let remote, _),
-                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _), .fetchRemote(let remote, _):
+                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _), .fetchRemote(let remote, _),
+                 .pruneMergedBranch(_, let remote):
                 remote
             case .checkoutPullRequest(.branch(let remote, _), _, _), .checkoutPullRequest(_, _, let remote):
                 remote
@@ -796,7 +802,7 @@ final class RepoSession: Identifiable {
         var notUndoable: UndoJournal.NotUndoable? {
             switch self {
             case .push, .pushMirror: .push
-            case .fetchAll, .fetchRemote: .fetch
+            case .fetchAll, .fetchRemote, .pruneMergedBranch: .fetch
             case .pull, .pullBranch: .pull
             case .deleteRemoteBranch, .deleteBranchAndRemote: .deleteRemoteBranch
             case .deleteRemoteTag: .deleteRemoteTag
@@ -809,7 +815,8 @@ final class RepoSession: Identifiable {
         var isNetwork: Bool {
             switch self {
             case .fetchAll, .fetchRemote, .pull, .pullBranch, .push, .pushTag, .pushMirror, .deleteRemoteBranch,
-                 .deleteBranchAndRemote, .deleteRemoteTag, .checkoutPullRequest, .updateSubmodules, .addSubmodule:
+                 .deleteBranchAndRemote, .deleteRemoteTag, .checkoutPullRequest, .updateSubmodules, .addSubmodule,
+                 .pruneMergedBranch:
                 true
             default: false
             }
@@ -3729,6 +3736,22 @@ final class RepoSession: Identifiable {
         return try? await Self.readSubjects(backend, cwd: url, range: "\(base)..\(head)", limit: limit)
     }
 
+    /// The template the host's own Create form starts with, at `ref` (`PullRequestTemplate`, GitLab's `Default.md`
+    /// alone); nil when there is none or it can't be read.
+    func pullRequestTemplate(ref: String, kind: HostingKind) async -> String? {
+        guard let backend = try? await backend() else { return nil }
+        return await Self.readTemplate(backend, cwd: url, ref: ref, kind: kind)
+    }
+
+    @concurrent
+    private nonisolated static func readTemplate(_ backend: Backend, cwd: URL, ref: String, kind: HostingKind) async
+        -> String?
+    {
+        guard let env = try? await backend.readEnvironment(cwd: cwd) else { return nil }
+        return await PullRequestTemplate.read(
+            ref: ref, runner: backend.runner, cwd: cwd, env: env, kind: kind, defaultOnly: true)
+    }
+
     @concurrent
     private nonisolated static func readSubjects(_ backend: Backend, cwd: URL, range: String, limit: Int) async throws
         -> [String]
@@ -5603,6 +5626,8 @@ final class RepoSession: Identifiable {
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
         case .fetchRemote(let remote, let prune): try await ops.fetch(remote: remote, prune: prune)
+        case .pruneMergedBranch(let branch, let remote):
+            if try await ops.pruneRemoteBranchIfDeleted(remote: remote, branch: branch) { outcome = .remoteBranchPruned }
         case .pullBranch(let branch, let remote, let remoteBranch):
             try await ops.fetchRefspec(remote: remote, refspec: "heads/\(remoteBranch):\(branch)")
         case .pull(let mode, let autostash):
@@ -6111,11 +6136,12 @@ final class RepoSession: Identifiable {
     /// dialog's "Always do this" (`OperationConfirmation.asksAlways`).
     func confirm(_ title: String, message: String, button: String, write: Write, operation: String,
                  key: ActionBarAction? = nil, isDestructive: Bool = true,
-                 secondary: (button: String, write: Write)? = nil, asksAlways: Bool = false)
+                 secondary: (button: String, write: Write)? = nil, asksAlways: Bool = false,
+                 then afterSuccess: (@MainActor () -> Void)? = nil)
     {
         confirmation = OperationConfirmation(
             title: title, message: message, button: button, write: write, operation: operation, key: key,
-            isDestructive: isDestructive, secondary: secondary, asksAlways: asksAlways)
+            isDestructive: isDestructive, secondary: secondary, asksAlways: asksAlways, afterSuccess: afterSuccess)
     }
 
     /// The checked-out branch; nil on a detached HEAD or before the refs are read.

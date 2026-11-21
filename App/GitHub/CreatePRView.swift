@@ -4,7 +4,8 @@
 // from another branch's menu, the checked-out branch, pushed first when GitHub lacks it or some of its commits), the
 // base that other branch, the dropped-on branch or the repository's default branch. The title starts as the head's name made readable,
 // then becomes the commit's subject when the head has exactly one commit past the base (read with git from the
-// remote-tracking branches, the commits GitHub compares), while the user has not typed one. The body has Write and a
+// remote-tracking branches, the commits GitHub compares), while the user has not typed one. The body starts as the
+// repository's template (the default branch's), while it is empty. The body has Write and a
 // local Preview (inline markdown only, no request: `POST /markdown` would send the draft to GitHub on every switch).
 // Reviewers, assignees and labels come from the API off the main actor; a list the token may not read (403, 404) only
 // leaves its picker out. Create opens the pull request, then asks for the reviewers, labels and assignees, and closes
@@ -407,9 +408,22 @@ struct CreatePRView: View {
         if !baseTouched, let branch = loaded.defaultBranch, branches.contains(branch), branch != head {
             base = branch
         }
+        await fillTemplate(defaultBranch: loaded.defaultBranch, remote: api.remote)
         UITiming.content("create-pr choices " + [("reviewers", loaded.reviewers), ("assignees", loaded.assignees),
                                                  ("labels", loaded.labels)]
             .map { "\($0.0):" + ($0.1.value.map { "\($0.count)" } ?? "unavailable") }.joined(separator: " "))
+    }
+
+    /// Puts the repository's template (read where the host reads it: the default branch, else the base) in the
+    /// description while it is still empty, as the host's own form does.
+    private func fillTemplate(defaultBranch: String?, remote: String) async {
+        guard let branch = defaultBranch ?? (base.isEmpty ? nil : base),
+              let template = await session.pullRequestTemplate(ref: "refs/remotes/\(remote)/\(branch)",
+                                                               kind: session.github.kind),
+              !Task.isCancelled, bodyText.isEmpty
+        else { return }
+        bodyText = template
+        UITiming.content("create-pr template")
     }
 
     @concurrent

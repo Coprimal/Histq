@@ -68,6 +68,8 @@ struct OperationConfirmation: Identifiable {
     /// The auto-stash dialog's "Always do this" checkbox: ticked, the button stores `PrefKey.autoStash` "always" and
     /// `secondary` "never" (Cancel stores nothing).
     var asksAlways = false
+    /// Runs after the button's write went through (not the secondary's): Create Pull Request's push opens the form.
+    var afterSuccess: (@MainActor () -> Void)?
 }
 
 /// A confirmation that is not a repo write (a profile's deletion, a WIP file's discard): `WindowModel.modal` shows it
