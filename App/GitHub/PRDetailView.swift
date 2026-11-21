@@ -1667,6 +1667,8 @@ enum HostAvatars: Equatable {
         switch store.kind {
         case .github: return repository.host == "github.com" ? .github : .drawn
         case .gitlab: return .gitlab(host: repository.host)
+        // Loaded avatars come with the app support (Phase 12).
+        case .bitbucketCloud: return .drawn
         }
     }
 
@@ -2159,11 +2161,13 @@ private struct PRSkeleton: View {
 }
 
 private extension HostingKind {
-    /// What follows a pull request's web URL for its changed files: GitHub's `/files`, GitLab's `/diffs`.
+    /// What follows a pull request's web URL for its changed files: GitHub's `/files`, GitLab's `/diffs`, Bitbucket's
+    /// `/diff`.
     var filesPagePath: String {
         switch self {
         case .github: "/files"
         case .gitlab: "/diffs"
+        case .bitbucketCloud: "/diff"
         }
     }
 }

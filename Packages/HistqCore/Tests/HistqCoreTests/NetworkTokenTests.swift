@@ -59,6 +59,25 @@ struct NetworkTokenTests {
         #expect(GitInvocation.isTokenURL(url, host: Self.host) == expected)
     }
 
+    @Test(
+        "with allowsUsername (a Bitbucket account) a bare username passes too, never a password or an encoding",
+        arguments: [
+            ("https://me@git.histq.invalid/ws/repo.git", true),
+            ("https://Me.name_2-x@git.histq.invalid/ws/repo", true),
+            ("https://git.histq.invalid/ws/repo", true),
+            ("https://user:pw@git.histq.invalid/ws/repo", false),
+            ("https://user:@git.histq.invalid/ws/repo", false),
+            ("https://@git.histq.invalid/ws/repo", false),
+            ("https://user%3Apw@git.histq.invalid/ws/repo", false),
+            ("https://a@b@git.histq.invalid/ws/repo", false),
+            ("https://me@evil.invalid/ws/repo", false),
+            ("https://git.histq.invalid@evil.invalid/ws/repo", false),
+            ("https://me@git.histq.invalid", false),
+        ])
+    func urlRulesWithUsername(url: String, expected: Bool) {
+        #expect(GitInvocation.isTokenURL(url, host: Self.host, allowsUsername: true) == expected)
+    }
+
     @Test("a profile host with a port only matches that port")
     func urlRulesWithPort() {
         let host = "ghe.histq.invalid:8443"
@@ -68,6 +87,50 @@ struct NetworkTokenTests {
     }
 
     // MARK: - Gate decisions
+
+    /// A Bitbucket Cloud account on `host`: its clone links carry the user's name (`https://me@<host>/…`).
+    static let bitbucketCredential = GitCredential(
+        kind: .bitbucketCloud, host: host, username: "x-token-auth", token: token)
+
+    @Test("https://me@<host>/… gets a Bitbucket account's token, and git signs in as x-token-auth, not as me")
+    func bitbucketUsernameURL() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let source = try await box.sandbox.makeRepo("source")
+        try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "remote only"], in: source)
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "origin", "https://me@\(Self.host)\(source.path)"], in: repo)
+        let credentials = [Self.bitbucketCredential]
+
+        let decision = await box.decision(.fetch(remotes: ["origin"]), in: repo, credentials: credentials)
+        guard case .attach(let matched) = decision else {
+            Issue.record("expected .attach, got \(decision)")
+            return
+        }
+        #expect(matched.map(\.host) == [Self.host])
+        try await box.operations(naive: false, in: repo, credentials: credentials).fetch(remote: "origin")
+        #expect(try await box.hasRef("refs/remotes/origin/main", in: repo))
+        let answer = box.transportAnswer(host: Self.host)
+        let signedIn = answer.contains("password=\(Self.token)\n") && answer.contains("username=x-token-auth\n")
+        #expect(signedIn, "the transport did not sign in with the token as x-token-auth")
+        #expect(!answer.contains("username=me\n"), "the URL's username reached the transport")
+    }
+
+    @Test("the same username form on a GitHub or GitLab host, or user:pass@ on any host, gets no token")
+    func usernameURLRefused() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "gh", "https://me@\(Self.host)/o/r.git"], in: repo)
+        try await box.sandbox.git(["remote", "add", "pw", "https://me:pw@\(Self.host)/o/r.git"], in: repo)
+        #expect(await box.decision(.fetch(remotes: ["gh"]), in: repo) == .otherURL)
+        #expect(await box.decision(.fetch(remotes: ["pw"]), in: repo) == .otherURL)
+        let bitbucket = [Self.bitbucketCredential]
+        #expect(await box.decision(.fetch(remotes: ["pw"]), in: repo, credentials: bitbucket) == .otherURL)
+        // On GitLab a username in the URL picks one of the user's own logins: their helpers sign in, not the account.
+        let gitLab = [GitCredential(kind: .gitlab, host: Self.host, username: "oauth2", token: Self.token)]
+        #expect(await box.decision(.fetch(remotes: ["gh"]), in: repo, credentials: gitLab) == .otherURL)
+    }
 
     @Test("the gate resolves insteadOf, pushInsteadOf and pushurl, and runs no transport")
     func gateFollowsRewrites() async throws {
@@ -965,8 +1028,11 @@ struct TokenSandbox {
         let root = sandbox.root.path
         try Fixtures.writeScript(#"""
             host=$(printf '%s' "$2" | cut -d/ -f3)
+            user=
+            case "$host" in *@*) user=${host%@*}; host=${host#*@} ;; esac
             dir="/${2#https://*/}"
-            printf 'protocol=https\nhost=%s\n\n' "$host" | git credential fill > '\#(out)' 2>/dev/null
+            { printf 'protocol=https\nhost=%s\n' "$host"; test -n "$user" && printf 'username=%s\n' "$user"; printf '\n'; } \
+              | git credential fill > '\#(out)' 2>/dev/null
             cp '\#(out)' '\#(root)'"/transport.$host.txt"
             env > '\#(root)'"/transport.$host.env"
             printf 'protocol=https\nhost=other.histq.invalid\n\n' | git credential fill > /dev/null 2>&1
@@ -1010,18 +1076,23 @@ struct TokenSandbox {
         return (repo, source)
     }
 
-    func decision(_ target: GitInvocation.NetworkTarget, in repo: URL) async -> GitInvocation.TokenDecision {
+    func decision(
+        _ target: GitInvocation.NetworkTarget, in repo: URL,
+        credentials: [GitCredential] = NetworkTokenTests.credentials
+    ) async -> GitInvocation.TokenDecision {
         await GitInvocation.networkToken(
-            for: target, credentials: NetworkTokenTests.credentials, base: base, runner: sandbox.runner, cwd: repo)
+            for: target, credentials: credentials, base: base, runner: sandbox.runner, cwd: repo)
     }
 
     /// The operations with the gate, or (`naive`) with the naive environment for every command.
-    func operations(naive: Bool, in repo: URL) -> GitOperations {
+    func operations(
+        naive: Bool, in repo: URL, credentials: [GitCredential] = NetworkTokenTests.credentials
+    ) -> GitOperations {
         naive
             ? GitOperations(runner: sandbox.runner, cwd: repo, env: naiveEnvironment())
             : GitOperations(
                 runner: sandbox.runner, cwd: repo, profile: NetworkTokenTests.profile, base: base,
-                credentials: NetworkTokenTests.credentials)
+                credentials: credentials)
     }
 
     /// Before the gate: the write environment plus, for every credential, its `HISTQ_GIT_TOKEN_<n>`,

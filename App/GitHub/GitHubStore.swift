@@ -412,6 +412,9 @@ final class HostingStore {
         switch account.kind {
         case .github:
             return try GitHubClient(host: account.host, token: token)
+        // Not connected in the app yet (Phase 12): Settings cannot add such an account.
+        case .bitbucketCloud:
+            throw HostingError.validationFailed(message: "Bitbucket is not supported in this version")
         case .gitlab:
             return try GitLabClient(host: account.host, basePath: account.basePath) { rejected in
                 do {

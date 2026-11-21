@@ -20,7 +20,8 @@ public enum PullRequestTemplate {
 
     /// The template's text at `ref` (a branch, tag or commit), from the first regular file named
     /// `pull_request_template.md` in any case in the root, `.github/` or `docs/` (GitLab: `Default.md` in any case in
-    /// `.gitlab/merge_request_templates/`, else that folder's first `.md` file by name); nil when there is none or the
+    /// `.gitlab/merge_request_templates/`, else that folder's first `.md` file by name; Bitbucket Cloud: none, its
+    /// default description is a repository setting); nil when there is none or the
     /// read fails (a missing ref, too). A candidate whose root-relative path `ignore` (the worktree's `.aiignore`) matches
     /// is skipped, and the search goes on. `defaultOnly`: only the template the host's own form starts with (GitLab's
     /// `Default.md`, no other file of the folder), for the Create form's description; the AI prompt takes any.
@@ -32,8 +33,10 @@ public enum PullRequestTemplate {
         let paths = switch kind {
         case .github: ["."] + folders.filter { !$0.isEmpty }
         case .gitlab: [gitLabFolder]
+        // Bitbucket Cloud keeps a repository's default description in its settings, not in a file.
+        case .bitbucketCloud: [String]()
         }
-        guard let listing = try? await runner.run(
+        guard !paths.isEmpty, let listing = try? await runner.run(
             ["ls-tree", "-z", "-l", "--full-tree", "--end-of-options", ref, "--"] + paths,
             cwd: cwd, env: env, timeout: .seconds(30))
         else { return nil }
@@ -69,6 +72,7 @@ public enum PullRequestTemplate {
             case .gitlab:
                 folder != gitLabFolder || !name.hasSuffix(".md") ? nil
                     : name == "default.md" ? 0 : defaultOnly ? nil : 1
+            case .bitbucketCloud: nil
             }
             guard let rank, ignore?.matches(path) != true else { continue }
             found.append((rank, String(meta[2])))

@@ -411,6 +411,7 @@ enum HostingTokens {
             let kindUsername = switch account.kind {
             case .github: "x-access-token"
             case .gitlab: "oauth2"
+            case .bitbucketCloud: "x-token-auth"
             }
             let username = account.gitUsername ?? kindUsername
             credentials.append(GitCredential(kind: account.kind, host: account.host, username: username, token: token))

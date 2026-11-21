@@ -859,6 +859,9 @@ struct IntegrationsSettings: View {
             // GitHubClient checks this itself; GitLabClient takes a provider, so the pasted text is checked here.
             guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
             return try await GitLabClient(host: host, basePath: basePath) { _ in token }.currentUser().login
+        // Not offered in Add Account yet (Phase 12).
+        case .bitbucketCloud:
+            throw HostingError.validationFailed(message: "Bitbucket is not supported in this version")
         }
     }
 
@@ -1018,11 +1021,12 @@ struct IntegrationsSettings: View {
 }
 
 extension HostingKind {
-    /// The host's product name: "GitHub" or "GitLab".
+    /// The host's product name: "GitHub", "GitLab" or "Bitbucket".
     var name: String {
         switch self {
         case .github: "GitHub"
         case .gitlab: "GitLab"
+        case .bitbucketCloud: "Bitbucket"
         }
     }
 }
@@ -1033,6 +1037,7 @@ extension HostingAccount {
         switch kind {
         case .github: host.lowercased() == "github.com"
         case .gitlab: host.lowercased() == "gitlab.com"
+        case .bitbucketCloud: host.lowercased() == "bitbucket.org"
         }
     }
 
@@ -1042,6 +1047,7 @@ extension HostingAccount {
         switch kind {
         case .github: isPublicSite ? "GitHub" : "GitHub Enterprise Server"
         case .gitlab: isPublicSite ? "GitLab" : "GitLab Self-Managed"
+        case .bitbucketCloud: "Bitbucket"
         }
     }
 

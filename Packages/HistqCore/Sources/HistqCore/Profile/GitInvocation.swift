@@ -409,7 +409,8 @@ public enum GitInvocation {
     /// nor for a submodule fetch, whose caller never recurses), no remote a fetch names is also the name of a remote
     /// group in any config scope (`remoteGroup`; a push and a submodule fetch never resolve groups, and a group named
     /// like no fetched remote changes nothing), and every URL `target` contacts passes
-    /// `isTokenURL(_:host:)` for the host of one of them after the rewrites git applies (`remote get-url`:
+    /// `isTokenURL(_:host:allowsUsername:)` (a bare username for a Bitbucket account) for the host of one of them
+    /// after the rewrites git applies (`remote get-url`:
     /// `insteadOf`, and `pushInsteadOf` for a push; `ls-remote --get-url` for a clone). All or nothing: one URL on no
     /// credential's host and the command gets none. `.attach` carries the credentials of the hosts the URLs reach
     /// alone, so a command never gets the token of a host it does not contact. The git runs read config only, under a
@@ -456,7 +457,11 @@ public enum GitInvocation {
         guard !urls.isEmpty else { return .otherURL }
         var reached: Set<String> = []
         for url in urls {
-            guard let credential = usable.first(where: { isTokenURL(url, host: $0.host) }) else { return .otherURL }
+            // A bare username only on Bitbucket, whose own clone links carry one. Elsewhere a username in the URL picks
+            // one of the user's own logins for that host (their helpers'), which the account's token must not replace.
+            guard let credential = usable.first(where: {
+                isTokenURL(url, host: $0.host, allowsUsername: $0.kind == .bitbucketCloud)
+            }) else { return .otherURL }
             reached.insert(credential.host)
         }
         let matched = usable.filter { reached.contains($0.host) }
@@ -509,21 +514,33 @@ public enum GitInvocation {
     }
 
     /// Whether git may send the token for `host` (as `HostingHTTP.validatedHost` gives it) to `url`: exactly
-    /// `https://<host>/…`, with the scheme in lowercase, no userinfo, the same port as `host` (none when it has
-    /// none) and only printable ASCII. The authority is everything up to the first `/` and must equal `host` once
-    /// validated, so `@`, `?`, `#`, `%`, `\` and a trailing dot all fail.
-    public static func isTokenURL(_ url: String, host: String) -> Bool {
+    /// `https://<host>/…`, with the scheme in lowercase, the same port as `host` (none when it has none) and only
+    /// printable ASCII. The authority is everything up to the first `/` and must equal `host` once validated, so
+    /// `?`, `#`, `%`, `\` and a trailing dot all fail. No userinfo, except with `allowsUsername` a bare username
+    /// (`https://me@<host>/…`, as Bitbucket's clone links have): letters, digits, `.`, `_` and `-` only, so no
+    /// password, no second `@` and nothing percent-encoded. The token helper still answers its own username.
+    public static func isTokenURL(_ url: String, host: String, allowsUsername: Bool = false) -> Bool {
         let scheme = "https://"
         guard url.hasPrefix(scheme), url.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else {
             return false
         }
         let rest = url.dropFirst(scheme.count)
-        let authority = rest.prefix { $0 != "/" }
-        guard authority.count < rest.count, let validated = HostingHTTP.validatedHost(String(authority)) else {
-            return false
+        var authority = rest.prefix { $0 != "/" }
+        guard authority.count < rest.count else { return false }
+        if allowsUsername, let at = authority.firstIndex(of: "@") {
+            let user = authority[..<at]
+            guard !user.isEmpty, user.unicodeScalars.allSatisfy({ Self.usernameScalars.contains($0) }) else {
+                return false
+            }
+            authority = authority[authority.index(after: at)...]
         }
+        guard let validated = HostingHTTP.validatedHost(String(authority)) else { return false }
         return validated == host
     }
+
+    /// What a bare username in a token URL may hold (`isTokenURL(_:host:allowsUsername:)`).
+    private static let usernameScalars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz")
+        .union(CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"))
 
     /// The names of the remote groups git reads in `cwd`, from every config scope (system, global, the repo's, the
     /// files they include, command): `<name>` of each `remotes.<name>` key, valueless ones too, as git canonicalizes it
@@ -925,11 +942,13 @@ public struct GitCredential: Sendable, Equatable, CustomStringConvertible, Custo
 
     /// What the token helper answers as the username: GitHub's `x-access-token`, whatever `username` says; for
     /// GitLab `username` (any name works with a personal access token; an OAuth account saves `oauth2`), else
-    /// `oauth2`. Only a name `isSafeUsername(_:)` accepts is ever answered.
+    /// `oauth2`; Bitbucket Cloud's `x-token-auth`, which its API tokens and OAuth tokens both accept (Atlassian docs,
+    /// phase 11.0). Only a name `isSafeUsername(_:)` accepts is ever answered.
     var gitUsername: String {
         switch kind {
         case .github: "x-access-token"
         case .gitlab: Self.isSafeUsername(username) ? username : "oauth2"
+        case .bitbucketCloud: "x-token-auth"
         }
     }
 

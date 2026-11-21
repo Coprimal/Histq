@@ -100,6 +100,24 @@ struct RemoteURLTests {
         #expect(GitLabClient.repository(fromRemoteURL: url, basePath: basePath) == expected)
     }
 
+    @Test("Bitbucket Cloud wants bitbucket.org and exactly a workspace and a repository", arguments: [
+        ("https://bitbucket.org/ws/repo.git", HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
+        ("https://me@bitbucket.org/ws/repo.git", HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
+        ("git@bitbucket.org:ws/repo.git", HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
+        ("ssh://git@bitbucket.org/ws/repo.git", HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
+        ("https://Bitbucket.org/ws/my.repo", HostedRepository(host: "bitbucket.org", path: ["ws", "my.repo"])),
+        // Another host, the host hidden in the userinfo, three segments or one, a segment that is not plain.
+        ("https://bitbucket.example.com/ws/repo.git", nil),
+        ("https://bitbucket.org@evil.example/ws/repo.git", nil),
+        ("https://bitbucket.org/ws/sub/repo.git", nil),
+        ("git@bitbucket.org:ws/sub/repo.git", nil),
+        ("https://bitbucket.org/repo.git", nil),
+        ("https://bitbucket.org/ws/my%20repo", nil),
+    ] as [(String, HostedRepository?)])
+    func bitbucketCloudRepository(url: String, expected: HostedRepository?) {
+        #expect(BitbucketCloudClient.repository(fromRemoteURL: url) == expected)
+    }
+
     @Test("an account's kind resolves its remotes: GitLab subgroups and base paths, GitHub's two segments as before",
           arguments: [
         (HostingKind.gitlab, "https://gitlab.com/group/sub/proj.git", nil,
@@ -114,6 +132,8 @@ struct RemoteURLTests {
         (.github, "git@ghe.example.com:Team/app.git", "ignored",
          HostedRepository(host: "ghe.example.com", owner: "Team", name: "app")),
         (.github, "https://gitlab.com/group/sub/proj.git", nil, nil),
+        (.bitbucketCloud, "git@bitbucket.org:ws/repo.git", nil, HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
+        (.bitbucketCloud, "https://github.com/octo/hello.git", nil, nil),
     ] as [(HostingKind, String, String?, HostedRepository?)])
     func kindRepository(kind: HostingKind, url: String, basePath: String?, expected: HostedRepository?) {
         #expect(kind.repository(fromRemoteURL: url, basePath: basePath) == expected)

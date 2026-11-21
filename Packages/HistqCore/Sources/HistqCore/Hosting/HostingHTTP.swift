@@ -64,7 +64,8 @@ public enum HostingHTTP {
     }
 
     /// The message of an error body whose `message` is not a string (GitLab): an object's fields as `field: msg1,
-    /// msg2` (sorted, joined by `; `), an array's strings, else `error_description` or `error`; empty otherwise.
+    /// msg2` (sorted, joined by `; `), an array's strings, else `error_description`, `error`, or the `message` of an
+    /// `error` object (Bitbucket); empty otherwise.
     private static func otherMessage(_ data: Data) -> String {
         guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
         func text(_ value: Any) -> String? {
@@ -78,6 +79,7 @@ public enum HostingHTTP {
                 .joined(separator: "; ")
         }
         if let message = body["message"].flatMap(text) { return message }
+        if let error = body["error"] as? [String: Any], let message = error["message"] as? String { return message }
         return (body["error_description"] as? String) ?? (body["error"] as? String) ?? ""
     }
 
