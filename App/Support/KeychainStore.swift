@@ -251,7 +251,27 @@ struct OAuthKeychainStore: OAuthRefresher.Store {
         decoder.dateDecodingStrategy = .secondsSince1970
         let record = try decoder.decode(Record.self, from: Data(text.utf8))
         return OAuthRefresher.TokenPair(
-            accessToken: accessToken, refreshToken: record.refreshToken, expiresAt: record.expiresAt)
+            accessToken: accessToken, refreshToken: record.refreshToken,
+            expiresAt: Self.debugExpiry(key) ?? record.expiresAt)
+    }
+
+    #if DEBUG
+    /// The keys DEBUG `-HistqExpireHostingTokens YES` has already reported as expired.
+    private static let expiredOnce = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+    #endif
+
+    /// DEBUG `-HistqExpireHostingTokens YES` (state-dir launches only): the first read of each OAuth account's pair
+    /// in this process says it expired, so the refresher renews it once (QA of a refresh shared by several tabs);
+    /// later reads, and every other build, give the stored expiry (nil).
+    private static func debugExpiry(_ key: String) -> Date? {
+        #if DEBUG
+        guard AppState.isStateDirMode, AppState.launchFlag("-HistqExpireHostingTokens") == "YES",
+              expiredOnce.withLock({ $0.insert(key).inserted })
+        else { return nil }
+        return .distantPast
+        #else
+        return nil
+        #endif
     }
 
     @concurrent
@@ -303,7 +323,15 @@ enum HostingTokens {
               let clientID = account.oauthClientID.flatMap(ownID) ?? gitLabClientID
         else { throw HostingError.unauthorized }
         let flow = try DeviceFlow(kind: .gitlab, host: account.host, basePath: account.basePath, clientID: clientID)
-        return try await flow.refresh(refreshToken)
+        UITiming.hosting("refresh \(account.host) start")
+        do {
+            let token = try await flow.refresh(refreshToken)
+            UITiming.hosting("refresh \(account.host) ok")
+            return token
+        } catch {
+            UITiming.hosting("refresh \(account.host) failed \(logReason(error))")
+            throw error
+        }
     }
 
     /// Whether the access token item `key` has an `.oauth` record; throws `KeychainError` when the lookup failed.

@@ -34,7 +34,7 @@ enum AIJob: Equatable, Sendable {
         case .explainWorkingChanges: "Explain the uncommitted changes"
         case .improveMessage: "Improve message"
         case .resolution(let target): "Resolve conflict \(target.conflict + 1) of \(target.path)"
-        case .pullRequest: "Pull request description"
+        case .pullRequest(_, _, _, let kind): "\(kind.pullRequestNoun) description"
         }
     }
 
@@ -280,7 +280,7 @@ struct AIResultSheet: View {
             summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
         case .improveMessage: "Replace the row's new message"
-        case .pullRequest: "Fill the pull request's title and description"
+        case .pullRequest(_, _, _, let kind): "Fill the \(kind.pullRequestNoun.lowercased())'s title and description"
         default: ""
         }
     }

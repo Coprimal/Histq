@@ -1199,12 +1199,13 @@ enum RepoMenus {
             else { false }
         let push: RepoSession.Write? = if case .local(let name) = head { pushBeforePullRequest(name, session) } else { nil }
         let reason = createPullRequestUnavailableReason(head: head, base: base, session, pushing: push != nil)
+        let noun = session.github.kind.pullRequestNoun.capitalized
         guard let push, case .push(let branch, let remote, let remoteBranch, _, _) = push else {
-            return .action("Create Pull Request\(namesHead ? " from \(headName)" : "")\(into)…", enabled: reason == nil, toolTip: reason) {
+            return .action("Create \(noun)\(namesHead ? " from \(headName)" : "")\(into)…", enabled: reason == nil, toolTip: reason) {
                 openCreatePullRequest(head: head, base: base, session)
             }
         }
-        return .action("Push \(headName) and Create Pull Request\(into)…", enabled: reason == nil, toolTip: reason) {
+        return .action("Push \(headName) and Create \(noun)\(into)…", enabled: reason == nil, toolTip: reason) {
             session.run(push, title: "Push \(branch) to \(remote)/\(remoteBranch ?? branch)") {
                 openCreatePullRequest(head: head, base: base, session)
             }
@@ -1244,10 +1245,11 @@ enum RepoMenus {
                     + " to this tab's profile in Settings › Integrations."
             }
         }
-        guard let headName = head.branchName else { return "Only a branch can be a pull request's head." }
+        let noun = session.github.kind.pullRequestNoun.lowercased()
+        guard let headName = head.branchName else { return "Only a branch can be a \(noun)'s head." }
         let headBranch = gitHubBranch(of: head, session)
         if headBranch == nil, !pushing {
-            return "Push \(headName) to \(remote) first: the host opens a pull request only from a branch it has."
+            return "Push \(headName) to \(remote) first: the host opens a \(noun) only from a branch it has."
         }
         guard let base else {
             // The form's base is another branch of the GitHub remote: without one, its Base picker is empty.
@@ -1256,7 +1258,7 @@ enum RepoMenus {
         }
         guard let baseBranch = gitHubBranch(of: base, session) else {
             return "\(base.branchName ?? "The target") is not on \(remote): "
-                + "a pull request goes into a branch the host has."
+                + "a \(noun) goes into a branch the host has."
         }
         return headBranch == baseBranch ? "Both are the same branch on \(remote)." : nil
     }

@@ -5990,6 +5990,7 @@ final class RepoSession: Identifiable {
         running.append(operation)
         failure = nil
         let timing = "resolve pr \(number) \(withAI ? "ai" : "manual")"
+        let noun = github.kind.pullRequestNoun.lowercased()
         Task { [weak self] in
             guard let self else { return }
             defer { running.removeAll { $0.id == operation.id } }
@@ -6048,7 +6049,7 @@ final class RepoSession: Identifiable {
                 try await perform(write)
                 UITiming.content("\(timing) clean")
                 postToast(.success(title, detail: "Merged \(base) into \(head) with no conflicts. "
-                    + "Push to update the pull request."))
+                    + "Push to update the \(noun)."))
             } catch {
                 // `perform` reread the status before it threw: the conflicted paths are the merge's.
                 let conflicted = status.value?.conflicted ?? []
@@ -6056,7 +6057,7 @@ final class RepoSession: Identifiable {
                     UITiming.content("\(timing) stopped \(conflicted.count)")
                     let count = conflicted.count == 1 ? "1 conflict" : "\(conflicted.count) conflicts"
                     postToast(.warning("\(title) stopped on conflicts", detail: "\(count) — resolve them, commit, "
-                        + "then push to update the pull request."))
+                        + "then push to update the \(noun)."))
                     // Suggest All needs both sides as text: with AI, the first path both sides still have (UU or
                     // AA, never a modify/delete; a binary one only shows once loaded), else the first: its load then
                     // says AI has nothing to suggest.

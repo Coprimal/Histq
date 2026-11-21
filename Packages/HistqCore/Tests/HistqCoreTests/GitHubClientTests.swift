@@ -88,6 +88,19 @@ struct GitHubClientTests {
         }
     }
 
+    @Test("GitHub's capabilities stay as they were, without unapprove, which it refuses unsent")
+    func capabilitiesWithoutUnapprove() async throws {
+        let stub = StubServer { _ in .init(body: "{}") }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+
+        #expect(client.capabilities
+            == [.labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests])
+        await #expect(throws: HostingError.self) {
+            try await client.unapprove(1, in: HostedRepository(host: "github.com", owner: "octo", name: "hello"))
+        }
+        #expect(stub.requests.isEmpty)
+    }
+
     @Test("a next-page link to another host is refused, so the token never goes there")
     func paginationRefusesOtherOrigin() async throws {
         let stub = StubServer { _ in

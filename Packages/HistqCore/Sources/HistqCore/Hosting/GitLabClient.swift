@@ -5,9 +5,10 @@
 //
 // The token is a secret: the client asks its provider for it on every request (a constant for a personal access
 // token, a refresher for OAuth), and after a 401 asks once more with the refused token and retries that request once.
-// It only ever goes in the `Authorization` header of a request under `apiBase` (its origin and base path): a
-// `Link: rel="next"` URL outside it is refused, a redirect to another origin or outside the base path is not followed,
-// no error or description holds it, and `print`, `dump` and `String(reflecting:)` of a client show only its host.
+// It only ever goes in the `Authorization` header of a request under `apiBase` (its origin and base path), or to
+// `graphQLURL` exactly (requesting changes, which REST lacks): a `Link: rel="next"` URL outside `apiBase` is refused,
+// a redirect to another origin or outside the base path is not followed, no error or description holds it, and
+// `print`, `dump` and `String(reflecting:)` of a client show only its host.
 import Foundation
 import Synchronization
 
@@ -24,6 +25,9 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     public let basePath: [String]
     /// `https://<host>[/<basePath>]/api/v4`.
     public let apiBase: URL
+    /// `https://<host>[/<basePath>]/api/graphql`: the one URL outside `apiBase` the token goes to, this exact path
+    /// only.
+    public let graphQLURL: URL
     /// The most pages one list follows (100 items each), so a huge project cannot keep a list loading.
     public var maxPages = 10
     private let token: TokenProvider
@@ -37,13 +41,16 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         token: @escaping TokenProvider
     ) throws {
         guard let validHost = HostingHTTP.validatedHost(host), let segments = Self.basePathSegments(basePath),
-            let apiBase = URL(string: "https://\(validHost)" + (segments + ["api", "v4"]).map { "/" + $0 }.joined())
+            let apiBase = URL(string: "https://\(validHost)" + (segments + ["api", "v4"]).map { "/" + $0 }.joined()),
+            let graphQLURL = URL(
+                string: "https://\(validHost)" + (segments + ["api", "graphql"]).map { "/" + $0 }.joined())
         else {
             throw HostingError.invalidHost(host)
         }
         self.host = validHost
         self.basePath = segments
         self.apiBase = apiBase
+        self.graphQLURL = graphQLURL
         self.token = token
         self.session = session
     }
@@ -108,9 +115,10 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     public var kind: HostingKind { .gitlab }
 
-    /// Everything but requesting changes, which REST has only through draft notes (see Phase 10).
+    /// All of them: requesting changes through GraphQL (REST has it only through draft notes), and revoking an
+    /// approval, which GitHub lacks.
     public var capabilities: HostingCapabilities {
-        [.labels, .assignees, .issues, .resolveThreads, .draft, .reopen, .reviewRequests]
+        [.labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests, .unapprove]
     }
 
     /// What `PUT .../merge` does: a merge (commit or fast-forward, as the project is set up) or a squash. A rebase is
@@ -523,18 +531,18 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// `HostingError.headChanged`) and posts a non-empty body as a note; `COMMENT` posts the body as a note. GitLab
     /// answers 401 when it refuses the approval (already approved, not allowed): a 401 that the forced token refresh
     /// does not clear is `validationFailed`, not `unauthorized`.
-    /// `REQUEST_CHANGES` is refused (no `requestChanges` capability). The review's id follows `reviews(of:in:)`.
+    /// `REQUEST_CHANGES` runs GraphQL's `mergeRequestRequestChanges` (REST has it only through draft notes), then
+    /// posts a non-empty body as a note once it succeeded; a GraphQL error, top-level or the mutation's, is thrown
+    /// as `HostingError.graphQL` and posts nothing. The review's id follows `reviews(of:in:)`.
     public func review(_ number: Int, in repo: HostedRepository, event: HostedReviewEvent, body: String?)
         async throws -> HostedReview
     {
-        guard event != .requestChanges else {
-            throw HostingError.validationFailed(message: "GitLab merge requests cannot request changes here")
-        }
         let path = try itemPath(.pullRequest(number), in: repo)
+        let text = body.flatMap { $0.isEmpty ? nil : $0 }
+        if event == .requestChanges { return try await requestChanges(number, in: repo, body: text) }
         let me = try await myID()
         var ids = SyntheticIDs()
         let id = ids.id("review", String(me))
-        let text = body.flatMap { $0.isEmpty ? nil : $0 }
         if event == .comment {
             guard let text else { throw HostingError.validationFailed(message: "a comment needs a body") }
             let note = try await comment(on: .pullRequest(number), in: repo, body: text)
@@ -559,6 +567,49 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return HostedReview(
             id: id, user: approver?.user.hosted, state: "APPROVED", body: text, bodyHTML: text.map(MarkdownHTML.html),
             submittedAt: GitLabDate.parse(approver?.approvedAt) ?? Date())
+    }
+
+    /// The `REQUEST_CHANGES` review: the mutation, with the project's full path and the merge request's iid as
+    /// variables, then the body as a note only once it succeeded (a refused mutation leaves no note).
+    private func requestChanges(_ number: Int, in repo: HostedRepository, body text: String?) async throws
+        -> HostedReview
+    {
+        let projectPath = try projectID(repo)
+        let me = try await currentUser()
+        struct Variables: Encodable { var projectPath, iid: String }
+        struct Payload: Decodable { var errors: [String]? }
+        struct Answer: Decodable { var mergeRequestRequestChanges: Payload? }
+        let answer: Answer = try await graphQL(
+            "mutation($projectPath: ID!, $iid: String!) { mergeRequestRequestChanges(input: "
+                + "{projectPath: $projectPath, iid: $iid}) { errors mergeRequest { iid } } }",
+            variables: Variables(projectPath: projectPath, iid: String(number)))
+        guard let payload = answer.mergeRequestRequestChanges else {
+            throw HostingError.invalidResponse("a change request without its result")
+        }
+        if let errors = payload.errors, !errors.isEmpty {
+            throw HostingError.graphQL(message: String(errors.joined(separator: "; ").prefix(500)))
+        }
+        if let text { _ = try await comment(on: .pullRequest(number), in: repo, body: text) }
+        var ids = SyntheticIDs()
+        return HostedReview(
+            id: ids.id("review", String(me.id)), user: me, state: "CHANGES_REQUESTED", body: text,
+            bodyHTML: text.map(MarkdownHTML.html), submittedAt: Date())
+    }
+
+    /// `POST .../unapprove`: revokes the token's user's approval. GitLab answers 404 when there is none to revoke (or
+    /// it cannot see the merge request), and 401 when it refuses: a 401 that the forced token refresh does not clear
+    /// is `validationFailed`, not `unauthorized`, as for approving.
+    public func unapprove(_ number: Int, in repo: HostedRepository) async throws {
+        let target = url(try itemPath(.pullRequest(number), in: repo) + ["unapprove"])
+        do {
+            _ = try await perform("POST", target)
+        } catch HostingError.notFound {
+            throw HostingError.validationFailed(
+                message: "GitLab found no approval of yours to revoke on this merge request (or cannot see it).")
+        } catch HostingError.unauthorized {
+            throw HostingError.validationFailed(
+                message: "GitLab refused to revoke the approval: you may not be allowed to on this merge request.")
+        }
     }
 
     /// `PUT .../merge`, always with `sha`: a push since the user reviewed makes GitLab answer 409, thrown as
@@ -860,6 +911,41 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         HostingHTTP.isSameOrigin(url, apiBase) && HostingHTTP.isPath(of: url, under: apiBase.path(percentEncoded: true))
     }
 
+    /// Whether `url` is `graphQLURL` itself: the same origin and exactly its path, no query, so `/api/graphqlx`,
+    /// `/api/graphql/x` or anything else under `/api` is not.
+    private func isGraphQLURL(_ url: URL) -> Bool {
+        HostingHTTP.isSameOrigin(url, graphQLURL)
+            && url.path(percentEncoded: true) == graphQLURL.path(percentEncoded: true) && url.query() == nil
+    }
+
+    /// POSTs a GraphQL operation to `graphQLURL` through `perform`, so it carries the token, headers, 401 refresh and
+    /// redirect guard of every REST call. Values only go in `variables`, never into the `query` text. GitLab answers
+    /// a failed operation with 200, an `errors` array and a partial or null `data`: the errors are read first, and the
+    /// first one is thrown as `HostingError.graphQL`.
+    private func graphQL<Value: Decodable, Variables: Encodable>(_ query: String, variables: Variables)
+        async throws -> Value
+    {
+        let body = try JSONEncoder().encode(GraphQLRequest(query: query, variables: variables))
+        let (data, _) = try await perform("POST", graphQLURL, body: body)
+        let failure: GraphQLErrors = try Self.decode(data)
+        if let first = failure.errors?.first { throw HostingError.graphQL(message: String(first.message.prefix(500))) }
+        let answer: GraphQLAnswer<Value> = try Self.decode(data)
+        guard let value = answer.data else { throw HostingError.invalidResponse("a GraphQL answer without data") }
+        return value
+    }
+
+    private struct GraphQLRequest<Variables: Encodable>: Encodable {
+        var query: String
+        var variables: Variables
+    }
+
+    private struct GraphQLErrors: Decodable {
+        struct Message: Decodable { var message: String }
+        var errors: [Message]?
+    }
+
+    private struct GraphQLAnswer<Value: Decodable>: Decodable { var data: Value? }
+
     private static func decode<T: Decodable>(_ data: Data) throws -> T {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -917,10 +1003,12 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return components.url
     }
 
-    /// The one place a request is made and the token attached, only to a URL under `apiBase`. A 401 asks the
-    /// provider for a refreshed token and retries once; a second 401 is `unauthorized`.
+    /// The one place a request is made and the token attached, only to a URL under `apiBase` or to `graphQLURL`. A
+    /// 401 asks the provider for a refreshed token and retries once; a second 401 is `unauthorized`.
     private func perform(_ method: String, _ url: URL, body: Data? = nil) async throws -> (Data, HTTPURLResponse) {
-        guard isUnderAPIBase(url) else { throw HostingError.invalidResponse("a URL outside the API") }
+        guard isUnderAPIBase(url) || isGraphQLURL(url) else {
+            throw HostingError.invalidResponse("a URL outside the API")
+        }
         let token = try await self.token(nil)
         var (data, response) = try await load(method, url, body: body, token: token)
         if response.statusCode == 401 {

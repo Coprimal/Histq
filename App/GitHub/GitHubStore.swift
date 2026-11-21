@@ -543,13 +543,16 @@ final class HostingStore {
         lists[.assigned] = issueHits?.map {
             $0.filter { !$0.isPullRequest }.map { HostedRow(searchHit: $0, pull: nil) }
         }
-        return (lists, (try? pulls.get()).map { branchPullRequests($0, repository: repository, remote: remote) })
+        return (lists, (try? pulls.get()).map {
+            branchPullRequests($0, repository: repository, remote: remote, numberPrefix: client.kind.numberPrefix)
+        })
     }
 
     /// The badges of `pulls` by remote branch: only heads whose `owner:branch` label names the repository's owner (a
     /// fork's head is another repository's branch). When two pull requests share a head, the lowest number wins.
+    /// `numberPrefix` goes before each chip's number (`!` on GitLab).
     nonisolated static func branchPullRequests(
-        _ pulls: [HostedPullRequest], repository: HostedRepository, remote: String
+        _ pulls: [HostedPullRequest], repository: HostedRepository, remote: String, numberPrefix: String
     ) -> [String: RefBadge.PullRequest] {
         var result: [String: RefBadge.PullRequest] = [:]
         for pull in pulls.sorted(by: { $0.number < $1.number }) where pull.state == "open" {
@@ -558,7 +561,8 @@ final class HostingStore {
             else { continue }
             let branch = "\(remote)/\(pull.head.ref)"
             if result[branch] == nil {
-                result[branch] = RefBadge.PullRequest(number: pull.number, isDraft: pull.draft ?? false)
+                result[branch] = RefBadge.PullRequest(
+                    number: pull.number, isDraft: pull.draft ?? false, numberPrefix: numberPrefix)
             }
         }
         return result

@@ -106,6 +106,9 @@ struct GitLabClientTests {
         "https://git.example.com/gitlab/api/v4evil/projects?page=2",
         "https://git.example.com/gitlab/api/v4/../../x?page=2",
         "http://git.example.com/gitlab/api/v4/projects?page=2",
+        "https://git.example.com/gitlab/api/graphql?page=2",
+        "https://git.example.com/gitlab/api/graphqlx?page=2",
+        "https://git.example.com/gitlab/api/other?page=2",
     ])
     func paginationRefusesOutsideAPIBase(next: String) async throws {
         let stub = StubServer { _ in .init(headers: ["Link": "<\(next)>; rel=\"next\""], body: "[]") }
@@ -417,6 +420,7 @@ struct GitLabClientTests {
         ("https://git.example.com/gitlab/api/v4evil/user", false),
         ("https://git.example.com/gitlab/api/v4/%2E%2E/%2E%2E/user", false),
         ("https://git.example.com/gitlab/api/v4/..%2F..%2Fuser", false),
+        ("https://git.example.com/gitlab/api/graphql", false),
     ])
     func redirectOutsideBasePathIsNotFollowed(target: String, isFollowed: Bool) async throws {
         let stub = StubServer { request in
@@ -665,7 +669,7 @@ struct GitLabClientTests {
         #expect(puts.map { $0.url?.query() } == ["resolved=true", "resolved=false"])
     }
 
-    @Test("approving pins the head the client last loaded (409 is headChanged); request changes is refused unsent")
+    @Test("approving pins the head the client last loaded (409 is headChanged)")
     func approvePinsHead() async throws {
         let stub = StubServer { request in
             let path = request.url?.path(percentEncoded: true) ?? ""
@@ -680,10 +684,6 @@ struct GitLabClientTests {
         }
         let client = try Self.client(stub, refreshes: Self.refreshed())
 
-        await #expect(throws: HostingError.self) {
-            try await client.review(5, in: Self.writeRepo, event: .requestChanges, body: "no")
-        }
-        #expect(stub.requests.isEmpty)
         await #expect(throws: HostingError.headChanged) {
             try await client.review(5, in: Self.writeRepo, event: .approve, body: nil)
         }
@@ -713,6 +713,132 @@ struct GitLabClientTests {
         let approvals = stub.requests.filter { $0.url?.path(percentEncoded: true) == Self.mrPath + "/5/approve" }
         #expect(approvals.count == 2)
         #expect(refreshes.count.withLock { $0 } == 1)
+    }
+
+    @Test("unapprove POSTs .../unapprove with the token and no body; 404 and a 401 the refresh does not clear are refusals, 403 is forbidden")
+    func unapprovePostsAndMapsErrors() async throws {
+        let unapprovePath = Self.mrPath + "/5/unapprove"
+        let ok = StubServer { request in
+            request.url?.path(percentEncoded: true) == unapprovePath
+                ? .init(status: 201, body: #"{"approved": false, "approved_by": []}"#)
+                : .init(status: 404, body: "{}")
+        }
+        try await Self.client(ok, refreshes: Self.refreshed()).unapprove(5, in: Self.writeRepo)
+        let sent = try #require(ok.requests.first)
+        #expect(ok.requests.count == 1)
+        #expect(sent.httpMethod == "POST" && sent.url?.absoluteString == "https://git.example.com\(unapprovePath)")
+        #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        #expect(sent.httpBody == nil)
+
+        for (status, refreshesAfter) in [(404, 0), (401, 1)] {
+            let refused = StubServer { _ in .init(status: status, body: #"{"message": "\#(status) Refused"}"#) }
+            let refreshes = Refreshes()
+            await #expect {
+                try await Self.client(refused, refreshes: refreshes).unapprove(5, in: Self.writeRepo)
+            } throws: { error in
+                guard case HostingError.validationFailed = error else { return false }
+                return true
+            }
+            #expect(refused.requests.count == (status == 401 ? 2 : 1), "a 401 retries once after a refresh")
+            #expect(refreshes.count.withLock { $0 } == refreshesAfter)
+        }
+
+        let forbidden = StubServer { _ in .init(status: 403, body: #"{"message": "403 Forbidden"}"#) }
+        await #expect(throws: HostingError.forbidden(message: "403 Forbidden")) {
+            try await Self.client(forbidden, refreshes: Self.refreshed()).unapprove(5, in: Self.writeRepo)
+        }
+    }
+
+    /// A GitLab whose `/api/graphql` answers `graphQL`, with the user `me` and a note endpoint.
+    static func requestChangesServer(graphQL: String) -> StubServer {
+        StubServer { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/gitlab/api/v4/user": .init(body: Self.user(7, "me"))
+            case Self.mrPath + "/5/notes":
+                .init(status: 201, body: #"{"id": 61, "body": "Fix it", "author": \#(Self.user(7, "me"))}"#)
+            case "/gitlab/api/graphql": .init(body: graphQL)
+            default: .init(status: 404, body: "{}")
+            }
+        }
+    }
+
+    @Test("request changes runs the GraphQL mutation with the project path and iid as variables and the token, then posts the body as a note; the review is the user's CHANGES_REQUESTED")
+    func requestChangesRunsMutation() async throws {
+        let stub = Self.requestChangesServer(
+            graphQL: #"{"data": {"mergeRequestRequestChanges": {"errors": [], "mergeRequest": {"iid": "5"}}}}"#)
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let review = try await client.review(5, in: Self.writeRepo, event: .requestChanges, body: "Fix it")
+
+        #expect(review.state == "CHANGES_REQUESTED" && review.user?.login == "me" && review.body == "Fix it")
+        #expect(stub.requests.map { $0.url?.path(percentEncoded: true) } == [
+            "/gitlab/api/v4/user", "/gitlab/api/graphql", Self.mrPath + "/5/notes",
+        ])
+        let mutation = stub.requests[1]
+        #expect(mutation.httpMethod == "POST")
+        #expect(mutation.url == client.graphQLURL)
+        #expect(mutation.url?.absoluteString == "https://git.example.com/gitlab/api/graphql")
+        #expect(mutation.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        #expect(mutation.value(forHTTPHeaderField: "Content-Type") == "application/json")
+        let json = Self.json(mutation)
+        let query = try #require(json["query"] as? String)
+        #expect(query.contains("mergeRequestRequestChanges(input: {projectPath: $projectPath, iid: $iid})"))
+        #expect(query.contains("errors"))
+        #expect(!query.contains("group/proj"), "values go only in the variables")
+        let variables = try #require(json["variables"] as? [String: Any])
+        #expect(variables["projectPath"] as? String == "group/proj")
+        #expect(variables["iid"] as? String == "5")
+        #expect(Self.json(stub.requests[2])["body"] as? String == "Fix it")
+
+        let bare = Self.requestChangesServer(
+            graphQL: #"{"data": {"mergeRequestRequestChanges": {"errors": [], "mergeRequest": {"iid": "5"}}}}"#)
+        _ = try await Self.client(bare, refreshes: Self.refreshed())
+            .review(5, in: Self.writeRepo, event: .requestChanges, body: nil)
+        #expect(!bare.requests.contains { $0.url?.path(percentEncoded: true) == Self.mrPath + "/5/notes" },
+                "no body, no note")
+    }
+
+    @Test("a change request GraphQL refuses, with top-level errors or the mutation's, or answers without its result, fails and posts no note", arguments: [
+        (#"{"errors": [{"message": "The resource that you are attempting to access does not exist"}], "data": {"mergeRequestRequestChanges": null}}"#,
+         HostingError.graphQL(message: "The resource that you are attempting to access does not exist")),
+        (#"{"data": {"mergeRequestRequestChanges": {"errors": ["Not a reviewer", "Locked"], "mergeRequest": null}}}"#,
+         HostingError.graphQL(message: "Not a reviewer; Locked")),
+        (#"{"data": {"mergeRequestRequestChanges": null}}"#,
+         HostingError.invalidResponse("a change request without its result")),
+    ])
+    func requestChangesErrorsFail(answer: String, expected: HostingError) async throws {
+        let stub = Self.requestChangesServer(graphQL: answer)
+        await #expect(throws: expected) {
+            try await Self.client(stub, refreshes: Self.refreshed())
+                .review(5, in: Self.writeRepo, event: .requestChanges, body: "Fix it")
+        }
+        #expect(!stub.requests.contains { $0.url?.path(percentEncoded: true) == Self.mrPath + "/5/notes" })
+    }
+
+    @Test("the token goes to /api/graphql itself; a redirect from it to /api/graphqlx, /api/other or below it is not followed", arguments: [
+        "https://git.example.com/gitlab/api/graphqlx",
+        "https://git.example.com/gitlab/api/other",
+        "https://git.example.com/gitlab/api/graphql/x",
+        "https://git.example.com/api/graphql",
+    ])
+    func graphQLTokenScope(target: String) async throws {
+        let stub = StubServer { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/gitlab/api/v4/user": .init(body: Self.user(7, "me"))
+            case "/gitlab/api/graphql":
+                .init(status: 307, headers: ["Location": target], body: "", redirect: URL(string: target))
+            default: .init(body: #"{"data": {"mergeRequestRequestChanges": {"errors": []}}}"#)
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        await #expect(throws: HostingError.self) {
+            try await client.review(5, in: Self.writeRepo, event: .requestChanges, body: nil)
+        }
+        let graphQL = try #require(stub.requests.last)
+        #expect(graphQL.url?.absoluteString == "https://git.example.com/gitlab/api/graphql")
+        #expect(graphQL.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        #expect(!stub.requests.contains { $0.url?.absoluteString == target }, "nothing reaches the target")
     }
 
     @Test("requesting reviewers reads the merge request and PUTs the union of reviewer_ids (a user's reviewerID over its id)")

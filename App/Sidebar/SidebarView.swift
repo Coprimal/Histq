@@ -38,6 +38,16 @@ enum SidebarTab: String, CaseIterable, Hashable, Sendable {
         }
     }
 
+    /// `title` in the connected host's words ("Merge requests & Issues" on GitLab).
+    func title(_ kind: HostingKind) -> String {
+        self == .prs ? "\(kind.pullRequestsNoun) & Issues" : title
+    }
+
+    /// `shortTitle` in the connected host's words ("MRs" on GitLab).
+    func shortTitle(_ kind: HostingKind) -> String {
+        self == .prs ? "\(kind.shortNoun)s" : shortTitle
+    }
+
     var systemImage: String {
         switch self {
         case .branches: "lucide-git-branch"
@@ -137,9 +147,9 @@ struct SidebarView: View {
             CapsuleTabs(
                 selection: Binding(get: { tab }, set: { session.selectSidebarTab($0) }),
                 tabs: layout.tabs,
-                title: { Text($0.shortTitle) },
+                title: { Text($0.shortTitle(session.github.kind)) },
                 compact: true,
-                help: \.title,
+                help: { $0.title(session.github.kind) },
                 fillsWidth: true,
                 systemImage: \.systemImage)
                 // In the frame of the shown tab's stop: Branches and Tags, or Pull Requests and Issues.

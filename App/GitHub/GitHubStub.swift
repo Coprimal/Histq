@@ -357,8 +357,8 @@ enum GitHubStub {
 /// `feature.txt` (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10, resolved), its `detailed_merge_status`
 /// as `-HistqPRMergeable true|false|null` says (`mergeable`, `conflict`, `checking`), open issue #2 assigned to `stub`
 /// with 1 note, the project's labels and users. The writes answer as GitLab does and change nothing: a note, a reply
-/// to A or B, resolve/unresolve of A or B, approve, a merge (409 unless pinned to the head), close/reopen, and a
-/// create that always makes !3. Anything else is 404.
+/// to A or B, resolve/unresolve of A or B, approve, unapprove, a change request (GraphQL), a merge (409 unless pinned
+/// to the head), close/reopen, and a create that always makes !3. Anything else is 404.
 enum GitLabStub {
     static let repository = HostedRepository(host: "gitlab.com", owner: "stub", name: "stub")
 
@@ -384,6 +384,11 @@ enum GitLabStub {
                 return (409, #"{"message": "SHA does not match HEAD of source branch"}"#)
             }
             return (201, #"{"approved": true, "approved_by": [\#(approver(reviewer)), \#(approver(user))]}"#)
+        case ("POST", "\(mr1)/unapprove"):
+            return (201, #"{"approved": true, "approved_by": [\#(approver(reviewer))]}"#)
+        case ("POST", "/api/graphql"):
+            guard (json["query"] as? String)?.contains("mergeRequestRequestChanges") == true else { return notFound }
+            return (200, #"{"data": {"mergeRequestRequestChanges": {"errors": [], "mergeRequest": {"iid": "1"}}}}"#)
         case ("POST", "\(mr1)/notes"): return (201, note(803, by: user, body: "Thanks.", at: "17:00"))
         case ("PUT", mr1): return (200, mergeRequest(1, full: true))
         case ("POST", "\(project)/issues/2/notes"): return (201, note(804, by: user, body: "Thanks.", at: "17:00"))

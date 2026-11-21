@@ -128,6 +128,8 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let draft = HostingCapabilities(rawValue: 1 << 5)
     public static let reopen = HostingCapabilities(rawValue: 1 << 6)
     public static let reviewRequests = HostingCapabilities(rawValue: 1 << 7)
+    /// The token's user can revoke their own approval (`unapprove(_:in:)`); GitHub has no such action.
+    public static let unapprove = HostingCapabilities(rawValue: 1 << 8)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -260,8 +262,17 @@ public protocol HostingProvider: Sendable {
     func setReviewThread(_ state: HostedReviewThreadState, resolved: Bool) async throws -> Bool
     func review(_ number: Int, in repo: HostedRepository, event: HostedReviewEvent, body: String?)
         async throws -> HostedReview
+    /// Revokes the token's user's approval of pull request `number` (only with the `unapprove` capability).
+    func unapprove(_ number: Int, in repo: HostedRepository) async throws
     /// Merges only while the head is still `sha` (409 otherwise, `HostingError.headChanged` for GitHub).
     func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws
     /// Closes (`open` false) or reopens an issue or a pull request.
     func setOpen(_ open: Bool, item: HostedItem, in repo: HostedRepository) async throws
+}
+
+extension HostingProvider {
+    /// A host without the `unapprove` capability refuses it unsent.
+    public func unapprove(_ number: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot revoke an approval")
+    }
 }

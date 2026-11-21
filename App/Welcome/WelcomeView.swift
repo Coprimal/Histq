@@ -1020,8 +1020,8 @@ private struct RepositoryRow: View {
             } label: {
                 Text("Repository")
             }
-        case .loaded(_, let repos):
-            RepositoryPicker(model: model, repos: repos)
+        case .loaded(let account, let repos):
+            RepositoryPicker(model: model, repos: repos, kind: account.kind)
         case .notConnected(let account):
             LabeledContent {
                 settingsButton
@@ -1066,6 +1066,8 @@ private struct RepositoryPicker: View {
 
     let model: WelcomeModel
     let repos: [HostedCloneRepository]
+    /// The account's host: the hint under the label is in its words.
+    let kind: HostingKind
     @State private var query = ""
     @State private var isOpen = false
     /// The groups the list shows: `repos` filtered by the query.
@@ -1096,7 +1098,8 @@ private struct RepositoryPicker: View {
                 Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
-                Text("Organization repositories appear when the organization allows Histq's GitHub access.")
+                Text(kind == .gitlab ? "Projects of your groups appear here."
+                    : "Organization repositories appear when the organization allows Histq's GitHub access.")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

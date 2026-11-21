@@ -95,6 +95,9 @@ struct PullRequestDetail: Sendable {
     let files: Loadable<[PRFile]>
     let checks: Loadable<[HostedCheckRun]>
     let threads: Loadable<PRThreads>
+    /// The token's user's latest review is an approval, on a provider that can revoke it (`unapprove`): the Review
+    /// box offers Revoke Approval.
+    let viewerApproved: Bool
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -111,6 +114,8 @@ enum PullRequestAction: Equatable, Sendable {
     case reply(rootID: Int, body: String)
     /// `thread`: the thread's state, whose GraphQL node id resolving takes.
     case resolve(thread: HostedReviewThreadState, resolved: Bool)
+    /// Revokes the token's user's approval (GitLab).
+    case unapprove
 
     var progressTitle: String {
         switch self {
@@ -120,6 +125,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .setOpen(let open): open ? "Reopening…" : "Closing…"
         case .reply: "Replying…"
         case .resolve(_, let resolved): resolved ? "Resolving…" : "Unresolving…"
+        case .unapprove: "Revoking the approval…"
         }
     }
 
@@ -131,6 +137,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .setOpen(let open): open ? "Reopen failed" : "Close failed"
         case .reply: "The reply was not posted"
         case .resolve(_, let resolved): resolved ? "Resolve failed" : "Unresolve failed"
+        case .unapprove: "The approval was not revoked"
         }
     }
 
@@ -143,6 +150,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .setOpen(let open): open ? "Reopen of \(number) failed" : "Close of \(number) failed"
         case .reply: "The reply on \(number) was not posted"
         case .resolve(_, let resolved): resolved ? "Resolve on \(number) failed" : "Unresolve on \(number) failed"
+        case .unapprove: "The approval of \(number) was not revoked"
         }
     }
 
@@ -155,6 +163,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .setOpen(let open): open ? "reopen" : "close"
         case .reply: "reply"
         case .resolve(_, let resolved): resolved ? "resolve" : "unresolve"
+        case .unapprove: "unapprove"
         }
     }
 }
@@ -239,15 +248,17 @@ final class PullRequestDetailModel {
     /// DEBUG `-HistqPRTab commits|files|checks`: the tab a pull request opens on (QA shots of each tab).
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
     #if DEBUG
-    /// DEBUG `-HistqPRAction comment|approve|request-changes|merge|merge-stale|merge-stale-closed|close|reopen`: runs
-    /// that action once, on the first load, without its confirmation (the stub answers it), so a launch exercises the
-    /// action path and its reload. Only with `-HistqGitHubStub YES`: never an unconfirmed action on a real account.
+    /// DEBUG `-HistqPRAction <action>` (`comment`, `approve`, `request-changes`, `unapprove`, `merge`, `merge-stale`,
+    /// `merge-stale-closed`, `close`, `reopen`): runs that action once, on the first load, without its confirmation
+    /// (the stub answers it), so a launch exercises the action path and its reload. Only with `-HistqGitHubStub YES`:
+    /// never an unconfirmed action on a real account.
     /// `resolve-manual` is the merge box's own (`PRActionsCard.launchResolve`): a local merge, not a GitHub action.
     private static var launchAction: PullRequestAction? = switch GitHubStub.isEnabled
         ? AppState.launchFlag("-HistqPRAction") : nil {
     case "comment": .comment("QA comment")
     case "approve": .review(.approve, body: "")
     case "request-changes": .review(.requestChanges, body: "QA change request")
+    case "unapprove": .unapprove
     case "merge": .merge(.squash, sha: GitHubStub.headSHA)
     // A head the stub's PR #1 no longer has: the stub answers 409, as GitHub does after a push.
     case "merge-stale", "merge-stale-closed": .merge(.squash, sha: GitHubStub.staleSHA)
@@ -457,7 +468,7 @@ final class PullRequestDetailModel {
                    let root = state.value?.threads.value?.all.first(where: { $0.state?.id == thread.id })?.id {
                     threadExpanded[root] = false
                 }
-            case .merge, .setOpen: break
+            case .merge, .setOpen, .unapprove: break
             }
             github.refreshNow()
             if showing { load(number, github: github, quiet: true) }
@@ -482,6 +493,9 @@ final class PullRequestDetailModel {
         async let files = part(client.kind) { try await client.pullRequestFiles(number, in: repository) }
         async let reviewComments = part(client.kind) { try await client.reviewComments(of: number, in: repository) }
         async let threadStates = part(client.kind) { try await client.reviewThreadStates(of: number, in: repository) }
+        // Only a provider that can revoke an approval asks who the token's user is; a failure only hides the button.
+        let asksViewer = client.capabilities.contains(.unapprove)
+        async let viewer = asksViewer ? try? await client.currentUser() : nil
         do {
             let pull = try await pullRequest
             async let checks = part(client.kind) { try await client.checkRuns(for: pull.head.sha, in: repository) }
@@ -496,10 +510,15 @@ final class PullRequestDetailModel {
                 author: pull.user, action: "opened this \(client.kind.pullRequestNoun.lowercased())",
                 date: pull.createdAt, html: pull.bodyHTML,
                 markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded)
+            let reviewers = reviewers(pull, reviews)
+            let viewerID = await viewer?.id
+            let viewerApproved = viewerID.map { id in
+                reviewers.contains { $0.userID == id && $0.state == "APPROVED" }
+            } ?? false
             return .success(PullRequestDetail(
                 loadID: loadID, pull: pull, timelineCount: timeline.count, timeline: timeline,
-                reviewers: reviewers(pull, reviews), commits: await commits, files: fileList, checks: await checks,
-                threads: threads))
+                reviewers: reviewers, commits: await commits, files: fileList, checks: await checks,
+                threads: threads, viewerApproved: viewerApproved))
         } catch {
             return .failure(error)
         }
@@ -601,6 +620,7 @@ final class PullRequestDetailModel {
                     body: body)
             case .resolve(let thread, let resolved):
                 _ = try await client.setReviewThread(thread, resolved: resolved)
+            case .unapprove: try await client.unapprove(number, in: repository)
             }
             return nil
         } catch {
@@ -800,12 +820,20 @@ private struct PRHeaderCard: View {
                 Text("from")
                     .foregroundStyle(.secondary)
                     .layoutPriority(1)
-                branchChip(pull.head.label ?? pull.head.ref)
+                branchChip(headName(pull))
             }
         }
         .font(.body)
         .lineLimit(1)
         .accessibilityElement(children: .combine)
+    }
+
+    /// The head as the sentence names it: GitHub's `owner:branch`; on GitLab the branch alone when it is in the same
+    /// project (its label's owner is the base's), as GitLab writes it.
+    private func headName(_ pull: HostedPullRequest) -> String {
+        let sameProject = pull.head.label != nil
+            && pull.head.label?.split(separator: ":").first == pull.base.label?.split(separator: ":").first
+        return session.github.kind == .gitlab && sameProject ? pull.head.ref : pull.head.label ?? pull.head.ref
     }
 
     /// A branch of the sentence: monospaced in a brand blue capsule, at most `maxWidth` wide and cut in the middle, so
@@ -1025,6 +1053,20 @@ private struct PRComposerCard: View {
                         }
                     }
                     Spacer(minLength: 8)
+                    if isReview, detail.viewerApproved, session.github.offers(.unapprove) {
+                        Button {
+                            guard let number = model.number else { return }
+                            model.perform(.unapprove, on: number, github: session.github)
+                        } label: {
+                            HStack(spacing: 6) {
+                                if model.running == .unapprove { ProgressView().controlSize(.mini) }
+                                Text("Revoke Approval")
+                            }
+                        }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                        .disabled(model.running != nil)
+                        .help("Revoke your approval")
+                    }
                     Button {
                         submit(model)
                     } label: {

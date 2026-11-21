@@ -24,6 +24,8 @@ struct RefBadge: Hashable {
     struct PullRequest: Hashable, Sendable {
         let number: Int
         let isDraft: Bool
+        /// What goes before the number: the host's (`HostingKind.numberPrefix`, `!` on GitLab).
+        var numberPrefix = "#"
     }
 
     let kind: Kind
@@ -272,7 +274,7 @@ final class RefBadgeCellView: NSView {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
-    /// The pull request chip's width: its icon and "#N".
+    /// The pull request chip's width: its icon and "#N" ("!N" on GitLab).
     private func pullChipWidth(_ pull: PullRequestChip) -> CGFloat {
         2 * Style.chipPadding + Style.icon + Style.iconGap
             + ceil((pull.text as NSString).size(withAttributes: countAttributes).width)
@@ -712,7 +714,7 @@ private struct PullRequestChip {
     let isDraft: Bool
 
     init(_ pull: RefBadge.PullRequest) {
-        text = "#\(pull.number)"
+        text = "\(pull.numberPrefix)\(pull.number)"
         isDraft = pull.isDraft
     }
 }

@@ -45,7 +45,7 @@ targets:
         HISTQ_GITHUB_CLIENT_ID: "Ov23ct3if1iFB6cEigym"
         # The Application ID of the GitLab application used by "Sign in with GitLab" on gitlab.com (device flow, public
         # client, no secret). Empty until one is registered: GitLab then connects with a personal access token only.
-        HISTQ_GITLAB_CLIENT_ID: ""
+        HISTQ_GITLAB_CLIENT_ID: "2b3ce01fe36183b5b9d7bab9da5792350c26c5fcf272686a64ed156826d17c01"
         INFOPLIST_KEY_LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
         INFOPLIST_KEY_CFBundleDisplayName: "Histq"
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Coprimal"
