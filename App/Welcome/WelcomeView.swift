@@ -1057,10 +1057,9 @@ private struct RepositoryRow: View {
     }
 }
 
-/// The GitHub repositories as a search field: typing fuzzy-filters them (`FuzzyRank` on the
-/// name and `owner/name`, off the main actor) in a list under the field, grouped by owner. Up/Down move the highlight,
-/// Return picks it, Escape closes the list, the chevron opens or closes it. A pick fills the field with `owner/name`;
-/// that text lists every repository again.
+/// The account's repositories as a dropdown: the field shows the picked one (`owner/name`); a click opens a popover
+/// under it with a search field over the list, grouped by owner. Typing fuzzy-filters them (`FuzzyRank` on the name and
+/// `owner/name`, off the main actor); Up/Down move the highlight, Return picks it, Escape closes the popover.
 private struct RepositoryPicker: View {
     typealias Groups = [(owner: String, repos: [HostedCloneRepository])]
 
@@ -1081,33 +1080,24 @@ private struct RepositoryPicker: View {
         let repos: [HostedCloneRepository]
     }
 
-    /// The query the list is filtered by: none while the field shows the picked repository.
-    private var filterQuery: String {
-        query == model.selectedRepository?.fullName ? "" : query
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent {
-                HStack(spacing: 8) {
-                    field
-                    refreshButton
-                }
-            } label: {
-                Text("Repository")
-                Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                Text(kind == .gitlab ? "Projects of your groups appear here."
-                    : "Organization repositories appear when the organization allows Histq's GitHub access.")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        LabeledContent {
+            HStack(spacing: 8) {
+                field
+                refreshButton
             }
-            if isOpen { list }
+        } label: {
+            Text("Repository")
+            Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+            Text(kind == .gitlab ? "Projects of your groups appear here."
+                : "Organization repositories appear when the organization allows Histq's GitHub access.")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .onAppear {
-            query = model.selectedRepository?.fullName ?? ""
             #if DEBUG
             // QA: `-HistqWelcomeRepoQuery <text>` opens the list filtered for it (with `-HistqWelcomeSource github`).
             if let text = AppState.launchFlag("-HistqWelcomeRepoQuery") {
@@ -1116,8 +1106,8 @@ private struct RepositoryPicker: View {
             }
             #endif
         }
-        .task(id: FilterKey(query: filterQuery, repos: repos)) {
-            let query = filterQuery
+        .task(id: FilterKey(query: query, repos: repos)) {
+            let query = query
             let result = await Self.filter(model.repoGroups, query: query)
             guard !Task.isCancelled else { return }
             shown = result
@@ -1130,53 +1120,70 @@ private struct RepositoryPicker: View {
         }
     }
 
-    /// The field with a search icon and the chevron, in the card's input look.
+    /// The picked repository (or the prompt) and the chevron, in the card's input look; a click opens the popover.
     private var field: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            TextField("Repository", text: $query, prompt: Text("Search repositories"))
-                .textFieldStyle(.plain)
-                .labelsHidden()
-                .focused($focused)
-                .onSubmit(pickHighlighted)
-                .onKeyPress(.downArrow) { move(by: 1) }
-                .onKeyPress(.upArrow) { move(by: -1) }
-                .onKeyPress(.escape) {
-                    guard isOpen else { return .ignored }
-                    isOpen = false
-                    return .handled
-                }
-            Button {
-                isOpen.toggle()
-                if isOpen { focused = true }
-            } label: {
+        let selected = model.selectedRepository
+        return Button {
+            isOpen.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: selected?.isPrivate == true ? "lock" : "book.closed")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(selected?.fullName ?? "Choose a repository")
+                    .foregroundStyle(selected == nil ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
-                    .rotationEffect(.degrees(isOpen ? 180 : 0))
+                    .foregroundStyle(.secondary)
                     .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel(isOpen ? "Hide the repositories" : "Show the repositories")
+            .padding(.leading, 10)
+            .padding(.trailing, 6)
+            .frame(minHeight: SettingsInputMetrics.minHeight)
+            .contentShape(Rectangle())
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 6)
-        .frame(minHeight: SettingsInputMetrics.minHeight)
-        .modifier(SettingsInputChrome(focused: focused))
+        .buttonStyle(.plain)
+        .modifier(SettingsInputChrome(focused: isOpen))
         .frame(maxWidth: 360)
-        .onChange(of: focused) { _, focused in
-            if focused { isOpen = true }
-        }
-        .onChange(of: query) { _, query in
-            // Typing opens the list; the text a pick wrote does not.
-            if focused, query != model.selectedRepository?.fullName { isOpen = true }
-        }
+        .accessibilityLabel("Repository")
+        .accessibilityValue(selected?.fullName ?? "None")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) { dropdown }
     }
 
-    /// The filtered repositories under the field, grouped by owner, at most `maxHeight` tall.
+    /// The popover: the search field over the filtered list. It opens on the picked repository, unfiltered.
+    private var dropdown: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                TextField("Repository", text: $query, prompt: Text("Search repositories"))
+                    .textFieldStyle(.plain)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($focused)
+                    .onSubmit(pickHighlighted)
+                    .onKeyPress(.downArrow) { move(by: 1) }
+                    .onKeyPress(.upArrow) { move(by: -1) }
+            }
+            .padding(.horizontal, 10)
+            .frame(minHeight: SettingsInputMetrics.minHeight)
+            .modifier(SettingsInputChrome(focused: focused))
+            list
+        }
+        .padding(10)
+        .frame(width: 360)
+        .onAppear {
+            highlighted = model.selectedRepository?.id ?? shown.first?.repos.first?.id
+            DispatchQueue.main.async { focused = true }
+        }
+        .onDisappear { query = "" }
+    }
+
+    /// The filtered repositories, grouped by owner, at most `maxHeight` tall.
     private var list: some View {
         let rows = shown.reduce(0) { $0 + $1.repos.count }
         let height = min(Self.maxHeight, CGFloat(rows) * (SidebarItemStyle.height + 2) + CGFloat(shown.count) * 26 + 12)
@@ -1200,22 +1207,21 @@ private struct RepositoryPicker: View {
                         }
                     }
                 }
-                .padding(6)
             }
             .frame(height: rows == 0 ? nil : height)
             .overlay {
                 if rows == 0 {
-                    Text("No repository matches \"\(query)\".")
+                    Text(repos.isEmpty ? "No repository." : "No repository matches \"\(query)\".")
                         .foregroundStyle(.secondary)
                         .padding(12)
                 }
             }
+            .onAppear { if let id = highlighted { proxy.scrollTo(id, anchor: .center) } }
             .onChange(of: highlighted) { _, id in
                 if let id { proxy.scrollTo(id) }
             }
         }
         .frame(maxWidth: .infinity, minHeight: rows == 0 ? 40 : nil)
-        .modifier(SettingsInputChrome(focused: false))
     }
 
     private static let maxHeight: CGFloat = 280
@@ -1240,7 +1246,6 @@ private struct RepositoryPicker: View {
     private func pick(_ repo: HostedCloneRepository) {
         UITiming.select("welcome repo")
         model.selectRepository(repo)
-        query = repo.fullName
         highlighted = repo.id
         isOpen = false
     }
@@ -1251,12 +1256,8 @@ private struct RepositoryPicker: View {
         pick(repo)
     }
 
-    /// Up/Down: opens the list, or moves the highlight, stopping at the ends.
+    /// Up/Down: moves the highlight, stopping at the ends.
     private func move(by step: Int) -> KeyPress.Result {
-        guard isOpen else {
-            isOpen = true
-            return .handled
-        }
         let ids = shown.flatMap { $0.repos.map(\.id) }
         guard !ids.isEmpty else { return .handled }
         let index = highlighted.flatMap(ids.firstIndex(of:)).map { $0 + step } ?? (step > 0 ? 0 : ids.count - 1)

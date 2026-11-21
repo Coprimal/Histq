@@ -147,25 +147,29 @@ enum GitHubStub {
          "avatar_url": "https://avatars.githubusercontent.com/u/1002"}
         """
 
-    /// DEBUG `-HistqPRMergeable true|false|null` (default true): PR #1's `mergeable` with the `mergeable_state` GitHub
-    /// gives with it (`clean`, `dirty` for conflicts, `unknown` while it computes), for the merge box's states. The
-    /// stub keeps no state, so null stays null on every fetch and the detail's re-poll runs out.
+    /// DEBUG `-HistqPRMergeable true|false|null|merged` (default true): PR #1's `mergeable` with the `mergeable_state`
+    /// GitHub gives with it (`clean`, `dirty` for conflicts, `unknown` while it computes), for the merge box's states;
+    /// `merged`: #1 is already merged (closed, `merged_at` set), for the Merged pill and box. The stub keeps no state,
+    /// so null stays null on every fetch and the detail's re-poll runs out.
     private static let mergeable = switch AppState.launchFlag("-HistqPRMergeable") {
     case "false": #""mergeable": false, "mergeable_state": "dirty""#
-    case "null": #""mergeable": null, "mergeable_state": "unknown""#
+    case "null", "merged": #""mergeable": null, "mergeable_state": "unknown""#
     default: #""mergeable": true, "mergeable_state": "clean""#
     }
+    private static let isMerged = AppState.launchFlag("-HistqPRMergeable") == "merged"
 
     /// PR #1, or #3 as a create makes it (the fixture's one commit on `origin/feature` past `origin/main`).
     private static func pull(_ number: Int, full: Bool) -> String {
         let created = number == 3
         let detail = !full ? ""
             : created ? #", "merged": false, "mergeable": true, "commits": 1, "additions": 1, "deletions": 0, "changed_files": 0"#
+            : isMerged ? #", "merged": true, "merged_at": "2026-11-12T17:00:00Z", \#(mergeable), "commits": 2, "additions": 12, "deletions": 3, "changed_files": 1"#
             : #", "merged": false, \#(mergeable), "commits": 2, "additions": 12, "deletions": 3, "changed_files": 1"#
         let title = created ? "Polish feature (pushed)" : "Add feature"
         let body = created ? "Polishes the feature." : "Adds the feature branch's work."
         return """
-            {"id": \(500 + number), "number": \(number), "title": "\(title)", "state": "open", "draft": false,
+            {"id": \(500 + number), "number": \(number), "title": "\(title)",
+             "state": "\(isMerged && !created && full ? "closed" : "open")", "draft": false,
              "html_url": "https://github.com/stub/stub/pull/\(number)", "user": \(user),
              "body": "\(body)", "body_html": "<p>\(body)</p>",
              "head": {"label": "stub:feature", "ref": "feature", "sha": "\(created ? createdSHA : headSHA)"},

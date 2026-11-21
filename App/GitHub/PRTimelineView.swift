@@ -149,7 +149,8 @@ extension PRTimeline {
     }
 
     /// The chevron slot, the path with its folders shortened in the middle when it is too long (the file name
-    /// stays), "Line N" or "Lines a–b", and the Outdated and Resolved capsules.
+    /// stays), "Line N" or "Lines a–b", and the Outdated and Resolved capsules (Resolved green with a check, so a
+    /// resolved thread reads at a glance: user, 2026-11-20).
     private nonisolated static func threadHead(_ thread: HostedReviewThread, isResolved: Bool) -> String {
         let slash = thread.path.lastIndex(of: "/")
         let folder = slash.map { String(thread.path[..<$0]) } ?? ""
@@ -166,7 +167,7 @@ extension PRTimeline {
             + "<span class=\"file\">\(HostedHTML.escape(file))</span></span>"
             + (lines.map { "<span class=\"lines\">\($0)</span>" } ?? "")
             + (thread.isOutdated ? "<span class=\"cap outdated\">Outdated</span>" : "")
-            + (isResolved ? "<span class=\"cap\">Resolved</span>" : "") + "</div>"
+            + (isResolved ? "<span class=\"cap resolved\">✓ Resolved</span>" : "") + "</div>"
     }
 
     /// The commented diff rows as the Files tab shows them: old and new line numbers, the sign, the text on a green or

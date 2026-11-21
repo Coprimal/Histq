@@ -483,6 +483,7 @@ enum HostedHTML {
                 .lines { flex: none; }
                 .cap { flex: none; font-size: 11px; line-height: 16px; padding: 0 7px; border: 1px solid \(border);
                   border-radius: 9px; } .cap.outdated { color: \(outdated); }
+                .cap.resolved { color: \(added); border-color: \(added); background: \(addedFill); font-weight: 600; }
                 .excerpt { width: 100%; margin: 0; border-collapse: collapse; font: 12px/18px \(mono); }
                 .excerpt td { border: 0; padding: 0; vertical-align: top; }
                 .excerpt .num { width: 1px; padding: 0 8px; text-align: right; color: \(number); font-size: 11px;

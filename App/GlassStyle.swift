@@ -62,6 +62,9 @@ enum Palette {
     /// The WIP panel's Stage All button: a muted green at the accent's lightness (OKLCH 0.61 0.115 152), under a
     /// white label at 3.59:1. #469760
     static let stageAllFill = color(srgb(0x469760))
+    /// A merged pull request: its state pill under a white label (5.0:1) and the tint of its Merged box, a purple
+    /// apart from the brand blue so the merge reads at a glance (user, 2026-11-20). #8250DF
+    static let mergedTone = color(srgb(0x8250DF))
     /// The WIP panel's Conflicted card: its title and icon, and the tint of its fill and edge (`SectionCard.tone`). The
     /// conflict editor's gold. #F2B630
     static let conflictTone = color(srgb(0xF2B630))

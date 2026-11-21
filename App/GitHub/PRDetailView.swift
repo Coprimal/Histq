@@ -899,7 +899,7 @@ private struct PRStatePill: View {
     var body: some View {
         let (title, symbol, fill, text): (String, String, Color, Color) =
             if detail.isMerged {
-                ("Merged", "arrow.triangle.merge", Palette.primaryFill, Palette.onAccent)
+                ("Merged", "arrow.triangle.merge", Palette.mergedTone, Palette.onAccent)
             } else if !detail.isOpen {
                 ("Closed", "xmark.circle", Color(nsColor: Palette.diffRemovedFill), Color(nsColor: Palette.diffRemovedSign))
             } else if detail.pull.draft == true {
@@ -1210,8 +1210,7 @@ private struct PRActionsCard: View {
         SectionCard("Actions", systemImage: "bolt") {
             VStack(alignment: .leading, spacing: 10) {
                 if detail.isMerged {
-                    Label("Merged into \(pull.base.ref)", systemImage: "arrow.triangle.merge")
-                        .foregroundStyle(.secondary)
+                    mergedBox
                 } else if detail.isOpen {
                     statusBox
                 }
@@ -1299,6 +1298,42 @@ private struct PRActionsCard: View {
         let pull = detail.pull
         return pull.mergeable == true && pull.draft != true
             && !["dirty", "blocked", "behind"].contains(pull.mergeableState ?? "")
+    }
+
+    /// `date` in the user's date format (Settings › Appearance), as the conversation's dates.
+    private static func dateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: Locale.current.identifier)
+        formatter.dateFormat = Preferences.defaults.string(forKey: PrefKey.dateFormat.rawValue) ?? "MM/dd/yy @ HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// A merged pull request: "Merged into <base>" and when, in a purple box like the open one's status, so the merge
+    /// reads at a glance (user, 2026-11-20: the grey line was easy to miss).
+    private var mergedBox: some View {
+        let pull = detail.pull
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "arrow.triangle.merge")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Palette.mergedTone)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Merged into \(pull.base.ref)")
+                    .font(.body.weight(.semibold))
+                if let date = pull.mergedAt {
+                    Text(verbatim: "On \(Self.dateText(date))")
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(shape.fill(Palette.mergedTone.opacity(0.14)))
+        .overlay(shape.strokeBorder(Palette.mergedTone.opacity(0.35), lineWidth: 1))
     }
 
     /// The status in a box tinted with its tone (neutral without one), so whether the branch merges reads at a glance
