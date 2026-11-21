@@ -53,18 +53,22 @@ struct WIPPanel: View {
         let (conflicted, unstaged, staged) = Self.lists(session.status.value, moves: moves)
         // The panel's height is always used: an Unstaged or Staged card with files scrolls inside and shares the free
         // height equally with the other; the Conflicted card fits its rows up to a cap; an empty card fits its text; the
-        // commit box stays at the bottom, or at the top (`PrefKey.commitBoxPosition`).
+        // commit box stays at the bottom, or at the top (`PrefKey.commitBoxPosition`). With nothing staged, the Staged
+        // card and the commit box are hidden (the box stays while Amend is on, so an edited message is not lost).
+        let showCommitBox = !staged.isEmpty || session.commitDraft.amend
         VStack(spacing: SectionCardMetrics.spacing) {
-            if commitBoxOnTop { commitBox(staged: staged, unstaged: unstaged) }
+            if commitBoxOnTop && showCommitBox { commitBox(staged: staged, unstaged: unstaged) }
             // During an operation the card stays once its files are resolved, saying nothing is left.
             if !conflicted.isEmpty || session.repoState?.isOperationInProgress == true {
                 conflictedCard(conflicted)
             }
-            UnstagedStagedCards { unstagedCard(unstaged) } staged: { stagedCard(staged) }
+            UnstagedStagedCards { unstagedCard(unstaged) } staged: {
+                if !staged.isEmpty { stagedCard(staged) }
+            }
             if unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
-            if !commitBoxOnTop { commitBox(staged: staged, unstaged: unstaged) }
+            if !commitBoxOnTop && showCommitBox { commitBox(staged: staged, unstaged: unstaged) }
         }
     }
 
