@@ -4,6 +4,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-21
+
 ### Added
 - When an update is available, it downloads in the background and a green Update button shows in the toolbar: one click installs it and relaunches Histq. The app menu's item then reads "Install Update and Relaunch".
 - "Merge X into Y" is a submenu with three choices: Fast-forward if possible, Fast-forward only, and Always create a merge commit (no fast-forward). The command palette lists each one as its own row.
@@ -18,6 +20,16 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Tab groups: Add Tab to New Group in a tab's menu (or Add Tabs to New Group after ⇧-clicking a range or ⌘-clicking several tabs) puts tabs in a group with a color and an optional name, shown as a chip before its tabs with a line under them. Click the chip to collapse or expand the group; Add Tab to Group and Remove from Group move tabs in and out. Groups are kept per window across launches.
 - Right-click (or Control-click) a group's chip to rename it, pick one of 9 colors, open a New Tab in Group, Move Group to New Window, Close Group (⇧⌘T brings the whole group back) or Ungroup.
 - Drag a tab into or out of a tab group, and drag a group by its chip to move all its tabs at once. A worktree tab moves inside its box until you drag it out, then the whole box moves.
+- Archive tabs: a tab's menu has Archive This Tab, and an archive button beside the tabs (or in the footer of the vertical tabs) lists them in a searchable dropdown; opening one pops it out beside the button, and Unarchive Tab puts it back.
+- The tab strip has scroll arrows and an edge fade when the tabs do not fit, and a new tab is scrolled into view.
+- Settings › Appearance › Lane colors: choose between the Vivid and Gradient sets for the graph's lanes. A Row Height dropdown in the toolbar switches the graph's row height.
+- A search field in the Settings header finds a setting, scrolls to it and flashes it. Settings switches and short choices are also in the command palette, and a footer tip says so.
+- Delete a local branch and its upstream together when they sit at the same commit; double-clicking a branch badge checks out its ref; a branch's first push asks for the remote and the name.
+- Other worktrees in the graph: their WIP row is greyed and named, double-clicking it opens its tab, an Open Worktree button sits on the selected WIP row and the Unstaged card, and their branches fade from their fork point until one of their rows is selected.
+- Select several commits in the graph for a Selected commits card with a combined diff, and revert single hunks of a commit from its diff. Dragging in a diff selects its text.
+- Discard all unstaged changes from the Unstaged card (Unstage All asks to confirm), copy a file's relative path from its menu, and hide the Staged card and the commit box while nothing is staged.
+- Create Pull Request has its own group in the branch menu, the form closes after creating, and its branch and worktree pickers can be filtered. A new profile can be created from the Integrations profile picker. Reveal in Finder is in a local branch badge's menu.
+- Merge or fast-forward the current branch into a clicked local branch from that branch's menu. The interactive rebase's squash message is split into a summary and a description.
 
 ### Changed
 - The status bar under the window shows every operation while it runs, from the click on: toolbar actions, staging, commits, Edit Message, conflict saves, patch exports and GitHub pull request and issue actions, not only those started from a menu.
@@ -26,9 +38,13 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Fewer git processes per action: a commit or checkout runs 32-36 git processes instead of 53-57, with one refresh instead of two, and the graph redraws sooner after a stash, rebase, fetch, pull or push (about 90-115 ms instead of 110-150 ms); clicking the WIP row again no longer reloads the open diff (12 git processes instead of 19); a hidden tab waits until it is shown to read changes made outside the app (one `git check-ignore` while it stays hidden, was 13 git processes); a tab shown again after such a change shows its WIP placeholder until the change is read, and only when a file that git does not ignore changed (build output and other ignored files leave its WIP as it was).
 - Switching back to a recently shown tab (the last 4 in each window) shows it as it was, without building it again: it shows in about 30 ms instead of 45 ms, its longest frame is about 50-55 ms instead of 80 ms, and it costs about 25 MB more memory with 3 tabs. The keyboard goes to the shown tab: its open graph search, else its open diff or blame, else its graph.
 - The tabs of one repository's worktrees sit together in a box, with no name and no collapse, instead of a named group.
+- Every graph opens on its HEAD commit, centered, instead of the last session's commit, and a tab keeps its graph view when you switch tabs.
+- Lane lines are thinner (1.5 pt), row bands fainter with a brighter selected band, Regular and Comfortable row heights are 30 and 34, and colored buttons use the accent blue and a muted red and green.
+- The repository dropdown shows the folder's name, not the tab's alias.
 
 ### Fixed
 - Discard on a submodule now puts it back on the recorded commit (it did nothing before).
+- A hidden tab's text editors no longer take the keyboard, the Conflicted card fits its rows, and dropdown scrollbars run along the popover's right edge.
 
 ## [0.2.0] - 2026-11-18
 
