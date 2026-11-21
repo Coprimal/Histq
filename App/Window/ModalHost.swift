@@ -25,8 +25,6 @@ enum WindowModal: Identifiable {
     case tabAlias(tabID: UUID)
     /// A tab's menu › Set Emoji… for the tab `tabID`.
     case tabEmoji(tabID: UUID)
-    /// A tab group's name › Rename Group… for the group `key` (`TabGroupNames`).
-    case groupName(key: String)
     /// The palette's File History… (or Blame… when `blame`): a search of the tab `tabID`'s tracked files.
     case fileSearch(tabID: UUID, blame: Bool)
 
@@ -36,7 +34,6 @@ enum WindowModal: Identifiable {
         case .generateKey(let id): "generate key \(id)"
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
-        case .groupName(let key): "group name \(key)"
         case .fileSearch(let id, let blame): "file search \(id) \(blame)"
         }
     }
@@ -183,8 +180,6 @@ struct ModalHost: View {
             TabAliasModal(model: model, tabID: tabID) { model.closeModal() }
         case .window(.tabEmoji(let tabID)):
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
-        case .window(.groupName(let key)):
-            GroupNameModal(key: key) { model.closeModal() }
         case .window(.fileSearch(let tabID, let blame)):
             if let session = model.sessions[tabID] {
                 FileSearchModal(session: session, blame: blame) { model.closeModal() }
@@ -303,48 +298,6 @@ private struct TabAliasModal: View {
 
     private func save() {
         model.setAlias(alias, for: tabID)
-        onClose()
-    }
-}
-
-/// A tab group's name › Rename Group…: the group's name in one field, the main worktree's folder as its placeholder.
-/// Return saves; an empty field gives the group its folder's name back.
-private struct GroupNameModal: View {
-    let key: String
-    let onClose: () -> Void
-    @State private var name = ""
-    @FocusState private var fieldFocused: Bool
-
-    var body: some View {
-        let folder = RepoGroupKey.name(of: key)
-        ModalCard(title: "Rename the \(folder) group",
-                  subtitle: "The group's name shows this instead of the folder's, in every window. Leave it empty to "
-                      + "show the folder's name.",
-                  width: 420) {
-            TextField("Name", text: $name, prompt: Text(folder))
-                .textFieldStyle(.modal)
-                .labelsHidden()
-                .autocorrectionDisabled()
-                .focused($fieldFocused)
-                .onSubmit(save)
-                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
-        } actions: {
-            Button("Cancel", action: onClose)
-                .buttonStyle(RowTextButtonStyle(formRow: true))
-                .keyboardShortcut(.cancelAction)
-            Button("Save", action: save)
-                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
-                .keyboardShortcut(.defaultAction)
-        }
-        .onAppear {
-            name = TabGroupNames.shared.custom(of: key) ?? ""
-            // The card is installed on this turn; the field takes the focus on the next one.
-            DispatchQueue.main.async { fieldFocused = true }
-        }
-    }
-
-    private func save() {
-        TabGroupNames.shared.set(name, for: key)
         onClose()
     }
 }

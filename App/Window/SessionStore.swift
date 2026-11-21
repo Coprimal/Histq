@@ -38,6 +38,8 @@ struct SavedWindow: Codable, Equatable, Sendable {
     var tabs: [SavedTab]
     /// The selected app tab's index.
     var selectedTab: Int?
+    /// The window's manual tab groups, in order; nil when it has none. Absent from files of older builds.
+    var tabGroups: [SavedTabGroup]?
 
     var frame: NSRect { NSRect(x: x, y: y, width: width, height: height) }
 }
@@ -63,12 +65,25 @@ struct SavedTab: Codable, Equatable, Sendable {
     /// written as nil. Archived entries come after every other tab; the selected one is the tab popped out beside the
     /// archive button. Absent from files of older builds.
     var archived: Bool?
+    /// The manual group it is in (`SavedWindow.tabGroups`); nil for none. Absent from files of older builds.
+    var group: UUID?
 
     /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab: an archived tab's row in the archive's
     /// list.
     var title: String {
         alias ?? path.map { URL(fileURLWithPath: $0, isDirectory: true).lastPathComponent } ?? "New Tab"
     }
+}
+
+/// A manual tab group of a window. Absent from files of older builds.
+struct SavedTabGroup: Codable, Equatable, Sendable {
+    var id: UUID
+    /// The name the user gave it; nil for none.
+    var name: String?
+    /// Its swatch: 0 is grey, 1–8 a lane color (`Palette.graphLanes`); clamped to 0...8 on restore.
+    var color: Int
+    /// The group shows only its chip; nil reads as false, and an expanded group is written as nil.
+    var collapsed: Bool?
 }
 
 /// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).

@@ -1,6 +1,7 @@
-// Tab groups (as Chrome's): the tabs of one repository's worktrees sit side by side, under the repo's name and one color.
-import Foundation
+// Tab groups: the tabs of one repository's worktrees sit side by side in a worktree box, and manual groups (as
+// Chrome's) gather tabs and boxes under one color and an optional name.
 import Observation
+import SwiftUI
 
 /// The repository a folder belongs to: its git common dir, which all its worktrees share. Read from the folder's `.git`
 /// (the repo's own folder, or a worktree's `gitdir:` file and that dir's `commondir`): small files, read off the main
@@ -23,69 +24,54 @@ enum RepoGroupKey {
         return URL(filePath: commonPath, directoryHint: .isDirectory, relativeTo: gitDir).absoluteURL
             .resolvingSymlinksInPath().path
     }
-
-    /// The group's name: the main worktree's folder (`…/graph/.git` → "graph"), or a bare repo's (`graph.git`).
-    static func name(of key: String) -> String {
-        let url = URL(filePath: key)
-        if url.lastPathComponent == ".git" { return url.deletingLastPathComponent().lastPathComponent }
-        let name = url.lastPathComponent
-        return name.hasSuffix(".git") ? String(name.dropLast(4)) : name
-    }
-
-    /// The group's color, an index into `Palette.graphLanes`: the same for a repo at every launch (FNV-1a of the key;
-    /// `hashValue` changes per launch).
-    static func colorIndex(of key: String, count: Int) -> Int {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in key.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x100_0000_01b3
-        }
-        return Int(hash % UInt64(max(count, 1)))
-    }
 }
 
-/// The names the user gave tab groups (a group's menu › Rename Group…), by group key, kept in `Preferences.defaults`
-/// (`PrefKey.tabGroupNames`): one repo has the same name in every window and at every launch.
-@Observable
-@MainActor
-final class TabGroupNames {
-    static let shared = TabGroupNames()
-
-    /// The custom names, by group key.
-    private(set) var names: [String: String]
-
-    private static var key: String { PrefKey.tabGroupNames.rawValue }
-
-    private init() {
-        names = Preferences.defaults.dictionary(forKey: Self.key) as? [String: String] ?? [:]
-    }
-
-    /// The group's custom name, else its main worktree's folder (`RepoGroupKey.name`).
-    func name(of key: String) -> String { names[key] ?? RepoGroupKey.name(of: key) }
-
-    /// The group's custom name (nil when it has none).
-    func custom(of key: String) -> String? { names[key] }
-
-    /// Names the group; empty (or only spaces) gives it back its folder's name.
-    func set(_ name: String, for key: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        names[key] = trimmed.isEmpty ? nil : trimmed
-        Preferences.defaults.set(names, forKey: Self.key)
-    }
+/// A manual tab group of one window (`WindowModel.groups`): its color, an optional name, and whether it is collapsed
+/// to its chip.
+struct ManualTabGroup: Equatable, Identifiable {
+    let id: UUID
+    /// The name the user gave it; nil shows just its color.
+    var name: String?
+    /// Its swatch: 0 is grey, 1–8 a lane color (`Palette.graphLanes`).
+    var colorIndex: Int
+    var collapsed: Bool
 }
 
-/// Two or more neighboring tabs of one repository (`WindowModel.tabGroups`). A repo with a single tab has no group.
-struct TabGroup: Equatable {
+/// Two or more neighboring tabs of one repository (`WindowModel.worktreeBoxes`). A repo with a single tab has no box.
+struct WorktreeBox: Equatable {
     let key: String
-    /// The tabs' indices; the tabs of a repo are always neighbors (`WindowModel.gatherGroups`).
+    /// The tabs' indices; the tabs of a repo are always neighbors (`WindowModel.normalize`).
     let range: ClosedRange<Int>
-    /// The custom name (`TabGroupNames`), else the main worktree's folder.
-    let name: String
 }
 
-/// The tabs in order with each group's header (the top tabs' chip, the vertical tabs' name row) before its first tab,
-/// and where they stand along the row or column: each item's start, the items `gap` apart. Shared by the tab strip and
-/// the vertical tabs, so a drag can place every item where it would stand with the tab dropped at its target.
+/// The neighboring tabs of one manual group (`WindowModel.manualGroups`), with its entry in the group table.
+struct TabGroup: Equatable {
+    let group: ManualTabGroup
+    /// The tabs' indices; a group's tabs are always neighbors (`WindowModel.normalize`).
+    let range: ClosedRange<Int>
+
+    var id: UUID { group.id }
+    /// The layout's key for the group.
+    var key: String { group.id.uuidString }
+    /// The group's name; empty when it has none.
+    var name: String { group.name ?? "" }
+
+    /// The header's spoken label: "Group Work, 3 tabs" ("Group, 3 tabs" without a name).
+    var accessibilityLabel: String {
+        let tabs = range.count == 1 ? "1 tab" : "\(range.count) tabs"
+        return name.isEmpty ? "Group, \(tabs)" : "Group \(name), \(tabs)"
+    }
+
+    /// The header's tooltip: what a click does.
+    func help(collapsed: Bool) -> String {
+        "\(accessibilityLabel). Click to \(collapsed ? "show" : "hide") its tabs."
+    }
+}
+
+/// The tabs in order with each manual group's header (the top tabs' chip, the vertical tabs' name row) before its first
+/// tab, and where they stand along the row or column: each item's start, the items `gap` apart. A worktree box takes no
+/// room of its own: it is drawn around its tabs (`boxSpan`), inside the gaps. Shared by the tab strip and the vertical
+/// tabs, so a drag can place every item (and box) where it would stand with the tab dropped at its target.
 struct TabGroupLayout {
     enum Item: Identifiable {
         case header(TabGroup)
@@ -113,14 +99,19 @@ struct TabGroupLayout {
     let gap: CGFloat
     /// The group of each grouped tab, by index.
     let groupKey: [Int: String]
-    /// The collapsed groups (`WindowModel.collapsedGroups`): their header only, their tabs take no room.
+    /// The collapsed groups (`ManualTabGroup.collapsed`), by key: their header only, their tabs take no room.
     let collapsed: Set<String>
     /// Each group's tab indices, by key.
     private let groupRange: [String: ClosedRange<Int>]
+    /// Each group, by key.
+    private let groupByKey: [String: TabGroup]
+    /// The worktree boxes drawn around their tabs.
+    let boxes: [WorktreeBox]
 
     /// `extent` gives the tab at an index its own extent; without it every tab takes `tabExtent`.
-    init(tabs: [WindowModel.Tab], groups: [TabGroup], collapsed: Set<String>, tabExtent: CGFloat, gap: CGFloat,
+    init(tabs: [WindowModel.Tab], groups: [TabGroup], boxes: [WorktreeBox] = [], tabExtent: CGFloat, gap: CGFloat,
          extent: ((Int) -> CGFloat)? = nil, headerExtent: (TabGroup) -> CGFloat) {
+        let collapsed = Set(groups.filter(\.group.collapsed).map(\.key))
         var items: [Item] = []
         var groupKey: [Int: String] = [:]
         for (index, tab) in tabs.enumerated() {
@@ -139,6 +130,23 @@ struct TabGroupLayout {
         self.collapsed = collapsed
         headerExtents = Dictionary(groups.map { ($0.key, headerExtent($0)) }, uniquingKeysWith: { first, _ in first })
         groupRange = Dictionary(groups.map { ($0.key, $0.range) }, uniquingKeysWith: { first, _ in first })
+        groupByKey = Dictionary(groups.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        self.boxes = boxes
+    }
+
+    /// Where the box's tabs stand at `positions`: from its first tab's start to its last tab's end (its tabs in any
+    /// order, so a drag inside the box keeps it whole); nil while a collapsed group hides it (a box is in one group).
+    func boxSpan(_ box: WorktreeBox, at positions: Positions) -> (start: CGFloat, end: CGFloat)? {
+        if let key = groupKey[box.range.lowerBound], collapsed.contains(key) { return nil }
+        let starts = box.range.compactMap { positions.tabs[$0] }
+        let ends = box.range.compactMap { index in positions.tabs[index].map { $0 + extent(of: index) } }
+        guard let start = starts.min(), let end = ends.max() else { return nil }
+        return (start, end)
+    }
+
+    /// The manual group the tab at `index` is in; nil for none.
+    func group(at index: Int) -> TabGroup? {
+        groupKey[index].flatMap { groupByKey[$0] }
     }
 
     /// The tab at `index`'s width (top tabs) or height (vertical tabs); `tabExtent` outside the tabs.
@@ -189,5 +197,76 @@ struct TabGroupLayout {
             (destination, abs((positions(order: Self.moved(count, from, destination)).tabs[from] ?? 0) - pointer))
         }
         return distances.min { $0.1 < $1.1 }?.0 ?? from
+    }
+}
+
+/// A worktree box behind its tabs, drawn at row level (the tab strip's row, the vertical tabs' list) from the layout's
+/// target positions, so it moves with its tabs during a drag. The selected tab's shape (`TabSheetShape` along a row,
+/// `VerticalTabSheetShape` down a column, flares included) is cut out of it with `Path.subtracting`, so the translucent
+/// selected tab never sits on the box's fill. `border` gives the box's 1 pt edge, cut the same way (never the outline
+/// of the cut shape). Animatable, so the box follows its tabs and the hole slides with the selected tab.
+struct WorktreeBoxShape: Shape {
+    enum Axis { case horizontal, vertical }
+
+    let axis: Axis
+    /// The box along the axis, in the row's (column's) space.
+    var start: CGFloat
+    var end: CGFloat
+    /// The selected tab's shape along the axis, flares included; empty (`holeEnd <= holeStart`) for none.
+    var holeStart: CGFloat
+    var holeEnd: CGFloat
+    /// The box across the axis: its top (leading edge down a column) in `rect`'s space, and its bottom (trailing edge)
+    /// this far inside `rect`'s far side.
+    let crossStart: CGFloat
+    let crossEndInset: CGFloat
+    /// The selected shape across the axis: from here to the far side of `rect` (the tab's bottom along a row, the
+    /// sheet's edge down a column); a row's starts at `rect`'s top.
+    let holeCrossStart: CGFloat
+    let radius: CGFloat
+    /// The selected shape's rounded corners and flares.
+    let holeRadius: CGFloat
+    let flare: CGFloat
+    var border = false
+
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
+        get { AnimatablePair(AnimatablePair(start, end), AnimatablePair(holeStart, holeEnd)) }
+        set {
+            start = newValue.first.first
+            end = newValue.first.second
+            holeStart = newValue.second.first
+            holeEnd = newValue.second.second
+        }
+    }
+
+    /// The same box's edge.
+    var edge: WorktreeBoxShape {
+        var shape = self
+        shape.border = true
+        return shape
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let box = axis == .horizontal
+            ? CGRect(x: start, y: crossStart, width: end - start, height: rect.maxY - crossEndInset - crossStart)
+            : CGRect(x: crossStart, y: start, width: rect.maxX - crossEndInset - crossStart, height: end - start)
+        guard box.width > 0, box.height > 0 else { return Path() }
+        let shape: Path
+        if border {
+            // The edge inside the box, so cutting it keeps exactly the part on the shown box.
+            let inner = box.insetBy(dx: 1, dy: 1)
+            shape = Path(roundedRect: box, cornerRadius: radius, style: .continuous)
+                .subtracting(Path(roundedRect: inner, cornerRadius: max(radius - 1, 0), style: .continuous))
+        } else {
+            shape = Path(roundedRect: box, cornerRadius: radius, style: .continuous)
+        }
+        guard holeEnd > holeStart else { return shape }
+        let hole = axis == .horizontal
+            ? CGRect(x: holeStart, y: rect.minY, width: holeEnd - holeStart, height: rect.height)
+            : CGRect(x: holeCrossStart, y: holeStart, width: rect.maxX - holeCrossStart, height: holeEnd - holeStart)
+        guard hole.intersects(box) else { return shape }
+        let selected = axis == .horizontal
+            ? TabSheetShape(radius: holeRadius, flare: flare).path(in: hole)
+            : VerticalTabSheetShape(radius: holeRadius, flare: flare).path(in: hole)
+        return shape.subtracting(selected)
     }
 }

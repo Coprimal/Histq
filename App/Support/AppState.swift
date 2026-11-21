@@ -137,8 +137,6 @@ enum PrefKey: String, CaseIterable {
     case defaultTabEmoji
     /// The book's color for a repo tab without its own: an index into `Palette.graphLanes`; -1 = the text's color.
     case defaultTabIconColor
-    /// The names the user gave tab groups (Rename Group…), by group key (`TabGroupNames`); a missing one = the folder's.
-    case tabGroupNames
     /// Native window tabs in the traffic-light row (Phase 8 attempt).
     case nativeTabsOnTop
     /// Repo layout panel widths, encoded by `RepoLayoutView`; empty = the layout's defaults.
@@ -265,7 +263,6 @@ enum PrefKey: String, CaseIterable {
         case .tabPosition: "top"
         case .defaultTabEmoji: ""
         case .defaultTabIconColor: -1
-        case .tabGroupNames: [String: String]()
         case .nativeTabsOnTop: false
         case .panelWidths: ""
         case .historyPanelWidth: 0.0

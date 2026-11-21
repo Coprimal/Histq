@@ -308,12 +308,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return entry
     }
 
-    /// Saves the session when a window's tabs, its selected tab, or a tab's commit or profile change. Re-armed after
-    /// each change, as long as the window is open.
+    /// Saves the session when a window's tabs, its selected tab, a tab's commit or profile, or a manual group change.
+    /// Re-armed after each change, as long as the window is open.
     private func trackSession(of model: WindowModel) {
         withObservationTracking {
             _ = model.savedTabs
             _ = model.selectedIndex
+            _ = model.savedTabGroups
         } onChange: { [weak self, weak model] in
             // Called before the change lands, off any isolation: re-arm on the main actor once it has.
             Task { @MainActor in
@@ -337,7 +338,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for group in loaded.session.groups.reversed() {
             let windows = group.map { saved in
                 let entry = newWindow(frame: saved.frame)
-                entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded.missing)
+                entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded.missing,
+                                    groups: saved.tabGroups)
                 return entry
             }
             // The group's selected tab goes on screen first (no other tab flashes); the others join it in their saved
@@ -379,7 +381,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     tabIndex: tabGroup?.windows.firstIndex(of: window) ?? 0,
                     isSelectedInGroup: tabGroup.map { $0.selectedWindow === window } ?? true,
                     tabs: entry.model.savedTabs,
-                    selectedTab: entry.model.selectedIndex))
+                    selectedTab: entry.model.selectedIndex,
+                    tabGroups: entry.model.savedTabGroups))
             }
         }
         return SavedSession(windows: windows)

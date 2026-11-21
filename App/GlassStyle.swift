@@ -30,6 +30,10 @@ enum Palette {
     static let selectedBorder = color(.white.withAlphaComponent(0.12))
     /// A hovered unselected tab's fill (the selected tab is the sheet's `sheet`), and other faint chips.
     static let tabFill = color(.white.withAlphaComponent(0.06))
+    /// A worktree box: the background behind the tabs of one repository's worktrees (`WorktreeBoxShape`), and its 1 pt
+    /// edge. White 0.045 / white 0.08
+    static let worktreeBoxFill = color(.white.withAlphaComponent(0.045))
+    static let worktreeBoxBorder = color(.white.withAlphaComponent(0.08))
     /// The capsule bars of a loading placeholder (`SkeletonLine`), on a `surface` card.
     static let skeletonFill = color(.white.withAlphaComponent(0.10))
     /// Darkens a pressed button over its own fill.
@@ -137,6 +141,9 @@ enum Palette {
     static let graphStashBadgeFill = graphStash.withAlphaComponent(0.38)
     /// A tab group's chip: its accent color at 0.38, as a Vivid branch badge.
     static let graphBadgeFills: [NSColor] = graphVivid.badgeFills
+    /// A manual tab group's grey swatch (color 0, before the 8 lanes) and its chip's fill, at a badge's 0.38. #8E8E93
+    static let groupGrey = srgb(0x8E8E93)
+    static let groupGreyFill = groupGrey.withAlphaComponent(0.38)
     /// Text and icons on a badge: pure white, so they read on the dark fills (user, 2026-11-17). White
     static let graphBadgeText = NSColor.white
     /// A tag badge's neutral fill. White 0.14
@@ -1310,7 +1317,7 @@ extension TextFieldStyle where Self == SettingsTextFieldStyle {
     static var settings: SettingsTextFieldStyle { SettingsTextFieldStyle() }
 }
 
-/// The one field of a single-input modal (Set Alias…, Rename Group…, Set Emoji…): `.textFieldStyle(.modal)`, straight
+/// The one field of a single-input modal (Set Alias…, Set Emoji…): `.textFieldStyle(.modal)`, straight
 /// on the modal's container with no card around it (user, 2026-11-18). Larger than `.settings`, on a darker fill, with
 /// no focus ring: the caret shows the focus.
 @MainActor

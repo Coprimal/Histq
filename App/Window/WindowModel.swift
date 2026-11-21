@@ -20,29 +20,43 @@ final class WindowModel {
         /// Remove) and gets no session.
         var isMissing = false
         /// The repository's git common dir (`RepoGroupKey`), shared by its worktrees' tabs; nil until read (off the main
-        /// thread) or for a Welcome tab. Tabs with the same key are kept side by side, as a group.
+        /// thread) or for a Welcome tab. Tabs with the same key are kept side by side, in a worktree box.
         var repoKey: String?
         /// The name the user gave the tab (its menu's Set Alias…); nil shows the folder's name.
         var alias: String?
         /// The emoji the user gave the tab (its menu's Set Emoji…), one `Character`; nil shows none.
         var emoji: String?
-        /// The tab sits in the pinned area at the far left (`pinnedCount`); a worktree group is pinned whole.
+        /// The tab sits in the pinned area at the far left (`pinnedCount`); a worktree box is pinned whole. A pinned
+        /// tab is in no manual group.
         var pinned = false
         /// The color of the tab's book icon (its menu's Icon Color), an index into `Palette.graphLanes`; nil draws it in
         /// the text's color. Shown when the tab has no emoji, pinned or not.
         var iconColor: Int?
         /// The archived tab popped out beside the archive button (`openArchived(at:)`): always the last of `tabs`, at
-        /// most one, never pinned and never in a group (its `repoKey` stays nil).
+        /// most one, never pinned, never in a box (its `repoKey` stays nil) and never in a manual group.
         var archived = false
+        /// The manual group it is in (`groups`); nil for none.
+        var groupID: UUID?
 
         /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { alias ?? repoURL?.lastPathComponent ?? "New Tab" }
     }
 
-    /// A closed repo tab that ⇧⌘T reopens: as the session saves it, its group, and its index when it closed.
+    /// A closed repo tab that ⇧⌘T reopens: as the session saves it, its worktree box's key, its manual group, and its
+    /// index when it closed.
     private struct ClosedTab {
+        /// The manual group as it was when the tab closed, so ⇧⌘T can recreate it.
+        struct Group {
+            let id: UUID
+            let name: String?
+            let colorIndex: Int
+        }
+
         let saved: SavedTab
         let repoKey: String?
+        let group: Group?
+        /// The tabs closed together (Close Group) share one, so one ⇧⌘T reopens them all; nil for a tab closed alone.
+        let batch: UUID?
         let index: Int
     }
 
@@ -76,9 +90,10 @@ final class WindowModel {
     /// At most this many repo layouts stay mounted: each holds its graph table, diff and detail views, so the memory
     /// a window takes stays bounded however many tabs it has. 4 covers going back and forth between a few repos.
     private static let keptLayouts = 4
-    /// The tab groups (by key) collapsed with a click on their name, as Chrome's: only the name shows. The selected
-    /// tab is never in one: a group opens again when one of its tabs is selected (the tab list, ⇧⌘T, a worktree).
-    private(set) var collapsedGroups: Set<String> = []
+    /// The window's manual tab groups, in a stable order (the session saves them so). Each has at least one tab: one
+    /// left with none is dropped. A collapsed one never holds the selected tab: it opens again when one of its tabs is
+    /// selected (the tab list, ⇧⌘T, a worktree).
+    private(set) var groups: [ManualTabGroup] = []
     /// The repo tabs' sessions, by tab.
     private(set) var sessions: [Tab.ID: RepoSession] = [:]
     /// The Welcome tabs' state (the clone in flight, the git check), by tab: it outlives the view across tab
@@ -246,10 +261,10 @@ final class WindowModel {
 
     /// Opens a repo in a tab and selects it: the tab that already shows it, else the selected tab if it is a
     /// Welcome tab, else a new tab. `nil` opens a new Welcome tab. A worktree opened from the tab `opener` (a
-    /// double-click in its sidebar, "Open in New Tab") joins the opener's group at once: its new tab goes right after
-    /// the group's last tab, pinned when the group is (`gatherGroups`). Any other new tab goes last, and moves beside
-    /// its repo's tabs once its repo is read (`resolveRepoKeys`). A repo in the archive pops out (`openArchived(at:)`)
-    /// instead of opening twice.
+    /// double-click in its sidebar, "Open in New Tab") joins the opener's box and manual group at once: its new tab
+    /// goes right after the box's last tab, pinned when the box is (`normalize`). Any other new tab goes last, and
+    /// moves beside its repo's tabs once its repo is read (`resolveRepoKeys`). A repo in the archive pops out
+    /// (`openArchived(at:)`) instead of opening twice.
     func openTab(_ url: URL?, opener: Tab.ID? = nil) {
         navigation.page = .home
         closeSettings()
@@ -276,8 +291,9 @@ final class WindowModel {
         } else if let opener = opener.flatMap({ id in tabs.firstIndex { $0.id == id } }) {
             var tab = Tab(repoURL: url)
             tab.repoKey = tabs[opener].repoKey
+            tab.groupID = tabs[opener].groupID
             tabs.insert(tab, at: min(groupEnd(of: opener) + 1, normalEnd))
-            gatherGroups()
+            normalize()
             selectedTabID = tab.id
             if tab.repoKey == nil { resolveRepoKeys([tab.id]) }
         } else {
@@ -601,8 +617,9 @@ final class WindowModel {
     /// Session restore: this new window's tabs become `saved` (`missing` = the folders that are gone) and the saved
     /// selected tab opens, as a click would show it. Not `openTab`: no recent-repos update, and the other tabs get their
     /// session only when selected. The archived entries go back to the archive, but the selected one: it is popped
-    /// out again, last and selected.
-    func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>) {
+    /// out again, last and selected. `groups` is the window's manual group table; a tab's group not in it is dropped,
+    /// as is an entry no tab is in.
+    func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>, groups: [SavedTabGroup]? = nil) {
         guard !saved.isEmpty else { return }
         welcomes.removeAll()
         var entries: [SavedTab] = []
@@ -614,6 +631,9 @@ final class WindowModel {
                 if offset == selected { selectedEntry = entries.count }
                 entries.append(entry)
             } else if entry.path != nil {
+                // An archived tab is in no group.
+                var entry = entry
+                entry.group = nil
                 if offset == selected { popped = entry } else { archivedTabs.append(entry) }
             }
         }
@@ -625,14 +645,25 @@ final class WindowModel {
             let archived = tab.archived == true
             return Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
                        isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias, emoji: tab.emoji,
-                       pinned: archived ? false : tab.pinned ?? false, iconColor: tab.iconColor, archived: archived)
+                       pinned: archived ? false : tab.pinned ?? false, iconColor: tab.iconColor, archived: archived,
+                       groupID: archived ? nil : tab.group)
         }
         restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), entries))
         if tabs.isEmpty { tabs = [Tab()] }
         resolveRepoKeys(tabs.filter { !$0.isMissing && !$0.archived }.map(\.id))
-        let index = selectedEntry ?? 0
-        selectedTabID = tabs[index].id
-        if let url = tabs[index].repoURL, !tabs[index].isMissing { UITiming.open(url.path) }
+        // The table first (`normalize` drops a group it does not hold), then the order: `applyRepoKeys` never runs
+        // for a window of Welcome or missing tabs. The selection is kept by id, as normalizing may reorder the tabs,
+        // and set last: its `didSet` opens the selected tab's group.
+        let selectedID = tabs[selectedEntry ?? 0].id
+        self.groups = (groups ?? []).map { group in
+            ManualTabGroup(id: group.id, name: group.name, colorIndex: min(max(group.color, 0), 8),
+                           collapsed: group.collapsed ?? false)
+        }
+        normalize()
+        selectedTabID = selectedID
+        if let tab = tabs.first(where: { $0.id == selectedID }), let url = tab.repoURL, !tab.isMissing {
+            UITiming.open(url.path)
+        }
         activateSelectedTab()
     }
 
@@ -642,6 +673,17 @@ final class WindowModel {
     /// after every tab, so the normal tabs keep their indices.
     var savedTabs: [SavedTab] {
         tabs.map(saved) + archivedTabs
+    }
+
+    /// The manual groups as the session saves them, those with a tab only; nil when there is none. Observable, as
+    /// `savedTabs`: a rename, recolor or collapse saves the session.
+    var savedTabGroups: [SavedTabGroup]? {
+        let used = Set(tabs.compactMap(\.groupID))
+        let saved = groups.filter { used.contains($0.id) }.map { group in
+            SavedTabGroup(id: group.id, name: group.name, color: group.colorIndex,
+                          collapsed: group.collapsed ? true : nil)
+        }
+        return saved.isEmpty ? nil : saved
     }
 
     /// One tab as the session saves it (`savedTabs`), and as ⇧⌘T reopens it.
@@ -655,12 +697,14 @@ final class WindowModel {
             saved.pinned = tab.pinned ? true : nil
             saved.iconColor = tab.iconColor
             saved.archived = tab.archived ? true : nil
+            saved.group = tab.groupID
             return saved
         }
         // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
         let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
         return SavedTab(path: path, profile: profile, alias: tab.alias, emoji: tab.emoji,
-                        pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil)
+                        pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil,
+                        group: tab.groupID)
     }
 
     /// "Repo not found" › Locate: the tab opens `url` instead (the tab that already shows it when there is one, or
@@ -773,23 +817,27 @@ final class WindowModel {
         closedTabs.removeAll { $0.saved.path.map { key(URL(filePath: $0)) } == removed }
     }
 
-    /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens. The
-    /// popped-out archived tab, or any tab when `archiving`, goes to the archive's front instead (unpinned).
+    /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens, with its
+    /// manual group. The popped-out archived tab, or any tab when `archiving`, goes to the archive's front instead
+    /// (unpinned, in no group). A manual group left with no tab is dropped.
     private func remove(at index: Int, archiving: Bool = false) {
         let tab = tabs[index]
         if tab.archived || archiving {
             var entry = saved(tab)
             entry.archived = true
             entry.pinned = nil
+            entry.group = nil
             archivedTabs.insert(entry, at: 0)
         } else if tab.repoURL != nil, !tab.isMissing {
-            closedTabs.append(ClosedTab(saved: saved(tab), repoKey: tab.repoKey, index: index))
+            let group = tab.groupID.flatMap { id in groups.first { $0.id == id } }
+                .map { ClosedTab.Group(id: $0.id, name: $0.name, colorIndex: $0.colorIndex) }
+            closedTabs.append(ClosedTab(saved: saved(tab), repoKey: tab.repoKey, group: group, batch: nil,
+                                        index: index))
             if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
         }
         tabs.remove(at: index)
-        // A group left with one tab is no group: it must not come back collapsed.
-        if let key = tab.repoKey, collapsedGroups.contains(key), !tabGroups.contains(where: { $0.key == key }) {
-            collapsedGroups.remove(key)
+        if let id = tab.groupID, !tabs.contains(where: { $0.groupID == id }) {
+            groups.removeAll { $0.id == id }
         }
         restored.removeValue(forKey: tab.id)
         sessions.removeValue(forKey: tab.id)?.close()
@@ -800,9 +848,9 @@ final class WindowModel {
     /// A tab was closed in this window that ⇧⌘T can reopen.
     var canReopenClosedTab: Bool { !closedTabs.isEmpty }
 
-    /// ⇧⌘T: reopens the last closed repo tab at its index, back in its worktree group (`gatherGroups`), with its
-    /// profile, commit, alias, emoji and pin, and selects it. A repo open again in another tab meanwhile is selected
-    /// instead, and one in the archive pops out.
+    /// ⇧⌘T: reopens the last closed repo tab at its index, back in its worktree box and its manual group (recreated,
+    /// same id, name and color, when it is gone; `normalize`), with its profile, commit, alias, emoji and pin, and
+    /// selects it. A repo open again in another tab meanwhile is selected instead, and one in the archive pops out.
     func reopenClosedTab() {
         guard let closed = closedTabs.popLast(), let path = closed.saved.path else { return }
         navigation.page = .home
@@ -815,9 +863,16 @@ final class WindowModel {
         var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias, emoji: closed.saved.emoji,
                       pinned: closed.saved.pinned ?? false, iconColor: closed.saved.iconColor, archived: false)
         tab.repoKey = closed.repoKey
+        if let group = closed.group {
+            tab.groupID = group.id
+            if !groups.contains(where: { $0.id == group.id }) {
+                groups.append(ManualTabGroup(id: group.id, name: group.name, colorIndex: group.colorIndex,
+                                             collapsed: false))
+            }
+        }
         tabs.insert(tab, at: min(closed.index, normalEnd))
         restored[tab.id] = closed.saved
-        gatherGroups()
+        normalize()
         if exists, tab.repoKey == nil { resolveRepoKeys([tab.id]) }
         UITiming.select("reopen tab")
         selectedTabID = tab.id
@@ -858,8 +913,8 @@ final class WindowModel {
         activateSelectedTab()
     }
 
-    /// The popped-out tab's menu › Unarchive Tab: it becomes a normal tab at the start of the unpinned area, then
-    /// rejoins its worktree group once its repo is read. The selection stays.
+    /// The popped-out tab's menu › Unarchive Tab: it becomes a normal tab at the start of the unpinned area, in no
+    /// manual group, then rejoins its worktree box once its repo is read. The selection stays.
     func unarchiveTab(_ id: Tab.ID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].archived else { return }
         var tab = tabs.remove(at: index)
@@ -874,7 +929,7 @@ final class WindowModel {
         var entry = archivedTabs.remove(at: index)
         entry.archived = nil
         guard entry.path != nil else { return }
-        closedTabs.append(ClosedTab(saved: entry, repoKey: nil, index: normalEnd))
+        closedTabs.append(ClosedTab(saved: entry, repoKey: nil, group: nil, batch: nil, index: normalEnd))
         if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
     }
 
@@ -903,9 +958,9 @@ final class WindowModel {
         tabs[index].iconColor = color
     }
 
-    /// A tab's menu › Pin Tab / Unpin Tab: pins or unpins the tab, with its whole worktree group (the tabs of its
-    /// `repoKey`). Pinned tabs go to the end of the pinned area, unpinned ones to the start of the other tabs. The
-    /// selection stays.
+    /// A tab's menu › Pin Tab / Unpin Tab: pins or unpins the tab, with its whole worktree box (the tabs of its
+    /// `repoKey`); they leave their manual group. Pinned tabs go to the end of the pinned area, unpinned ones to the
+    /// start of the other tabs. The selection stays.
     func setPinned(_ pinned: Bool, for id: Tab.ID) {
         // The popped-out archived tab is never pinned.
         guard let tab = tabs.first(where: { $0.id == id }), !tab.archived else { return }
@@ -913,10 +968,13 @@ final class WindowModel {
         guard tabs.contains(where: { isAffected($0) && $0.pinned != pinned }) else { return }
         var moved = tabs.filter(isAffected)
         let rest = tabs.filter { !isAffected($0) }
-        for index in moved.indices { moved[index].pinned = pinned }
+        for index in moved.indices {
+            moved[index].pinned = pinned
+            moved[index].groupID = nil
+        }
         let boundary = rest.prefix { $0.pinned }.count
         tabs = Array(rest[..<boundary]) + moved + Array(rest[boundary...])
-        gatherGroups()
+        normalize()
     }
 
     /// The number of pinned tabs, which come first in `tabs`.
@@ -935,47 +993,93 @@ final class WindowModel {
 
     // MARK: Tab groups
 
-    /// The runs of two or more neighboring tabs of one repository, in tab order. The popped-out archived tab is in
-    /// none.
-    var tabGroups: [TabGroup] {
-        var groups: [TabGroup] = []
+    /// The runs of two or more neighboring tabs of one repository (worktree boxes), in tab order. The popped-out
+    /// archived tab is in none.
+    var worktreeBoxes: [WorktreeBox] {
+        var boxes: [WorktreeBox] = []
         var start = 0
         while start < tabs.count {
             var end = start
             if let key = tabs[start].repoKey, !tabs[start].archived {
                 while end + 1 < tabs.count, tabs[end + 1].repoKey == key, !tabs[end + 1].archived { end += 1 }
-                if end > start {
-                    groups.append(TabGroup(key: key, range: start...end, name: TabGroupNames.shared.name(of: key)))
+                if end > start { boxes.append(WorktreeBox(key: key, range: start...end)) }
+            }
+            start = end + 1
+        }
+        return boxes
+    }
+
+    /// The runs of neighboring tabs of one manual group, in tab order, each with its entry in `groups`. Pinned tabs and
+    /// the popped-out archived tab are in none.
+    var manualGroups: [TabGroup] {
+        var runs: [TabGroup] = []
+        var start = 0
+        while start < tabs.count {
+            var end = start
+            if let id = tabs[start].groupID, !tabs[start].pinned, !tabs[start].archived {
+                while end + 1 < tabs.count, tabs[end + 1].groupID == id, !tabs[end + 1].pinned,
+                      !tabs[end + 1].archived { end += 1 }
+                if let group = groups.first(where: { $0.id == id }) {
+                    runs.append(TabGroup(group: group, range: start...end))
                 }
             }
             start = end + 1
         }
-        return groups
+        return runs
     }
 
-    /// Where the tab at `source` may be dropped (indices once moved): a grouped tab only within its group, another
-    /// tab anywhere but between two tabs of a group, so a group is never split; and a pinned tab only among the pinned
-    /// tabs, an unpinned one only among the others (before the popped-out archived tab, which never moves).
+    /// The row's parts in order: manual groups, worktree boxes and plain tabs (`TabArrangement.segments`).
+    var segments: [TabArrangement.Segment] {
+        TabArrangement.segments(arrangementEntries)
+    }
+
+    /// The tabs as `TabArrangement` sees them; a group with no entry in `groups` counts as none.
+    private var arrangementEntries: [TabArrangement.Entry] {
+        let ids = Set(groups.map(\.id))
+        return tabs.map { tab in
+            let group = tab.groupID.flatMap { ids.contains($0) ? $0 : nil }
+            return TabArrangement.Entry(id: tab.id, repo: tab.repoKey, group: group, pinned: tab.pinned,
+                                        archived: tab.archived)
+        }
+    }
+
+    /// Where the tab at `source` may be dropped (indices once moved): a tab of a worktree box only within its box; a
+    /// tab of a manual group only within its group, never inside a box; another tab anywhere but inside a box or
+    /// between two tabs of a group, so a box or a group is never split. A pinned tab only among the pinned tabs, an
+    /// unpinned one only among the others (before the popped-out archived tab, which never moves).
     func moveDestinations(from source: Int) -> [Int] {
         guard tabs.indices.contains(source), !tabs[source].archived else { return [] }
-        if let group = tabGroups.first(where: { $0.range.contains(source) }) { return Array(group.range) }
-        let area = tabs[source].pinned ? 0..<pinnedCount : pinnedCount..<normalEnd
-        var rest = tabs.map(\.repoKey)
+        if let box = worktreeBoxes.first(where: { $0.range.contains(source) }) { return Array(box.range) }
+        var rest = tabs
         rest.remove(at: source)
-        return (0...rest.count).filter { index in
-            area.contains(index)
-                && (index == 0 || index == rest.count || rest[index] == nil || rest[index - 1] != rest[index])
+        let inBox: (Int) -> Bool = { index in
+            index > 0 && index < rest.count && rest[index].repoKey != nil
+                && rest[index - 1].repoKey == rest[index].repoKey
         }
+        if let group = manualGroups.first(where: { $0.range.contains(source) }) {
+            return group.range.filter { !inBox($0) }
+        }
+        let inGroup: (Int) -> Bool = { index in
+            index > 0 && index < rest.count && rest[index].groupID != nil
+                && rest[index - 1].groupID == rest[index].groupID
+        }
+        let area = tabs[source].pinned ? 0..<pinnedCount : pinnedCount..<normalEnd
+        return (0...rest.count).filter { area.contains($0) && !inBox($0) && !inGroup($0) }
     }
 
-    /// A click on a group's name: collapses it to its name, or shows its tabs again. Collapsing the selected tab's
+    /// The manual group `id` is collapsed to its chip.
+    func isCollapsed(_ id: UUID) -> Bool {
+        groups.contains { $0.id == id && $0.collapsed }
+    }
+
+    /// A click on a group's chip: collapses it to its chip, or shows its tabs again. Collapsing the selected tab's
     /// group selects the next shown tab after it, else before it, else the popped-out archived tab, else a new tab.
-    func toggleGroup(_ key: String) {
-        if collapsedGroups.contains(key) {
-            collapsedGroups.remove(key)
+    func toggleGroup(_ id: UUID) {
+        if let index = groups.firstIndex(where: { $0.id == id && $0.collapsed }) {
+            groups[index].collapsed = false
             return
         }
-        guard let group = tabGroups.first(where: { $0.key == key }) else { return }
+        guard let group = manualGroups.first(where: { $0.id == id }) else { return }
         if let selected = selectedIndex, group.range.contains(selected) {
             let shown = (0..<normalEnd).filter { !group.range.contains($0) && !isHidden($0) }
             let popped = archivedOut == nil ? nil : tabs.count - 1
@@ -985,21 +1089,25 @@ final class WindowModel {
                 openTab(nil)
             }
         }
-        collapsedGroups.insert(key)
+        // Looked up again: the selection above may have changed the table.
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].collapsed = true
     }
 
     /// The tab at `index` is in a collapsed group.
     private func isHidden(_ index: Int) -> Bool {
-        tabs[index].repoKey.map(collapsedGroups.contains) ?? false
+        tabs[index].groupID.map(isCollapsed) ?? false
     }
 
-    /// Opens the selected tab's group when it is collapsed (checked first, so a selection does not touch the set).
+    /// Opens the selected tab's group when it is collapsed (checked first, so a selection does not touch the table).
     private func expandSelectedGroup() {
-        guard let key = selectedIndex.flatMap({ tabs[$0].repoKey }), collapsedGroups.contains(key) else { return }
-        collapsedGroups.remove(key)
+        guard let id = selectedIndex.flatMap({ tabs[$0].groupID }),
+              let index = groups.firstIndex(where: { $0.id == id && $0.collapsed })
+        else { return }
+        groups[index].collapsed = false
     }
 
-    /// The last index of the group the tab at `index` is in; `index` itself when it is in none.
+    /// The last index of the worktree box the tab at `index` is in; `index` itself when it is in none.
     private func groupEnd(of index: Int) -> Int {
         guard let key = tabs[index].repoKey else { return index }
         var end = index
@@ -1020,38 +1128,32 @@ final class WindowModel {
 
     private func applyRepoKeys(_ keys: [(Tab.ID, URL, String?)]) {
         // A tab closed or pointed elsewhere (Locate) meanwhile keeps what it has. The popped-out archived tab never
-        // joins a group.
+        // joins a box.
         for (id, url, key) in keys {
             guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].repoURL == url,
                   !tabs[index].archived, tabs[index].repoKey != key
             else { continue }
             tabs[index].repoKey = key
         }
-        gatherGroups()
+        normalize()
     }
 
-    /// Moves each repo's tabs right after its first tab, the others keeping their order; then pins a whole group when
-    /// one of its tabs is pinned and moves the pinned tabs first, each side
-    /// keeping its order. The popped-out archived tab is left out of both and stays last. The selection stays.
-    private func gatherGroups() {
-        var gathered: [Tab] = []
-        var placed = Set<String>()
-        for tab in tabs where !tab.archived {
-            guard let key = tab.repoKey else {
-                gathered.append(tab)
-                continue
-            }
-            guard placed.insert(key).inserted else { continue }
-            gathered += tabs.filter { $0.repoKey == key && !$0.archived }
+    /// Puts the tabs in order (`TabArrangement.normalized`): each repo's tabs in a box after its first tab, each
+    /// manual group's boxes and tabs after its first one, pinned tabs first and out of every group, the popped-out
+    /// archived tab last. Drops the groups left with no tab. The selection stays.
+    private func normalize() {
+        let arrangement = TabArrangement.normalized(arrangementEntries)
+        let byID = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
+        let ordered = arrangement.tabs.compactMap { entry -> Tab? in
+            guard var tab = byID[entry.id] else { return nil }
+            tab.groupID = entry.group
+            tab.pinned = entry.pinned
+            return tab
         }
-        // A tab that joins a pinned group (a new worktree tab, a repo read, Locate, ⇧⌘T) is pinned with it.
-        let pinnedKeys = Set(gathered.filter(\.pinned).compactMap(\.repoKey))
-        for index in gathered.indices where !gathered[index].pinned {
-            if let key = gathered[index].repoKey, pinnedKeys.contains(key) { gathered[index].pinned = true }
+        if ordered != tabs { tabs = ordered }
+        if groups.contains(where: { !arrangement.groups.contains($0.id) }) {
+            groups.removeAll { !arrangement.groups.contains($0.id) }
         }
-        // Groups stay side by side: each is wholly pinned or not.
-        gathered = gathered.filter(\.pinned) + gathered.filter { !$0.pinned } + tabs.filter(\.archived)
-        if gathered != tabs { tabs = gathered }
         // The selected tab may just have joined a collapsed group (a Welcome tab's repo read).
         expandSelectedGroup()
     }

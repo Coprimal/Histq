@@ -36,10 +36,12 @@ enum TabStripMetrics {
     static let dragThreshold: CGFloat = 5
     /// A tab group's line: under its chip and tabs, around its selected tab (and the vertical tabs' bar).
     static let groupLine: CGFloat = 1.5
-    /// A tab group's name chip, before its first tab: as tall as New Tab, at most `groupChipMaxWidth` wide.
+    /// A manual group's chip, before its first tab: as tall as New Tab, a color square without a name, else as wide as
+    /// its name, at most `groupChipMaxWidth`; a rounded rect, not a capsule.
     static let groupChipHeight: CGFloat = 20
     static let groupChipMaxWidth: CGFloat = 120
     static let groupChipPadding: CGFloat = 8
+    static let groupChipRadius: CGFloat = 6
     static var groupChipFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
     /// The archived tab popped out beside the archive button (`ArchiveCluster`): one fixed width, outside the track.
     static let archivedTabWidth: CGFloat = 160
@@ -48,22 +50,38 @@ enum TabStripMetrics {
     /// this). The tabs after it do not move.
     static let archiveShift: CGFloat = (HeaderMetrics.tabRowLeading - gap) / 2
 
-    /// A group's chip width for its name.
+    /// A worktree box (`WorktreeBoxShape`): this far out from its tabs along the row, inside the gap, so two boxes
+    /// side by side (and a box beside a plain tab) keep a clear line between them; from the row's top to the hover
+    /// fill's bottom, clear of the sheet and of a group's line.
+    static let boxOutset: CGFloat = 1.5
+    static let boxBottomInset: CGFloat = 3
+    static let boxRadius: CGFloat = 10
+
+    /// A group's chip width for its name: a square without one.
     static func groupChipWidth(_ name: String) -> CGFloat {
+        guard !name.isEmpty else { return groupChipHeight }
         let text = (name as NSString).size(withAttributes: [.font: groupChipFont]).width
-        return min(groupChipMaxWidth, ceil(text) + 2 * groupChipPadding)
+        return max(groupChipHeight, min(groupChipMaxWidth, ceil(text) + 2 * groupChipPadding))
     }
 }
 
-/// A tab group's color (`Palette.graphLanes`, by its repo) and its chip's fill (the graph badges' fill), and the
-/// archive's fixed pair.
+/// A manual group's color by its swatch (`ManualTabGroup.colorIndex`: 0 the grey, 1–8 `Palette.graphLanes`) and its
+/// chip's fill (the graph badges' fill), and the archive's fixed pair.
 enum TabGroupColors {
-    static func line(_ key: String) -> Color {
-        Color(nsColor: Palette.graphLanes[RepoGroupKey.colorIndex(of: key, count: Palette.graphLanes.count)])
+    static func line(_ colorIndex: Int) -> Color {
+        let index = swatch(colorIndex)
+        return Color(nsColor: index == 0 ? Palette.groupGrey : Palette.graphLanes[index - 1])
     }
 
-    static func chip(_ key: String) -> Color {
-        Color(nsColor: Palette.graphBadgeFills[RepoGroupKey.colorIndex(of: key, count: Palette.graphLanes.count)])
+    static func chip(_ colorIndex: Int) -> Color {
+        let index = swatch(colorIndex)
+        return Color(nsColor: index == 0 ? Palette.groupGreyFill : Palette.graphBadgeFills[index - 1])
+    }
+
+    /// The swatch, wrapped into range: a hand-edited `session.json` may hold any number.
+    private static func swatch(_ colorIndex: Int) -> Int {
+        let count = Palette.graphLanes.count + 1
+        return (colorIndex % count + count) % count
     }
 
     /// The archive's lane: index 1, the orange (#FC9F30), whatever the repos' groups take.
@@ -133,9 +151,10 @@ struct TabStripButtons: View {
 
 /// The tabs with a small gap: the pinned tabs first, narrow (`pinnedTabWidth`, their icon alone), then the others in
 /// equal widths; no fill (a subtle one on hover), and the selected tab's sheet-colored shape that slides to the next
-/// selection. A tab group (a repo's worktrees, `WindowModel.tabGroups`) has its name chip
+/// selection. A manual tab group (`WindowModel.manualGroups`) has its name chip
 /// before its first tab, its color as one line under the chip and its tabs (`TabGroupLine`, open where the selected
-/// tab stands, live during a drag), and as the selected tab's outline. Two arrows at the strip's end (before New Tab)
+/// tab stands, live during a drag), and as the selected tab's outline. A worktree box (`WorktreeBoxShape`) is drawn
+/// behind its tabs, with the selected tab's shape cut out of it. Two arrows at the strip's end (before New Tab)
 /// scroll the row a page each way, disabled while the tabs fit; a cut edge fades out. The popped-out archived tab is not here: it
 /// stands beside the archive button (`ArchiveCluster`); last in `tabs`, it takes no room, so no other tab moves.
 private struct TabTrack: View {
@@ -167,9 +186,9 @@ private struct TabTrack: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let groups = model.tabGroups
+            let groups = model.manualGroups
             // A collapsed group's tabs take no room.
-            let hidden = Set(groups.filter { model.collapsedGroups.contains($0.key) }.flatMap(\.range))
+            let hidden = Set(groups.filter { model.isCollapsed($0.id) }.flatMap(\.range))
             let shown = model.tabs.indices.filter { !hidden.contains($0) && !model.tabs[$0].archived }
             let pinned = CGFloat(shown.filter { model.tabs[$0].pinned }.count)
             let count = shown.count
@@ -180,17 +199,18 @@ private struct TabTrack: View {
             let pinnedWidth = pinned * TabStripMetrics.pinnedTabWidth
             // The scroll arrows always stand at the strip's end, before New Tab; the tabs get the rest.
             let available = proxy.size.width - Self.arrowsWidth
-            // The unpinned tabs share what the pinned ones, the chips and the gaps leave.
+            // The unpinned tabs share what the pinned ones, the chips and the gaps leave. Whole points, so the tabs'
+            // frames stand where the layout says, unsnapped: a worktree box's hole then meets the selected tab exactly.
             let tabWidth = min(TabStripMetrics.maxTabWidth,
                                max(TabStripMetrics.minTabWidth,
-                                   (available - gaps - chips - pinnedWidth) / max(unpinned, 1)))
+                                   floor((available - gaps - chips - pinnedWidth) / max(unpinned, 1))))
             let rowWidth = tabWidth * unpinned + pinnedWidth + chips + gaps
             let overflows = rowWidth > available
             HStack(spacing: 0) {
                 ScrollViewReader { scroller in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        row(layout: TabGroupLayout(tabs: model.tabs, groups: groups,
-                                                   collapsed: model.collapsedGroups, tabExtent: tabWidth,
+                        row(layout: TabGroupLayout(tabs: model.tabs, groups: groups, boxes: model.worktreeBoxes,
+                                                   tabExtent: tabWidth,
                                                    gap: TabStripMetrics.gap,
                                                    extent: { model.tabs[$0].archived ? 0
                                                        : model.tabs[$0].pinned ? TabStripMetrics.pinnedTabWidth
@@ -285,8 +305,7 @@ private struct TabTrack: View {
                                  span: layout.span(of: group.key), opening: opening,
                                  openingWidth: (selected.map(layout.extent(of:)) ?? layout.tabExtent)
                                      + 2 * TabStripMetrics.flare,
-                                 onToggle: { withAnimation(animation) { model.toggleGroup(group.key) } })
-                        .contextMenu { MenuEntriesView(entries: TabMenu.groupEntries(for: group.key, model: model)) }
+                                 onToggle: { withAnimation(animation) { model.toggleGroup(group.id) } })
                         .padding(.horizontal, TabStripMetrics.flare)
                         .offset(x: chipX - (current.headers[group.key] ?? 0))
                         .animation(draggedID != nil ? animation : nil, value: dragTarget)
@@ -295,9 +314,45 @@ private struct TabTrack: View {
                 }
             }
         }
+        // Inside the selection's animation, so each box's hole slides with the selected tab's shape.
+        .background { boxes(layout: layout, target: target, selectedX: selectedX) }
         .padding(.top, TabStripMetrics.rowInset)
         // The selected tab's shape slides, also for a selection made elsewhere (a menu, the tab list).
         .animation(animation, value: model.selectedTabID)
+    }
+
+    /// The worktree boxes behind their tabs, at the tabs' target positions (so they move with a drag), each with the
+    /// selected tab's shape cut out where it reaches: at `selectedX` (as drawn, following the pointer), or the popped-out
+    /// archived tab's beside the archive button, whose flare reaches a first box. Decorative.
+    private func boxes(layout: TabGroupLayout, target: TabGroupLayout.Positions, selectedX: CGFloat?) -> some View {
+        let flare = TabStripMetrics.flare
+        // The selected shape's rect along the row: a tab's frame stands at its position plus its flare room.
+        var hole: (start: CGFloat, end: CGFloat) = (0, 0)
+        if let selectedX, let index = model.selectedIndex {
+            hole = (selectedX, selectedX + layout.extent(of: index) + 2 * flare)
+        } else if model.archivedOut != nil, model.selectedTabID == model.archivedOut?.id {
+            // The popped tab's frame ends `gap` before the track's first item (`TabStrip`).
+            hole = (-TabStripMetrics.gap - TabStripMetrics.archivedTabWidth, 2 * flare - TabStripMetrics.gap)
+        }
+        return ZStack {
+            ForEach(layout.boxes, id: \.key) { box in
+                if let span = layout.boxSpan(box, at: target) {
+                    let shape = WorktreeBoxShape(axis: .horizontal,
+                                                 start: span.start + flare - TabStripMetrics.boxOutset,
+                                                 end: span.end + flare + TabStripMetrics.boxOutset,
+                                                 holeStart: hole.start, holeEnd: hole.end,
+                                                 crossStart: -TabStripMetrics.rowInset,
+                                                 crossEndInset: TabStripMetrics.boxBottomInset,
+                                                 holeCrossStart: 0, radius: TabStripMetrics.boxRadius,
+                                                 holeRadius: TabStripMetrics.tabRadius, flare: flare)
+                    shape.fill(Palette.worktreeBoxFill)
+                    shape.edge.fill(Palette.worktreeBoxBorder)
+                }
+            }
+        }
+        .animation(draggedID != nil ? animation : nil, value: dragTarget)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     /// Every item but the popped-out archived tab, which `ArchiveCluster` draws.
@@ -311,13 +366,13 @@ private struct TabTrack: View {
         let selected = tab.id == model.selectedTabID
         let dragged = tab.id == draggedID
         let profile = model.profile(of: tab)
-        let group = layout.groupKey[index]
+        let group = layout.group(at: index)
         let offset = dragged ? dragOffset : (target.tabs[index] ?? 0) - (current.tabs[index] ?? 0)
         return TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, emoji: tab.emoji,
                        symbol: TabIcon.symbol(of: tab), pinned: tab.pinned, iconColor: tab.iconColor,
                        profileColor: profile?.color,
-                       profileName: profile?.name, groupName: group.map(TabGroupNames.shared.name(of:)),
-                       groupColor: group.map(TabGroupColors.line),
+                       profileName: profile?.name, groupName: group?.group.name,
+                       groupColor: group.map { TabGroupColors.line($0.group.colorIndex) },
                        selected: selected, dragged: dragged, namespace: namespace,
                        onSelect: { model.selectTab(id: tab.id) },
                        onClose: { close(tab.id) })
@@ -507,10 +562,10 @@ private struct ArchiveCluster: View {
 /// A tab's right-click menu, in the tab strip and the vertical tabs (as Chrome's): Close Tab, Close Other Tabs, Close
 /// Tabs to the Right (Below), each off when it has no tab to close (they never close the popped-out archived tab), then
 /// Copy Path (off for a Welcome tab), Reveal in Finder (the tab's repo or worktree folder; off for a Welcome tab or a
-/// missing folder), Set Alias…, Set Emoji…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Group / Unpin Group for
-/// a tab of a worktree group, which pins with it) and Archive This Tab, these five off for a Welcome tab. On the
-/// popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the Right (Below)
-/// are off.
+/// missing folder), Set Alias…, Set Emoji…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Worktree Tabs / Unpin
+/// Worktree Tabs for a tab of a worktree box, which pins with it) and Archive This Tab, these five off for a Welcome
+/// tab. On the popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the
+/// Right (Below) are off.
 @MainActor
 enum TabMenu {
     static func entries(for id: WindowModel.Tab.ID, model: WindowModel, vertical: Bool) -> [MenuEntry] {
@@ -518,8 +573,8 @@ enum TabMenu {
         let tab = model.tabs[index]
         let isRepo = tab.repoURL != nil
         let revealable = isRepo && !tab.isMissing
-        let grouped = model.tabGroups.contains { $0.range.contains(index) }
-        let pinTitle = (tab.pinned ? "Unpin " : "Pin ") + (grouped ? "Group" : "Tab")
+        let boxed = model.worktreeBoxes.contains { $0.range.contains(index) }
+        let pinTitle = (tab.pinned ? "Unpin " : "Pin ") + (boxed ? "Worktree Tabs" : "Tab")
         // The normal tabs: the popped-out archived tab, last, is never closed with others.
         let normalCount = model.tabs.count - (model.archivedOut == nil ? 0 : 1)
         return [
@@ -566,11 +621,6 @@ enum TabMenu {
         }
     }
 
-    /// A tab group's name's right-click menu (the top tabs' chip, the vertical tabs' header): Rename Group….
-    static func groupEntries(for key: String, model: WindowModel) -> [MenuEntry] {
-        [.action("Rename Group…") { [weak model] in model?.presentModal(.groupName(key: key)) }]
-    }
-
     /// The Icon Color menu: Default (Settings › Appearance's default tab icon), then each lane color with its dot; the
     /// tab's own is checked.
     private static func iconColors(_ id: WindowModel.Tab.ID, _ tab: WindowModel.Tab, _ model: WindowModel)
@@ -607,9 +657,10 @@ enum TabMenu {
     }
 }
 
-/// A tab group's name before its first tab, in the group's color, with the group's line under it and its tabs
-/// (`span` long) open at `opening` for `openingWidth`: the selected tab, its flares included. A click collapses the
-/// group to the chip alone, with no line, and shows its tabs again, as Chrome's.
+/// A manual group's chip before its first tab: a rounded rect in the group's color, a plain square without a name, else
+/// wider with the name inside; the group's line under it and its tabs (`span` long), open at `opening` for
+/// `openingWidth`: the selected tab, its flares included. A click collapses the group to the chip alone, with no line,
+/// and shows its tabs again, as Chrome's.
 private struct TabGroupChip: View {
     let group: TabGroup
     let collapsed: Bool
@@ -620,34 +671,31 @@ private struct TabGroupChip: View {
     let onToggle: () -> Void
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: TabStripMetrics.groupChipRadius, style: .continuous)
         Button(action: onToggle) {
             Text(group.name)
                 .font(Font(TabStripMetrics.groupChipFont))
                 .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .padding(.horizontal, TabStripMetrics.groupChipPadding)
+                .padding(.horizontal, group.name.isEmpty ? 0 : TabStripMetrics.groupChipPadding)
                 .frame(width: width, height: TabStripMetrics.groupChipHeight)
-                .background(Capsule().fill(TabGroupColors.chip(group.key)))
-                .contentShape(Capsule())
+                .background(shape.fill(TabGroupColors.chip(group.group.colorIndex)))
+                .contentShape(shape)
         }
         .buttonStyle(.plain)
         .frame(height: TabStripMetrics.tabHeight)
         .overlay(alignment: .bottomLeading) {
             if !collapsed {
                 TabGroupLine(opening: opening, openingEnd: opening + openingWidth)
-                    .fill(TabGroupColors.line(group.key))
+                    .fill(TabGroupColors.line(group.group.colorIndex))
                     .frame(width: span, height: TabStripMetrics.groupLine)
                     .allowsHitTesting(false)
             }
         }
-        .help(help)
-        .accessibilityLabel("Group \(group.name), \(group.range.count) tabs")
+        .help(group.help(collapsed: collapsed))
+        .accessibilityLabel(group.accessibilityLabel)
         .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
-    }
-
-    private var help: String {
-        "\(group.name): \(group.range.count) tabs of this repository. Click to \(collapsed ? "show" : "hide") them."
     }
 }
 
@@ -693,8 +741,8 @@ struct TabItem: View {
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
     let profileColor: String?
     let profileName: String?
-    /// The tab's group (`WindowModel.tabGroups`): its name and color (the selected tab's outline); nil outside a
-    /// group. The popped-out archived tab has no name but the archive's color (`TabGroupColors.archiveLine`).
+    /// The tab's manual group (`WindowModel.manualGroups`): its name and color (the selected tab's outline); nil
+    /// outside a group. The popped-out archived tab has no name but the archive's color (`TabGroupColors.archiveLine`).
     let groupName: String?
     let groupColor: Color?
     let selected: Bool
