@@ -452,7 +452,9 @@ enum RepoMenus {
     /// checkout and its submenu).
     static func badge(_ ref: SidebarItem, on item: GraphItem, session: RepoSession) -> [MenuEntry] {
         let refEntries = self.ref(ref, session)
-        guard case .commit(let hash) = item else { return refEntries }
+        // Reveal in Finder ends the menu.
+        let reveal: [MenuEntry] = if case .local(let name) = ref { [.separator, revealBranch(name, session)] } else { [] }
+        guard case .commit(let hash) = item else { return refEntries + reveal }
         let actionTitles = Set(refEntries.compactMap { entry -> String? in
             if case .action = entry.kind { entry.title } else { nil }
         })
@@ -469,9 +471,20 @@ enum RepoMenus {
         }
         guard let refCopy = refEntries.first(where: isCopy), case .submenu(let refCopies) = refCopy.kind,
               let commitCopy = commitEntries.first(where: isCopy), case .submenu(let commitCopies) = commitCopy.kind
-        else { return refEntries + [.separator] + commitEntries }
+        else { return refEntries + [.separator] + commitEntries + reveal }
         return [.submenu("Copy", refCopies + [.separator] + commitCopies), .separator]
-            + refEntries.filter { !isCopy($0) } + [.separator] + commitEntries.filter { !isCopy($0) }
+            + refEntries.filter { !isCopy($0) } + [.separator] + commitEntries.filter { !isCopy($0) } + reveal
+    }
+
+    /// A local branch badge's "Reveal in Finder": the folder of the worktree that has it checked out (this repo's or a
+    /// linked one). Disabled when no worktree has it, or that worktree's folder is missing.
+    private static func revealBranch(_ name: String, _ session: RepoSession) -> MenuEntry {
+        let worktree = session.worktrees.value?.first { $0.worktree.branch == "refs/heads/\(name)" }?.worktree
+        let reason: String? = if worktree == nil { "\(name) is not checked out in any worktree." }
+            else if worktree?.isPrunable == true { "Its worktree folder is missing." } else { nil }
+        return .action("Reveal in Finder", enabled: reason == nil, toolTip: reason) {
+            if let worktree { NSWorkspace.shared.activateFileViewerSelecting([URL(filePath: worktree.path)]) }
+        }
     }
 
     static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
