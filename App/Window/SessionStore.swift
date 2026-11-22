@@ -40,6 +40,9 @@ struct SavedWindow: Codable, Equatable, Sendable {
     var selectedTab: Int?
     /// The window's manual tab groups, in order; nil when it has none. Absent from files of older builds.
     var manualTabGroups: [SavedTabGroup]?
+    /// The window's closed groups (a group's Close Group), most recently closed first; nil when it has none. Absent
+    /// from files of older builds.
+    var closedTabGroups: [SavedClosedTabGroup]?
 
     var frame: NSRect { NSRect(x: x, y: y, width: width, height: height) }
 }
@@ -84,6 +87,18 @@ struct SavedTabGroup: Codable, Equatable, Sendable {
     var color: Int
     /// The group shows only its chip; nil reads as false, and an expanded group is written as nil.
     var collapsed: Bool?
+}
+
+/// A manual tab group stowed by its Close Group, with its tabs, until it opens again. Absent from files of older
+/// builds.
+struct SavedClosedTabGroup: Codable, Equatable, Sendable {
+    var id: UUID
+    /// The name the user gave it; nil for none.
+    var name: String?
+    /// Its swatch, as `SavedTabGroup.color`; clamped to 0...8 on restore.
+    var color: Int
+    /// Its tabs in order, each with `tabGroup`, `pinned` and `archived` nil.
+    var tabs: [SavedTab]
 }
 
 /// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).
