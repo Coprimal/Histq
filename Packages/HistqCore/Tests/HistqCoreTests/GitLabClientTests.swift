@@ -290,7 +290,11 @@ struct GitLabClientTests {
         #expect(Set(reviews.map(\.id)).isDisjoint(with: Set(comments.map(\.id) + reviewComments.map(\.id))))
 
         for request in stub.requests {
-            #expect(request.url?.path(percentEncoded: true).hasPrefix("/gitlab/api/v4/projects/group%2Fsub%2Fproj/") == true)
+            // The discussions load also asks GraphQL for rights and awards, and `/user` for the viewer (both 404
+            // here, so the load falls back).
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            #expect(path.hasPrefix("/gitlab/api/v4/projects/group%2Fsub%2Fproj/")
+                || ["/gitlab/api/v4/user", "/gitlab/api/graphql"].contains(path), "\(path)")
             let carriesToken = request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)"
             #expect(carriesToken)
         }
@@ -627,7 +631,8 @@ struct GitLabClientTests {
             to: HostedThreadRef(rootCommentID: 10), on: 5, in: Self.writeRepo, body: "ok")
 
         #expect(reply.id == 77 && reply.inReplyToID == 10)
-        let post = try #require(stub.requests.first { $0.httpMethod == "POST" })
+        // The load's GraphQL read is a POST too.
+        let post = try #require(stub.requests.last { $0.httpMethod == "POST" })
         #expect(post.url?.path(percentEncoded: true) == Self.mrPath + "/5/discussions/\(discussion)/notes")
         await #expect(throws: HostingError.self) {
             try await client.reply(to: HostedThreadRef(rootCommentID: 10), on: 6, in: Self.writeRepo, body: "ok")
@@ -988,5 +993,412 @@ struct GitLabClientTests {
         }
         await #expect(throws: ProviderFailure()) { try await refreshFails.currentUser() }
         #expect(rejecting.requests.count == 1, "the stale token is not sent again")
+    }
+
+    // MARK: - Comment interactions
+
+    static let issuePath = "/gitlab/api/v4/projects/group%2Fproj/issues"
+    static let graphQLPath = "/gitlab/api/graphql"
+
+    /// A REST note of a discussions fixture: `diff` gives it a position on new line 1 of `a.swift`.
+    static func restNote(
+        _ id: Int, by author: Int, type: String? = "DiscussionNote", resolvable: Bool = false, resolved: Bool = false,
+        system: Bool = false, diff: Bool = false
+    ) -> String {
+        let position = diff ? #", "position": {"old_path": "a.swift", "new_path": "a.swift", "new_line": 1}"# : ""
+        return """
+            {"id": \(id), "type": \(type.map { "\"\($0)\"" } ?? "null"), "body": "note \(id)",
+             "author": \(Self.user(author, "u\(author)")), "created_at": "2026-11-02T10:00:00Z", "system": \(system),
+             "resolvable": \(resolvable), "resolved": \(resolved)\(position)}
+            """
+    }
+
+    static func restDiscussion(_ id: String, individual: Bool = false, _ notes: [String]) -> String {
+        #"{"id": "\#(id)", "individual_note": \#(individual), "notes": [\#(notes.joined(separator: ", "))]}"#
+    }
+
+    /// A GraphQL note: its global id, `adminNote`, `resolveNote` and awards (emoji name, user id).
+    static func graphQLNote(_ gid: String, admin: Bool, resolve: Bool? = nil, awards: [(String, Int)] = []) -> String {
+        let nodes = awards.map { #"{"name": "\#($0.0)", "user": {"id": "gid://gitlab/User/\#($0.1)"}}"# }
+        let resolveNote = resolve.map { #", "resolveNote": \#($0)"# } ?? ""
+        return """
+            {"id": "\(gid)", "userPermissions": {"adminNote": \(admin)\(resolveNote)},
+             "awardEmoji": {"nodes": [\(nodes.joined(separator: ", "))]}}
+            """
+    }
+
+    /// A `NoteStates` answer page for a merge request (`field` `mergeRequest`) or an issue (`issue`): discussions as
+    /// (REST id, resolved, notes), `next` the end cursor when another page follows.
+    static func noteStatesPage(field: String, _ discussions: [(String, Bool?, [String])], next: String? = nil)
+        -> String
+    {
+        let nodes = discussions.map { id, resolved, notes in
+            #"{"id": "gid://gitlab/Discussion/\#(id)", "resolved": \#(resolved.map(String.init) ?? "null"), "#
+                + #""notes": {"nodes": [\#(notes.joined(separator: ", "))]}}"#
+        }
+        let cursor = next.map { "\"\($0)\"" } ?? "null"
+        return """
+            {"data": {"project": {"\(field)": {"discussions": {"nodes": [\(nodes.joined(separator: ", "))],
+             "pageInfo": {"hasNextPage": \(next != nil), "endCursor": \(cursor)}}}}}}
+            """
+    }
+
+    static let individualID = "1111111111111111111111111111111111111111"
+    static let threadID = "2222222222222222222222222222222222222222"
+    static let diffID = "3333333333333333333333333333333333333333"
+    static let systemID = "4444444444444444444444444444444444444444"
+    static let issueThreadID = "5555555555555555555555555555555555555555"
+
+    /// Merge request !5's discussions: an individual note 100 by the viewer (7); a resolvable general thread (root
+    /// 200 by user 8, reply 201 by the viewer, a system note 202 inside); a resolvable diff thread (300 by user 8,
+    /// reply 301 by the viewer); an individual system note 400. Issue #3: a resolvable general thread, root 500.
+    static let mrDiscussions = "[" + [
+        restDiscussion(individualID, individual: true, [restNote(100, by: 7, type: nil)]),
+        restDiscussion(threadID, [
+            restNote(200, by: 8, resolvable: true), restNote(201, by: 7, resolvable: true),
+            restNote(202, by: 8, type: nil, system: true),
+        ]),
+        restDiscussion(diffID, [
+            restNote(300, by: 8, type: "DiffNote", resolvable: true, diff: true),
+            restNote(301, by: 7, type: "DiffNote", resolvable: true, diff: true),
+        ]),
+        restDiscussion(systemID, individual: true, [restNote(400, by: 8, type: nil, system: true)]),
+    ].joined(separator: ", ") + "]"
+    static let issueDiscussions = "[" + restDiscussion(issueThreadID, [restNote(500, by: 8, resolvable: true)]) + "]"
+
+    /// The GraphQL answers for !5 (two pages: the general discussions, then the diff one) and issue #3.
+    static func noteStates(_ request: URLRequest) -> String {
+        let body = Self.json(request)
+        let query = body["query"] as? String ?? ""
+        let after = (body["variables"] as? [String: Any])?["after"] as? String
+        if query.contains("issue(iid:") {
+            return noteStatesPage(field: "issue", [
+                (issueThreadID, true, [graphQLNote("gid://gitlab/Note/500", admin: false, resolve: true)]),
+            ])
+        }
+        if after == "page2" {
+            return noteStatesPage(field: "mergeRequest", [
+                (diffID, false, [
+                    graphQLNote("gid://gitlab/DiffNote/300", admin: false, resolve: false, awards: [("eyes", 7)]),
+                    graphQLNote("gid://gitlab/DiffNote/301", admin: true, resolve: false),
+                ]),
+            ])
+        }
+        return noteStatesPage(field: "mergeRequest", [
+            (individualID, nil, [
+                graphQLNote("gid://gitlab/Note/100", admin: true, awards: [("thumbsup", 7), ("100", 8), ("thumbsup", 8)]),
+            ]),
+            (threadID, false, [
+                graphQLNote("gid://gitlab/DiscussionNote/200", admin: false, resolve: true,
+                            awards: [("rocket", 7), ("tada", 8)]),
+                graphQLNote("gid://gitlab/DiscussionNote/201", admin: true, resolve: true),
+                graphQLNote("gid://gitlab/Note/202", admin: false),
+            ]),
+        ], next: "page2")
+    }
+
+    /// The reads of the comment fixtures; `graphQL` answers a `NoteStates` query (nil: the fixtures').
+    static func commentReads(_ request: URLRequest, graphQL: String? = nil) -> StubServer.Reply? {
+        let path = request.url?.path(percentEncoded: true) ?? ""
+        switch (request.httpMethod ?? "GET", path) {
+        case ("GET", mrPath + "/5/discussions"): return .init(body: mrDiscussions)
+        case ("GET", issuePath + "/3/discussions"): return .init(body: issueDiscussions)
+        case ("GET", "/gitlab/api/v4/user"): return .init(body: Self.user(7, "me"))
+        case ("POST", graphQLPath) where (Self.json(request)["query"] as? String)?.contains("NoteStates") == true:
+            return .init(body: graphQL ?? noteStates(request))
+        default: return nil
+        }
+    }
+
+    @Test("discussions split into general comments (roots, one level of replies, hostKey, resolvable) and diff threads; rights and reactions come from one GraphQL read per page, else the author and no reactions")
+    func commentNestingRightsAndReactions() async throws {
+        let stub = StubServer { request in
+            Self.commentReads(request) ?? .init(status: 404, body: #"{"message": "404 Not Found"}"#)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let comments = try await client.comments(on: .pullRequest(5), in: Self.writeRepo)
+        #expect(comments.map(\.id) == [100, 200, 201], "no system note, no diff thread")
+        #expect(comments.map(\.parentID) == [nil, nil, 200])
+        #expect(comments.map(\.hostKey) == [Self.individualID, Self.threadID, Self.threadID])
+        #expect(comments.map(\.resolvable) == [nil, true, nil])
+        #expect(comments.map(\.resolved) == [nil, false, nil])
+        #expect(comments.map(\.viewerCanEdit) == [true, false, true])
+        #expect(comments.map(\.viewerCanDelete) == [true, false, true])
+        #expect(comments[0].reactions == [
+            HostedReaction(kind: "thumbsup", count: 2, viewerReacted: true), HostedReaction(kind: "100", count: 1),
+        ], "the default kinds first, another name still shown")
+        #expect(comments[1].reactions == [
+            HostedReaction(kind: "tada", count: 1), HostedReaction(kind: "rocket", count: 1, viewerReacted: true),
+        ], "in reactionKinds order")
+        #expect(comments[2].reactions.isEmpty)
+        #expect(comments[1].htmlURL == "https://git.example.com/gitlab/group/proj/-/merge_requests/5#note_200")
+
+        let reviewComments = try await client.reviewComments(of: 5, in: Self.writeRepo)
+        #expect(reviewComments.map(\.id) == [300, 301] && reviewComments.map(\.inReplyToID) == [nil, 300])
+        #expect(reviewComments.map(\.hostKey) == [Self.diffID, Self.diffID])
+        #expect(reviewComments.map(\.viewerCanEdit) == [false, true])
+        #expect(reviewComments[0].reactions == [HostedReaction(kind: "eyes", count: 1, viewerReacted: true)])
+        let states = try await client.reviewThreadStates(of: 5, in: Self.writeRepo)
+        #expect(states.map(\.id) == [Self.diffID])
+        #expect(states.first?.viewerCanResolve == true, "resolveNote is read but not applied yet")
+
+        let queries = stub.requests.filter { $0.url?.path() == Self.graphQLPath }
+        #expect(queries.count == 6, "two pages per load, three loads one after another")
+        let first = Self.json(queries[0])
+        let variables = first["variables"] as? [String: Any] ?? [:]
+        #expect(variables["projectPath"] as? String == "group/proj" && variables["iid"] as? String == "5")
+        #expect(variables["after"] == nil || variables["after"] is NSNull)
+        #expect((Self.json(queries[1])["variables"] as? [String: Any])?["after"] as? String == "page2")
+        let query = first["query"] as? String ?? ""
+        #expect(query.contains("mergeRequest(iid: $iid)") && query.contains("discussions(first: 20"))
+        #expect(!query.contains("group/proj"), "values only in variables")
+        #expect(!stub.requests.contains { $0.url?.path().hasSuffix("/award_emoji") == true }, "no REST per note")
+        #expect(!stub.requests.contains { $0.url?.path().hasSuffix("/notes") == true })
+
+        // GraphQL refused: rights fall back to author == viewer, reactions hidden; the issue reads its own path.
+        let failing = StubServer { request in
+            Self.commentReads(request, graphQL: #"{"errors": [{"message": "boom"}], "data": null}"#)
+                ?? .init(status: 404, body: #"{"message": "404 Not Found"}"#)
+        }
+        let fallback = try Self.client(failing, refreshes: Self.refreshed())
+        let degraded = try await fallback.comments(on: .pullRequest(5), in: Self.writeRepo)
+        #expect(degraded.map(\.viewerCanEdit) == [true, false, true])
+        #expect(degraded.allSatisfy { $0.reactions.isEmpty })
+        #expect(degraded.map(\.resolved) == [nil, false, nil], "REST's resolved without GraphQL")
+        let issueComments = try await fallback.comments(on: .issue(3), in: Self.writeRepo)
+        #expect(issueComments.map(\.id) == [500] && issueComments.first?.resolvable == true)
+        #expect(issueComments.first?.viewerCanEdit == false)
+        let issueQuery = failing.requests.last { $0.url?.path() == Self.graphQLPath }.map { Self.json($0)["query"] }
+        #expect((issueQuery as? String)?.contains("issue(iid: $iid)") == true)
+    }
+
+    @Test("the three reads of one detail load share one discussions fetch and one GraphQL read; a later read fetches again")
+    func discussionsLoadedOnce() async throws {
+        let stub = StubServer { request in
+            if request.url?.path(percentEncoded: true) == Self.mrPath + "/5/discussions" {
+                Thread.sleep(forTimeInterval: 0.3)  // keeps the load running while the other reads join it
+            }
+            if request.url?.path(percentEncoded: true) == Self.mrPath + "/5" { return .init(body: Self.minimalMR()) }
+            return Self.commentReads(request) ?? .init(status: 404, body: #"{"message": "404 Not Found"}"#)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        func count(_ path: String) -> Int { stub.requests.count { $0.url?.path(percentEncoded: true) == path } }
+
+        async let comments = client.comments(on: .pullRequest(5), in: Self.writeRepo)
+        async let reviewComments = client.reviewComments(of: 5, in: Self.writeRepo)
+        async let states = client.reviewThreadStates(of: 5, in: Self.writeRepo)
+        let loaded = try await (comments, reviewComments, states)
+
+        #expect(loaded.0.map(\.id) == [100, 200, 201] && loaded.1.map(\.id) == [300, 301] && loaded.2.count == 1)
+        #expect(count(Self.mrPath + "/5/discussions") == 1)
+        #expect(count(Self.graphQLPath) == 2, "one NoteStates read of two pages")
+
+        _ = try await client.comments(on: .pullRequest(5), in: Self.writeRepo)
+        #expect(count(Self.mrPath + "/5/discussions") == 2, "the finished load is not kept")
+    }
+
+    @Test("comment writes send GitLab's method, path and body, on a merge request and an issue; refusals send nothing")
+    func commentWrites() async throws {
+        let mrWithRefs = """
+            {"id": 9005, "iid": 5, "title": "T", "state": "opened", "sha": "abc1",
+             "web_url": "https://git.example.com/gitlab/group/proj/-/merge_requests/5",
+             "source_branch": "feature", "target_branch": "main",
+             "diff_refs": {"base_sha": "b0", "start_sha": "s0", "head_sha": "abc1"}}
+            """
+        let stub = StubServer { request in
+            if let read = Self.commentReads(request) { return read }
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            let query = Self.json(request)["query"] as? String ?? ""
+            switch request.httpMethod ?? "" {
+            case "DELETE": return .init(status: 204, body: "")
+            case "PUT" where path.hasSuffix("/discussions/\(Self.threadID)"):
+                return .init(body: Self.restDiscussion(Self.threadID, [
+                    Self.restNote(200, by: 8, resolvable: true, resolved: true),
+                ]))
+            case "PUT": return .init(body: Self.restNote(200, by: 7))
+            case "GET" where path == Self.mrPath + "/5": return .init(body: mrWithRefs)
+            case "POST" where path == Self.graphQLPath:
+                if query.contains("discussionToggleResolve") {
+                    return .init(body: #"{"data": {"discussionToggleResolve": {"errors": [], "discussion": {"resolved": true}}}}"#)
+                }
+                let name = query.contains("awardEmojiAdd") ? "awardEmojiAdd" : "awardEmojiRemove"
+                return .init(body: #"{"data": {"\#(name)": {"errors": []}}}"#)
+            case "POST" where path == Self.mrPath + "/5/discussions":
+                return .init(status: 201, body: Self.restDiscussion(Self.diffID, [
+                    Self.restNote(310, by: 7, type: "DiffNote", resolvable: true, diff: true),
+                ]))
+            case "POST": return .init(status: 201, body: Self.restNote(600, by: 7))
+            default: return .init(status: 404, body: "{}")
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        let repo = Self.writeRepo
+        // The loads the detail did: they give the resolvable threads and the global ids the mutations take.
+        _ = try await client.comments(on: .pullRequest(5), in: repo)
+        _ = try await client.comments(on: .issue(3), in: repo)
+        let mrRoot = HostedCommentRef(kind: .general, id: 200, hostKey: Self.threadID)
+        let issueRoot = HostedCommentRef(kind: .general, id: 500, hostKey: Self.issueThreadID)
+        let diffNote = HostedCommentRef(kind: .review, id: 300, hostKey: Self.diffID)
+        func inline(_ position: HostedInlinePosition) async throws {
+            let created = try await client.createInlineComment(at: position, on: 5, in: repo, body: "Hm")
+            #expect(created.id == 310 && created.hostKey == Self.diffID && created.viewerCanEdit)
+        }
+        func base(_ old: String = "a.swift", _ new: String = "a.swift") -> [String: Any] {
+            ["position_type": "text", "base_sha": "b0", "start_sha": "s0", "head_sha": "abc1", "old_path": old,
+             "new_path": new]
+        }
+        func merged(_ a: [String: Any], _ b: [String: Any]) -> [String: Any] { a.merging(b) { _, new in new } }
+        let discussions = Self.mrPath + "/5/discussions"
+        let rows: [(method: String, path: String, query: String?, body: [String: Any]?, run: () async throws -> Void)] = [
+            ("POST", Self.mrPath + "/5/discussions/\(Self.threadID)/notes", nil, ["body": "hi"], {
+                let reply = try await client.reply(toGeneral: mrRoot, on: .pullRequest(5), in: repo, body: "hi")
+                #expect(reply.parentID == 200 && reply.hostKey == Self.threadID)
+            }),
+            ("POST", Self.issuePath + "/3/discussions/\(Self.issueThreadID)/notes", nil, ["body": "hi"], {
+                _ = try await client.reply(toGeneral: issueRoot, on: .issue(3), in: repo, body: "hi")
+            }),
+            ("PUT", Self.mrPath + "/5/discussions/\(Self.threadID)", "resolved=true", nil, {
+                let resolved = try await client.setGeneralThread(mrRoot, on: .pullRequest(5), in: repo, resolved: true)
+                #expect(resolved)
+            }),
+            ("POST", Self.graphQLPath, nil, ["id": "gid://gitlab/Discussion/\(Self.issueThreadID)", "resolve": true], {
+                let resolved = try await client.setGeneralThread(issueRoot, on: .issue(3), in: repo, resolved: true)
+                #expect(resolved)
+            }),
+            ("PUT", Self.mrPath + "/5/notes/200", nil, ["body": "new"], {
+                try await client.editComment(mrRoot, on: .pullRequest(5), in: repo, body: "new")
+            }),
+            ("PUT", Self.mrPath + "/5/notes/300", nil, ["body": "new"], {
+                try await client.editComment(diffNote, on: .pullRequest(5), in: repo, body: "new")
+            }),
+            ("PUT", Self.issuePath + "/3/notes/500", nil, ["body": "new"], {
+                try await client.editComment(issueRoot, on: .issue(3), in: repo, body: "new")
+            }),
+            ("DELETE", Self.mrPath + "/5/notes/200", nil, nil, {
+                try await client.deleteComment(mrRoot, on: .pullRequest(5), in: repo)
+            }),
+            ("DELETE", Self.issuePath + "/3/notes/500", nil, nil, {
+                try await client.deleteComment(issueRoot, on: .issue(3), in: repo)
+            }),
+            ("POST", Self.graphQLPath, nil, ["awardableId": "gid://gitlab/DiscussionNote/200", "name": "thumbsup"], {
+                try await client.addReaction("thumbsup", to: mrRoot, on: .pullRequest(5), in: repo)
+            }),
+            ("POST", Self.graphQLPath, nil, ["awardableId": "gid://gitlab/Note/500", "name": "eyes"], {
+                try await client.removeReaction("eyes", from: issueRoot, on: .issue(3), in: repo)
+            }),
+            ("POST", discussions, nil, ["body": "Hm", "position": merged(base(), ["new_line": 12])], {
+                try await inline(.init(path: "a.swift", oldLine: nil, newLine: 12, lineKind: .added, headSHA: "abc1"))
+            }),
+            ("POST", discussions, nil, ["body": "Hm", "position": merged(base(), ["old_line": 8])], {
+                try await inline(.init(path: "a.swift", oldLine: 8, newLine: nil, lineKind: .removed, headSHA: "abc1"))
+            }),
+            ("POST", discussions, nil,
+             ["body": "Hm", "position": merged(base("old.swift", "b.swift"), [
+                 "old_line": 10, "new_line": 14,
+                 "line_range": ["start": ["old_line": 7, "new_line": 11], "end": ["old_line": 10, "new_line": 14]],
+             ])], {
+                try await inline(.init(
+                    path: "b.swift", oldPath: "old.swift", oldLine: 10, newLine: 14, lineKind: .context,
+                    startOldLine: 7, startNewLine: 11, headSHA: "abc1"))
+            }),
+            ("POST", discussions, nil,
+             ["body": "Hm", "position": merged(base(), [
+                 "new_line": 5,
+                 "line_range": ["start": ["type": "new", "new_line": 3], "end": ["type": "new", "new_line": 5]],
+             ])], {
+                try await inline(.init(
+                    path: "a.swift", oldLine: nil, newLine: 5, lineKind: .added, startNewLine: 3, headSHA: "abc1"))
+            }),
+        ]
+
+        for (index, row) in rows.enumerated() {
+            try await row.run()
+            let request = try #require(stub.requests.last)
+            #expect(request.httpMethod == row.method, "row \(index)")
+            #expect(request.url?.host() == "git.example.com", "row \(index)")
+            #expect(request.url?.path(percentEncoded: true) == row.path, "row \(index)")
+            #expect(request.url?.query() == row.query, "row \(index)")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)", "row \(index)")
+            guard let expected = row.body else {
+                #expect(request.httpBody?.isEmpty ?? true, "row \(index)")
+                continue
+            }
+            let body = Self.json(request)
+            if row.path == Self.graphQLPath {
+                let query = body["query"] as? String ?? ""
+                for value in expected.values.compactMap({ $0 as? String }) {
+                    #expect(!query.contains(value), "row \(index): a value in the query text")
+                }
+                #expect(NSDictionary(dictionary: body["variables"] as? [String: Any] ?? [:]).isEqual(to: expected),
+                        "row \(index): \(body)")
+            } else {
+                #expect(NSDictionary(dictionary: body).isEqual(to: expected), "row \(index): \(body)")
+            }
+        }
+        let graphQL = stub.requests.filter { $0.httpMethod == "POST" && $0.url?.path() == Self.graphQLPath }
+            .compactMap { Self.json($0)["query"] as? String }
+        #expect(graphQL.contains { $0.contains("discussionToggleResolve(input:") })
+        #expect(graphQL.contains { $0.contains("awardEmojiAdd(input:") })
+        #expect(graphQL.contains { $0.contains("awardEmojiRemove(input:") })
+
+        let sent = stub.requests.count
+        await #expect(throws: HostingError.self, "no discussion id") {
+            _ = try await client.reply(
+                toGeneral: .init(kind: .general, id: 200), on: .pullRequest(5), in: repo, body: "hi")
+        }
+        await #expect(throws: HostingError.self, "an individual note is not resolvable") {
+            let individual = HostedCommentRef(kind: .general, id: 100, hostKey: Self.individualID)
+            _ = try await client.setGeneralThread(individual, on: .pullRequest(5), in: repo, resolved: true)
+        }
+        await #expect(throws: HostingError.self, "a note without a global id") {
+            try await client.addReaction("tada", to: .init(kind: .general, id: 999), on: .pullRequest(5), in: repo)
+        }
+        await #expect(throws: HostingError.self, "an added line without its new line") {
+            try await inline(.init(path: "a.swift", oldLine: 4, newLine: nil, lineKind: .added, headSHA: "abc1"))
+        }
+        #expect(stub.requests.count == sent)
+    }
+
+    @Test("a new diff thread is refused unsent when the merge request has no diff_refs, or its head is not the patch's",
+          arguments: [
+              (#""diff_refs": null"#, false),
+              (#""diff_refs": {"base_sha": "b0", "start_sha": "s0", "head_sha": "newer"}"#, true),
+          ])
+    func inlineCommentNeedsDiffRefs(refs: String, headChanged: Bool) async throws {
+        let stub = StubServer { request in
+            guard request.httpMethod == "GET" else { return .init(status: 201, body: "{}") }
+            return .init(body: """
+                {"id": 9005, "iid": 5, "title": "T", "state": "opened", "sha": "newer",
+                 "web_url": "https://git.example.com/gitlab/group/proj/-/merge_requests/5",
+                 "source_branch": "feature", "target_branch": "main", \(refs)}
+                """)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        let position = HostedInlinePosition(
+            path: "a.swift", oldLine: nil, newLine: 2, lineKind: .added, headSHA: "abc1")
+
+        do {
+            _ = try await client.createInlineComment(at: position, on: 5, in: Self.writeRepo, body: "Hm")
+            Issue.record("expected a refusal")
+        } catch HostingError.headChanged {
+            #expect(headChanged)
+        } catch HostingError.validationFailed {
+            #expect(!headChanged)
+        }
+        #expect(stub.requests.map(\.httpMethod) == ["GET"], "only the merge request read, no POST")
+    }
+
+    @Test("GitLab offers the comment interactions and its 8 default reactions")
+    func commentCapabilities() throws {
+        let client = try GitLabClient(host: "gitlab.com", session: .shared) { _ in Self.token }
+        let wanted: HostingCapabilities = [
+            .generalReplies, .resolveGeneralThreads, .editComments, .deleteComments, .reactions, .newInlineComments,
+            .multiLineInlineComments,
+        ]
+        #expect(client.capabilities.isSuperset(of: wanted))
+        #expect(client.reactionKinds == [
+            "thumbsup", "thumbsdown", "laughing", "tada", "confused", "heart", "rocket", "eyes",
+        ])
     }
 }

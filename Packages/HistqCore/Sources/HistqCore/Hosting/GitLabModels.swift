@@ -188,6 +188,25 @@ struct GitLabDiscussion: Decodable {
     var notes: [GitLabNote]
 }
 
+/// What GitLab's GraphQL adds to a note that REST lacks: the token's user's rights (`adminNote`, which covers editing
+/// and deleting; `resolveNote`) and the note's awards, each with its emoji name and the user's numeric id (the
+/// trailing number of the user's global id).
+struct GitLabNoteState {
+    var canAdmin: Bool
+    var canResolve: Bool?
+    var awards: [(name: String, userID: Int?)]
+}
+
+/// One load of an item's discussions: the REST threads, the GraphQL note states by REST note id and each
+/// discussion's `resolved` by REST discussion id (both nil when the GraphQL read failed), and the token's user's id
+/// (nil when unknown).
+struct GitLabThreads {
+    var discussions: [GitLabDiscussion]
+    var noteStates: [Int: GitLabNoteState]?
+    var discussionResolved: [String: Bool]?
+    var viewerID: Int?
+}
+
 struct GitLabCommit: Decodable {
     var id: String
     var message: String?

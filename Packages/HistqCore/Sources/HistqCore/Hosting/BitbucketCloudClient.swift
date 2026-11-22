@@ -85,10 +85,11 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
 
     public var kind: HostingKind { .bitbucketCloud }
 
-    /// No labels, assignees or issues (Bitbucket has reviewers only, and its issue tracker is out of scope), and no
-    /// reopen (a declined pull request stays declined).
+    /// No labels, assignees or issues (Bitbucket has reviewers only, and its issue tracker is out of scope), no
+    /// reopen (a declined pull request stays declined), and no reactions (the public API has no like endpoint).
     public var capabilities: HostingCapabilities {
-        [.requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove]
+        [.requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
+         .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments]
     }
 
     /// `merge_commit`, `squash` and `rebase_merge`; `merge(_:in:method:sha:)` refuses one the destination branch does
@@ -189,15 +190,21 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         throw Self.noIssues
     }
 
-    /// The comments of a pull request outside its inline threads, oldest first, replies included: neither deleted nor
-    /// pending (a draft only its author sees). `bodyHTML` is Bitbucket's rendered HTML.
+    /// The comments of a pull request outside its inline threads, oldest first, replies included, each with its
+    /// direct `parentID` (Bitbucket nests to any depth): not pending (a draft only its author sees), and not deleted
+    /// unless a comment below it is not, then shown as `deletedText` with no rights. A top-level comment is
+    /// `resolvable`, resolved when it has a `resolution`. Rights: the author is the token's user (Bitbucket has no
+    /// flag; none when the user cannot be read). `bodyHTML` is Bitbucket's rendered HTML.
     public func comments(on item: HostedItem, in repo: HostedRepository) async throws -> [HostedComment] {
         guard case .pullRequest(let number) = item else { throw Self.noIssues }
         let comments = try await pullRequestComments(number, in: repo)
         let roots = Self.roots(comments)
-        return comments
-            .filter { roots[$0.id]?.inline == nil && $0.deleted != true && $0.pending != true }
-            .map(Self.comment)
+        let general = comments.filter { roots[$0.id]?.inline == nil && $0.pending != true }
+        let kept = Self.keptDeleted(general)
+        let shown = general.filter { $0.deleted != true || kept.contains($0.id) }
+        guard !shown.isEmpty else { return [] }
+        let me = try? await myUUID()
+        return shown.map { Self.comment($0, viewer: me) }
     }
 
     /// One review per participant who approved (`APPROVED`) or asked for changes (`CHANGES_REQUESTED`), sorted by
@@ -233,6 +240,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
             return comment.deleted != true || (comment.parent == nil && withReplies.contains(comment.id))
         }
         guard !threaded.isEmpty else { return [] }
+        let me = try? await myUUID()
         let files = (try? await pullRequestFiles(number, in: repo)) ?? []
         let patches = Dictionary(
             files.compactMap { file in file.patch.map { (file.filename, $0) } }, uniquingKeysWith: { a, _ in a })
@@ -242,13 +250,16 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
             let hunk = place.line.flatMap { line in
                 patches[place.path].flatMap { GitLabClient.hunk($0, side: place.side, line: line) }
             }
-            return HostedReviewComment(
+            var mapped = HostedReviewComment(
                 id: comment.id, inReplyToID: comment.id == root.id ? nil : root.id, path: place.path,
                 line: place.line, originalLine: place.line, startLine: place.startLine,
                 originalStartLine: place.startLine, side: place.side, diffHunk: hunk,
                 body: comment.deleted == true ? nil : comment.content?.raw,
                 bodyHTML: comment.deleted == true ? nil : Self.html(comment.content), user: comment.user?.hosted,
                 createdAt: GitLabDate.parse(comment.createdOn), htmlURL: comment.links?.html?.href)
+            let own = Self.isOwn(comment, viewer: me)
+            (mapped.viewerCanEdit, mapped.viewerCanDelete) = (own, own)
+            return mapped
         }
     }
 
@@ -398,7 +409,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
 
     public func comment(on item: HostedItem, in repo: HostedRepository, body: String) async throws -> HostedComment {
         guard case .pullRequest(let number) = item else { throw Self.noIssues }
-        return Self.comment(try await postComment(body, parent: nil, on: number, in: repo))
+        return Self.created(try await postComment(body, parent: nil, on: number, in: repo))
     }
 
     /// A comment whose `parent` is the thread's root comment.
@@ -406,13 +417,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         async throws -> HostedReviewComment
     {
         let comment = try await postComment(body, parent: thread.rootCommentID, on: number, in: repo)
-        let place = comment.inline.map(Self.place)
-        return HostedReviewComment(
-            id: comment.id, inReplyToID: thread.rootCommentID, path: place?.path ?? "", line: place?.line,
-            originalLine: place?.line, startLine: place?.startLine, originalStartLine: place?.startLine,
-            side: place?.side, body: comment.content?.raw, bodyHTML: Self.html(comment.content),
-            user: comment.user?.hosted, createdAt: GitLabDate.parse(comment.createdOn),
-            htmlURL: comment.links?.html?.href)
+        return Self.created(comment, inReplyTo: thread.rootCommentID, fallbackPath: "")
     }
 
     /// `POST` (resolve) or `DELETE` (reopen) `.../comments/<root>/resolve`, for a thread this client mapped in
@@ -423,12 +428,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
             throw HostingError.validationFailed(message: "an unknown Bitbucket thread: reload the pull request")
         }
         let path = target.path + ["pullrequests", String(target.number), "comments", String(root), "resolve"]
-        do {
-            _ = try await perform(resolved ? "POST" : "DELETE", url(path))
-        } catch HostingError.http(status: 409, message: _) where resolved {
-            return true
-        }
-        return resolved
+        return try await setResolution(path, resolved: resolved)
     }
 
     /// `APPROVE` (`POST .../approve`) and `REQUEST_CHANGES` (`POST .../request-changes`) post a non-empty body as a
@@ -554,6 +554,103 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
 
     private static let noIssues = HostingError.validationFailed(message: "Bitbucket issues are not supported")
 
+    // MARK: - Comment interactions
+
+    /// `POST .../comments` with `parent` the general comment answered (any comment: Bitbucket nests to any depth).
+    /// A review comment's ref is refused unsent (`reply(to:on:in:body:)` answers inline threads).
+    public func reply(
+        toGeneral comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String
+    ) async throws -> HostedComment {
+        let number = try Self.generalTarget(comment, on: item)
+        var reply = Self.created(try await postComment(body, parent: comment.id, on: number, in: repo))
+        reply.parentID = reply.parentID ?? comment.id
+        return reply
+    }
+
+    /// `POST` (resolve) or `DELETE` (reopen) `.../comments/<root>/resolve` on a top-level general comment (Bitbucket
+    /// answers 403 for a reply); its 409 on resolving says it already is.
+    public func setGeneralThread(
+        _ root: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, resolved: Bool
+    ) async throws -> Bool {
+        let number = try Self.generalTarget(root, on: item)
+        let path = try pullRequestPath(number, in: repo) + ["comments", String(root.id), "resolve"]
+        return try await setResolution(path, resolved: resolved)
+    }
+
+    /// `PUT .../comments/<id>` with only the new `content.raw`, a general or an inline comment alike.
+    public func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
+        async throws
+    {
+        guard case .pullRequest(let number) = item else { throw Self.noIssues }
+        struct Content: Encodable { var raw: String }
+        struct Body: Encodable { var content: Content }
+        let _: BitbucketComment = try await send(
+            "PUT", url(try pullRequestPath(number, in: repo) + ["comments", String(comment.id)]),
+            body: Body(content: Content(raw: body)))
+    }
+
+    /// `DELETE .../comments/<id>`, answered 204 without a body.
+    public func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    {
+        guard case .pullRequest(let number) = item else { throw Self.noIssues }
+        _ = try await perform("DELETE", url(try pullRequestPath(number, in: repo) + ["comments", String(comment.id)]))
+    }
+
+    /// `POST .../comments` with `inline`: `path` (the new path; Bitbucket has no old path), `to` the new line for an
+    /// added or context line, `from` the old line for a removed one, and for a range `start_to` or `start_from` on the
+    /// same side. Refused unsent when the line, or a range's first line, is missing on its side (a range across sides
+    /// is not documented). Bitbucket takes no commit, so `headSHA` is not sent.
+    public func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
+    ) async throws -> HostedReviewComment {
+        struct Content: Encodable { var raw: String }
+        struct Inline: Encodable {
+            var path: String
+            var from, to, startFrom, startTo: Int?
+            enum CodingKeys: String, CodingKey {
+                case path, from, to, startFrom = "start_from", startTo = "start_to"
+            }
+        }
+        struct Body: Encodable { var content: Content; var inline: Inline }
+        let newSide = position.lineKind != .removed
+        let (line, start) = newSide
+            ? (position.newLine, position.startNewLine) : (position.oldLine, position.startOldLine)
+        guard let line else {
+            throw HostingError.validationFailed(message: "no line on the \(newSide ? "new" : "old") side")
+        }
+        guard start != nil || (position.startOldLine == nil && position.startNewLine == nil) else {
+            throw HostingError.validationFailed(message: "a range must start on the same side it ends")
+        }
+        let inline = newSide
+            ? Inline(path: position.path, to: line, startTo: start)
+            : Inline(path: position.path, from: line, startFrom: start)
+        let comment: BitbucketComment = try await send(
+            "POST", url(try pullRequestPath(number, in: repo) + ["comments"]),
+            body: Body(content: Content(raw: body), inline: inline))
+        return Self.created(comment, inReplyTo: nil, fallbackPath: position.path)
+    }
+
+    /// The pull request number of a general comment write; an issue or a review comment's ref is refused unsent.
+    private static func generalTarget(_ comment: HostedCommentRef, on item: HostedItem) throws -> Int {
+        guard case .pullRequest(let number) = item else { throw noIssues }
+        guard comment.kind == .general else {
+            throw HostingError.validationFailed(message: "not a general Bitbucket comment")
+        }
+        return number
+    }
+
+    /// `POST` (resolve) or `DELETE` (reopen) the resolve path of a top-level comment: a 409 on resolving says it
+    /// already is.
+    private func setResolution(_ path: [String], resolved: Bool) async throws -> Bool {
+        do {
+            _ = try await perform(resolved ? "POST" : "DELETE", url(path))
+        } catch HostingError.http(status: 409, message: _) where resolved {
+            return true
+        }
+        return resolved
+    }
+
     // MARK: - Mapping
 
     /// The head's `owner:branch` label is set only for a branch of the same repository (nil for a fork's, or when
@@ -650,11 +747,66 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         return (inline.path ?? "", side, line, startLine)
     }
 
-    private static func comment(_ comment: BitbucketComment) -> HostedComment {
-        HostedComment(
-            id: comment.id, user: comment.user?.hosted, body: comment.content?.raw, bodyHTML: html(comment.content),
+    /// The body a deleted comment kept for its replies shows.
+    static let deletedText = "This comment was deleted"
+
+    /// The deleted comments to keep: those with a comment below them (any depth) that is not deleted.
+    private static func keptDeleted(_ comments: [BitbucketComment]) -> Set<Int> {
+        let parents = Dictionary(comments.map { ($0.id, $0.parent?.id) }, uniquingKeysWith: { a, _ in a })
+        var kept: Set<Int> = []
+        for comment in comments where comment.deleted != true {
+            var next = comment.parent?.id
+            var steps = 0
+            while let id = next, steps < comments.count, kept.insert(id).inserted {
+                next = parents[id] ?? nil
+                steps += 1
+            }
+        }
+        return kept
+    }
+
+    /// Whether the token's user (`viewer`, its uuid) wrote `comment`, and it is not deleted.
+    private static func isOwn(_ comment: BitbucketComment, viewer: String?) -> Bool {
+        guard let viewer, let author = comment.user?.uuid, comment.deleted != true else { return false }
+        return author == viewer
+    }
+
+    /// A general comment: `parentID` its direct parent, a top-level one `resolvable`, rights when `viewer` wrote it,
+    /// and `deletedText` (no rights) for a deleted one.
+    private static func comment(_ comment: BitbucketComment, viewer: String? = nil) -> HostedComment {
+        let deleted = comment.deleted == true
+        let own = isOwn(comment, viewer: viewer)
+        let topLevel = comment.parent == nil
+        var mapped = HostedComment(
+            id: comment.id, user: comment.user?.hosted, body: deleted ? deletedText : comment.content?.raw,
+            bodyHTML: deleted ? MarkdownHTML.html(deletedText) : html(comment.content),
             htmlURL: comment.links?.html?.href, createdAt: GitLabDate.parse(comment.createdOn),
-            updatedAt: GitLabDate.parse(comment.updatedOn))
+            updatedAt: GitLabDate.parse(comment.updatedOn), parentID: comment.parent?.id,
+            resolvable: topLevel ? !deleted : nil, resolved: topLevel ? comment.resolution != nil : nil)
+        (mapped.viewerCanEdit, mapped.viewerCanDelete) = (own, own)
+        return mapped
+    }
+
+    /// A general comment the token's user just wrote: theirs to edit and delete.
+    private static func created(_ comment: BitbucketComment) -> HostedComment {
+        var mapped = Self.comment(comment)
+        (mapped.viewerCanEdit, mapped.viewerCanDelete) = (true, true)
+        return mapped
+    }
+
+    /// An inline comment the token's user just wrote, placed by its `inline` (else on `fallbackPath`).
+    private static func created(_ comment: BitbucketComment, inReplyTo root: Int?, fallbackPath: String)
+        -> HostedReviewComment
+    {
+        let place = comment.inline.map(Self.place)
+        var mapped = HostedReviewComment(
+            id: comment.id, inReplyToID: root, path: place?.path ?? fallbackPath, line: place?.line,
+            originalLine: place?.line, startLine: place?.startLine, originalStartLine: place?.startLine,
+            side: place?.side, body: comment.content?.raw, bodyHTML: Self.html(comment.content),
+            user: comment.user?.hosted, createdAt: GitLabDate.parse(comment.createdOn),
+            htmlURL: comment.links?.html?.href)
+        (mapped.viewerCanEdit, mapped.viewerCanDelete) = (true, true)
+        return mapped
     }
 
     /// Bitbucket's rendered HTML, else the raw markdown through `MarkdownHTML`.

@@ -3,13 +3,16 @@
 // then uses the repository `stub/stub` on github.com (the fixtures' origin is a local bare repo, which names no GitHub
 // repo), a fake token, and a `URLSession` whose only protocol is `GitHubStubProtocol`: it answers every request from
 // the JSON below (PR #1's merge, a 409 when it is not pinned to its head, review, comment, close/reopen and a reply to
-// a review thread's root, issue #2's comment and close/reopen, a create that always makes PR #3 with its reviewers,
-// labels and assignees succeed, and on `/graphql` the review threads' states and resolve/unresolve, by operation name)
-// and 404 for anything else, so a stub run never reaches the network. The data: user `stub`, open pull request #1 "Add
-// feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 1 comment, 1 check run) by `stub` with two
-// review threads on `feature.txt` in review 701 (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10,
-// resolved), mergeable as `-HistqPRMergeable true|false|null` says (default true), open issue #2 assigned to `stub`
-// with 1 comment, the repository's labels, assignable users and collaborators (`stub`, `reviewer`), default branch
+// a review thread's root, an edit or delete of a seeded comment (kept in memory for the next load), issue #2's
+// comment and close/reopen, a create that always makes PR #3 with its reviewers,
+// labels and assignees succeed, and on `/graphql` the review threads' states and resolve/unresolve and the comments'
+// viewer states, by operation name) and 404 for anything else, so a stub run never reaches the network. The data: user
+// `stub`, open pull request #1 "Add feature" (`feature` into `main`, 2 commits, 1 changed file, 1 review, 2 comments,
+// 1 check run) by `stub` with two review threads on `feature.txt` in review 701 (A on lines 4-6 with `stub`'s reply,
+// unresolved; B on line 10, resolved) between `reviewer`'s comment and `stub`'s, mergeable as `-HistqPRMergeable
+// true|false|null` says (default true), open issue #2 assigned to `stub` with 2 comments (`reviewer`'s and `stub`'s),
+// every comment with its node id, reactions (one by `stub`) and rights (`stub` may edit and delete only its own, each a
+// leaf), the repository's labels, assignable users and collaborators (`stub`, `reviewer`), default branch
 // `main`, and the Welcome clone picker's `/user/repos` (`stub`'s and `acme`'s). The JSON has GitHub's shapes (search
 // results are issue-shaped), so the stub exercises the same decoding as the real API.
 //
@@ -18,8 +21,12 @@
 // the same session (`GitHubStubProtocol` answers gitlab.com from `GitLabStub`). `-HistqHostingStubKind bitbucket`
 // does the same with `BitbucketStub` (Bitbucket's 2.0 shapes through `BitbucketCloudClient`, the repository `stub/stub`
 // on bitbucket.org, answered on api.bitbucket.org). The Welcome clone picker stays GitHub's.
+//
+// DEBUG `-HistqStubFailWrites YES`: every stub answers each write and GraphQL mutation with a 500 (reads still answer),
+// so a launch checks how an action's failure rolls back.
 import Foundation
 import HistqCore
+import os
 
 enum GitHubStub {
     static let isEnabled = AppState.launchFlag("-HistqGitHubStub") == "YES"
@@ -31,6 +38,26 @@ enum GitHubStub {
     static let baseSHA = "2222222222222222222222222222222222222222"
     /// A head PR #1 had before a push: a merge pinned to it gets GitHub's 409 (`-HistqPRAction merge-stale`).
     static let staleSHA = "6666666666666666666666666666666666666666"
+    /// DEBUG `-HistqStubFailWrites YES`: every host's stub answers each write and GraphQL mutation with a 500; reads,
+    /// GraphQL queries included, still answer (`GitHubStubProtocol`), so a launch checks an action's rollback.
+    static let failsWrites = AppState.launchFlag("-HistqStubFailWrites") == "YES"
+
+    /// `text` as the inside of a JSON string literal (quotes, backslashes and control characters escaped), for a
+    /// request's text going into the stubs' JSON.
+    static func jsonText(_ text: String) -> String {
+        guard let data = try? JSONEncoder().encode(text), let quoted = String(data: data, encoding: .utf8),
+              quoted.count >= 2 else { return "" }
+        return String(quoted.dropFirst().dropLast())
+    }
+
+    /// Whether a request is a write: anything but a GET, except a GraphQL query (a read sent as a POST).
+    static func isWrite(method: String, url: URL, body: Data?) -> Bool {
+        guard method != "GET" else { return false }
+        guard url.path().hasSuffix("/graphql") else { return true }
+        let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let query = (json?["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return query.hasPrefix("mutation")
+    }
 
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -91,6 +118,9 @@ enum GitHubStub {
             let root = Int(path.split(separator: "/").dropLast().last ?? "")
             guard let root, [811, 813].contains(root) else { return notFound }
             return (201, reviewComment(814, review: 703, root: root, body: "Thanks, done.", at: "17:00"))
+        case let (method, path) where ["PATCH", "DELETE"].contains(method)
+            && (path.hasPrefix("\(repo)/issues/comments/") || path.hasPrefix("\(repo)/pulls/comments/")):
+            return write(method, String(path.dropFirst(repo.count + 1)), body)
         case ("POST", "/graphql"): return graphQL(body)
         case ("GET", _): break
         default: return notFound
@@ -116,7 +146,8 @@ enum GitHubStub {
         case "\(repo)/issues/1": return (200, pullAsIssue)
         case "\(repo)/issues/2": return (200, issue)
         case "\(repo)/issues/1/comments": return (200, "[\(pullComments)]")
-        case "\(repo)/issues/2/comments": return (200, "[\(issueComment)]")
+        case "\(repo)/issues/2/comments":
+            return (200, "[" + written(issueSeed).map { conversationComment($0, on: 2) }.joined(separator: ", ") + "]")
         case "\(repo)/commits/\(headSHA)/check-runs", "\(repo)/commits/feature/check-runs":
             return (200, #"{"total_count": 1, "check_runs": [\#(checkRun)]}"#)
         case let path where path.hasPrefix("\(repo)/commits/") && path.hasSuffix("/check-runs"):
@@ -134,6 +165,45 @@ enum GitHubStub {
     }
 
     private static let notFound = (404, #"{"message": "Not Found"}"#)
+
+    /// What this run wrote to the seeded comments: their new bodies (raw markdown) and the deleted ones, by REST path
+    /// after the repository (`issues/comments/<id>`, `pulls/comments/<id>`: the two id spaces apart). Each load reads
+    /// it, so the next load after a write shows it.
+    private struct Writes {
+        var edits: [String: String] = [:]
+        var deleted: Set<String> = []
+    }
+
+    private static let writes = OSAllocatedUnfairLock(initialState: Writes())
+
+    /// `PATCH` (`{body}`, answered with the comment's id) or `DELETE` (204) of a seeded conversation comment
+    /// (`issues/comments/<id>`) or review comment (`pulls/comments/<id>`, 811 to 813), kept for the next load; a
+    /// deleted or unknown one is 404, as on GitHub.
+    private static func write(_ method: String, _ path: String, _ body: Data?) -> (status: Int, body: String) {
+        let id = Int(path.split(separator: "/").last ?? "") ?? 0
+        let known = path.hasPrefix("issues/") ? (pullSeed + issueSeed).contains { $0.id == id } : (811...813) ~= id
+        guard known, !writes.withLock({ $0.deleted.contains(path) }) else { return notFound }
+        if method == "DELETE" {
+            writes.withLock { _ = $0.deleted.insert(path) }
+            return (204, "")
+        }
+        let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        guard let text = json?["body"] as? String else { return (422, #"{"message": "Body is required"}"#) }
+        writes.withLock { $0.edits[path] = text }
+        return (200, #"{"id": \#(id)}"#)
+    }
+
+    /// `seeds` with this run's writes: deleted ones left out, edited ones with their new body.
+    private static func written(_ seeds: [Seed]) -> [Seed] {
+        let writes = writes.withLock { $0 }
+        return seeds.compactMap { seed in
+            let path = "issues/comments/\(seed.id)"
+            guard !writes.deleted.contains(path) else { return nil }
+            var seed = seed
+            if let body = writes.edits[path] { seed.body = body }
+            return seed
+        }
+    }
 
     private static let user = """
         {"id": 1001, "login": "stub", "name": "Stub User", "html_url": "https://github.com/stub",
@@ -206,16 +276,13 @@ enum GitHubStub {
         {"name": "documentation", "color": "0075ca"}
         """
 
-    private static let issueComment = """
-        {"id": 802, "user": \(user), "body": "I can reproduce it on 0.1.", "body_html": "<p>I can reproduce it on 0.1.</p>",
-         "html_url": "https://github.com/stub/stub/issues/2#issuecomment-802",
-         "created_at": "2026-11-12T11:00:00Z", "updated_at": "2026-11-12T11:00:00Z"}
-        """
+    /// `stub`'s comment on issue #2, also what a comment posted there answers.
+    private static let issueComment = conversationComment(issueSeed[1], on: 2)
 
     /// PR #1 as the issues API and search return it: issue-shaped, with `pull_request` and `draft`.
     private static let pullAsIssue = """
         {"id": 501, "number": 1, "title": "Add feature", "state": "open", "draft": false,
-         "html_url": "https://github.com/stub/stub/pull/1", "user": \(user), "comments": 1,
+         "html_url": "https://github.com/stub/stub/pull/1", "user": \(user), "comments": 2,
          "body": "Adds the feature branch's work.", "labels": [{"name": "enhancement", "color": "a2eeef"}],
          "assignees": [\(user)], "created_at": "2026-11-10T09:00:00Z", "updated_at": "2026-11-12T16:30:00Z",
          "pull_request": {"url": "https://api.github.com/repos/stub/stub/pulls/1"}}
@@ -223,7 +290,7 @@ enum GitHubStub {
 
     private static let issue = """
         {"id": 602, "number": 2, "title": "Crash when opening an empty repository", "state": "open",
-         "html_url": "https://github.com/stub/stub/issues/2", "user": \(reviewer), "comments": 1,
+         "html_url": "https://github.com/stub/stub/issues/2", "user": \(reviewer), "comments": 2,
          "body": "Steps: open an empty folder.", "body_html": "<p>Steps: open an empty folder.</p>",
          "labels": [{"name": "bug", "color": "d73a4a"}], "assignees": [\(user)],
          "created_at": "2026-11-11T08:00:00Z", "updated_at": "2026-11-12T10:00:00Z"}
@@ -242,18 +309,71 @@ enum GitHubStub {
          "submitted_at": "2026-11-12T16:00:00Z"}
         """
 
-    private static let comment = """
-        {"id": 801, "user": \(reviewer), "body": "Nice work.", "body_html": "<p>Nice work.</p>",
-         "html_url": "https://github.com/stub/stub/pull/1#issuecomment-801",
-         "created_at": "2026-11-12T14:00:00Z", "updated_at": "2026-11-12T14:00:00Z"}
-        """
+    /// `reviewer`'s comment on PR #1, also what a comment posted there answers.
+    private static let comment = conversationComment(pullSeed[0], on: 1)
 
-    /// DEBUG `-HistqPRStubComments <n>` (up to 600): PR #1's issue comments are n generated ones instead of `comment`,
-    /// a minute apart from 12:00, for a conversation longer than the panel. Every third has a long line of code, which
-    /// a fit page must wrap.
-    private static let pullComments: String = {
+    /// A seeded conversation comment: `stub`'s when `own` (`stub` may edit and delete it), else `reviewer`'s, at
+    /// `time` on 2026-11-12; `reactions`: REST content, count, and whether `stub` gave one of them.
+    private struct Seed {
+        let id: Int
+        let own: Bool
+        var body: String
+        let time: String
+        var reactions: [(kind: String, count: Int, mine: Bool)] = []
+    }
+
+    /// PR #1's conversation comments: `reviewer`'s 801 before review 701's threads (a +1 by `stub`) and `stub`'s 805
+    /// after them, so the threads sit between two comments by time.
+    private static let pullSeed = [
+        Seed(id: 801, own: false, body: "Nice work.", time: "14:00",
+             reactions: [("+1", 2, true), ("rocket", 1, false)]),
+        Seed(id: 805, own: true, body: "Rebased on main; the usage is in the readme too.", time: "15:30",
+             reactions: [("heart", 1, false)]),
+    ]
+
+    /// Issue #2's comments: `reviewer`'s 820 (a +1 by `stub`), then `stub`'s 802.
+    private static let issueSeed = [
+        Seed(id: 820, own: false, body: "It also happens on a fresh clone.", time: "10:00",
+             reactions: [("+1", 1, true)]),
+        Seed(id: 802, own: true, body: "I can reproduce it on 0.1.", time: "11:00"),
+    ]
+
+    /// GitHub's reactions, in its picker's order: REST `content` and GraphQL `ReactionContent`.
+    private static let reactionNames = [
+        ("+1", "THUMBS_UP"), ("-1", "THUMBS_DOWN"), ("laugh", "LAUGH"), ("hooray", "HOORAY"),
+        ("confused", "CONFUSED"), ("heart", "HEART"), ("rocket", "ROCKET"), ("eyes", "EYES"),
+    ]
+
+    /// A seeded comment as `issues/<number>/comments` lists it, with its node id and GitHub's `reactions` rollup
+    /// (counts only: who reacted is in the GraphQL answer). Its body goes in as JSON text (an edited one may have any
+    /// character), its HTML escaped.
+    private static func conversationComment(_ seed: Seed, on number: Int) -> String {
+        let counts = reactionNames.map { rest, _ in
+            "\"\(rest)\": \(seed.reactions.first { $0.kind == rest }?.count ?? 0)"
+        }.joined(separator: ", ")
+        let page = number == 1 ? "pull/1" : "issues/\(number)"
+        return """
+            {"id": \(seed.id), "node_id": "IC_stub\(seed.id)", "user": \(seed.own ? user : reviewer),
+             "body": "\(jsonText(seed.body))", "body_html": "<p>\(jsonText(HostedHTML.escape(seed.body)))</p>",
+             "html_url": "https://github.com/stub/stub/\(page)#issuecomment-\(seed.id)",
+             "created_at": "2026-11-12T\(seed.time):00Z", "updated_at": "2026-11-12T\(seed.time):00Z",
+             "reactions": {"url": "https://api.github.com/repos/stub/stub/issues/comments/\(seed.id)/reactions",
+                           "total_count": \(seed.reactions.reduce(0) { $0 + $1.count }), \(counts)}}
+            """
+    }
+
+    /// PR #1's issue comments: `pullSeed`'s with this run's writes, or the generated ones of `-HistqPRStubComments`.
+    private static var pullComments: String {
+        generatedComments ?? written(pullSeed).map { conversationComment($0, on: 1) }.joined(separator: ", ")
+    }
+
+    /// DEBUG `-HistqPRStubComments <n>` (up to 600): PR #1's issue comments are n generated ones instead of
+    /// `pullSeed`'s, a minute apart from 12:00, for a conversation longer than the panel. Every third has a long line
+    /// of code, which a fit page must wrap. Each has a node id: `stub`'s (every second) are its to edit and delete
+    /// (the stub keeps no write to them).
+    private static let generatedComments: String? = {
         guard let count = AppState.launchFlag("-HistqPRStubComments").flatMap(Int.init), count >= 0 else {
-            return comment
+            return nil
         }
         return (0..<min(count, 600)).map { index in
             let id = 10_000 + index
@@ -262,7 +382,8 @@ enum GitHubStub {
             let code = index % 3 != 2 ? "" : "<pre><code>\(String(repeating: line, count: 4))</code></pre>"
             let date = String(format: "2026-11-12T%02d:%02d:00Z", 12 + index / 60, index % 60)
             return """
-                {"id": \(id), "user": \(index.isMultiple(of: 2) ? reviewer : user), "body": "\(text)",
+                {"id": \(id), "node_id": "IC_stub\(id)", "user": \(index.isMultiple(of: 2) ? reviewer : user),
+                 "body": "\(text)",
                  "body_html": "<p>\(text)</p>\(code)",
                  "html_url": "https://github.com/stub/stub/pull/1#issuecomment-\(id)",
                  "created_at": "\(date)", "updated_at": "\(date)"}
@@ -272,16 +393,25 @@ enum GitHubStub {
 
     /// PR #1's inline review comments on `feature.txt`, as GitHub lists them: thread A (root 811 on lines 4-6,
     /// unresolved) with `stub`'s reply 812, which GitHub files in a review of its own (`replyReview`, 702), and
-    /// thread B (root 813 on line 10, resolved), both roots in review 701.
-    private static let reviewComments = "[" + [
-        reviewComment(811, review: 701, root: nil, body: "Could the three steps be one sentence?", at: "14:55"),
-        reviewComment(812, review: 702, root: 811, body: "I kept the list: it reads better.", at: "16:00"),
-        reviewComment(813, review: 701, root: nil, body: "Show the output flag in the usage too.", at: "14:57"),
-    ].joined(separator: ", ") + "]"
+    /// thread B (root 813 on line 10, resolved), both roots in review 701; with this run's edits and deletions.
+    private static var reviewComments: String {
+        let writes = writes.withLock { $0 }
+        let seeds: [(id: Int, review: Int, root: Int?, body: String, time: String)] = [
+            (811, 701, nil, "Could the three steps be one sentence?", "14:55"),
+            (812, 702, 811, "I kept the list: it reads better.", "16:00"),
+            (813, 701, nil, "Show the output flag in the usage too.", "14:57"),
+        ]
+        return "[" + seeds.compactMap { seed in
+            let path = "pulls/comments/\(seed.id)"
+            guard !writes.deleted.contains(path) else { return nil }
+            return reviewComment(seed.id, review: seed.review, root: seed.root, body: writes.edits[path] ?? seed.body,
+                                 at: seed.time)
+        }.joined(separator: ", ") + "]"
+    }
 
     /// A comment of thread A (root 811: lines 4-6, the numbered list) or B (root 813: line 10, the usage line), by
-    /// `reviewer` for a root and `stub` for a reply. Its `diff_hunk` is GitHub's: the file patch's hunk header, then
-    /// its rows down to the commented line; a reply repeats its root's lines and hunk.
+    /// `reviewer` for a root and `stub` for a reply (`ownReviewComments`). Its `diff_hunk` is GitHub's: the file
+    /// patch's hunk header, then its rows down to the commented line; a reply repeats its root's lines and hunk.
     private static func reviewComment(_ id: Int, review: Int, root: Int?, body: String, at time: String) -> String {
         let onList = (root ?? id) == 811
         let lines = onList
@@ -290,9 +420,11 @@ enum GitHubStub {
         let hunk = onList ? listHunk : listHunk + #"\n+\n+Usage:\n+\n+    feature --input file"#
         let reply = root.map { #" "in_reply_to_id": \#($0),"# } ?? ""
         return """
-            {"id": \(id), "pull_request_review_id": \(review),\(reply) "path": "feature.txt", \(lines),
+            {"id": \(id), "node_id": "PRRC_stub\(id)", "pull_request_review_id": \(review),\(reply)
+             "path": "feature.txt", \(lines),
              "side": "RIGHT", "diff_hunk": "\(hunk)", "commit_id": "\(headSHA)", "original_commit_id": "\(headSHA)",
-             "user": \(root == nil ? reviewer : user), "body": "\(body)", "body_html": "<p>\(body)</p>",
+             "user": \(root == nil ? reviewer : user), "body": "\(jsonText(body))",
+             "body_html": "<p>\(jsonText(HostedHTML.escape(body)))</p>",
              "html_url": "https://github.com/stub/stub/pull/1#discussion_r\(id)",
              "created_at": "2026-11-12T\(time):00Z", "updated_at": "2026-11-12T\(time):00Z"}
             """
@@ -306,13 +438,19 @@ enum GitHubStub {
     /// The GraphQL node ids of threads A and B.
     private static let threadA = "PRRT_stub811", threadB = "PRRT_stub813"
 
+    /// The review comments `stub` wrote: its reply 812 in thread A and the reply 814 a reply posts.
+    private static let ownReviewComments: Set<Int> = [812, 814]
+
     /// GitHub's GraphQL API, matched by the operation's name in the query: `ReviewThreadStates` (the two threads'
-    /// states, joined on their roots' ids, so another PR's empty comments join none) and a resolve or unresolve of
-    /// thread A or B, which succeeds without changing anything. Like GitHub, an unknown operation or thread gets 200
-    /// with `errors`.
+    /// states, joined on their roots' ids, so another PR's empty comments join none), `CommentViewerStates` (the
+    /// asked comments' rights and `stub`'s reactions) and a resolve or unresolve of thread A or B, which succeeds
+    /// without changing anything. Like GitHub, an unknown operation or thread gets 200 with `errors`.
     private static func graphQL(_ body: Data?) -> (status: Int, body: String) {
         let request = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let query = request?["query"] as? String ?? ""
+        if query.contains("CommentViewerStates") {
+            return commentViewerStates((request?["variables"] as? [String: Any])?["ids"] as? [String] ?? [])
+        }
         // `contains` is case-sensitive, so neither operation's name is in the other's: the order does not matter.
         let unresolve = query.contains("UnresolveReviewThread")
         if unresolve || query.contains("ResolveReviewThread") {
@@ -338,6 +476,44 @@ enum GitHubStub {
         }.joined(separator: ", ")
         return (200, #"{"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [\#(nodes)], "#
             + #""pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}"#)
+    }
+
+    /// `CommentViewerStates`: the asked node ids' comments as `nodes(ids:)` answers them, in the order asked, each
+    /// with its database id as github.com gives it (`fullDatabaseId`, a string), `stub`'s rights (edit and delete its
+    /// own only) and the 8 reaction groups with the ones it gave marked. An unknown id is null with a `NOT_FOUND`
+    /// error, as GitHub answers a comment deleted since the REST read.
+    private static func commentViewerStates(_ ids: [String]) -> (status: Int, body: String) {
+        let nodes = ids.map { nodeID -> String in
+            guard let state = viewerState(of: nodeID) else { return "null" }
+            let groups = reactionNames.map { rest, graphQL in
+                #"{"content": "\#(graphQL)", "viewerHasReacted": \#(state.mine.contains(rest))}"#
+            }.joined(separator: ", ")
+            return """
+                {"__typename": "\(state.typename)", "fullDatabaseId": "\(state.id)", "viewerCanUpdate": \(state.own),
+                 "viewerCanDelete": \(state.own), "reactionGroups": [\(groups)]}
+                """
+        }.joined(separator: ", ")
+        let errors = ids.filter { viewerState(of: $0) == nil }.map {
+            #"{"type": "NOT_FOUND", "path": ["nodes"], "#
+                + #""message": "Could not resolve to a node with the global id of '\#($0)'."}"#
+        }
+        let tail = errors.isEmpty ? "" : #", "errors": [\#(errors.joined(separator: ", "))]"#
+        return (200, #"{"data": {"nodes": [\#(nodes)]}\#(tail)}"#)
+    }
+
+    /// A node id's comment: a conversation comment (`IC_stub<id>`: `pullSeed`, `issueSeed`, or a generated one of
+    /// `-HistqPRStubComments`, `stub`'s at an odd index) or a review comment (`PRRC_stub<id>`: 811 to 814); whether
+    /// `stub` wrote it, and the REST names of the reactions it gave.
+    private static func viewerState(of nodeID: String) -> (typename: String, id: Int, own: Bool, mine: [String])? {
+        if nodeID.hasPrefix("IC_stub"), let id = Int(nodeID.dropFirst("IC_stub".count)) {
+            if id >= 10_000 { return ("IssueComment", id, !(id - 10_000).isMultiple(of: 2), []) }
+            guard let seed = (pullSeed + issueSeed).first(where: { $0.id == id }) else { return nil }
+            return ("IssueComment", id, seed.own, seed.reactions.filter(\.mine).map(\.kind))
+        }
+        if nodeID.hasPrefix("PRRC_stub"), let id = Int(nodeID.dropFirst("PRRC_stub".count)), (811...814).contains(id) {
+            return ("PullRequestReviewComment", id, ownReviewComments.contains(id), [])
+        }
+        return nil
     }
 
     private static let checkRun = """
@@ -367,13 +543,18 @@ enum GitHubStub {
 }
 
 /// `GitHubStub`'s data in GitLab's REST v4 shapes, for `GitLabClient` (`-HistqHostingStubKind gitlab`): user `stub`,
-/// open merge request !1 "Add feature" (`feature` into `main` of the same project, 2 commits, 1 changed file, a comment
-/// and a system note, approved by `reviewer`, a head pipeline and 1 commit status) with two diff discussions on
-/// `feature.txt` (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10, resolved), its `detailed_merge_status`
-/// as `-HistqPRMergeable true|false|null` says (`mergeable`, `conflict`, `checking`), open issue #2 assigned to `stub`
-/// with 1 note, the project's labels and users. The writes answer as GitLab does and change nothing: a note, a reply
-/// to A or B, resolve/unresolve of A or B, approve, unapprove, a change request (GraphQL), a merge (409 unless pinned
-/// to the head), close/reopen, and a create that always makes !3. Anything else is 404.
+/// open merge request !1 "Add feature" (`feature` into `main` of the same project, 2 commits, 1 changed file, approved
+/// by `reviewer`, a head pipeline and 1 commit status) with `reviewer`'s general thread and `stub`'s reply (resolvable,
+/// open), two diff discussions on `feature.txt` (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10,
+/// resolved), then `stub`'s comment and a system note, its `detailed_merge_status` as `-HistqPRMergeable
+/// true|false|null` says (`mergeable`, `conflict`, `checking`), open issue #2 assigned to `stub` with `reviewer`'s
+/// thread and `stub`'s reply, then `stub`'s note, the project's labels and users. The GraphQL `NoteStates` read gives
+/// each note's rights (`stub` may edit and delete only its own) and awards (one by `stub`). A reply to a general
+/// thread or comment (!1's and issue #2's) and a resolve of a general thread (REST on !1, GraphQL
+/// `discussionToggleResolve` on issue #2) are kept in memory (`writes`), so the next load shows them. The other
+/// writes answer as GitLab does and change nothing: a note, a reply to A or B, resolve/unresolve of A or B, approve,
+/// unapprove, a change request (GraphQL), a merge (409 unless pinned to the head), close/reopen, and a create that
+/// always makes !3. Anything else is 404.
 enum GitLabStub {
     static let repository = HostedRepository(host: "gitlab.com", owner: "stub", name: "stub")
 
@@ -402,6 +583,8 @@ enum GitLabStub {
         case ("POST", "\(mr1)/unapprove"):
             return (201, #"{"approved": true, "approved_by": [\#(approver(reviewer))]}"#)
         case ("POST", "/api/graphql"):
+            if (json["query"] as? String)?.contains("NoteStates") == true { return noteStates(json) }
+            if (json["query"] as? String)?.contains("discussionToggleResolve") == true { return toggleResolve(json) }
             guard (json["query"] as? String)?.contains("mergeRequestRequestChanges") == true else { return notFound }
             return (200, #"{"data": {"mergeRequestRequestChanges": {"errors": [], "mergeRequest": {"iid": "1"}}}}"#)
         case ("POST", "\(mr1)/notes"): return (201, note(803, by: user, body: "Thanks.", at: "17:00"))
@@ -413,13 +596,26 @@ enum GitLabStub {
         case ("PUT", mr3): return (200, mergeRequest(3, full: true))
         case let ("POST", path) where path.hasPrefix("\(mr1)/discussions/") && path.hasSuffix("/notes"):
             let id = path.split(separator: "/").dropLast().last.map(String.init)
+            if let id, mrGeneral.contains(id) { return replyToGeneral(id, json) }
             guard let id, [threadA, threadB].contains(id) else { return notFound }
             return (201, diffNote(814, by: user, body: "Thanks, done.", onList: id == threadA, resolved: id == threadB,
                                   at: "17:00"))
+        case let ("POST", path) where path.hasPrefix("\(project)/issues/2/discussions/") && path.hasSuffix("/notes"):
+            let id = path.split(separator: "/").dropLast().last.map(String.init)
+            guard let id, issueGeneral.contains(id) else { return notFound }
+            return replyToGeneral(id, json)
+        case let (method, path) where ["PUT", "DELETE"].contains(method)
+            && (path.hasPrefix("\(mr1)/notes/") || path.hasPrefix("\(project)/issues/2/notes/")):
+            let discussions = path.hasPrefix(mr1) ? mrDiscussions : issueDiscussions
+            return editOrDelete(method, Int(path.split(separator: "/").last ?? "") ?? 0, json, in: discussions)
         case let ("PUT", path) where path.hasPrefix("\(mr1)/discussions/"):
             let id = String(path.dropFirst("\(mr1)/discussions/".count))
+            if id == generalThread {
+                writes.withLock { $0.resolved[id] = query.contains("resolved=true") }
+                return (200, mrDiscussions[0].json)
+            }
             guard [threadA, threadB].contains(id) else { return notFound }
-            return (200, discussion(id, resolved: query.contains("resolved=true")))
+            return (200, discussion(id, resolved: query.contains("resolved=true")).json)
         case ("GET", _): break
         default: return notFound
         }
@@ -437,10 +633,7 @@ enum GitLabStub {
         case mr1: return (200, mergeRequest(1, full: true))
         case "\(mr1)/notes":
             return (200, "[\(note(801, by: reviewer, body: "Nice work.", at: "14:00")), \(systemNote)]")
-        case "\(mr1)/discussions":
-            return (200, "[\(discussion(threadA, resolved: false)), \(discussion(threadB, resolved: true)), "
-                + #"{"id": "0000000000000000000000000000000000000801", "individual_note": true, "notes": ["#
-                + note(801, by: reviewer, body: "Nice work.", at: "14:00") + "]}]")
+        case "\(mr1)/discussions": return (200, "[" + mrDiscussions.map(\.json).joined(separator: ", ") + "]")
         case "\(mr1)/approvals": return (200, #"{"approved": true, "approved_by": [\#(approver(reviewer))]}"#)
         case "\(mr1)/reviewers":
             return (200, #"[{"user": \#(reviewer), "state": "approved", "created_at": "2026-11-10T09:00:00Z"}]"#)
@@ -466,6 +659,8 @@ enum GitLabStub {
         case "\(project)/issues/2": return (200, issue)
         case "\(project)/issues/2/notes":
             return (200, "[\(note(802, by: user, body: "I can reproduce it on 0.1.", at: "11:00"))]")
+        case "\(project)/issues/2/discussions":
+            return (200, "[" + issueDiscussions.map(\.json).joined(separator: ", ") + "]")
         default: return notFound
         }
     }
@@ -520,7 +715,7 @@ enum GitLabStub {
                            "start_sha": "\(GitHubStub.baseSHA)"},
              "created_at": "2026-11-10T09:00:00Z", "updated_at": "2026-11-12T16:30:00Z",
              "detailed_merge_status": "\(created ? "mergeable" : mergeStatus)", "changes_count": "1",
-             "user_notes_count": 4\(pipeline)}
+             "user_notes_count": \(created ? 0 : 6)\(pipeline)}
             """
     }
 
@@ -534,15 +729,226 @@ enum GitLabStub {
         {"id": 602, "iid": 2, "title": "Crash when opening an empty repository", "state": "opened",
          "description": "Steps: open an empty folder.", "author": \(reviewer), "assignees": [\(user)],
          "labels": [{"name": "bug", "color": "#d73a4a"}], "web_url": "https://gitlab.com/stub/stub/-/issues/2",
-         "user_notes_count": 1, "created_at": "2026-11-11T08:00:00Z", "updated_at": "2026-11-12T10:00:00Z"}
+         "user_notes_count": 3, "created_at": "2026-11-11T08:00:00Z", "updated_at": "2026-11-12T10:00:00Z"}
         """
 
-    /// A plain note (a comment) at `time` on 2026-11-12.
-    private static func note(_ id: Int, by author: String, body: String, at time: String) -> String {
-        """
-        {"id": \(id), "type": null, "body": "\(body)", "author": \(author), "created_at": "2026-11-12T\(time):00Z",
-         "system": false, "resolvable": false}
-        """
+    /// A plain note (a comment) at `time` on 2026-11-12, or a general thread's note (`DiscussionNote`, resolvable)
+    /// when `resolved` is given. `body` goes in as JSON text (`GitHubStub.jsonText` for a written one).
+    private static func note(_ id: Int, by author: String, body: String, at time: String, resolved: Bool? = nil)
+        -> String
+    {
+        let kind = resolved.map { #""type": "DiscussionNote", "resolvable": true, "resolved": \#($0)"# }
+            ?? #""type": null, "resolvable": false"#
+        return """
+            {"id": \(id), \(kind), "body": "\(body)", "author": \(author), "created_at": "2026-11-12T\(time):00Z",
+             "system": false}
+            """
+    }
+
+    /// A seeded note, its REST JSON with what GitLab's GraphQL adds: its global id's type (`Note`, `DiscussionNote`,
+    /// `DiffNote`), whether `stub` may edit and delete it (`adminNote`: its own), whether it may be resolved
+    /// (`resolveNote`), and its awards (emoji name and the awarding user's id).
+    private struct SeedNote {
+        let id: Int
+        let json: String
+        let type: String
+        let admin: Bool
+        let resolvable: Bool
+        var awards: [(name: String, user: Int)] = []
+    }
+
+    /// A seeded discussion: its REST id (the last segment of its global id), whether it is a lone comment, and
+    /// GraphQL's `resolved`.
+    private struct SeedDiscussion {
+        let id: String
+        let individual: Bool
+        let resolved: Bool
+        let notes: [SeedNote]
+
+        var json: String {
+            let notes = notes.map(\.json).joined(separator: ", ")
+            return #"{"id": "\#(id)", "individual_note": \#(individual), "notes": [\#(notes)]}"#
+        }
+    }
+
+    /// A general note: `stub`'s when `own`, else `reviewer`'s, in a resolvable thread (open unless `resolved`) when
+    /// `threaded`, else a lone comment.
+    private static func generalNote(
+        _ id: Int, own: Bool, body: String, at time: String, threaded: Bool, resolved: Bool = false,
+        awards: [(name: String, user: Int)] = []
+    ) -> SeedNote {
+        let json = note(id, by: own ? user : reviewer, body: body, at: time, resolved: threaded ? resolved : nil)
+        return SeedNote(id: id, json: json, type: threaded ? "DiscussionNote" : "Note", admin: own,
+                        resolvable: threaded, awards: awards)
+    }
+
+    /// The ids of !1's and issue #2's general threads, and of their lone general comments (805, 802).
+    private static let generalThread = "c801c801c801c801c801c801c801c801c801c801"
+    private static let issueThread = "c820c820c820c820c820c820c820c820c820c820"
+    private static let mrComment = "0000000000000000000000000000000000000805"
+    private static let issueComment = "0000000000000000000000000000000000000802"
+    /// The general discussions a reply may go to, !1's and issue #2's.
+    private static let mrGeneral: Set = [generalThread, mrComment]
+    private static let issueGeneral: Set = [issueThread, issueComment]
+
+    /// What this run wrote to the general discussions, by discussion id: the replies (id and body as JSON text) and
+    /// the threads resolved or reopened. Each load reads it, so the next load after a write shows it.
+    private struct Writes {
+        var nextID = 900
+        var replies: [String: [(id: Int, body: String)]] = [:]
+        var resolved: [String: Bool] = [:]
+        /// The notes edited (their new raw body) and deleted, by note id, on !1 and issue #2.
+        var edits: [Int: String] = [:]
+        var deleted: Set<Int> = []
+    }
+
+    private static let writes = OSAllocatedUnfairLock(uncheckedState: Writes())
+
+    /// `PUT .../notes/<id>` (`{body}`, answered with the note) or `DELETE` (204) of a note of `discussions` (seeded
+    /// or written, not a system note), kept for the next load; another one is 404.
+    private static func editOrDelete(
+        _ method: String, _ id: Int, _ json: [String: Any], in discussions: [SeedDiscussion]
+    ) -> (status: Int, body: String) {
+        guard id != 850, discussions.contains(where: { $0.notes.contains { $0.id == id } }) else { return notFound }
+        if method == "DELETE" {
+            writes.withLock { _ = $0.deleted.insert(id) }
+            return (204, "")
+        }
+        guard let body = json["body"] as? String else { return (400, #"{"message": "body is missing"}"#) }
+        writes.withLock { $0.edits[id] = body }
+        let note = discussions.lazy.flatMap(\.notes).first { $0.id == id }
+        return (200, note.map { edited($0.json, body: body) } ?? #"{"id": \#(id)}"#)
+    }
+
+    /// A note's JSON with `body` as its body (any text: the JSON is written again).
+    private static func edited(_ json: String, body: String) -> String {
+        guard var note = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else {
+            return json
+        }
+        note["body"] = body
+        guard let data = try? JSONSerialization.data(withJSONObject: note) else { return json }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// `discussion` with this run's edits and deletions: nil once its last note is deleted, as GitLab drops it.
+    private static func withEdits(_ discussion: SeedDiscussion) -> SeedDiscussion? {
+        let (edits, deleted) = writes.withLock { ($0.edits, $0.deleted) }
+        let notes = discussion.notes.filter { !deleted.contains($0.id) }.map { note in
+            edits[note.id].map { body in
+                SeedNote(id: note.id, json: edited(note.json, body: body), type: note.type, admin: note.admin,
+                         resolvable: note.resolvable, awards: note.awards)
+            } ?? note
+        }
+        guard !notes.isEmpty else { return nil }
+        return SeedDiscussion(id: discussion.id, individual: discussion.individual, resolved: discussion.resolved,
+                              notes: notes)
+    }
+
+    /// A reply by `stub` to the general discussion `id`, kept for the next load; answered with its note.
+    private static func replyToGeneral(_ id: String, _ json: [String: Any]) -> (status: Int, body: String) {
+        let body = GitHubStub.jsonText(json["body"] as? String ?? "")
+        let noteID = writes.withLock { writes in
+            writes.nextID += 1
+            writes.replies[id, default: []].append((writes.nextID, body))
+            return writes.nextID
+        }
+        let threaded = id == generalThread || id == issueThread
+        let resolved = writes.withLock { $0.resolved[id] } ?? false
+        return (201, generalNote(noteID, own: true, body: body, at: replyTime(noteID), threaded: threaded,
+                                 resolved: resolved).json)
+    }
+
+    /// A written reply's time on 2026-11-12: after every seeded note, in the order they were written.
+    private static func replyTime(_ id: Int) -> String {
+        "17:" + String(format: "%02d", min(id - 900, 59))
+    }
+
+    /// GraphQL `discussionToggleResolve` on issue #2's thread (by its global id), kept for the next load.
+    private static func toggleResolve(_ json: [String: Any]) -> (status: Int, body: String) {
+        let variables = json["variables"] as? [String: Any] ?? [:]
+        guard variables["id"] as? String == "gid://gitlab/Discussion/\(issueThread)",
+              let resolve = variables["resolve"] as? Bool
+        else { return (200, #"{"data": {"discussionToggleResolve": null}, "errors": [{"message": "Not found"}]}"#) }
+        writes.withLock { $0.resolved[issueThread] = resolve }
+        return (200, #"{"data": {"discussionToggleResolve": {"errors": [], "discussion": {"resolved": \#(resolve)}}}}"#)
+    }
+
+    /// `discussion` with the replies this run wrote to it, after its own notes.
+    private static func withReplies(_ discussion: SeedDiscussion) -> SeedDiscussion {
+        let replies = writes.withLock { $0.replies[discussion.id] } ?? []
+        guard !replies.isEmpty else { return discussion }
+        let threaded = discussion.id == generalThread || discussion.id == issueThread
+        let notes = replies.map { reply in
+            generalNote(reply.id, own: true, body: reply.body, at: replyTime(reply.id), threaded: threaded,
+                        resolved: discussion.resolved)
+        }
+        return SeedDiscussion(id: discussion.id, individual: false, resolved: discussion.resolved,
+                              notes: discussion.notes + notes)
+    }
+
+    /// !1's discussions in GitLab's order: `reviewer`'s thread 801 (a thumbsup by `stub` and one by `reviewer`) with
+    /// `stub`'s reply 806, diff discussions A and B, `stub`'s comment 805 after them (a heart by `reviewer`), so the
+    /// diff threads sit between two general comments by time, and the push's system note; with this run's writes.
+    private static var mrDiscussions: [SeedDiscussion] {
+        let resolved = writes.withLock { $0.resolved[generalThread] } ?? false
+        return [SeedDiscussion]([
+            withReplies(SeedDiscussion(id: generalThread, individual: false, resolved: resolved, notes: [
+                generalNote(801, own: false, body: "Nice work.", at: "14:00", threaded: true, resolved: resolved,
+                            awards: [("thumbsup", 1001), ("thumbsup", 1002)]),
+                generalNote(806, own: true, body: "Thanks for the quick review.", at: "14:10", threaded: true,
+                            resolved: resolved),
+            ])),
+            discussion(threadA, resolved: false), discussion(threadB, resolved: true),
+            withReplies(SeedDiscussion(id: mrComment, individual: true, resolved: false, notes: [
+                generalNote(805, own: true, body: "Rebased on main; the usage is in the readme too.", at: "15:30",
+                            threaded: false, awards: [("heart", 1002)]),
+            ])),
+            SeedDiscussion(id: "0000000000000000000000000000000000000850", individual: true, resolved: false, notes: [
+                SeedNote(id: 850, json: systemNote, type: "Note", admin: false, resolvable: false),
+            ]),
+        ]).compactMap(withEdits)
+    }
+
+    /// Issue #2's discussions: `reviewer`'s thread 820 (a thumbsup by `stub`) with `stub`'s reply 821, then `stub`'s
+    /// comment 802; with this run's writes.
+    private static var issueDiscussions: [SeedDiscussion] {
+        let resolved = writes.withLock { $0.resolved[issueThread] } ?? false
+        return [SeedDiscussion]([
+            withReplies(SeedDiscussion(id: issueThread, individual: false, resolved: resolved, notes: [
+                generalNote(820, own: false, body: "It also happens on a fresh clone.", at: "10:00", threaded: true,
+                            resolved: resolved, awards: [("thumbsup", 1001)]),
+                generalNote(821, own: true, body: "Thanks, I am on it.", at: "10:30", threaded: true,
+                            resolved: resolved),
+            ])),
+            withReplies(SeedDiscussion(id: issueComment, individual: true, resolved: false, notes: [
+                generalNote(802, own: true, body: "I can reproduce it on 0.1.", at: "11:00", threaded: false),
+            ])),
+        ]).compactMap(withEdits)
+    }
+
+    /// `NoteStates`: !1's or issue #2's discussions (another item's are none) on one page, with what GraphQL adds to
+    /// REST: global ids whose last segment is the REST id, each discussion's `resolved`, each note's rights and its
+    /// awards with the user's global id.
+    private static func noteStates(_ json: [String: Any]) -> (status: Int, body: String) {
+        let isIssue = (json["query"] as? String)?.contains("issue(iid:") == true
+        let iid = (json["variables"] as? [String: Any])?["iid"] as? String
+        let discussions = isIssue ? (iid == "2" ? issueDiscussions : []) : (iid == "1" ? mrDiscussions : [])
+        let nodes = discussions.map { discussion in
+            let notes = discussion.notes.map { note in
+                let awards = note.awards.map { award in
+                    #"{"name": "\#(award.name)", "user": {"id": "gid://gitlab/User/\#(award.user)"}}"#
+                }
+                return """
+                    {"id": "gid://gitlab/\(note.type)/\(note.id)",
+                     "userPermissions": {"adminNote": \(note.admin), "resolveNote": \(note.resolvable)},
+                     "awardEmoji": {"nodes": [\(awards.joined(separator: ", "))]}}
+                    """
+            }.joined(separator: ", ")
+            return #"{"id": "gid://gitlab/Discussion/\#(discussion.id)", "resolved": \#(discussion.resolved), "#
+                + #""notes": {"nodes": [\#(notes)]}}"#
+        }.joined(separator: ", ")
+        return (200, #"{"data": {"project": {"\#(isIssue ? "issue" : "mergeRequest")": {"discussions": {"#
+            + #""nodes": [\#(nodes)], "pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}"#)
     }
 
     /// GitLab's own note of a push: never a comment.
@@ -557,15 +963,17 @@ enum GitLabStub {
 
     /// Discussion A (root 811 by `reviewer` on lines 4-6 with `stub`'s reply 812) or B (root 813 on line 10), every
     /// note `resolved` as given.
-    private static func discussion(_ id: String, resolved: Bool) -> String {
+    private static func discussion(_ id: String, resolved: Bool) -> SeedDiscussion {
+        func seed(_ id: Int, own: Bool, body: String, onList: Bool, at time: String) -> SeedNote {
+            SeedNote(id: id, json: diffNote(id, by: own ? user : reviewer, body: body, onList: onList,
+                                            resolved: resolved, at: time),
+                     type: "DiffNote", admin: own, resolvable: true)
+        }
         let notes = id == threadA
-            ? [diffNote(811, by: reviewer, body: "Could the three steps be one sentence?", onList: true,
-                        resolved: resolved, at: "14:55"),
-               diffNote(812, by: user, body: "I kept the list: it reads better.", onList: true, resolved: resolved,
-                        at: "16:00")]
-            : [diffNote(813, by: reviewer, body: "Show the output flag in the usage too.", onList: false,
-                        resolved: resolved, at: "14:57")]
-        return #"{"id": "\#(id)", "individual_note": false, "notes": [\#(notes.joined(separator: ", "))]}"#
+            ? [seed(811, own: false, body: "Could the three steps be one sentence?", onList: true, at: "14:55"),
+               seed(812, own: true, body: "I kept the list: it reads better.", onList: true, at: "16:00")]
+            : [seed(813, own: false, body: "Show the output flag in the usage too.", onList: false, at: "14:57")]
+        return SeedDiscussion(id: id, individual: false, resolved: resolved, notes: notes)
     }
 
     /// A note on `feature.txt` at the head: new lines 4-6 (the numbered list) or new line 10 (the usage line).
@@ -602,10 +1010,14 @@ enum GitLabStub {
 
 /// `GitHubStub`'s data in Bitbucket Cloud's 2.0 shapes, for `BitbucketCloudClient` (`-HistqHostingStubKind bitbucket`):
 /// user `stub`, open pull request #1 "Add feature" (`feature` into `main` of the same repository, 2 commits, 1 changed
-/// file, a comment, approved by `reviewer`, 1 commit status) with two inline threads on `feature.txt` (A on lines 4-6
-/// with `stub`'s reply, unresolved; B on line 10, resolved), and open pull request #2 "Fix typo" by `reviewer` from the
+/// file, approved by `reviewer`, 1 commit status) with `reviewer`'s comment, their reply and `stub`'s reply to that,
+/// two inline threads on `feature.txt` (A on lines 4-6 with `stub`'s reply, unresolved; B on line 10, resolved), a
+/// deleted comment with `reviewer`'s live reply, then `stub`'s comment (the author's uuid against `/2.0/user` makes
+/// `stub`'s comments editable and deletable, each a leaf), and open pull request #2 "Fix typo" by `reviewer` from the
 /// fork `reviewer/stub` with `stub` as its reviewer (Checkout Locally is unavailable for it). Heads are abbreviated to
-/// 12 hex digits, as Bitbucket gives them. Reads only: any write, and anything else, is 404.
+/// 12 hex digits, as Bitbucket gives them. The only writes are on #1's comments: a general comment or a reply
+/// (`parent`), a resolve or reopen of a top-level one, and an edit or delete of any comment, kept in memory
+/// (`writes`), so the next load shows them. Any other write, and anything else, is 404.
 enum BitbucketStub {
     static let repository = HostedRepository(host: "bitbucket.org", owner: "stub", name: "stub")
     /// The host the client's requests go to.
@@ -615,11 +1027,12 @@ enum BitbucketStub {
         BitbucketCloudClient(session: GitHubStub.session) { _ in GitHubStub.token }
     }
 
-    /// The status and JSON (or, for a diff, text) body for a GET of the stub session to api.bitbucket.org.
-    static func reply(method: String, url: URL) -> (status: Int, body: String) {
+    /// The status and JSON (or, for a diff, text) body for a request of the stub session to api.bitbucket.org
+    /// (`body`: the request's).
+    static func reply(method: String, url: URL, body: Data?) -> (status: Int, body: String) {
         let repo = "/2.0/repositories/stub/stub", pr1 = "\(repo)/pullrequests/1", pr2 = "\(repo)/pullrequests/2"
         let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value
-        guard method == "GET" else { return notFound }
+        guard method == "GET" else { return write(method, url.path(percentEncoded: false), body, pr1: pr1) }
         switch url.path(percentEncoded: false) {
         case "/2.0/user": return (200, user)
         case repo:
@@ -633,15 +1046,7 @@ enum BitbucketStub {
             return page(pullRequest(1), pullRequest(2))
         case pr1: return (200, pullRequest(1))
         case pr2: return (200, pullRequest(2))
-        case "\(pr1)/comments":
-            return page(
-                comment(801, by: reviewer, body: "Nice work.", at: "14:00"),
-                comment(811, by: reviewer, body: "Could the three steps be one sentence?", at: "14:55",
-                        inline: #"{"path": "feature.txt", "from": null, "to": 6, "start_from": null, "start_to": 4}"#),
-                comment(812, by: user, body: "I kept the list: it reads better.", at: "16:00", parent: 811,
-                        inline: #"{"path": "feature.txt", "from": null, "to": 6}"#),
-                comment(813, by: reviewer, body: "Show the output flag in the usage too.", at: "14:57",
-                        inline: #"{"path": "feature.txt", "from": null, "to": 10}"#, resolved: true))
+        case "\(pr1)/comments": return page(comments)
         // Bitbucket lists a pull request's commits newest first.
         case "\(pr1)/commits":
             return page(commit(GitHubStub.headSHA, "Finish the feature", "2026-11-12T16:20:00", parent: startSHA),
@@ -664,8 +1069,124 @@ enum BitbucketStub {
 
     private static let notFound = (404, #"{"type": "error", "error": {"message": "Resource not found"}}"#)
 
+    /// #1's comments: a general thread two replies deep, the inline threads, a deleted comment kept for its reply, and
+    /// `stub`'s comment after the threads, so they sit between general comments by time; then this run's comments,
+    /// and its edits and deletions (a deleted comment stays in the list, `deleted: true`, as Bitbucket keeps it).
+    private static var comments: [String] {
+        let writes = writes.withLock { $0 }
+        let resolved = writes.resolved
+        let comments = [
+            comment(801, by: reviewer, body: "Nice work.", at: "14:00", resolved: resolved.contains(801)),
+            comment(806, by: reviewer, body: "One more thing: a test for an empty input?", at: "14:10",
+                    parent: 801),
+            comment(807, by: user, body: "Added one in the second commit.", at: "14:20", parent: 806),
+            comment(811, by: reviewer, body: "Could the three steps be one sentence?", at: "14:55",
+                    inline: #"{"path": "feature.txt", "from": null, "to": 6, "start_from": null, "start_to": 4}"#),
+            comment(812, by: user, body: "I kept the list: it reads better.", at: "16:00", parent: 811,
+                    inline: #"{"path": "feature.txt", "from": null, "to": 6}"#),
+            comment(813, by: reviewer, body: "Show the output flag in the usage too.", at: "14:57",
+                    inline: #"{"path": "feature.txt", "from": null, "to": 10}"#, resolved: true),
+            comment(809, by: reviewer, body: "", at: "15:00", deleted: true),
+            comment(810, by: reviewer, body: "The link I removed is in the docs now.", at: "15:05", parent: 809),
+            comment(805, by: user, body: "Rebased on main; the usage is in the readme too.", at: "15:30",
+                    resolved: resolved.contains(805)),
+        ] + writes.comments
+        guard !writes.edits.isEmpty || !writes.deleted.isEmpty else { return comments }
+        return comments.map { json in
+            guard var comment = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any],
+                  let id = comment["id"] as? Int else { return json }
+            if writes.deleted.contains(id) {
+                comment["deleted"] = true
+                comment["content"] = ["raw": "", "markup": "markdown", "html": ""]
+            } else if let raw = writes.edits[id] {
+                comment["content"] = ["raw": raw, "markup": "markdown", "html": "<p>\(HostedHTML.escape(raw))</p>"]
+            } else {
+                return json
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: comment) else { return json }
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    /// What this run wrote on #1: its new general comments (JSON, in order), the top-level ones it resolved, and the
+    /// comments it edited (their new raw body) or deleted, by id.
+    private struct Writes {
+        var nextID = 900
+        var comments: [String] = []
+        var resolved: Set<Int> = []
+        var edits: [Int: String] = [:]
+        var deleted: Set<Int> = []
+    }
+
+    private static let writes = OSAllocatedUnfairLock(initialState: Writes())
+
+    /// #1's general comment writes: `POST .../comments` (no `inline`; a reply has `parent`), answered with the comment
+    /// by `stub`, and `POST`/`DELETE .../comments/<801|805>/resolve`; and on any of its comments not deleted, `PUT
+    /// .../comments/<id>` (`content.raw`, answered with the comment) and `DELETE` (204). Anything else is 404.
+    private static func write(_ method: String, _ path: String, _ body: Data?, pr1: String)
+        -> (status: Int, body: String)
+    {
+        let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if ["PUT", "DELETE"].contains(method), path.hasPrefix("\(pr1)/comments/"),
+           let id = Int(path.dropFirst("\(pr1)/comments/".count)) {
+            return editOrDelete(method, id, json)
+        }
+        if method == "POST", path == "\(pr1)/comments", json["inline"] == nil,
+           let raw = (json["content"] as? [String: Any])?["raw"] as? String {
+            let parent = (json["parent"] as? [String: Any])?["id"] as? Int
+            let created = writes.withLock { writes in
+                writes.nextID += 1
+                let time = "17:" + String(format: "%02d", min(writes.nextID - 900, 59))
+                let created = comment(
+                    writes.nextID, by: user, body: GitHubStub.jsonText(raw), at: time, parent: parent,
+                    html: GitHubStub.jsonText("<p>\(HostedHTML.escape(raw))</p>"))
+                writes.comments.append(created)
+                return created
+            }
+            return (201, created)
+        }
+        let roots: Set = [801, 805]
+        let parts = path.split(separator: "/")
+        guard path.hasPrefix("\(pr1)/comments/"), path.hasSuffix("/resolve"), parts.count >= 2,
+              let id = Int(parts[parts.count - 2]), roots.contains(id) else { return notFound }
+        switch method {
+        case "POST":
+            writes.withLock { _ = $0.resolved.insert(id) }
+            return (200, #"{"type": "comment_resolution", "user": \#(user), "#
+                + #""created_on": "2026-11-12T17:00:00.000000+00:00"}"#)
+        case "DELETE":
+            writes.withLock { _ = $0.resolved.remove(id) }
+            return (204, "")
+        default:
+            return notFound
+        }
+    }
+
+    /// `PUT` (`content.raw`) or `DELETE` of #1's comment `id`, kept for the next load; a deleted or unknown one is
+    /// 404.
+    private static func editOrDelete(_ method: String, _ id: Int, _ json: [String: Any]) -> (status: Int, body: String) {
+        func object(_ comment: String) -> [String: Any]? {
+            (try? JSONSerialization.jsonObject(with: Data(comment.utf8))) as? [String: Any]
+        }
+        guard comments.contains(where: { object($0)?["id"] as? Int == id && object($0)?["deleted"] as? Bool == false })
+        else { return notFound }
+        if method == "DELETE" {
+            writes.withLock { _ = $0.deleted.insert(id) }
+            return (204, "")
+        }
+        guard let raw = (json["content"] as? [String: Any])?["raw"] as? String else {
+            return (400, #"{"type": "error", "error": {"message": "content.raw is missing"}}"#)
+        }
+        writes.withLock { $0.edits[id] = raw }
+        return comments.first { object($0)?["id"] as? Int == id }.map { (200, $0) } ?? notFound
+    }
+
     /// A list page without a `next`.
     private static func page(_ values: String...) -> (status: Int, body: String) {
+        page(values)
+    }
+
+    private static func page(_ values: [String]) -> (status: Int, body: String) {
         (200, #"{"pagelen": 50, "values": [\#(values.joined(separator: ", "))]}"#)
     }
 
@@ -711,23 +1232,26 @@ enum BitbucketStub {
                              "commit": {"hash": "\(GitHubStub.baseSHA.prefix(12))"},
                              "repository": \(repository("r-0001", "stub/stub"))},
              "reviewers": [\(fork ? user : reviewer)], "participants": [\(participants)],
-             "comment_count": \(fork ? 0 : 4), "created_on": "2026-11-1\(fork ? 3 : 0)T09:00:00.000000+00:00",
+             "comment_count": \(fork ? 0 : 8), "created_on": "2026-11-1\(fork ? 3 : 0)T09:00:00.000000+00:00",
              "updated_on": "2026-11-1\(fork ? 3 : 2)T16:30:00.000000+00:00",
              "links": {"html": {"href": "https://bitbucket.org/stub/stub/pull-requests/\(id)"}}}
             """
     }
 
-    /// A comment at `time` on 2026-11-12: global, inline (`inline`), a reply (`parent`), or a resolved thread's root.
+    /// A comment at `time` on 2026-11-12: global, inline (`inline`), a reply (`parent`), a resolved thread's root, or
+    /// deleted (Bitbucket keeps it in the list, `deleted: true`). `body` (and `html`, else `<p>body</p>`) go in as
+    /// JSON text (`GitHubStub.jsonText` for a written one).
     private static func comment(
         _ id: Int, by author: String, body: String, at time: String, parent: Int? = nil, inline: String? = nil,
-        resolved: Bool = false
+        resolved: Bool = false, deleted: Bool = false, html: String? = nil
     ) -> String {
         let extra = (parent.map { #", "parent": {"id": \#($0)}"# } ?? "")
             + (inline.map { #", "inline": \#($0)"# } ?? "")
             + (resolved ? #", "resolution": {"user": \#(user), "created_on": "2026-11-12T16:10:00.000000+00:00"}"# : "")
         return """
             {"type": "pullrequest_comment", "id": \(id), "content": {"raw": "\(body)", "markup": "markdown",
-             "html": "<p>\(body)</p>"}, "user": \(author), "deleted": false, "pending": false,
+             "html": "\(html ?? (body.isEmpty ? "" : "<p>\(body)</p>"))"}, "user": \(author), "deleted": \(deleted),
+             "pending": false,
              "created_on": "2026-11-12T\(time):00.000000+00:00",
              "links": {"html": {"href": "https://bitbucket.org/stub/stub/pull-requests/1#comment-\(id)"}}\(extra)}
             """
@@ -795,12 +1319,17 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
     }()
 
     override func startLoading() {
-        let reply = request.url.map { url in
+        let reply = request.url.map { url -> (status: Int, body: String) in
             let method = request.httpMethod ?? "GET"
             let body = request.httpBody ?? request.httpBodyStream.map(Self.read)
+            if GitHubStub.failsWrites, GitHubStub.isWrite(method: method, url: url, body: body) {
+                return url.host() == BitbucketStub.apiHost
+                    ? (500, #"{"type": "error", "error": {"message": "Stub write failure"}}"#)
+                    : (500, #"{"message": "Stub write failure"}"#)
+            }
             return switch url.host() {
             case GitLabStub.repository.host: GitLabStub.reply(method: method, url: url, body: body)
-            case BitbucketStub.apiHost: BitbucketStub.reply(method: method, url: url)
+            case BitbucketStub.apiHost: BitbucketStub.reply(method: method, url: url, body: body)
             default: GitHubStub.reply(method: method, url: url, body: body)
             }
         }

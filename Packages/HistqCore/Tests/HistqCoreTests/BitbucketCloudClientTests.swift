@@ -474,8 +474,211 @@ struct BitbucketCloudClientTests {
 
         let ids = reviews.map(\.id) + conversation.map(\.id) + reviewComments.map(\.id)
         #expect(Set(ids).count == ids.count)
-        for request in stub.requests {
+        for request in stub.requests where request.url?.path() != "/2.0/user" {
             #expect(request.url?.path().hasPrefix(Self.repoPath + "/pullrequests") == true)
+        }
+    }
+
+    /// A general or inline comment `id` by account `uuid` (`me` is `u1`, the token's user), as `/comments` lists it.
+    static func listed(
+        _ id: Int, by uuid: String, parent: Int? = nil, inline: Bool = false, deleted: Bool = false,
+        resolved: Bool = false
+    ) -> String {
+        let extra = (parent.map { #", "parent": {"id": \#($0)}"# } ?? "")
+            + (inline ? #", "inline": {"path": "a.swift", "from": null, "to": 3}"# : "")
+            + (resolved ? #", "resolution": {"type": "comment_resolution"}"# : "")
+        return """
+            {"id": \(id), "content": {"raw": \(deleted ? #""""# : #""text \#(id)""#), "html": "<p>text \(id)</p>"},
+             "user": \(account(uuid, uuid == "u1" ? "me" : "other")), "deleted": \(deleted), "pending": false,
+             "created_on": "2026-11-02T10:\(id):00.000000+00:00"\(extra)}
+            """
+    }
+
+    @Test("general comments keep their direct parent at any depth, a deleted one stays as a placeholder only above a live reply, a top-level one is resolvable, and only the token's user's own comments are editable")
+    func commentNestingAndRights() async throws {
+        // 40 (mine, resolved) <- 41 (other) <- 42 (mine); 50 (deleted) <- 51 (mine) <- 52 (deleted leaf);
+        // 60 (deleted) <- 61 (deleted) <- 62 (other); 70 (deleted leaf); 80 (inline, mine) <- 81 (other).
+        let comments = [
+            Self.listed(40, by: "u1", resolved: true), Self.listed(41, by: "u2", parent: 40),
+            Self.listed(42, by: "u1", parent: 41), Self.listed(50, by: "u1", deleted: true),
+            Self.listed(51, by: "u1", parent: 50), Self.listed(52, by: "u1", parent: 51, deleted: true),
+            Self.listed(60, by: "u2", deleted: true), Self.listed(61, by: "u2", parent: 60, deleted: true),
+            Self.listed(62, by: "u2", parent: 61), Self.listed(70, by: "u1", deleted: true),
+            Self.listed(80, by: "u1", inline: true), Self.listed(81, by: "u2", parent: 80),
+        ]
+        @Sendable func server(user: StubServer.Reply) -> StubServer {
+            StubServer { request in
+                switch request.url?.path() ?? "" {
+                case "/2.0/user": user
+                case Self.prPath + "/comments": .init(body: #"{"values": [\#(comments.joined(separator: ", "))]}"#)
+                default: .init(status: 404, body: "{}")
+                }
+            }
+        }
+        let stub = server(user: .init(body: Self.account("u1", "me")))
+        let client = Self.client(stub)
+
+        let general = try await client.comments(on: .pullRequest(5), in: Self.repo)
+        #expect(general.map(\.id) == [40, 41, 42, 50, 51, 60, 61, 62], "deleted leaves 52 and 70 are dropped")
+        #expect(general.map(\.parentID) == [nil, 40, 41, nil, 50, nil, 60, 61])
+        #expect(general.map(\.resolvable) == [true, nil, nil, false, nil, false, nil, nil])
+        #expect(general.map(\.resolved) == [true, nil, nil, false, nil, false, nil, nil])
+        #expect(general.map(\.viewerCanEdit) == [true, false, true, false, true, false, false, false])
+        #expect(general.map(\.viewerCanDelete) == general.map(\.viewerCanEdit))
+        let placeholders = general.filter { [50, 60, 61].contains($0.id) }
+        #expect(placeholders.allSatisfy { $0.body == "This comment was deleted" })
+        #expect(placeholders.allSatisfy { $0.bodyHTML?.contains("This comment was deleted") == true })
+        #expect(general.first?.body == "text 40" && general.first?.bodyHTML == "<p>text 40</p>")
+        #expect(general.allSatisfy { $0.reactions.isEmpty && $0.hostKey == nil })
+
+        let inline = try await client.reviewComments(of: 5, in: Self.repo)
+        #expect(inline.map(\.id) == [80, 81] && inline.map(\.inReplyToID) == [nil, 80])
+        #expect(inline.map(\.viewerCanEdit) == [true, false] && inline.map(\.viewerCanDelete) == [true, false])
+        #expect(stub.requests.count { $0.url?.path() == "/2.0/user" } == 1, "the uuid is asked once")
+
+        let noUser = server(user: .init(status: 500, body: "{}"))
+        let fallback = try await Self.client(noUser).comments(on: .pullRequest(5), in: Self.repo)
+        #expect(fallback.map(\.id) == general.map(\.id), "the comments load without the user")
+        #expect(fallback.allSatisfy { !$0.viewerCanEdit && !$0.viewerCanDelete })
+    }
+
+    @Test("comment writes send the documented method, path and body; an issue, a review ref on a general write, and a line missing on its side are refused unsent")
+    func commentWrites() async throws {
+        let stub = StubServer { request in
+            let path = request.url?.path() ?? ""
+            switch request.httpMethod ?? "" {
+            case "DELETE": return .init(status: 204, body: "")
+            case "POST" where path.hasSuffix("/42/resolve"): return .init(status: 409, body: "{}")
+            case "POST" where path.hasSuffix("/resolve"): return .init(body: #"{"type": "comment_resolution"}"#)
+            case "PUT": return .init(body: Self.listed(40, by: "u1"))
+            case "POST":
+                let body = Self.json(request)
+                let parent = (body["parent"] as? [String: Any])?["id"] as? Int
+                let inline = (body["inline"] as? [String: Any]).flatMap {
+                    try? JSONSerialization.data(withJSONObject: $0)
+                }.map { String(decoding: $0, as: UTF8.self) }
+                let extra = (parent.map { #", "parent": {"id": \#($0)}"# } ?? "")
+                    + (inline.map { #", "inline": \#($0)"# } ?? "")
+                return .init(status: 201, body: """
+                    {"id": 90, "content": {"raw": "hi"}, "user": \(Self.account("u1", "me"))\(extra)}
+                    """)
+            default: return .init(status: 404, body: "{}")
+            }
+        }
+        let client = Self.client(stub)
+        let pr = HostedItem.pullRequest(5)
+        let root = HostedCommentRef(kind: .general, id: 40)
+        let inlineRef = HostedCommentRef(kind: .review, id: 80)
+        let comments = Self.prPath + "/comments"
+        func inline(_ position: HostedInlinePosition) async throws -> HostedReviewComment {
+            let created = try await client.createInlineComment(at: position, on: 5, in: Self.repo, body: "hi")
+            #expect(created.id == 90 && created.path == "a.swift" && created.viewerCanEdit && created.viewerCanDelete)
+            return created
+        }
+        let rows: [(method: String, path: String, body: [String: Any]?, run: () async throws -> Void)] = [
+            ("POST", comments, ["content": ["raw": "hi"], "parent": ["id": 40]], {
+                let reply = try await client.reply(toGeneral: root, on: pr, in: Self.repo, body: "hi")
+                #expect(reply.id == 90 && reply.parentID == 40 && reply.viewerCanEdit && reply.viewerCanDelete)
+            }),
+            ("POST", comments + "/40/resolve", nil, {
+                let resolved = try await client.setGeneralThread(root, on: pr, in: Self.repo, resolved: true)
+                #expect(resolved)
+            }),
+            ("POST", comments + "/42/resolve", nil, {
+                let already = HostedCommentRef(kind: .general, id: 42)
+                let resolved = try await client.setGeneralThread(already, on: pr, in: Self.repo, resolved: true)
+                #expect(resolved, "a 409 says it already is")
+            }),
+            ("DELETE", comments + "/40/resolve", nil, {
+                let resolved = try await client.setGeneralThread(root, on: pr, in: Self.repo, resolved: false)
+                #expect(!resolved)
+            }),
+            ("PUT", comments + "/40", ["content": ["raw": "new"]], {
+                try await client.editComment(root, on: pr, in: Self.repo, body: "new")
+            }),
+            ("PUT", comments + "/80", ["content": ["raw": "new"]], {
+                try await client.editComment(inlineRef, on: pr, in: Self.repo, body: "new")
+            }),
+            ("DELETE", comments + "/40", nil, { try await client.deleteComment(root, on: pr, in: Self.repo) }),
+            ("DELETE", comments + "/80", nil, { try await client.deleteComment(inlineRef, on: pr, in: Self.repo) }),
+            ("POST", comments, ["content": ["raw": "hi"], "inline": ["path": "a.swift", "to": 12]], {
+                let created = try await inline(
+                    .init(path: "a.swift", oldLine: nil, newLine: 12, lineKind: .added, headSHA: "abc1"))
+                #expect(created.side == "RIGHT" && created.line == 12 && created.inReplyToID == nil)
+            }),
+            ("POST", comments, ["content": ["raw": "hi"], "inline": ["path": "a.swift", "to": 14]], {
+                _ = try await inline(.init(
+                    path: "a.swift", oldPath: "old.swift", oldLine: 10, newLine: 14, lineKind: .context,
+                    headSHA: "abc1"))
+            }),
+            ("POST", comments, ["content": ["raw": "hi"], "inline": ["path": "a.swift", "from": 8]], {
+                let created = try await inline(
+                    .init(path: "a.swift", oldLine: 8, newLine: nil, lineKind: .removed, headSHA: "abc1"))
+                #expect(created.side == "LEFT" && created.line == 8)
+            }),
+            ("POST", comments, ["content": ["raw": "hi"], "inline": ["path": "a.swift", "to": 5, "start_to": 3]], {
+                let created = try await inline(.init(
+                    path: "a.swift", oldLine: nil, newLine: 5, lineKind: .added, startNewLine: 3, headSHA: "abc1"))
+                #expect(created.line == 5 && created.startLine == 3)
+            }),
+            ("POST", comments, ["content": ["raw": "hi"], "inline": ["path": "a.swift", "from": 9, "start_from": 6]], {
+                _ = try await inline(.init(
+                    path: "a.swift", oldLine: 9, newLine: nil, lineKind: .removed, startOldLine: 6,
+                    startNewLine: nil, headSHA: "abc1"))
+            }),
+        ]
+
+        for (index, row) in rows.enumerated() {
+            let before = stub.requests.count
+            try await row.run()
+            #expect(stub.requests.count == before + 1, "row \(index): one request")
+            let request = try #require(stub.requests.last)
+            #expect(request.httpMethod == row.method, "row \(index)")
+            #expect(request.url?.absoluteString == "https://api.bitbucket.org" + row.path, "row \(index)")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)", "row \(index)")
+            guard let expected = row.body else {
+                #expect(request.httpBody?.isEmpty ?? true, "row \(index)")
+                continue
+            }
+            #expect(NSDictionary(dictionary: Self.json(request)).isEqual(to: expected), "row \(index): \(Self.json(request))")
+        }
+
+        let issue = HostedItem.issue(3)
+        let position = HostedInlinePosition(path: "a.swift", oldLine: nil, newLine: 2, lineKind: .added, headSHA: "a")
+        let refusals: [(String, () async throws -> Void)] = [
+            ("issue reply", { _ = try await client.reply(toGeneral: root, on: issue, in: Self.repo, body: "hi") }),
+            ("issue resolve", { _ = try await client.setGeneralThread(root, on: issue, in: Self.repo, resolved: true) }),
+            ("issue edit", { try await client.editComment(root, on: issue, in: Self.repo, body: "x") }),
+            ("issue delete", { try await client.deleteComment(root, on: issue, in: Self.repo) }),
+            ("review ref reply", {
+                _ = try await client.reply(toGeneral: inlineRef, on: pr, in: Self.repo, body: "hi")
+            }),
+            ("review ref resolve", {
+                _ = try await client.setGeneralThread(inlineRef, on: pr, in: Self.repo, resolved: true)
+            }),
+            ("added without its new line", {
+                _ = try await client.createInlineComment(
+                    at: .init(path: "a.swift", oldLine: 4, newLine: nil, lineKind: .added, headSHA: "a"),
+                    on: 5, in: Self.repo, body: "hi")
+            }),
+            ("removed without its old line", {
+                _ = try await client.createInlineComment(
+                    at: .init(path: "a.swift", oldLine: nil, newLine: 4, lineKind: .removed, headSHA: "a"),
+                    on: 5, in: Self.repo, body: "hi")
+            }),
+            ("a range across sides", {
+                var across = position
+                across.startOldLine = 1
+                _ = try await client.createInlineComment(at: across, on: 5, in: Self.repo, body: "hi")
+            }),
+        ]
+        let sent = stub.requests.count
+        for (name, run) in refusals {
+            await #expect(throws: HostingError.self, "\(name)") { try await run() }
+        }
+        #expect(stub.requests.count == sent, "a refusal sends nothing")
+        await #expect(throws: HostingError.self, "no reactions") {
+            try await client.addReaction("+1", to: root, on: pr, in: Self.repo)
         }
     }
 
@@ -563,6 +766,10 @@ struct BitbucketCloudClientTests {
         #expect(client.webURL(.issue(6), in: Self.repo) == nil)
         #expect(client.webURL(.repository, in: HostedRepository(host: "github.com", path: ["ws", "repo"])) == nil)
         #expect(client.webURL(.commit("abc;x"), in: Self.repo) == nil)
-        #expect(client.capabilities == [.requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove])
+        #expect(client.capabilities == [
+            .requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
+            .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
+        ])
+        #expect(!client.capabilities.contains(.reactions) && client.reactionKinds.isEmpty)
     }
 }

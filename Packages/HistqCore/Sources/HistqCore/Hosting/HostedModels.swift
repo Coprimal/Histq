@@ -178,7 +178,23 @@ public struct HostedIssue: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// A conversation comment of an issue or a pull request. Its `id` follows the id rule of `HostedReview`.
+/// One reaction kind on a comment: `kind` is the host's own name (GitHub's `content`, GitLab's emoji name), so a
+/// host may show kinds beyond its `reactionKinds`.
+public struct HostedReaction: Sendable, Hashable {
+    public var kind: String
+    public var count: Int
+    /// Whether the token's user is one of the `count`.
+    public var viewerReacted: Bool
+
+    public init(kind: String, count: Int, viewerReacted: Bool = false) {
+        self.kind = kind
+        self.count = count
+        self.viewerReacted = viewerReacted
+    }
+}
+
+/// A conversation comment of an issue or a pull request. Its `id` follows the id rule of `HostedReview`. `body` is
+/// the host's raw markdown on every host (what Edit starts from); `bodyHTML` is only for showing it.
 public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     public var id: Int
     public var user: HostedUser?
@@ -187,9 +203,22 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     public var htmlURL: String?
     public var createdAt: Date?
     public var updatedAt: Date?
+    /// The comment this one answers directly (a reply to a reply keeps its own parent); nil for a root.
+    public var parentID: Int?
+    /// A root's thread state where the host has one: nil when it cannot be resolved.
+    public var resolvable: Bool?
+    public var resolved: Bool?
+    /// The host's own key that writes on the comment take, where its id is not enough: GitLab's discussion id,
+    /// Bitbucket Data Center's comment version, Azure DevOps' thread id, GitHub's `node_id` (JSON `node_id`).
+    public var hostKey: String?
+    /// Not part of the JSON (GitHub's `reactions` rollup is another shape): the host's mapping sets these.
+    public var viewerCanEdit = false
+    public var viewerCanDelete = false
+    public var reactions: [HostedReaction] = []
 
     enum CodingKeys: String, CodingKey {
         case id, user, body
+        case hostKey = "node_id"
         case bodyHTML = "body_html"
         case htmlURL = "html_url"
         case createdAt = "created_at"
@@ -243,14 +272,22 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var side: String?
     /// The diff hunk the comment was written on, ending at the commented line.
     public var diffHunk: String?
+    /// The host's raw markdown, what Edit starts from.
     public var body: String?
     public var bodyHTML: String?
     public var user: HostedUser?
     public var createdAt: Date?
     public var htmlURL: String?
+    /// As in `HostedComment`: the host's own key for writes (GitHub's `node_id`).
+    public var hostKey: String?
+    /// As in `HostedComment`: not part of the JSON, the host's mapping sets these.
+    public var viewerCanEdit = false
+    public var viewerCanDelete = false
+    public var reactions: [HostedReaction] = []
 
     enum CodingKeys: String, CodingKey {
         case id, path, line, side, body, user
+        case hostKey = "node_id"
         case pullRequestReviewID = "pull_request_review_id"
         case inReplyToID = "in_reply_to_id"
         case originalLine = "original_line"

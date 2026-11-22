@@ -133,6 +133,18 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let reviewRequests = HostingCapabilities(rawValue: 1 << 7)
     /// The token's user can revoke their own approval (`unapprove(_:in:)`); GitHub has no such action.
     public static let unapprove = HostingCapabilities(rawValue: 1 << 8)
+    /// Replies under a general (conversation) comment (`reply(toGeneral:on:in:body:)`).
+    public static let generalReplies = HostingCapabilities(rawValue: 1 << 9)
+    /// Resolves and reopens a general thread whose root is `resolvable` (`setGeneralThread(_:on:in:resolved:)`).
+    public static let resolveGeneralThreads = HostingCapabilities(rawValue: 1 << 10)
+    /// Edits and deletes a comment the token's user may (`viewerCanEdit`, `viewerCanDelete`).
+    public static let editComments = HostingCapabilities(rawValue: 1 << 11)
+    public static let deleteComments = HostingCapabilities(rawValue: 1 << 12)
+    /// Adds and removes the token's user's reactions, of the provider's `reactionKinds`.
+    public static let reactions = HostingCapabilities(rawValue: 1 << 13)
+    /// Writes a new inline comment on a diff line (`createInlineComment(at:on:in:body:)`), and on a range of lines.
+    public static let newInlineComments = HostingCapabilities(rawValue: 1 << 14)
+    public static let multiLineInlineComments = HostingCapabilities(rawValue: 1 << 15)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -156,6 +168,58 @@ public struct HostedThreadRef: Sendable, Hashable {
     public init(rootCommentID: Int, hostKey: String? = nil) {
         self.rootCommentID = rootCommentID
         self.hostKey = hostKey
+    }
+}
+
+/// A comment a write acts on: a general (conversation) comment or a review (inline) comment, separate id spaces on
+/// some hosts; `hostKey` is the comment's own (`HostedComment.hostKey`, `HostedReviewComment.hostKey`).
+public struct HostedCommentRef: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable {
+        case general, review
+    }
+
+    public var kind: Kind
+    public var id: Int
+    public var hostKey: String?
+
+    public init(kind: Kind, id: Int, hostKey: String? = nil) {
+        self.kind = kind
+        self.id = id
+        self.hostKey = hostKey
+    }
+}
+
+/// The diff line a new inline comment goes on, in the patch `headSHA` was loaded at. An added line has only
+/// `newLine`, a removed line only `oldLine`, a context line both. A multi-line comment ends at this line and starts
+/// at `startOldLine`/`startNewLine`, set by the same rule for the first line (both nil for a single line).
+public struct HostedInlinePosition: Sendable, Hashable {
+    public enum LineKind: Sendable, Hashable {
+        case added, removed, context
+    }
+
+    public var path: String
+    /// The file's path before a rename; nil when it kept its path.
+    public var oldPath: String?
+    public var oldLine: Int?
+    public var newLine: Int?
+    public var lineKind: LineKind
+    public var startOldLine: Int?
+    public var startNewLine: Int?
+    /// The pull request's head commit the shown patch was loaded at.
+    public var headSHA: String
+
+    public init(
+        path: String, oldPath: String? = nil, oldLine: Int?, newLine: Int?, lineKind: LineKind,
+        startOldLine: Int? = nil, startNewLine: Int? = nil, headSHA: String
+    ) {
+        self.path = path
+        self.oldPath = oldPath
+        self.oldLine = oldLine
+        self.newLine = newLine
+        self.lineKind = lineKind
+        self.startOldLine = startOldLine
+        self.startNewLine = startNewLine
+        self.headSHA = headSHA
     }
 }
 
@@ -202,6 +266,9 @@ public protocol HostingProvider: Sendable {
     var capabilities: HostingCapabilities { get }
     /// The ways a pull request can be merged.
     var mergeMethods: Set<HostedMergeMethod> { get }
+    /// The reaction kinds the token's user can add, in the order the host shows them (host names, as
+    /// `HostedReaction.kind`); empty without the `reactions` capability.
+    var reactionKinds: [String] { get }
     /// How pull request `pullRequest`'s head is fetched locally.
     func checkout(of pullRequest: HostedPullRequest) -> HostedCheckout
     /// The web page of `target` in `repo`; nil when it has none.
@@ -271,11 +338,82 @@ public protocol HostingProvider: Sendable {
     func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws
     /// Closes (`open` false) or reopens an issue or a pull request.
     func setOpen(_ open: Bool, item: HostedItem, in repo: HostedRepository) async throws
+
+    /// Replies to the general comment `comment` of `item` (only with the `generalReplies` capability).
+    func reply(toGeneral comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
+        async throws -> HostedComment
+    /// Resolves (`resolved` true) or reopens the general thread whose root is `root` (only with the
+    /// `resolveGeneralThreads` capability), and returns whether it is resolved as the host answers it.
+    func setGeneralThread(_ root: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, resolved: Bool)
+        async throws -> Bool
+    /// Replaces the body of `comment` with `body` (only with the `editComments` capability).
+    func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
+        async throws
+    /// Deletes `comment` (only with the `deleteComments` capability).
+    func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository) async throws
+    /// Adds the token's user's reaction `kind` (one of `reactionKinds`) to `comment` (only with `reactions`).
+    func addReaction(_ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    /// Removes the token's user's reaction `kind` from `comment` (only with `reactions`).
+    func removeReaction(
+        _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws
+    /// Writes a new inline comment at `position` on pull request `number` (only with `newInlineComments`, and
+    /// `multiLineInlineComments` for a start line).
+    func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
+    ) async throws -> HostedReviewComment
 }
 
 extension HostingProvider {
     /// A host without the `unapprove` capability refuses it unsent.
     public func unapprove(_ number: Int, in repo: HostedRepository) async throws {
         throw HostingError.validationFailed(message: "this host cannot revoke an approval")
+    }
+
+    /// None by default.
+    public var reactionKinds: [String] { [] }
+
+    /// A host without the comment capability refuses each comment write unsent.
+    public func reply(
+        toGeneral comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String
+    ) async throws -> HostedComment {
+        throw HostingError.validationFailed(message: "this host cannot reply to a general comment")
+    }
+
+    public func setGeneralThread(
+        _ root: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, resolved: Bool
+    ) async throws -> Bool {
+        throw HostingError.validationFailed(message: "this host cannot resolve a general comment")
+    }
+
+    public func editComment(
+        _ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot edit a comment")
+    }
+
+    public func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    {
+        throw HostingError.validationFailed(message: "this host cannot delete a comment")
+    }
+
+    public func addReaction(
+        _ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot add a reaction")
+    }
+
+    public func removeReaction(
+        _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot remove a reaction")
+    }
+
+    public func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
+    ) async throws -> HostedReviewComment {
+        throw HostingError.validationFailed(message: "this host cannot write a new inline comment")
     }
 }

@@ -66,7 +66,7 @@ struct PRThreads: Sendable {
     let byReview: [Int: [HostedReviewThread]]
     /// The reviews that only hold replies to other reviews' threads: GitHub hides them from the timeline.
     let replyOnlyReviewIDs: Set<Int>
-    /// The threads whose root has no review, shown at the end of the timeline.
+    /// The threads whose root has no review, shown in the timeline at their first comment's time.
     let unattached: [HostedReviewThread]
     /// Why resolving is unavailable: the GraphQL load failed, or its states joined none of the threads. nil when
     /// the states loaded and joined, even only some of the threads, or when there are no threads.
@@ -86,15 +86,22 @@ struct PullRequestDetail: Sendable {
     let loadID: Int
     /// Replaced alone by the model's re-poll while GitHub still computes whether the branch merges.
     var pull: HostedPullRequest
-    let timelineCount: Int
+    var timelineCount: Int
     /// The Conversation's page: the description, then comments and reviews by date, each review with its threads
-    /// (`PRTimeline.page`).
-    let timeline: PRTimelineHTML
+    /// (`PRTimeline.page`). Rebuilt with `comments` by a general thread action, before its write (optimistic).
+    var timeline: PRTimelineHTML
+    /// The page's general comments and reviews, as loaded (or as an optimistic action patched them).
+    var comments: [HostedComment]
+    let reviews: [HostedReview]
+    /// The token's user, where the host has general replies or revokes approvals (the author of an optimistic reply);
+    /// nil when unknown.
+    let viewer: HostedUser?
     let reviewers: [PRReviewer]
     let commits: Loadable<[HostedCommit]>
     let files: Loadable<[PRFile]>
     let checks: Loadable<[HostedCheckRun]>
-    let threads: Loadable<PRThreads>
+    /// As loaded, or as an optimistic edit or delete of a review comment patched them.
+    var threads: Loadable<PRThreads>
     /// The token's user's latest review is an approval, on a provider that can revoke it (`unapprove`): the Review
     /// box offers Revoke Approval.
     let viewerApproved: Bool
@@ -116,6 +123,9 @@ enum PullRequestAction: Equatable, Sendable {
     case resolve(thread: HostedReviewThreadState, resolved: Bool)
     /// Revokes the token's user's approval (GitLab).
     case unapprove
+    /// A reply to or a resolve of a general thread, or an edit or delete of an own comment (`PRGeneralAction`), shown
+    /// before the host answers (optimistic).
+    case general(PRGeneralAction)
 
     var progressTitle: String {
         switch self {
@@ -126,6 +136,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .reply: "Replying…"
         case .resolve(_, let resolved): resolved ? "Resolving…" : "Unresolving…"
         case .unapprove: "Revoking the approval…"
+        case .general(let action): action.progressTitle
         }
     }
 
@@ -138,6 +149,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .reply: "The reply was not posted"
         case .resolve(_, let resolved): resolved ? "Resolve failed" : "Unresolve failed"
         case .unapprove: "The approval was not revoked"
+        case .general(let action): action.failureTitle
         }
     }
 
@@ -151,6 +163,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .reply: "The reply on \(number) was not posted"
         case .resolve(_, let resolved): resolved ? "Resolve on \(number) failed" : "Unresolve on \(number) failed"
         case .unapprove: "The approval of \(number) was not revoked"
+        case .general(let action): action.failureTitle(of: number)
         }
     }
 
@@ -164,6 +177,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .reply: "reply"
         case .resolve(_, let resolved): resolved ? "resolve" : "unresolve"
         case .unapprove: "unapprove"
+        case .general(let action): action.timingName
         }
     }
 }
@@ -232,6 +246,16 @@ final class PullRequestDetailModel {
     /// The threads the user expanded (true) or collapsed (false) against their default, by root comment id; a thread
     /// the user resolves is collapsed here too.
     var threadExpanded: [Int: Bool] = [:]
+    /// The same for general threads (`PRGeneralThreadModel`), by root comment id: an id space apart from the review
+    /// threads'.
+    var generalReplyDrafts: [Int: String] = [:]
+    var generalExpanded: [Int: Bool] = [:]
+    /// The comments being edited in place and their editors' text, by `PRCommentTarget.key` (`PRGeneralThreadModel`).
+    var editingComments: Set<String> = []
+    var commentEditDrafts: [String: String] = [:]
+    #if DEBUG
+    var launchDelete: (target: PRCommentTarget, confirm: Bool)?
+    #endif
     /// The actions running on GitHub, by pull request: one at a time for each. An action belongs to the pull request it
     /// started on, not to the detail, which may show another one by the time it returns.
     private(set) var busy: [Int: PullRequestAction] = [:]
@@ -244,6 +268,9 @@ final class PullRequestDetailModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadCount = 0
+    /// The ids of optimistic replies: above any id a host gives, so they never meet a real one, and digits only, as
+    /// the page's slot ids are.
+    @ObservationIgnored private var optimisticID = 1 << 62
 
     /// DEBUG `-HistqPRTab commits|files|checks`: the tab a pull request opens on (QA shots of each tab).
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
@@ -266,21 +293,33 @@ final class PullRequestDetailModel {
     case "reopen": .setOpen(true)
     default: nil
     }
-    /// DEBUG `-HistqPRAction reply|resolve|unresolve`: like `launchAction`, on a review thread of the first load,
-    /// which picks it (`threadLaunchAction(_:in:)`): only with `-HistqGitHubStub YES` too.
+    /// DEBUG `-HistqPRAction reply|resolve|unresolve|greply|gresolve|edit|edit-save|delete|delete-confirm`: like
+    /// `launchAction`, on a review thread (or a general thread: `greply`, `gresolve`; or the first own comment: `edit`
+    /// opens its editor, `edit-save` saves "edited" into it, `delete` opens its confirmation, `delete-confirm`
+    /// confirms it) of the first load, which picks it (`threadLaunchAction(_:in:)`): only with `-HistqGitHubStub YES`
+    /// too.
     private static var threadLaunchActionName: String? = GitHubStub.isEnabled
-        ? AppState.launchFlag("-HistqPRAction").flatMap { ["reply", "resolve", "unresolve"].contains($0) ? $0 : nil }
+        ? AppState.launchFlag("-HistqPRAction").flatMap {
+            ["reply", "resolve", "unresolve", "greply", "gresolve", "edit", "edit-save", "delete", "delete-confirm"]
+                .contains($0) ? $0 : nil
+        }
         : nil
     /// `merge-stale-closed`: the detail closes while the merge runs, so its failure is another detail's (the PRs tab's
     /// notice).
     private static let closesAfterLaunchAction = AppState.launchFlag("-HistqPRAction") == "merge-stale-closed"
 
     /// `reply` posts "QA reply" to the first thread, `resolve` resolves the first unresolved one and `unresolve`
-    /// unresolves the first resolved one, whatever `viewerCanResolve` says (the stub answers both); nil when no
-    /// thread fits.
+    /// unresolves the first resolved one, whatever `viewerCanResolve` says (the stub answers both); `greply` and
+    /// `gresolve` act on the first general thread and `edit-save` on the first own comment
+    /// (`PRGeneralAction.launchAction`); nil when no thread fits, and for `edit`, `delete` and `delete-confirm`
+    /// (`openLaunchStep`).
     private static func threadLaunchAction(_ name: String, in detail: PullRequestDetail) -> PullRequestAction? {
         let threads = detail.threads.value?.all ?? []
         switch name {
+        case "greply", "gresolve", "edit-save":
+            return PRGeneralAction.launchAction(
+                name, in: detail.comments, reviewComments: threads.flatMap(\.comments), page: detail.timeline
+            ).map { .general($0) }
         case "reply":
             return threads.first.map { .reply(rootID: $0.id, body: "QA reply") }
         case "resolve", "unresolve":
@@ -289,6 +328,22 @@ final class PullRequestDetailModel {
                 .map { .resolve(thread: $0, resolved: resolved) }
         default:
             return nil
+        }
+    }
+
+    /// `edit` opens the first own comment's editor, `delete` and `delete-confirm` its confirmation (the page opens it,
+    /// `launchDelete`); nothing for another name or when no comment fits.
+    private func openLaunchStep(_ name: String, in detail: PullRequestDetail) {
+        let target = PRGeneralAction.launchTarget(
+            name, in: detail.comments, reviewComments: detail.threads.value?.all.flatMap(\.comments) ?? [],
+            page: detail.timeline)
+        guard let target, let number else { return }
+        switch name {
+        case "edit":
+            beginEdit(target)
+            UITiming.content("pr \(number) action edit open")
+        case "delete", "delete-confirm": launchDelete = (target, name == "delete-confirm")
+        default: break
         }
     }
     #endif
@@ -306,6 +361,10 @@ final class PullRequestDetailModel {
             reviewEvent = .approve
             replyDrafts = [:]
             threadExpanded = [:]
+            generalReplyDrafts = [:]
+            generalExpanded = [:]
+            editingComments = []
+            commentEditDrafts = [:]
             actionError = nil
         }
         self.number = number
@@ -319,9 +378,10 @@ final class PullRequestDetailModel {
         let loadID = loadCount
         // The page is built with the threads the user expanded or collapsed by now.
         let expanded = threadExpanded
+        let general = PRGeneralOptions(api.client.capabilities, expanded: generalExpanded)
         task = Task { [weak self] in
             let result = await Self.fetch(
-                api.client, api.repository, number: number, loadID: loadID, expanded: expanded)
+                api.client, api.repository, number: number, loadID: loadID, expanded: expanded, general: general)
             guard let self, generation == self.generation, !Task.isCancelled else { return }
             switch result {
             case .success(let detail):
@@ -340,7 +400,7 @@ final class PullRequestDetailModel {
                             self?.perform(action, on: number, github: github)
                         }
                     } else {
-                        perform(action, on: number, github: github)
+                        PRLaunchActionGate.run { [weak self] in self?.perform(action, on: number, github: github) }
                     }
                     if Self.closesAfterLaunchAction { close() }
                 }
@@ -354,8 +414,10 @@ final class PullRequestDetailModel {
                                 self?.perform(action, on: number, github: github)
                             }
                         } else {
-                            perform(action, on: number, github: github)
+                            PRLaunchActionGate.run { [weak self] in self?.perform(action, on: number, github: github) }
                         }
+                    } else {
+                        PRLaunchActionGate.run { [weak self] in self?.openLaunchStep(name, in: detail) }
                     }
                 }
                 #endif
@@ -441,13 +503,52 @@ final class PullRequestDetailModel {
         if case .reply(let rootID, _) = action, self.number == number {
             hostKey = state.value?.threads.value?.all.first(where: { $0.id == rootID })?.state?.id
         }
+        // A general thread or own comment action shows at once: the shown detail's comments (and threads) patched,
+        // its page rebuilt off the main actor before the write; a failure puts them and the page back.
+        var optimistic: (shown: PullRequestDetail, comments: [HostedComment], threads: Loadable<PRThreads>,
+                         general: PRGeneralOptions)?
+        if case .general(let general) = action, self.number == number, let shown = state.value {
+            // A thread just resolved takes its default (collapsed), on the page and after; one being unresolved
+            // stays as the user expanded it.
+            if case .resolve(let root, true) = general { generalExpanded[root.id] = nil }
+            // A saved edit closes its editor at once (the page shows the new body); its text stays until the write
+            // is in, and a failure opens the editor again with it.
+            if case .edit(let target, _) = general { editingComments.remove(target.key) }
+            optimisticID &+= 1
+            // Bitbucket keeps a deleted comment that has replies, as "This comment was deleted".
+            let keepsDeleted = api.client.kind == .bitbucketCloud
+            optimistic = (shown, PRTimeline.patched(shown.comments, general, viewer: shown.viewer,
+                                                    replyID: optimisticID, keepsDeleted: keepsDeleted),
+                          PRTimeline.patched(shown.threads, general, keepsDeleted: keepsDeleted),
+                          PRGeneralOptions(api.client.capabilities, expanded: generalExpanded))
+        }
+        let expanded = threadExpanded
         Task { [weak self] in
+            if let optimistic {
+                let page = await Self.page(
+                    optimistic.shown, comments: optimistic.comments, threads: optimistic.threads,
+                    noun: api.client.kind.pullRequestNoun, expanded: expanded, general: optimistic.general)
+                if self?.replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments,
+                                     threads: optimistic.threads, timeline: page) == true {
+                    UITiming.content("pr \(number) action \(action.timingName) patched")
+                }
+            }
             let error = await Self.run(action, hostKey: hostKey, api.client, api.repository, number: number)
             guard let self else { return }
             busy[number] = nil
             UITiming.content("pr \(number) action \(action.timingName) \(error == nil ? "ok" : "failed")")
             let showing = isShowing(number)
             if let error {
+                if let optimistic {
+                    replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.shown.comments,
+                                threads: optimistic.shown.threads, timeline: optimistic.shown.timeline)
+                }
+                if case .general(.edit(let target, let body)) = action, self.number == number {
+                    reopenEdit(target.key, body: body)
+                    if editingComments.contains(target.key) {
+                        UITiming.content("pr \(number) action edit reopened cedit-\(target.key) open")
+                    }
+                }
                 let message = Self.message(for: error, kind: api.client.kind)
                 UITiming.content("pr \(number) action error \(message)")
                 if showing {
@@ -473,12 +574,52 @@ final class PullRequestDetailModel {
                    let root = state.value?.threads.value?.all.first(where: { $0.state?.id == thread.id })?.id {
                     threadExpanded[root] = false
                 }
+            case .general(let general):
+                if case .reply(let root, _) = general, self.number == number { generalReplyDrafts[root.id] = nil }
+                if case .edit(let target, _) = general, self.number == number { savedEdit(target.key) }
             case .merge, .setOpen, .unapprove: break
             }
             afterSuccess?()
             github.refreshNow()
             if showing { load(number, github: github, quiet: true) }
         }
+    }
+
+    /// Puts `comments`, `threads` and their page in the shown detail (in one change: the page's views read both),
+    /// only while it is still load `loadID` of pull request `number` (a reload in between already has the host's
+    /// answer). The rest of the detail stays as it is now (the re-poll may have replaced `pull`).
+    @discardableResult
+    private func replacePage(
+        of loadID: Int, number: Int, comments: [HostedComment], threads: Loadable<PRThreads>, timeline: PRTimelineHTML
+    ) -> Bool {
+        guard self.number == number, case .loaded(var detail) = state, detail.loadID == loadID else { return false }
+        detail.comments = comments
+        detail.threads = threads
+        detail.timeline = timeline
+        detail.timelineCount = timeline.count
+        state = .loaded(detail)
+        return true
+    }
+
+    /// The Conversation's page of `detail` with `comments` and `threads` instead of its own (an optimistic action's).
+    @concurrent
+    private nonisolated static func page(
+        _ detail: PullRequestDetail, comments: [HostedComment], threads: Loadable<PRThreads>, noun: String,
+        expanded: [Int: Bool], general: PRGeneralOptions
+    ) async -> PRTimelineHTML {
+        timeline(detail.pull, noun: noun, comments: comments, reviews: detail.reviews, threads: threads,
+                 expanded: expanded, general: general)
+    }
+
+    /// The Conversation's page: the description of `pull` (a `noun`), then `comments`, `reviews` and `threads`.
+    private nonisolated static func timeline(
+        _ pull: HostedPullRequest, noun: String, comments: [HostedComment], reviews: [HostedReview],
+        threads: Loadable<PRThreads>, expanded: [Int: Bool], general: PRGeneralOptions
+    ) -> PRTimelineHTML {
+        PRTimeline.page(
+            author: pull.user, action: "opened this \(noun.lowercased())", date: pull.createdAt, html: pull.bodyHTML,
+            markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded,
+            general: general)
     }
 
     /// Whether the detail shows pull request `number` (loading or loaded), not another one or nothing (closed).
@@ -490,7 +631,8 @@ final class PullRequestDetailModel {
 
     @concurrent
     private nonisolated static func fetch(
-        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, loadID: Int, expanded: [Int: Bool]
+        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, loadID: Int, expanded: [Int: Bool],
+        general: PRGeneralOptions
     ) async -> Result<PullRequestDetail, any Error> {
         async let pullRequest = client.pullRequest(number, in: repository)
         async let comments = client.comments(on: .pullRequest(number), in: repository)
@@ -499,8 +641,9 @@ final class PullRequestDetailModel {
         async let files = part(client.kind) { try await client.pullRequestFiles(number, in: repository) }
         async let reviewComments = part(client.kind) { try await client.reviewComments(of: number, in: repository) }
         async let threadStates = part(client.kind) { try await client.reviewThreadStates(of: number, in: repository) }
-        // Only a provider that can revoke an approval asks who the token's user is; a failure only hides the button.
-        let asksViewer = client.capabilities.contains(.unapprove)
+        // Only a provider that can revoke an approval or reply to general comments asks who the token's user is; a
+        // failure only hides the button (or draws an optimistic reply as "you").
+        let asksViewer = !client.capabilities.isDisjoint(with: [.unapprove, .generalReplies])
         async let viewer = asksViewer ? try? await client.currentUser() : nil
         do {
             let pull = try await pullRequest
@@ -512,19 +655,19 @@ final class PullRequestDetailModel {
             case .idle, .loading: .idle
             }
             let threads = Self.threads(await reviewComments, await threadStates, hostName: client.kind.name)
-            let timeline = PRTimeline.page(
-                author: pull.user, action: "opened this \(client.kind.pullRequestNoun.lowercased())",
-                date: pull.createdAt, html: pull.bodyHTML,
-                markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded)
+            let timeline = timeline(
+                pull, noun: client.kind.pullRequestNoun, comments: comments, reviews: reviews, threads: threads,
+                expanded: expanded, general: general)
             let reviewers = reviewers(pull, reviews)
-            let viewerID = await viewer?.id
-            let viewerApproved = viewerID.map { id in
-                reviewers.contains { $0.userID == id && $0.state == "APPROVED" }
+            let viewer = await viewer
+            let viewerApproved = viewer.map { viewer in
+                client.capabilities.contains(.unapprove)
+                    && reviewers.contains { $0.userID == viewer.id && $0.state == "APPROVED" }
             } ?? false
             return .success(PullRequestDetail(
-                loadID: loadID, pull: pull, timelineCount: timeline.count, timeline: timeline,
-                reviewers: reviewers, commits: await commits, files: fileList, checks: await checks,
-                threads: threads, viewerApproved: viewerApproved))
+                loadID: loadID, pull: pull, timelineCount: timeline.count, timeline: timeline, comments: comments,
+                reviews: reviews, viewer: viewer, reviewers: reviewers, commits: await commits, files: fileList,
+                checks: await checks, threads: threads, viewerApproved: viewerApproved))
         } catch {
             return .failure(error)
         }
@@ -627,6 +770,7 @@ final class PullRequestDetailModel {
             case .resolve(let thread, let resolved):
                 _ = try await client.setReviewThread(thread, resolved: resolved)
             case .unapprove: try await client.unapprove(number, in: repository)
+            case .general(let action): try await action.run(client, on: .pullRequest(number), in: repository)
             }
             return nil
         } catch {
@@ -644,6 +788,19 @@ final class PullRequestDetailModel {
         default:
             error.localizedDescription
         }
+    }
+}
+
+extension PullRequestDetailModel: PRGeneralThreadModel {
+    func isBusy(_ number: Int) -> Bool { busy[number] != nil }
+
+    func runningGeneral(on number: Int) -> PRGeneralAction? {
+        if case .general(let action)? = busy[number] { return action }
+        return nil
+    }
+
+    func perform(_ action: PRGeneralAction, on number: Int, github: HostingStore) {
+        perform(.general(action), on: number, github: github)
     }
 }
 
@@ -1030,7 +1187,7 @@ struct PRConversationTab: View {
                 // the page scrolls this column.
                 PRTimelinePage(session: session, number: detail.pull.number, timeline: detail.timeline,
                                loadID: detail.loadID, threads: detail.threads.value,
-                               avatars: .of(session.github))
+                               avatars: .of(session.github), general: session.pullDetail)
                     .frame(maxWidth: .infinity)
             }
             PRActionsCard(session: session, detail: detail)

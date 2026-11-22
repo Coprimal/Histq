@@ -32,8 +32,8 @@ public struct HostedReviewThread: Sendable, Equatable, Identifiable {
     /// that point at it (`inReplyToID`). When GitHub did not return a reply's root, the replies to that root still
     /// make one thread, headed by the earliest of them, whose `id` stays the missing root's (the id a reply posts
     /// to); its state joins on that id, else on the head's. A thread whose head has no review id goes to
-    /// `unattached`, ordered the same way, for the caller to show at the end of the timeline: dropping it would hide
-    /// an inline comment. `replyOnlyReviewIDs` are the reviews whose comments all went into threads of other
+    /// `unattached`, ordered the same way, for the caller to show at its root's time: dropping it would hide an
+    /// inline comment. `replyOnlyReviewIDs` are the reviews whose comments all went into threads of other
     /// reviews: GitHub makes such a review for each later reply and hides it from the timeline. It is read from the
     /// comments alone; whether such a review still shows when it has a body of its own is the caller's choice.
     public static func group(

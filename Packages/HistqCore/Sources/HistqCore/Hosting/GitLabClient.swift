@@ -6,9 +6,10 @@
 // The token is a secret: the client asks its provider for it on every request (a constant for a personal access
 // token, a refresher for OAuth), and after a 401 asks once more with the refused token and retries that request once.
 // It only ever goes in the `Authorization` header of a request under `apiBase` (its origin and base path), or to
-// `graphQLURL` exactly (requesting changes, which REST lacks): a `Link: rel="next"` URL outside `apiBase` is refused,
-// a redirect to another origin or outside the base path is not followed, no error or description holds it, and
-// `print`, `dump` and `String(reflecting:)` of a client show only its host.
+// `graphQLURL` exactly (requesting changes, note rights and awards, award and issue-thread mutations, which REST
+// lacks): a `Link: rel="next"` URL outside `apiBase` is refused, a redirect to another origin or outside the base path
+// is not followed, no error or description holds it, and `print`, `dump` and `String(reflecting:)` of a client show
+// only its host.
 import Foundation
 import Synchronization
 
@@ -64,12 +65,19 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// the merge request of each thread it mapped (for `setReviewThread(_:resolved:)`, which gets the thread only),
     /// and the discussion of each diff note it mapped (for `reply(to:on:in:body:)` without a `hostKey`). Shared by
     /// copies of the client.
+    /// `threadLoads` holds the running discussions load of each item (`itemKey`), so the reads of one detail load
+    /// share it: removed when it finishes and by a write on the item. `globalIDs` keeps the GraphQL global id of
+    /// each note and discussion a load read (`itemKey` + `note`/`discussion` + REST id), which the award and issue
+    /// resolve mutations take, and `resolvableDiscussions` the general threads a load found resolvable.
     private final class Memo: Sendable {
         let userID = Mutex<Int?>(nil)
         let mergeRequestByHead = Mutex<[String: Int]>([:])
         let headByMergeRequest = Mutex<[String: String]>([:])
         let mergeRequestByDiscussion = Mutex<[String: (projectID: String, iid: Int)]>([:])
         let discussionByNote = Mutex<[String: String]>([:])
+        let threadLoads = Mutex<[String: (token: UUID, task: Task<GitLabThreads, any Error>)]>([:])
+        let globalIDs = Mutex<[String: String]>([:])
+        let resolvableDiscussions = Mutex<Set<String>>([])
     }
 
     // MARK: - Hosts and remote URLs
@@ -118,12 +126,22 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// All of them: requesting changes through GraphQL (REST has it only through draft notes), and revoking an
     /// approval, which GitHub lacks.
     public var capabilities: HostingCapabilities {
-        [.labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests, .unapprove]
+        [
+            .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
+            .unapprove, .generalReplies, .resolveGeneralThreads, .editComments, .deleteComments, .reactions,
+            .newInlineComments, .multiLineInlineComments,
+        ]
     }
 
     /// What `PUT .../merge` does: a merge (commit or fast-forward, as the project is set up) or a squash. A rebase is
     /// its own endpoint, not a merge method.
     public var mergeMethods: Set<HostedMergeMethod> { [.merge, .squash] }
+
+    /// GitLab's default emoji reactions, as its picker shows them first. Any other emoji name a note already has
+    /// still shows in its `reactions`.
+    public var reactionKinds: [String] {
+        ["thumbsup", "thumbsdown", "laughing", "tada", "confused", "heart", "rocket", "eyes"]
+    }
 
     /// `merge-requests/<iid>/head`, the ref GitLab keeps for every merge request in the target project, forks' too.
     public func checkout(of pullRequest: HostedPullRequest) -> HostedCheckout {
@@ -232,14 +250,40 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return issues.map(issue)
     }
 
-    /// The notes of an issue or a merge request, oldest first, with HTML from `MarkdownHTML` (REST notes have
-    /// none). System notes (`system: true`) and diff notes, which `reviewComments(of:in:)` shows in their threads,
-    /// are left out.
+    /// The general discussions of an issue or a merge request in GitLab's order, each root followed by its replies
+    /// (`parentID` the root's id: GitLab nests one level), with HTML from `MarkdownHTML` (REST notes have none).
+    /// `hostKey` is the discussion id, which replying and resolving take; a root is `resolvable` as its note is.
+    /// System notes and diff threads, which `reviewComments(of:in:)` shows, are left out. Rights and reactions come
+    /// from the load's GraphQL read (`threads(of:in:)`).
     public func comments(on item: HostedItem, in repo: HostedRepository) async throws -> [HostedComment] {
-        let notes: [GitLabNote] = try await list(
-            url(try itemPath(item, in: repo) + ["notes"], query: ["sort": "asc", "order_by": "created_at"]))
+        let threads = try await threads(of: item, in: repo)
         let page = webURL(Self.webTarget(item), in: repo)
-        return notes.filter { $0.system != true && !$0.isDiffNote }.map { Self.comment($0, page: page) }
+        let itemKey = try itemKey(item, in: repo)
+        var result: [HostedComment] = []
+        for discussion in threads.discussions {
+            let notes = discussion.notes.filter { $0.system != true }
+            guard let root = notes.first, !root.isDiffNote else { continue }
+            let resolvableNotes = notes.filter { $0.resolvable == true }
+            let resolvable = root.resolvable == true
+            if resolvable {
+                memo.resolvableDiscussions.withLock { _ = $0.insert(itemKey + "\u{0}" + discussion.id) }
+            }
+            for note in notes {
+                var comment = Self.comment(note, page: page)
+                comment.parentID = note.id == root.id ? nil : root.id
+                comment.hostKey = discussion.id
+                if note.id == root.id, resolvable {
+                    comment.resolvable = true
+                    comment.resolved = threads.discussionResolved?[discussion.id]
+                        ?? resolvableNotes.allSatisfy { $0.resolved == true }
+                }
+                let state = viewerState(of: note, in: threads)
+                (comment.viewerCanEdit, comment.viewerCanDelete) = (state.canAdmin, state.canAdmin)
+                comment.reactions = state.reactions
+                result.append(comment)
+            }
+        }
+        return result
     }
 
     /// One review per user: `APPROVED` for each user in the approvals' `approved_by`, else the reviewer's state
@@ -273,8 +317,10 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// line; a multi-line comment starts at `line_range.start` on the same side. A position on another head than the
     /// merge request's is outdated: only `originalLine` is set then. The diff hunk is cut from the file's current
     /// patch, from its `@@` header to the commented line, and nil when that line is not in it.
+    /// `hostKey` is the discussion id; rights and reactions come from the load's GraphQL read, as in
+    /// `comments(on:in:)`.
     public func reviewComments(of number: Int, in repo: HostedRepository) async throws -> [HostedReviewComment] {
-        let threads = try await diffThreads(of: number, in: repo)
+        let (threads, load) = try await diffThreads(of: number, in: repo)
         guard !threads.isEmpty else { return [] }
         async let detail = try? mergeRequest(number, in: repo)
         async let files = try? pullRequestFiles(number, in: repo)
@@ -284,7 +330,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             uniquingKeysWith: { a, _ in a })
         let page = webURL(.pullRequest(number), in: repo)
         var result: [HostedReviewComment] = []
-        for (_, notes) in threads {
+        for (id, notes) in threads {
             guard let root = notes.first, let position = root.position else { continue }
             let place = Self.place(position)
             let current = Self.isCurrent(position, head: head)
@@ -292,13 +338,18 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                 ? place.line.flatMap { line in patches[place.path].flatMap { Self.hunk($0, side: place.side, line: line) } }
                 : nil
             for note in notes {
-                result.append(HostedReviewComment(
+                var comment = HostedReviewComment(
                     id: note.id, inReplyToID: note.id == root.id ? nil : root.id, path: place.path,
                     line: current ? place.line : nil, originalLine: place.line,
                     startLine: current ? place.startLine : nil, originalStartLine: place.startLine, side: place.side,
                     diffHunk: hunk, body: note.body, bodyHTML: note.body.map(MarkdownHTML.html),
                     user: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
-                    htmlURL: Self.noteURL(page, note.id)))
+                    htmlURL: Self.noteURL(page, note.id))
+                comment.hostKey = id
+                let state = viewerState(of: note, in: load)
+                (comment.viewerCanEdit, comment.viewerCanDelete) = (state.canAdmin, state.canAdmin)
+                comment.reactions = state.reactions
+                result.append(comment)
             }
         }
         return result
@@ -307,11 +358,11 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// A state for each diff thread with resolvable notes: the discussion id is its key (resolving and replying
     /// take it), resolved when every resolvable note is, outdated as in `reviewComments(of:in:)`. GitLab does not say
     /// whether the token's user may resolve it (Developer and up, and the merge request's author, may): both flags are
-    /// true, and GitLab refuses the others.
+    /// true, and GitLab refuses the others. (The load's GraphQL `resolveNote` is read but not applied yet.)
     public func reviewThreadStates(of number: Int, in repo: HostedRepository) async throws
         -> [HostedReviewThreadState]
     {
-        let threads = try await diffThreads(of: number, in: repo)
+        let (threads, _) = try await diffThreads(of: number, in: repo)
         guard !threads.isEmpty else { return [] }
         let detail = try? await mergeRequest(number, in: repo)
         let head = detail.flatMap { $0.diffRefs?.headSha ?? $0.sha }
@@ -486,9 +537,14 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     }
 
     public func comment(on item: HostedItem, in repo: HostedRepository, body: String) async throws -> HostedComment {
+        defer { forgetThreads(of: item, in: repo) }
         let note: GitLabNote = try await send(
             "POST", url(try itemPath(item, in: repo) + ["notes"]), body: ["body": body])
-        return Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        var comment = Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        // The token's user wrote it: theirs to edit and delete. `GitLabNote` decodes no discussion id, so `hostKey`
+        // stays nil: the reload after the post maps it.
+        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
+        return comment
     }
 
     /// `POST .../discussions/:discussion_id/notes`: `thread.hostKey` is the discussion id (the id of
@@ -502,6 +558,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         guard let discussion = thread.hostKey.flatMap({ $0.isEmpty ? nil : $0 }) ?? mapped else {
             throw HostingError.validationFailed(message: "an unknown GitLab thread: reload the merge request")
         }
+        defer { forgetThreads(of: .pullRequest(number), in: repo) }
         let note: GitLabNote = try await send(
             "POST", url(try itemPath(.pullRequest(number), in: repo) + ["discussions", discussion, "notes"]),
             body: ["body": body])
@@ -520,6 +577,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         guard let target = memo.mergeRequestByDiscussion.withLock({ $0[state.id] }) else {
             throw HostingError.validationFailed(message: "an unknown GitLab thread: reload the merge request")
         }
+        defer { forgetThreads(key: target.projectID + "\u{0}merge_requests\u{0}\(target.iid)") }
         let path = ["projects", target.projectID, "merge_requests", String(target.iid), "discussions", state.id]
         let (data, _) = try await perform("PUT", url(path, query: ["resolved": resolved ? "true" : "false"]))
         let discussion: GitLabDiscussion = try Self.decode(data)
@@ -636,6 +694,222 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             "PUT", url(try itemPath(item, in: repo)), body: ["state_event": open ? "reopen" : "close"])
     }
 
+    // MARK: - Comment interactions
+
+    /// `POST .../discussions/:discussion_id/notes` on the merge request or issue: `comment` is the thread's root
+    /// (GitLab nests one level) and its `hostKey` the discussion id. An individual note becomes a thread, as on the
+    /// web page. A ref without a discussion id is refused unsent.
+    public func reply(
+        toGeneral comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String
+    ) async throws -> HostedComment {
+        let discussion = try Self.discussionID(of: comment)
+        let path = try itemPath(item, in: repo) + ["discussions", discussion, "notes"]
+        defer { forgetThreads(of: item, in: repo) }
+        let note: GitLabNote = try await send("POST", url(path), body: ["body": body])
+        var reply = Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        reply.parentID = comment.id
+        reply.hostKey = discussion
+        (reply.viewerCanEdit, reply.viewerCanDelete) = (true, true)
+        return reply
+    }
+
+    /// Resolves or reopens a general thread the client's last load found `resolvable` (anything else is refused
+    /// unsent): a merge request's with `PUT .../discussions/:discussion_id?resolved=`, an issue's with GraphQL
+    /// `discussionToggleResolve` (REST has none for issues) on the discussion's global id from that load. Returns
+    /// whether the answer says it is resolved.
+    public func setGeneralThread(
+        _ root: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, resolved: Bool
+    ) async throws -> Bool {
+        let discussion = try Self.discussionID(of: root)
+        let key = try itemKey(item, in: repo)
+        guard memo.resolvableDiscussions.withLock({ $0.contains(key + "\u{0}" + discussion) }) else {
+            throw HostingError.validationFailed(message: "a GitLab thread that cannot be resolved: reload it")
+        }
+        if Self.isMergeRequest(item) {
+            let path = try itemPath(item, in: repo) + ["discussions", discussion]
+            defer { forgetThreads(key: key) }
+            let (data, _) = try await perform("PUT", url(path, query: ["resolved": resolved ? "true" : "false"]))
+            let answer: GitLabDiscussion = try Self.decode(data)
+            let notes = answer.notes.filter { $0.resolvable == true }
+            return !notes.isEmpty && notes.allSatisfy { $0.resolved == true }
+        }
+        guard let globalID = memo.globalIDs.withLock({ $0[key + "\u{0}discussion\u{0}" + discussion] }) else {
+            throw HostingError.validationFailed(message: "a GitLab thread without its GraphQL id: reload the issue")
+        }
+        struct Variables: Encodable { var id: String; var resolve: Bool }
+        struct Payload: Decodable {
+            var errors: [String]?
+            var discussion: Discussion?
+        }
+        struct Discussion: Decodable { var resolved: Bool? }
+        struct Answer: Decodable { var discussionToggleResolve: Payload? }
+        defer { forgetThreads(key: key) }
+        let answer: Answer = try await graphQL(
+            "mutation DiscussionToggleResolve($id: DiscussionID!, $resolve: Boolean!) { discussionToggleResolve("
+                + "input: {id: $id, resolve: $resolve}) { errors discussion { resolved } } }",
+            variables: Variables(id: globalID, resolve: resolved))
+        guard let payload = answer.discussionToggleResolve else {
+            throw HostingError.invalidResponse("a thread resolve without its result")
+        }
+        try Self.throwMutationErrors(payload.errors)
+        return payload.discussion?.resolved ?? resolved
+    }
+
+    /// `PUT .../notes/:note_id` with only the new body (never the deprecated `confidential`), on the merge request
+    /// or issue, a general or a diff note alike.
+    public func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
+        async throws
+    {
+        struct Edited: Decodable { var id: Int }
+        let path = try itemPath(item, in: repo) + ["notes", String(comment.id)]
+        defer { forgetThreads(of: item, in: repo) }
+        let _: Edited = try await send("PUT", url(path), body: ["body": body])
+    }
+
+    /// `DELETE .../notes/:note_id` on the merge request or issue, answered 204 without a body.
+    public func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    {
+        let path = try itemPath(item, in: repo) + ["notes", String(comment.id)]
+        defer { forgetThreads(of: item, in: repo) }
+        _ = try await perform("DELETE", url(path))
+    }
+
+    /// GraphQL `awardEmojiAdd` on the note's global id from the client's last load: no award id is needed, and no
+    /// REST call per note. `kind` is an emoji name (one of `reactionKinds`, or one a note already has).
+    public func addReaction(
+        _ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws {
+        try await setAward(kind, on: comment, item: item, in: repo, added: true)
+    }
+
+    /// GraphQL `awardEmojiRemove` on the note's global id, as `addReaction(_:to:on:in:)`.
+    public func removeReaction(
+        _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws {
+        try await setAward(kind, on: comment, item: item, in: repo, added: false)
+    }
+
+    /// `POST .../merge_requests/:iid/discussions` with a text `position` on the merge request's current `diff_refs`
+    /// (`base_sha`, `start_sha`, `head_sha`): `new_line` for an added line, `old_line` for a removed one, both for a
+    /// context line, `old_path`/`new_path` (the same without a rename), and `line_range` from the start line for a
+    /// range (each end's `type` `new` added, `old` removed, none for context; no `line_code`, which needs both line
+    /// numbers). Refused unsent when a line its kind needs is missing, when the merge request has no `diff_refs`, and
+    /// (`HostingError.headChanged`) when its head is not the one the patch was loaded at.
+    public func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
+    ) async throws -> HostedReviewComment {
+        struct Point: Encodable {
+            var type: String?
+            var oldLine, newLine: Int?
+            enum CodingKeys: String, CodingKey {
+                case type, oldLine = "old_line", newLine = "new_line"
+            }
+        }
+        struct LineRange: Encodable { var start, end: Point }
+        struct Position: Encodable {
+            var positionType = "text"
+            var baseSHA, startSHA, headSHA, oldPath, newPath: String
+            var oldLine, newLine: Int?
+            var lineRange: LineRange?
+            enum CodingKeys: String, CodingKey {
+                case positionType = "position_type", baseSHA = "base_sha", startSHA = "start_sha"
+                case headSHA = "head_sha", oldPath = "old_path", newPath = "new_path", oldLine = "old_line"
+                case newLine = "new_line", lineRange = "line_range"
+            }
+        }
+        struct Body: Encodable {
+            var body: String
+            var position: Position
+        }
+        func point(_ kind: HostedInlinePosition.LineKind, old: Int?, new: Int?) throws -> Point {
+            switch (kind, old, new) {
+            case (.added, _, let new?): Point(type: "new", newLine: new)
+            case (.removed, let old?, _): Point(type: "old", oldLine: old)
+            case (.context, let old?, let new?): Point(oldLine: old, newLine: new)
+            default: throw HostingError.validationFailed(message: "a diff line without the line numbers it needs")
+            }
+        }
+        let end = try point(position.lineKind, old: position.oldLine, new: position.newLine)
+        var range: LineRange?
+        switch (position.startOldLine, position.startNewLine) {
+        case (nil, nil): break
+        case (let old?, let new?): range = LineRange(start: try point(.context, old: old, new: new), end: end)
+        case (nil, let new): range = LineRange(start: try point(.added, old: nil, new: new), end: end)
+        case (let old, nil): range = LineRange(start: try point(.removed, old: old, new: nil), end: end)
+        }
+        let detail = try await mergeRequest(number, in: repo)
+        guard let refs = detail.diffRefs, let base = refs.baseSha, let start = refs.startSha, let head = refs.headSha,
+            ![base, start, head].contains("")
+        else {
+            throw HostingError.validationFailed(message: "the merge request has no diff yet: reload it")
+        }
+        guard head == position.headSHA else { throw HostingError.headChanged }
+        let path = try itemPath(.pullRequest(number), in: repo) + ["discussions"]
+        defer { forgetThreads(of: .pullRequest(number), in: repo) }
+        let discussion: GitLabDiscussion = try await send(
+            "POST", url(path),
+            body: Body(
+                body: body,
+                position: Position(
+                    baseSHA: base, startSHA: start, headSHA: head, oldPath: position.oldPath ?? position.path,
+                    newPath: position.path, oldLine: end.oldLine, newLine: end.newLine, lineRange: range)))
+        guard let note = discussion.notes.first else {
+            throw HostingError.invalidResponse("a new diff thread without its note")
+        }
+        let place = note.position.map(Self.place)
+        var comment = HostedReviewComment(
+            id: note.id, path: place?.path ?? position.path, line: place?.line, originalLine: place?.line,
+            startLine: place?.startLine, originalStartLine: place?.startLine, side: place?.side, body: note.body,
+            bodyHTML: note.body.map(MarkdownHTML.html), user: note.author?.hosted,
+            createdAt: GitLabDate.parse(note.createdAt),
+            htmlURL: Self.noteURL(webURL(.pullRequest(number), in: repo), note.id))
+        comment.hostKey = discussion.id
+        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
+        return comment
+    }
+
+    /// The discussion id a general write takes: the comment's `hostKey`; a ref without one is refused unsent.
+    private static func discussionID(of comment: HostedCommentRef) throws -> String {
+        guard let id = comment.hostKey, !id.isEmpty else {
+            throw HostingError.validationFailed(message: "an unknown GitLab thread: reload it")
+        }
+        return id
+    }
+
+    /// Adds or removes the token's user's award `kind` on the note, by its global id from the client's last load
+    /// (refused unsent without one, or for an empty name). A mutation's `errors` are thrown.
+    private func setAward(
+        _ kind: String, on comment: HostedCommentRef, item: HostedItem, in repo: HostedRepository, added: Bool
+    ) async throws {
+        guard !kind.isEmpty else { throw HostingError.validationFailed(message: "an empty emoji name") }
+        let key = try itemKey(item, in: repo)
+        guard let awardableID = memo.globalIDs.withLock({ $0[key + "\u{0}note\u{0}\(comment.id)"] }) else {
+            throw HostingError.validationFailed(message: "a GitLab comment without its GraphQL id: reload it")
+        }
+        struct Variables: Encodable { var awardableId, name: String }
+        struct Payload: Decodable { var errors: [String]? }
+        struct Answer: Decodable { var awardEmojiAdd, awardEmojiRemove: Payload? }
+        let mutation = added ? "awardEmojiAdd" : "awardEmojiRemove"
+        defer { forgetThreads(key: key) }
+        let answer: Answer = try await graphQL(
+            "mutation \(added ? "AwardEmojiAdd" : "AwardEmojiRemove")($awardableId: AwardableID!, $name: String!) { "
+                + "\(mutation)(input: {awardableId: $awardableId, name: $name}) { errors } }",
+            variables: Variables(awardableId: awardableID, name: kind))
+        guard let payload = added ? answer.awardEmojiAdd : answer.awardEmojiRemove else {
+            throw HostingError.invalidResponse("an emoji reaction without its result")
+        }
+        try Self.throwMutationErrors(payload.errors)
+    }
+
+    /// A GraphQL mutation payload's `errors` (GitLab answers 200 with them), the first 500 characters, as
+    /// `HostingError.graphQL`.
+    private static func throwMutationErrors(_ errors: [String]?) throws {
+        if let errors, !errors.isEmpty {
+            throw HostingError.graphQL(message: String(errors.joined(separator: "; ").prefix(500)))
+        }
+    }
+
     /// The answer of an update: only its `iid` is read.
     private struct Updated: Decodable { var iid: Int }
 
@@ -712,12 +986,14 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return try await currentUser().id
     }
 
-    /// The merge request's diff threads, as discussion id and non-system notes, in GitLab's order. Also remembers
-    /// the discussion of each of their notes, for a reply without a `hostKey`.
-    private func diffThreads(of number: Int, in repo: HostedRepository) async throws -> [(String, [GitLabNote])] {
-        let discussions: [GitLabDiscussion] = try await list(
-            url(try projectPath(repo) + ["merge_requests", String(number), "discussions"]))
-        let threads = discussions.compactMap { discussion -> (String, [GitLabNote])? in
+    /// The merge request's diff threads, as discussion id and non-system notes, in GitLab's order, from the shared
+    /// load (`threads(of:in:)`), which is returned too. Also remembers the discussion of each of their notes, for a
+    /// reply without a `hostKey`.
+    private func diffThreads(of number: Int, in repo: HostedRepository) async throws
+        -> (threads: [(String, [GitLabNote])], load: GitLabThreads)
+    {
+        let load = try await threads(of: .pullRequest(number), in: repo)
+        let threads = load.discussions.compactMap { discussion -> (String, [GitLabNote])? in
             let notes = discussion.notes.filter { $0.system != true }
             guard notes.first?.isDiffNote == true else { return nil }
             return (discussion.id, notes)
@@ -728,7 +1004,187 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                 for note in notes { memo[prefix + String(note.id)] = id }
             }
         }
-        return threads
+        return (threads, load)
+    }
+
+    /// The item's discussions and their GraphQL states, loaded once for the reads of one detail load: a load still
+    /// running for the item is joined, else a new one starts, and it leaves `threadLoads` when it finishes (only
+    /// itself, never a newer load that replaced it after a write), so a later detail load fetches again.
+    private func threads(of item: HostedItem, in repo: HostedRepository) async throws -> GitLabThreads {
+        let key = try itemKey(item, in: repo)
+        let projectPath = try projectID(repo)
+        let first = url(try itemPath(item, in: repo) + ["discussions"])
+        let token = UUID()
+        let task = memo.threadLoads.withLock { loads -> Task<GitLabThreads, any Error> in
+            if let running = loads[key] { return running.task }
+            let task = Task { [self] in
+                defer { memo.threadLoads.withLock { if $0[key]?.token == token { $0[key] = nil } } }
+                return try await loadThreads(of: item, key: key, projectPath: projectPath, first: first)
+            }
+            loads[key] = (token, task)
+            return task
+        }
+        return try await task.value
+    }
+
+    /// The REST discussions, the GraphQL note states and the token's user's id, side by side. A failed GraphQL read
+    /// or user leaves its part nil (rights fall back to the author, reactions are hidden); a failed REST read
+    /// fails the load.
+    private func loadThreads(of item: HostedItem, key: String, projectPath: String, first: URL) async throws
+        -> GitLabThreads
+    {
+        async let discussions: [GitLabDiscussion] = list(first)
+        async let states = try? noteStates(of: item, key: key, projectPath: projectPath)
+        async let viewerID = try? myID()
+        let loaded = try await discussions
+        let read = await states
+        return GitLabThreads(
+            discussions: loaded, noteStates: read?.notes, discussionResolved: read?.resolved, viewerID: await viewerID)
+    }
+
+    /// Discussions per GraphQL page: the query nests notes and awards (100 each) under each discussion, so the page
+    /// stays small to keep under GitLab's complexity limit of 250 per query.
+    static let noteStatePageSize = 20
+
+    /// GraphQL `discussions` of the merge request or issue, one query per `noteStatePageSize` discussions (up to
+    /// as many discussions as the REST list reads): each note's rights and awards, each discussion's `resolved`,
+    /// joined to REST on the trailing segment of their global ids (`gid://gitlab/<Type>/<id>`). The global ids are
+    /// remembered for the mutations that take them, never built. Values go in `variables` only.
+    private func noteStates(of item: HostedItem, key: String, projectPath: String) async throws
+        -> (notes: [Int: GitLabNoteState], resolved: [String: Bool])
+    {
+        struct Variables: Encodable { var projectPath, iid: String; var after: String? }
+        struct Answer: Decodable { var project: Project? }
+        struct Project: Decodable { var mergeRequest, issue: Item? }
+        struct Item: Decodable { var discussions: Page }
+        struct Page: Decodable {
+            var nodes: [Discussion]
+            var pageInfo: PageInfo
+        }
+        struct PageInfo: Decodable {
+            var hasNextPage: Bool
+            var endCursor: String?
+        }
+        struct Discussion: Decodable {
+            var id: String
+            var resolved: Bool?
+            var notes: Notes
+        }
+        struct Notes: Decodable { var nodes: [Note] }
+        struct Note: Decodable {
+            var id: String
+            var userPermissions: Permissions?
+            var awardEmoji: Awards?
+        }
+        struct Permissions: Decodable { var adminNote, resolveNote: Bool? }
+        struct Awards: Decodable { var nodes: [Award] }
+        struct Award: Decodable {
+            var name: String
+            var user: User?
+        }
+        struct User: Decodable { var id: String }
+        let field = Self.isMergeRequest(item) ? "mergeRequest" : "issue"
+        let query = """
+            query NoteStates($projectPath: ID!, $iid: String!, $after: String) {
+              project(fullPath: $projectPath) {
+                \(field)(iid: $iid) {
+                  discussions(first: \(Self.noteStatePageSize), after: $after) {
+                    nodes {
+                      id resolved
+                      notes(first: 100) {
+                        nodes {
+                          id
+                          userPermissions { adminNote resolveNote }
+                          awardEmoji(first: 100) { nodes { name user { id } } }
+                        }
+                      }
+                    }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+              }
+            }
+            """
+        var notes: [Int: GitLabNoteState] = [:]
+        var resolved: [String: Bool] = [:]
+        var globalIDs: [String: String] = [:]
+        var after: String?
+        for _ in 0..<(maxPages * 100 / Self.noteStatePageSize) {
+            let answer: Answer = try await graphQL(
+                query, variables: Variables(projectPath: projectPath, iid: String(item.number), after: after))
+            guard let page = (answer.project?.mergeRequest ?? answer.project?.issue)?.discussions else {
+                throw HostingError.invalidResponse("a GraphQL answer without the item's discussions")
+            }
+            for discussion in page.nodes {
+                let discussionID = Self.lastSegment(discussion.id)
+                globalIDs[key + "\u{0}discussion\u{0}" + discussionID] = discussion.id
+                if let value = discussion.resolved { resolved[discussionID] = value }
+                for note in discussion.notes.nodes {
+                    guard let noteID = Int(Self.lastSegment(note.id)) else { continue }
+                    globalIDs[key + "\u{0}note\u{0}\(noteID)"] = note.id
+                    notes[noteID] = GitLabNoteState(
+                        canAdmin: note.userPermissions?.adminNote ?? false,
+                        canResolve: note.userPermissions?.resolveNote,
+                        awards: (note.awardEmoji?.nodes ?? []).map { award in
+                            (award.name, award.user.flatMap { Int(Self.lastSegment($0.id)) })
+                        })
+                }
+            }
+            guard page.pageInfo.hasNextPage, let cursor = page.pageInfo.endCursor else { break }
+            after = cursor
+        }
+        memo.globalIDs.withLock { $0.merge(globalIDs) { _, new in new } }
+        return (notes, resolved)
+    }
+
+    /// The text after a global id's last `/` (`gid://gitlab/DiffNote/12` is `12`).
+    private static func lastSegment(_ globalID: String) -> String {
+        globalID.split(separator: "/").last.map(String.init) ?? globalID
+    }
+
+    /// A note's rights and reactions in a load: with the GraphQL states, `adminNote` (edit and delete) and the
+    /// awards counted per name, GitLab's default kinds first in `reactionKinds` order, then the others as first
+    /// seen, each marked when one is the token's user's. Without them (the read failed, or a note past the query's
+    /// 100 per discussion), the token's user may edit and delete their own notes, and there are no reactions.
+    private func viewerState(of note: GitLabNote, in load: GitLabThreads)
+        -> (canAdmin: Bool, reactions: [HostedReaction])
+    {
+        guard let state = load.noteStates?[note.id] else {
+            return (load.viewerID != nil && note.author?.id == load.viewerID, [])
+        }
+        var names: [String] = []
+        var byName: [String: HostedReaction] = [:]
+        for award in state.awards {
+            if byName[award.name] == nil {
+                names.append(award.name)
+                byName[award.name] = HostedReaction(kind: award.name, count: 0)
+            }
+            byName[award.name]?.count += 1
+            if award.userID != nil, award.userID == load.viewerID { byName[award.name]?.viewerReacted = true }
+        }
+        let kinds = reactionKinds
+        let ordered = kinds.filter { byName[$0] != nil } + names.filter { !kinds.contains($0) }
+        return (state.canAdmin, ordered.compactMap { byName[$0] })
+    }
+
+    /// The memo key of an item: the project's path, the item's kind and its iid.
+    private func itemKey(_ item: HostedItem, in repo: HostedRepository) throws -> String {
+        let kind = Self.isMergeRequest(item) ? "merge_requests" : "issues"
+        return try projectID(repo) + "\u{0}" + kind + "\u{0}\(item.number)"
+    }
+
+    private static func isMergeRequest(_ item: HostedItem) -> Bool {
+        if case .pullRequest = item { true } else { false }
+    }
+
+    /// Drops the item's running discussions load after a write on it, so the next read fetches again.
+    private func forgetThreads(of item: HostedItem, in repo: HostedRepository) {
+        guard let key = try? itemKey(item, in: repo) else { return }
+        forgetThreads(key: key)
+    }
+
+    private func forgetThreads(key: String) {
+        _ = memo.threadLoads.withLock { $0.removeValue(forKey: key) }
     }
 
     /// `opened`, and `locked` (a merge request being merged), are open; `closed` and `merged` are not.

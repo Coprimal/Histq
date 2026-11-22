@@ -14,9 +14,14 @@ import SwiftUI
 struct IssueDetail: Sendable {
     let loadID: Int
     let issue: HostedIssue
-    let commentCount: Int
-    /// The body, then the comments by date (`PRTimeline.page`).
-    let timeline: PRTimelineHTML
+    var commentCount: Int
+    /// The body, then the comments by date (`PRTimeline.page`). Rebuilt with `comments` by a general thread action,
+    /// before its write (optimistic).
+    var timeline: PRTimelineHTML
+    /// The page's comments, as loaded (or as an optimistic action patched them).
+    var comments: [HostedComment]
+    /// The token's user, where the host has general replies (the author of an optimistic reply); nil when unknown.
+    let viewer: HostedUser?
 
     var isOpen: Bool { issue.state == "open" }
 }
@@ -25,11 +30,15 @@ struct IssueDetail: Sendable {
 enum IssueAction: Equatable, Sendable {
     case comment(String)
     case setOpen(Bool)
+    /// A reply to or a resolve of a general thread, or an edit or delete of an own comment (`PRGeneralAction`), shown
+    /// before the host answers (optimistic).
+    case general(PRGeneralAction)
 
     var progressTitle: String {
         switch self {
         case .comment: "Commenting…"
         case .setOpen(let open): open ? "Reopening…" : "Closing…"
+        case .general(let action): action.progressTitle
         }
     }
 
@@ -37,6 +46,7 @@ enum IssueAction: Equatable, Sendable {
         switch self {
         case .comment: "The comment was not posted"
         case .setOpen(let open): open ? "Reopen failed" : "Close failed"
+        case .general(let action): action.failureTitle
         }
     }
 
@@ -45,6 +55,7 @@ enum IssueAction: Equatable, Sendable {
         switch self {
         case .comment: "The comment on #\(number) was not posted"
         case .setOpen(let open): open ? "Reopen of #\(number) failed" : "Close of #\(number) failed"
+        case .general(let action): action.failureTitle(of: "#\(number)")
         }
     }
 
@@ -53,6 +64,7 @@ enum IssueAction: Equatable, Sendable {
         switch self {
         case .comment: "comment"
         case .setOpen(let open): open ? "reopen" : "close"
+        case .general(let action): action.timingName
         }
     }
 }
@@ -71,6 +83,16 @@ final class IssueDetailModel {
     private(set) var busy: [Int: IssueAction] = [:]
     /// The last action's failure (or a failed reload after it), above the cards until dismissed or the next action.
     var actionError: String?
+    /// Each general thread's reply box and the ones the user expanded or collapsed, by root comment id
+    /// (`PRGeneralThreadModel`).
+    var generalReplyDrafts: [Int: String] = [:]
+    var generalExpanded: [Int: Bool] = [:]
+    /// The comments being edited in place and their editors' text, by `PRCommentTarget.key` (`PRGeneralThreadModel`).
+    var editingComments: Set<String> = []
+    var commentEditDrafts: [String: String] = [:]
+    #if DEBUG
+    var launchDelete: (target: PRCommentTarget, confirm: Bool)?
+    #endif
 
     /// The shown issue's running action.
     var running: IssueAction? { number.flatMap { busy[$0] } }
@@ -80,17 +102,40 @@ final class IssueDetailModel {
     @ObservationIgnored var beginOperation: @MainActor (String) -> @MainActor () -> Void = { _ in {} }
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+    /// The ids of optimistic replies (`PullRequestDetailModel`'s rule).
+    @ObservationIgnored private var optimisticID = 1 << 62
 
     #if DEBUG
-    /// DEBUG `-HistqIssueAction comment|close|reopen`: runs that action once, on the first load, without its
-    /// confirmation, so a launch exercises the action path and its reload. Only with `-HistqGitHubStub YES`: never an
-    /// unconfirmed action on a real account.
-    private static var launchAction: IssueAction? = switch GitHubStub.isEnabled
-        ? AppState.launchFlag("-HistqIssueAction") : nil {
-    case "comment": .comment("QA comment")
-    case "close": .setOpen(false)
-    case "reopen": .setOpen(true)
-    default: nil
+    /// DEBUG `-HistqIssueAction comment|close|reopen|greply|gresolve|edit|edit-save|delete|delete-confirm`: runs
+    /// that action once, on the first load, without its confirmation, so a launch exercises the action path and its
+    /// reload. Only with `-HistqGitHubStub YES`: never an unconfirmed action on a real account. `greply` and
+    /// `gresolve` act on the first general thread of that load, `edit-save` on its first own comment
+    /// (`PRGeneralAction.launchAction`); `edit`, `delete` and `delete-confirm` open its editor or its confirmation
+    /// (`openLaunchStep`).
+    private static var launchActionName: String? = GitHubStub.isEnabled
+        ? AppState.launchFlag("-HistqIssueAction") : nil
+
+    private static func launchAction(_ name: String, in detail: IssueDetail) -> IssueAction? {
+        switch name {
+        case "comment": .comment("QA comment")
+        case "close": .setOpen(false)
+        case "reopen": .setOpen(true)
+        default: PRGeneralAction.launchAction(name, in: detail.comments, page: detail.timeline).map { .general($0) }
+        }
+    }
+
+    /// `edit` opens the first own comment's editor, `delete` and `delete-confirm` its confirmation (the page opens it,
+    /// `launchDelete`); nothing for another name or when no comment fits.
+    private func openLaunchStep(_ name: String, in detail: IssueDetail) {
+        guard let target = PRGeneralAction.launchTarget(name, in: detail.comments, page: detail.timeline),
+              let number else { return }
+        switch name {
+        case "edit":
+            beginEdit(target)
+            UITiming.content("issue \(number) action edit open")
+        case "delete", "delete-confirm": launchDelete = (target, name == "delete-confirm")
+        default: break
+        }
     }
     #endif
 
@@ -101,6 +146,10 @@ final class IssueDetailModel {
         if number != self.number {
             // Another issue: its own box. The same one opened again keeps its draft.
             draft = ""
+            generalReplyDrafts = [:]
+            generalExpanded = [:]
+            editingComments = []
+            commentEditDrafts = [:]
             actionError = nil
         }
         self.number = number
@@ -110,17 +159,23 @@ final class IssueDetailModel {
             return
         }
         let generation = generation
+        let general = PRGeneralOptions(api.client.capabilities, expanded: generalExpanded)
         task = Task { [weak self] in
-            let result = await Self.fetch(api.client, api.repository, number: number, loadID: generation)
+            let result = await Self.fetch(api.client, api.repository, number: number, loadID: generation,
+                                          general: general)
             guard let self, generation == self.generation, !Task.isCancelled else { return }
             switch result {
             case .success(let detail):
                 state = .loaded(detail)
                 if quiet { UITiming.content("issue \(number) reloaded") }
                 #if DEBUG
-                if let action = Self.launchAction {
-                    Self.launchAction = nil
-                    perform(action, on: number, github: github)
+                if let name = Self.launchActionName {
+                    Self.launchActionName = nil
+                    if let action = Self.launchAction(name, in: detail) {
+                        PRLaunchActionGate.run { [weak self] in self?.perform(action, on: number, github: github) }
+                    } else {
+                        PRLaunchActionGate.run { [weak self] in self?.openLaunchStep(name, in: detail) }
+                    }
                 }
                 #endif
             case .failure(let error):
@@ -155,7 +210,25 @@ final class IssueDetailModel {
         if self.number == number { actionError = nil }
         // "#5 Closing…" in the footer.
         let endOperation = beginOperation("#\(number) \(action.progressTitle.dropLast())")
+        // A general thread action shows at once (`PullRequestDetailModel.perform`'s rule).
+        var optimistic: (shown: IssueDetail, comments: [HostedComment], general: PRGeneralOptions)?
+        if case .general(let general) = action, self.number == number, let shown = state.value {
+            if case .resolve(let root, true) = general { generalExpanded[root.id] = nil }
+            if case .edit(let target, _) = general { editingComments.remove(target.key) }
+            optimisticID &+= 1
+            optimistic = (shown, PRTimeline.patched(shown.comments, general, viewer: shown.viewer,
+                                                    replyID: optimisticID),
+                          PRGeneralOptions(api.client.capabilities, expanded: generalExpanded))
+        }
         Task { [weak self] in
+            if let optimistic {
+                let page = await Self.page(optimistic.shown.issue, comments: optimistic.comments,
+                                           general: optimistic.general)
+                if self?.replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments,
+                                     timeline: page) == true {
+                    UITiming.content("issue \(number) action \(action.timingName) patched")
+                }
+            }
             let error = await Self.run(action, api.client, api.repository, number: number)
             endOperation()
             guard let self else { return }
@@ -163,6 +236,16 @@ final class IssueDetailModel {
             UITiming.content("issue \(number) action \(action.timingName) \(error == nil ? "ok" : "failed")")
             let showing = isShowing(number)
             if let error {
+                if let optimistic {
+                    replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.shown.comments,
+                                timeline: optimistic.shown.timeline)
+                }
+                if case .general(.edit(let target, let body)) = action, self.number == number {
+                    reopenEdit(target.key, body: body)
+                    if editingComments.contains(target.key) {
+                        UITiming.content("issue \(number) action edit reopened cedit-\(target.key) open")
+                    }
+                }
                 let message = PullRequestDetailModel.message(for: error, kind: api.client.kind)
                 if showing {
                     actionError = "\(action.failureTitle): \(message)"
@@ -172,6 +255,8 @@ final class IssueDetailModel {
                 return
             }
             if case .comment = action, self.number == number { draft = "" }
+            if case .general(.reply(let root, _)) = action, self.number == number { generalReplyDrafts[root.id] = nil }
+            if case .general(.edit(let target, _)) = action, self.number == number { savedEdit(target.key) }
             github.refreshNow()
             if showing { load(number, github: github, quiet: true) }
         }
@@ -184,20 +269,51 @@ final class IssueDetailModel {
         return true
     }
 
+    /// Puts `comments` and their page in the shown detail, only while it is still load `loadID` of issue `number`.
+    @discardableResult
+    private func replacePage(of loadID: Int, number: Int, comments: [HostedComment], timeline: PRTimelineHTML)
+        -> Bool
+    {
+        guard self.number == number, case .loaded(var detail) = state, detail.loadID == loadID else { return false }
+        detail.comments = comments
+        detail.commentCount = comments.count
+        detail.timeline = timeline
+        state = .loaded(detail)
+        return true
+    }
+
+    /// The page of `issue`: its body, then `comments`.
+    @concurrent
+    private nonisolated static func page(
+        _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions
+    ) async -> PRTimelineHTML {
+        timeline(issue, comments: comments, general: general)
+    }
+
+    private nonisolated static func timeline(
+        _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions
+    ) -> PRTimelineHTML {
+        PRTimeline.page(
+            author: issue.user, action: "opened this issue", date: issue.createdAt, html: issue.bodyHTML,
+            markdown: issue.body, comments: comments, general: general)
+    }
+
     /// `loadID` is the load's generation: a new one measures the page again, even when its HTML did not change.
+    /// Where the host has general replies, the token's user is asked too (a failure only draws an optimistic reply
+    /// as "you").
     @concurrent
     private nonisolated static func fetch(
-        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, loadID: Int
+        _ client: any HostingProvider, _ repository: HostedRepository, number: Int, loadID: Int,
+        general: PRGeneralOptions
     ) async -> Result<IssueDetail, any Error> {
         async let issue = client.issue(number, in: repository)
         async let comments = client.comments(on: .issue(number), in: repository)
+        async let viewer = general.replies ? try? await client.currentUser() : nil
         do {
             let (issue, comments) = try await (issue, comments)
-            let timeline = PRTimeline.page(
-                author: issue.user, action: "opened this issue", date: issue.createdAt, html: issue.bodyHTML,
-                markdown: issue.body, comments: comments)
+            let timeline = timeline(issue, comments: comments, general: general)
             return .success(IssueDetail(loadID: loadID, issue: issue, commentCount: comments.count,
-                                        timeline: timeline))
+                                        timeline: timeline, comments: comments, viewer: await viewer))
         } catch {
             return .failure(error)
         }
@@ -211,11 +327,25 @@ final class IssueDetailModel {
             switch action {
             case .comment(let body): _ = try await client.comment(on: .issue(number), in: repository, body: body)
             case .setOpen(let open): try await client.setOpen(open, item: .issue(number), in: repository)
+            case .general(let action): try await action.run(client, on: .issue(number), in: repository)
             }
             return nil
         } catch {
             return error
         }
+    }
+}
+
+extension IssueDetailModel: PRGeneralThreadModel {
+    func isBusy(_ number: Int) -> Bool { busy[number] != nil }
+
+    func runningGeneral(on number: Int) -> PRGeneralAction? {
+        if case .general(let action)? = busy[number] { return action }
+        return nil
+    }
+
+    func perform(_ action: PRGeneralAction, on number: Int, github: HostingStore) {
+        perform(.general(action), on: number, github: github)
     }
 }
 
@@ -398,7 +528,7 @@ private struct IssueContent: View {
                 // The page fits its content and never scrolls itself: a wheel over it scrolls this column.
                 PRTimelinePage(session: session, number: detail.issue.number, timeline: detail.timeline,
                                loadID: detail.loadID, kind: "issue",
-                               avatars: .of(session.github))
+                               avatars: .of(session.github), general: session.issueDetail)
                     .frame(maxWidth: .infinity)
             }
             IssueCommentCard(session: session)

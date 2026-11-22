@@ -88,13 +88,16 @@ struct GitHubClientTests {
         }
     }
 
-    @Test("GitHub's capabilities stay as they were, without unapprove, which it refuses unsent")
+    @Test("GitHub's capabilities: comment edit, delete, reactions and new inline comments, but no unapprove (refused unsent) and no general replies or resolve")
     func capabilitiesWithoutUnapprove() async throws {
         let stub = StubServer { _ in .init(body: "{}") }
         let client = try GitHubClient(token: Self.token, session: stub.session)
 
-        #expect(client.capabilities
-            == [.labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests])
+        #expect(client.capabilities == [
+            .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
+            .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments,
+        ])
+        #expect(client.reactionKinds == ["+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"])
         await #expect(throws: HostingError.self) {
             try await client.unapprove(1, in: HostedRepository(host: "github.com", owner: "octo", name: "hello"))
         }
@@ -518,6 +521,212 @@ struct GitHubClientTests {
             JSONSerialization.jsonObject(with: stub.requests.first?.httpBody ?? Data()) as? [String: Any])
         #expect((body["variables"] as? [String: Any])?["threadId"] as? String == "PRRT_x")
         #expect((body["query"] as? String)?.contains("PRRT_x") == false)
+    }
+
+    @Test("comment writes: edit and delete per comment kind, inline comments on line and side, reactions by GraphQL")
+    func commentWrites() async throws {
+        // Also: every write goes to the API host with the token, and a kind GitHub lacks, a comment without a node id
+        // or a position without a line on its side is refused unsent.
+        let stub = StubServer { request in
+            switch request.httpMethod {
+            case "DELETE": return .init(status: 204, body: "")
+            case "PATCH": return .init(body: #"{"id": 5}"#)
+            default:
+                if request.url?.path() == "/graphql" { return .init(body: #"{"data": {}}"#) }
+                return .init(status: 201, body: #"{"id": 99, "path": "a.swift", "node_id": "PRRC_new"}"#)
+            }
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+        let general = HostedCommentRef(kind: .general, id: 5, hostKey: "IC_5")
+        let review = HostedCommentRef(kind: .review, id: 6, hostKey: "PRRC_6")
+        func inline(_ position: HostedInlinePosition) async throws {
+            #expect(try await client.createInlineComment(at: position, on: 7, in: repo, body: "Hm").id == 99)
+        }
+        let comments = "/repos/octo/hello/pulls/7/comments"
+        let sha = "abc123"
+        let rows: [(method: String, path: String, body: [String: Any]?, run: () async throws -> Void)] = [
+            ("PATCH", "/repos/octo/hello/issues/comments/5", ["body": "new"],
+             { try await client.editComment(general, on: .pullRequest(7), in: repo, body: "new") }),
+            ("PATCH", "/repos/octo/hello/pulls/comments/6", ["body": "new"],
+             { try await client.editComment(review, on: .pullRequest(7), in: repo, body: "new") }),
+            ("DELETE", "/repos/octo/hello/issues/comments/5", nil,
+             { try await client.deleteComment(general, on: .issue(7), in: repo) }),
+            ("DELETE", "/repos/octo/hello/pulls/comments/6", nil,
+             { try await client.deleteComment(review, on: .pullRequest(7), in: repo) }),
+            ("POST", comments,
+             ["body": "Hm", "commit_id": "abc123", "path": "a.swift", "line": 12, "side": "RIGHT"],
+             { try await inline(.init(path: "a.swift", oldLine: nil, newLine: 12, lineKind: .added, headSHA: sha)) }),
+            ("POST", comments,
+             ["body": "Hm", "commit_id": "abc123", "path": "a.swift", "line": 8, "side": "LEFT"],
+             { try await inline(.init(path: "a.swift", oldLine: 8, newLine: nil, lineKind: .removed, headSHA: sha)) }),
+            ("POST", comments,
+             ["body": "Hm", "commit_id": "abc123", "path": "b.swift", "line": 14, "side": "RIGHT",
+              "start_line": 11, "start_side": "RIGHT"],
+             { try await inline(.init(
+                 path: "b.swift", oldPath: "old.swift", oldLine: 10, newLine: 14, lineKind: .context,
+                 startOldLine: 7, startNewLine: 11, headSHA: "abc123")) }),
+            ("POST", comments,
+             ["body": "Hm", "commit_id": "abc123", "path": "a.swift", "line": 5, "side": "RIGHT",
+              "start_line": 3, "start_side": "LEFT"],
+             { try await inline(.init(
+                 path: "a.swift", oldLine: nil, newLine: 5, lineKind: .added, startOldLine: 3, headSHA: "abc123")) }),
+            ("POST", "/graphql", ["subjectId": "PRRC_6", "content": "THUMBS_UP"],
+             { try await client.addReaction("+1", to: review, on: .pullRequest(7), in: repo) }),
+            ("POST", "/graphql", ["subjectId": "IC_5", "content": "EYES"],
+             { try await client.removeReaction("eyes", from: general, on: .issue(7), in: repo) }),
+        ]
+
+        for (index, row) in rows.enumerated() {
+            try await row.run()
+            let request = try #require(stub.requests.last)
+            #expect(stub.requests.count == index + 1, "row \(index)")
+            #expect(request.httpMethod == row.method, "row \(index)")
+            #expect(request.url?.host() == "api.github.com", "row \(index)")
+            #expect(request.url?.path() == row.path, "row \(index)")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)", "row \(index)")
+            guard let expected = row.body else {
+                #expect(request.httpBody?.isEmpty ?? true, "row \(index)")
+                continue
+            }
+            let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+            if row.path == "/graphql" {
+                let query = try #require(body["query"] as? String)
+                // The last row removes, the one before adds.
+                let mutation = index == rows.count - 1 ? "removeReaction(input:" : "addReaction(input:"
+                #expect(query.contains(mutation), "row \(index)")
+                #expect(!query.contains(expected["subjectId"] as? String ?? "?"), "row \(index): id in the query")
+                #expect(NSDictionary(dictionary: body["variables"] as? [String: Any] ?? [:]).isEqual(to: expected),
+                        "row \(index)")
+            } else {
+                #expect(NSDictionary(dictionary: body).isEqual(to: expected), "row \(index): \(body)")
+            }
+        }
+
+        let sent = stub.requests.count
+        await #expect(throws: HostingError.self) {
+            try await client.addReaction("tada", to: review, on: .pullRequest(7), in: repo)
+        }
+        await #expect(throws: HostingError.self) {
+            try await client.addReaction("+1", to: .init(kind: .review, id: 6), on: .pullRequest(7), in: repo)
+        }
+        await #expect(throws: HostingError.self) {
+            try await inline(.init(path: "a.swift", oldLine: 4, newLine: nil, lineKind: .added, headSHA: "abc123"))
+        }
+        #expect(stub.requests.count == sent)
+    }
+
+    @Test("a comment with GitHub's reactions rollup and node_id decodes its counts and node id; one without both too")
+    func commentReactionsRollupDecodes() async throws {
+        // Without a token there is no viewer: no GraphQL request, and no rights.
+        let rollup = """
+            "node_id": "IC_kwDO1", "reactions": {"url": "https://api.github.com/x", "total_count": 3, "+1": 2,
+            "-1": 0, "laugh": 0, "hooray": 0, "confused": 0, "heart": 1, "rocket": 0, "eyes": 0}
+            """
+        let stub = StubServer { request in
+            if request.url?.path() == "/repos/octo/hello/pulls/7/comments" {
+                let review = rollup.replacingOccurrences(of: "IC_", with: "PRRC_")
+                return .init(body: #"[{"id": 20, "path": "a.swift", \#(review)}]"#)
+            }
+            return .init(body: #"[{"id": 10, "body": "Hi", \#(rollup)}, {"id": 11, "body": "Old"}]"#)
+        }
+        let client = try GitHubClient(token: nil, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let comments = try await client.comments(on: .pullRequest(7), in: repo)
+        let reviewComments = try await client.reviewComments(of: 7, in: repo)
+
+        let counts = [HostedReaction(kind: "+1", count: 2), HostedReaction(kind: "heart", count: 1)]
+        #expect(comments.map(\.id) == [10, 11])
+        #expect(comments.map(\.hostKey) == ["IC_kwDO1", nil])
+        #expect(comments.map(\.reactions) == [counts, []])
+        #expect(reviewComments.first?.hostKey == "PRRC_kwDO1")
+        #expect(reviewComments.first?.reactions == counts)
+        #expect((comments.map(\.viewerCanEdit) + comments.map(\.viewerCanDelete)).allSatisfy { !$0 })
+        #expect(stub.requests.map { $0.httpMethod } == ["GET", "GET"])
+    }
+
+    @Test("rights and the viewer's reactions come from one nodes(ids:) query, joined on type and database id; a NOT_FOUND node or a failed query leaves the rest",
+          arguments: [
+              ("github.com", "https://api.github.com/graphql"),
+              ("ghe.example.com", "https://ghe.example.com/api/graphql"),
+          ])
+    func commentViewerStatesMerge(host: String, endpoint: String) async throws {
+        // Issue comment 10 and review comment 10 share an id in separate id spaces; the answer for issue comment 12
+        // is a review comment node with that id, which must not join. github.com is asked for `fullDatabaseId` (sent
+        // here as a string), Enterprise for `databaseId`.
+        @Sendable func node(_ type: String, _ id: Int, edit: Bool, delete: Bool, groups: String) -> String {
+            let databaseID = host == "github.com" ? #""fullDatabaseId": "\#(id)""# : #""databaseId": \#(id)"#
+            return """
+                {"__typename": "\(type)", \(databaseID), "viewerCanUpdate": \(edit), "viewerCanDelete": \(delete),
+                 "reactionGroups": [\(groups)]}
+                """
+        }
+        let stub = StubServer { request in
+            let path = request.url?.path() ?? ""
+            if path.hasSuffix("/graphql") {
+                let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let ids = (body?["variables"] as? [String: Any])?["ids"] as? [String] ?? []
+                if ids == ["IC_10", "IC_11", "IC_12"] {
+                    let groups = #"{"content": "THUMBS_UP", "viewerHasReacted": true}, "#
+                        + #"{"content": "LAUGH", "viewerHasReacted": false}"#
+                    return .init(body: """
+                        {"data": {"nodes": [\(node("IssueComment", 10, edit: true, delete: true, groups: groups)), null,
+                          \(node("PullRequestReviewComment", 12, edit: true, delete: true, groups: ""))]},
+                         "errors": [{"type": "NOT_FOUND", "path": ["nodes", 1],
+                                     "message": "Could not resolve to a node with the global id of 'IC_11'."}]}
+                        """)
+                }
+                if ids == ["PRRC_10"] {
+                    let groups = #"{"content": "EYES", "viewerHasReacted": true}"#
+                    return .init(body: """
+                        {"data": {"nodes": [
+                          \(node("PullRequestReviewComment", 10, edit: false, delete: true, groups: groups))]}}
+                        """)
+                }
+                return .init(body: #"{"data": null, "errors": [{"type": "FORBIDDEN", "message": "Not accessible"}]}"#)
+            }
+            if path.hasSuffix("/pulls/7/comments") {
+                return .init(body: #"[{"id": 10, "path": "a.swift", "node_id": "PRRC_10", "reactions": {"eyes": 3}}]"#)
+            }
+            let prefix = path.hasSuffix("/issues/8/comments") ? "IC_8" : "IC_1"
+            return .init(body: """
+                [{"id": 10, "node_id": "\(prefix)0", "reactions": {"total_count": 3, "+1": 2, "laugh": 1}},
+                 {"id": 11, "node_id": "\(prefix)1", "reactions": {"heart": 1}},
+                 {"id": 12, "node_id": "\(prefix)2"}]
+                """)
+        }
+        let client = try GitHubClient(host: host, token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: host, owner: "octo", name: "hello")
+
+        let comments = try await client.comments(on: .pullRequest(7), in: repo)
+        let reviewComments = try await client.reviewComments(of: 7, in: repo)
+        let failed = try await client.comments(on: .issue(8), in: repo)
+
+        #expect(comments.map(\.viewerCanEdit) == [true, false, false])
+        #expect(comments.map(\.viewerCanDelete) == [true, false, false])
+        #expect(comments.map(\.reactions) == [
+            [HostedReaction(kind: "+1", count: 2, viewerReacted: true), HostedReaction(kind: "laugh", count: 1)],
+            [HostedReaction(kind: "heart", count: 1)], [],
+        ])
+        #expect(reviewComments.map(\.viewerCanEdit) == [false])
+        #expect(reviewComments.map(\.viewerCanDelete) == [true])
+        #expect(reviewComments.first?.reactions == [HostedReaction(kind: "eyes", count: 3, viewerReacted: true)])
+        #expect(failed.map(\.viewerCanEdit) == [false, false, false])
+        #expect(failed.first?.reactions
+            == [HostedReaction(kind: "+1", count: 2), HostedReaction(kind: "laugh", count: 1)])
+        let queries = stub.requests.filter { $0.httpMethod == "POST" }
+        #expect(queries.count == 3)
+        for request in queries {
+            #expect(request.url?.absoluteString == endpoint)
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+            let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+            let query = try #require(body["query"] as? String)
+            #expect(query.contains("nodes(ids: $ids)"))
+            #expect(!query.contains("IC_1") && !query.contains("PRRC_"))
+            #expect(query.contains("fullDatabaseId") == (host == "github.com"))
+            #expect(query.contains("databaseId") == (host != "github.com"))
+        }
     }
 
     @Test("no inline comment is lost: replies join their root's review, and a comment without a review stays")
