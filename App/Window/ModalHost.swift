@@ -213,6 +213,8 @@ struct ModalHost: View {
             }
         case .hostKey(let session, let check):
             HostKeySheet(session: session, check: check) { session.hostKeyCheck = nil }
+        case .dialog(let session, .authorEmoji(let email, let name)):
+            AuthorEmojiModal(email: email, name: name) { session.dialog = nil }
         case .dialog(let session, let dialog):
             OperationDialogView(session: session, dialog: dialog) { session.dialog = nil }
         case .rebase(let session, let request):
@@ -375,6 +377,72 @@ private struct TabEmojiModal: View {
 
     private func save() {
         model.setEmoji(emoji.isEmpty ? nil : emoji, for: tabID)
+        onClose()
+    }
+}
+
+/// The commit menu's or the detail panel's Set Author Emoji…: the author's emoji avatar (`AvatarStore`), kept on this
+/// Mac for every repository, in one field like `TabEmojiModal`'s. Return saves; an empty field removes the emoji, as
+/// Remove does. No git write.
+private struct AuthorEmojiModal: View {
+    let email: String
+    let name: String
+    let onClose: () -> Void
+    @State private var emoji = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        let current = AvatarStore.shared.emoji(email: email, name: name)
+        ModalCard(title: "Set an emoji for \(name.isEmpty ? email : name)",
+                  subtitle: "Shown as \(email)'s avatar in every repository on this Mac. Leave it empty for none.",
+                  width: 420) {
+            HStack(spacing: 8) {
+                TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
+                    .textFieldStyle(.modal)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .onSubmit(save)
+                    .onChange(of: emoji) { _, new in
+                        let kept = TabEmoji.normalized(new) ?? ""
+                        if kept != new { emoji = kept }
+                    }
+                Button("Choose", action: choose)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+            }
+            .padding(.horizontal, ModalFooterMetrics.trailingPadding)
+        } actions: {
+            if current != nil {
+                Button("Remove", action: remove)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+            }
+            Button("Cancel", action: onClose)
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            Button("Save", action: save)
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .keyboardShortcut(.defaultAction)
+        }
+        .onAppear {
+            emoji = current ?? ""
+            // The card is installed on this turn; the field takes the focus on the next one.
+            DispatchQueue.main.async { fieldFocused = true }
+        }
+    }
+
+    /// Focuses the field, then opens the Character Viewer on the next turn, so its pick goes into the field.
+    private func choose() {
+        fieldFocused = true
+        DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
+    }
+
+    private func remove() {
+        AvatarStore.shared.setEmoji(nil, email: email, name: name)
+        onClose()
+    }
+
+    private func save() {
+        AvatarStore.shared.setEmoji(emoji.isEmpty ? nil : emoji, email: email, name: name)
         onClose()
     }
 }

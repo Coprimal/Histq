@@ -28,6 +28,9 @@ enum OperationDialog: Identifiable {
     /// The first push of a local branch without upstream: the remote and the remote branch's name, pushed with `-u`.
     /// `key`: the toolbar button that shows the push's progress.
     case pushNewBranch(String, key: ActionBarAction?)
+    /// The commit menu's or the detail panel's Set Author Emoji… for this author: not a git operation, `ModalHost`
+    /// shows its own card (`AuthorEmojiModal`), never `OperationDialogView`.
+    case authorEmoji(email: String, name: String)
 
     var id: String {
         switch self {
@@ -42,6 +45,7 @@ enum OperationDialog: Identifiable {
         case .setSubmoduleURL(let path): "submodule url \(path)"
         case .setSubmoduleBranch(let path): "submodule branch \(path)"
         case .pushNewBranch(let branch, _): "push \(branch)"
+        case .authorEmoji(let email, _): "author emoji \(email)"
         }
     }
 }
@@ -208,6 +212,7 @@ struct OperationDialogView: View {
         case .setSubmoduleURL(let path): "Set the URL of \(path)"
         case .setSubmoduleBranch(let path): "Set the branch of \(path)"
         case .pushNewBranch(let branch, _): "Push \(branch) to a remote"
+        case .authorEmoji: ""
         }
     }
 
@@ -222,6 +227,7 @@ struct OperationDialogView: View {
         case .addSubmodule: "Add Submodule"
         case .setSubmoduleBranch: "Set Branch"
         case .pushNewBranch: "Push"
+        case .authorEmoji: ""
         }
     }
 
@@ -277,6 +283,8 @@ struct OperationDialogView: View {
                 .font(.settingsCaption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        case .authorEmoji:
+            EmptyView()
         }
     }
 
@@ -332,6 +340,7 @@ struct OperationDialogView: View {
         case .addSubmodule: !trimmedURL.isEmpty && !trimmedPath.isEmpty
         case .setSubmoduleBranch: true
         case .pushNewBranch: !trimmedName.isEmpty && !remote.isEmpty
+        case .authorEmoji: false
         }
     }
 
@@ -364,7 +373,7 @@ struct OperationDialogView: View {
         case .createBranch, .renameBranch, .pushNewBranch: .branch
         case .createTag: .tag
         case .addRemote, .renameRemote: .remote
-        case .reset, .setRemoteURL, .addSubmodule, .setSubmoduleURL, .setSubmoduleBranch: nil
+        case .reset, .setRemoteURL, .addSubmodule, .setSubmoduleURL, .setSubmoduleBranch, .authorEmoji: nil
         }
     }
 
@@ -430,6 +439,7 @@ struct OperationDialogView: View {
             session.run(.push(branch: local, remote: remote, remoteBranch: name == local ? nil : name,
                               setUpstream: true, forceWithLease: nil),
                         title: "Push \(local) to \(remote)/\(name)", key: key)
+        case .authorEmoji: break
         }
         onClose()
     }

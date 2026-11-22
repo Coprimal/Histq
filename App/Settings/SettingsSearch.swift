@@ -162,6 +162,8 @@ struct SettingsSearchItem: Identifiable {
         .init(section: .appearance, group: "Panels", title: "Card borders", keywords: ["border", "edge", "outline"]),
         .init(section: .appearance, group: "Avatars", title: "Commit avatars",
               keywords: ["avatar", "picture", "photo", "generated", "real", "initials"]),
+        .init(section: .appearance, group: "Avatars", title: "Author emojis",
+              keywords: ["emoji", "avatar", "author", "email"]),
         .init(section: .appearance, group: "Commit list", title: "Date format", keywords: ["date", "time", "24 h"]),
         .init(section: .appearance, group: "Commit list", title: "Row height",
               keywords: ["compact", "regular", "comfortable", "density"]),
