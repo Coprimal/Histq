@@ -554,6 +554,11 @@ final class WindowModel {
         session.openRepoInTab = { [weak self] url in self?.openTab(url) }
         session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
         session.worktreeRemoved = { [weak self] path in self?.closeRemovedWorktreeTabs(path) }
+        // A merge run in another worktree from this tab: that worktree's tab here rereads its refs (its Undo).
+        session.refreshWorktreeTab = { [weak self] path in
+            let key = ProfileStore.repoKey(URL(filePath: path))
+            self?.sessions.values.first { ProfileStore.repoKey($0.url) == key }?.refresh(scope: [.refs])
+        }
     }
 
     /// The toolbar's Terminal button and View › Show Terminal (⌃`): the selected repo tab's drawer.
