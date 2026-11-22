@@ -106,12 +106,15 @@ final class WindowModel {
     var groupPopoverID: UUID?
     /// The repo tabs' sessions, by tab.
     private(set) var sessions: [Tab.ID: RepoSession] = [:]
-    /// The workspace file the window belongs to; nil = Untitled. Its sessions' `profileScope` follows it, and a change
-    /// saves the session.
+    /// The workspace file the window belongs to; nil = Untitled. Its sessions' `profileScope` and `viewRoute` follow
+    /// it, and a change saves the session.
     var workspace: Workspace? {
         didSet {
             guard workspace !== oldValue else { return }
-            for session in sessions.values { session.profileScope = profileScope }
+            for session in sessions.values {
+                session.profileScope = profileScope
+                session.viewRoute = viewRoute
+            }
             SessionStore.schedule()
         }
     }
@@ -270,8 +273,49 @@ final class WindowModel {
         }
     }
 
+    /// A tab's missing workspace profile (`RepoSession.missingProfile`): its session's; for a restored tab not selected
+    /// yet (no session), its saved profile id in a workspace window when the store does not have it (or is not read).
+    func missingProfile(of id: Tab.ID) -> RepoSession.MissingProfile? {
+        // Read first: a change of membership redraws the badge.
+        let workspace = workspace
+        if let session = sessions[id] { return session.missingProfile }
+        guard let workspace, let profileID = restored[id]?.profile?.profileID,
+              let tab = tabs.first(where: { $0.id == id }), tab.repoURL != nil, !tab.isMissing,
+              ProfileLibrary.shared.store?.profile(id: profileID) == nil else { return nil }
+        return RepoSession.MissingProfile(id: profileID, in: workspace)
+    }
+
     /// What a missing profile id means in this window's sessions (`RepoSession.profileScope`).
     private var profileScope: RepoSession.ProfileScope { workspace == nil ? .untitled : .workspace }
+    /// Where this window's sessions read and save their graph view (`RepoSession.viewRoute`).
+    private var viewRoute: RepoSession.ViewRoute { workspace.map { .workspace(WeakWorkspace($0)) } ?? .global }
+
+    /// Save Workspace As… from an Untitled window: the window joins `workspace` (its sessions route their views to
+    /// it) and every tab's graph view goes with it: a loaded session's at once; the global `repo-view/` file of a tab
+    /// with no session or a view not read yet (archived tabs too), read off the main thread and set unless the
+    /// workspace has the repo's view by then.
+    func join(_ workspace: Workspace) {
+        self.workspace = workspace
+        var unread: [URL] = []
+        for tab in tabs where !tab.isMissing {
+            guard let url = tab.repoURL else { continue }
+            if let session = sessions[tab.id], session.viewLoaded {
+                // Even an empty view: its hand-off already ran, so this is the only place it gets an entry.
+                workspace.setView(session.view, for: url)
+            } else {
+                unread.append(url)
+            }
+        }
+        unread += archivedTabs.compactMap { $0.path.map { URL(fileURLWithPath: $0, isDirectory: true) } }
+        guard !unread.isEmpty else { return }
+        Task { [weak self, weak workspace] in
+            let views = await RepoSession.globalViews(unread)
+            guard let self, let workspace, self.workspace === workspace else { return }
+            for (url, view) in views where view != .empty && workspace.view(for: url) == nil {
+                workspace.setView(view, for: url)
+            }
+        }
+    }
 
     /// Switches a repo tab to a profile (nil: none), from the toolbar chip or the tab's right-click menu. A tab not
     /// selected yet has no session: its pick waits in `restored` until its session is made, without loading the repo.
@@ -443,6 +487,7 @@ final class WindowModel {
     private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
         let session = RepoSession(url: url)
         session.profileScope = profileScope
+        session.viewRoute = viewRoute
         // A worktree's "Open in New Tab" and a double-click on its sidebar row open it in this window, beside this
         // tab's group. The worktree's tab shows its changes, else its HEAD commit, even when it was open on another
         // row.

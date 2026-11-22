@@ -819,16 +819,53 @@ final class RepoSession: Identifiable {
         case workspace
     }
 
+    /// Where the tab's graph view (`view`) is read from and saved to.
+    enum ViewRoute {
+        /// The global `repo-view/<stateKey>.json` file (an Untitled window).
+        case global
+        /// The workspace's in-memory views, saved with its file; a workspace gone since saves nothing.
+        case workspace(WeakWorkspace)
+        /// Nowhere: the tab is closing with its workspace (Close Workspace).
+        case dropped
+    }
+
     /// A write that needs the tab's profile, refused in a workspace tab whose profile this Mac does not have.
     enum ProfileError: LocalizedError {
-        case profileMissing(UUID)
+        /// The profile's name (`MissingProfile.name`).
+        case profileMissing(String)
 
         var errorDescription: String? {
             switch self {
-            case .profileMissing:
-                "This workspace tab's profile is not in Settings › Profiles: pick a profile for the tab to commit or "
-                    + "reach a remote."
+            case .profileMissing(let name):
+                "This workspace tab's profile \(name) is not in Settings › Profiles: pick a profile for the tab to "
+                    + "commit or reach a remote."
             }
+        }
+    }
+
+    /// A workspace tab's profile id that `ProfileLibrary` does not have (`missingProfile`), with the workspace file's
+    /// definition of it when the file has one.
+    struct MissingProfile {
+        let id: UUID
+        /// The profile as the workspace file embeds it; nil when the file does not define the id.
+        let embedded: Profile?
+
+        /// The embedded profile's name, else the id.
+        var name: String {
+            let name = embedded?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return name.isEmpty ? id.uuidString : name
+        }
+
+        /// `id` with `workspace`'s definition of it, if any.
+        @MainActor
+        init(id: UUID, in workspace: Workspace?) {
+            self.id = id
+            embedded = workspace?.profiles.first { $0.id == id }
+        }
+
+        init(_ profile: Profile) {
+            id = profile.id
+            embedded = profile
         }
     }
 
@@ -1011,6 +1048,12 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private(set) var profileResolved = false
     /// Set by the window from its membership (`WindowModel.workspace`); decides what a missing profile id means.
     @ObservationIgnored var profileScope = ProfileScope.untitled
+    /// A missing workspace profile the tab keeps wherever it is moved (set by a tab move): while `profileID` is its id
+    /// and the store lacks it, the tab stays missing (`missingProfile`) as in its workspace. nil for none.
+    var carriedMissingProfile: Profile?
+    /// Set by the window from its membership (`WindowModel.workspace`) before the first `backend()`; decides where
+    /// `view` is read from and saved to.
+    @ObservationIgnored var viewRoute = ViewRoute.global
 
     /// The runner and the folders, set up once (`backend()`).
     @ObservationIgnored private var setUpTask: Task<Backend, Error>?
@@ -1052,7 +1095,7 @@ final class RepoSession: Identifiable {
     private(set) var view = RepoViewState()
     /// What `view` leaves out and pins against the latest refs; recomputed with each refs read and each view change.
     private(set) var visibility = LogFilter()
-    @ObservationIgnored private var viewLoaded = false
+    @ObservationIgnored private(set) var viewLoaded = false
     /// The last save of `view`: each save waits for the one before, so the file ends with the latest state.
     @ObservationIgnored private var viewSave: Task<Void, Never>?
     @ObservationIgnored private var worktreeTask: Task<Void, Never>?
@@ -1429,12 +1472,29 @@ final class RepoSession: Identifiable {
     // MARK: Profile
 
     /// The tab's profile as the store has it now. An id the store no longer has (the profile was deleted) falls back
-    /// to the default profile, as deleting it promised, in an Untitled window only: a workspace tab gets none. nil
-    /// while the store is not read.
+    /// to the default profile, as deleting it promised, in an Untitled window only: a workspace tab (or one carrying
+    /// its missing profile) gets none. nil while the store is not read.
     var profile: Profile? {
         guard let profileID, let store = ProfileLibrary.shared.store else { return nil }
-        if profileScope == .workspace { return store.profile(id: profileID) }
+        if keepsMissingProfile { return store.profile(id: profileID) }
         return store.profile(id: profileID) ?? store.defaultProfile
+    }
+
+    /// The tab's profile id when the store does not have it (or is not read yet) in a workspace tab or one carrying
+    /// its missing profile, with the workspace file's definition when it has one; nil otherwise. Read anew each time:
+    /// a profile deleted in Settings makes the tab missing at once, an import or a pick resolves it. Writes that need
+    /// a profile are refused while it is set (`perform`).
+    var missingProfile: MissingProfile? {
+        guard let profileID, keepsMissingProfile,
+              ProfileLibrary.shared.store?.profile(id: profileID) == nil else { return nil }
+        if let carried = carriedMissingProfile, carried.id == profileID { return MissingProfile(carried) }
+        let workspace: Workspace? = if case .workspace(let box) = viewRoute { box.workspace } else { nil }
+        return MissingProfile(id: profileID, in: workspace)
+    }
+
+    /// A profile id the store lacks means no profile here, never the default.
+    private var keepsMissingProfile: Bool {
+        profileScope == .workspace || (profileID != nil && carriedMissingProfile?.id == profileID)
     }
 
     /// Resolves the repo's remembered profile, else the default: from memory when the store is read (it is read at
@@ -2563,6 +2623,8 @@ final class RepoSession: Identifiable {
     /// Drops the branches (and hidden tags) `refs` no longer has from `view` (deleted, pruned, renamed outside Histq):
     /// a soloed one would make `git log` fail.
     private func pruneView(_ refs: Refs) {
+        // A workspace's view is shared through its file: it keeps the branches this Mac has not fetched.
+        if case .workspace = viewRoute { return }
         guard view != .empty else { return }
         let names = Set(refs.localBranches.map(\.refName) + refs.remoteBranches.map(\.refName))
         let tags = Set(refs.tags.map(\.refName))
@@ -2575,8 +2637,16 @@ final class RepoSession: Identifiable {
         saveView()
     }
 
-    /// Saves `view` off the main actor, after the saves before it.
+    /// Saves `view` where `viewRoute` says: the global file off the main actor, after the saves before it; the
+    /// workspace's views (never the global file, even once the workspace is gone); or nowhere.
     private func saveView() {
+        switch viewRoute {
+        case .global: break
+        case .workspace(let box):
+            box.workspace?.setView(view, for: url)
+            return
+        case .dropped: return
+        }
         let (state, cwd, previous) = (view, url, viewSave)
         viewSave = Task {
             await previous?.value
@@ -2591,6 +2661,12 @@ final class RepoSession: Identifiable {
     @concurrent
     private nonisolated static func save(_ state: RepoViewState, cwd: URL) async throws {
         try state.save(key: stateKey(cwd))
+    }
+
+    /// The global saved view of each folder (`repo-view/<stateKey>.json`), read off the main actor.
+    @concurrent
+    nonisolated static func globalViews(_ cwds: [URL]) async -> [(URL, RepoViewState)] {
+        cwds.map { ($0, RepoViewState.load(key: stateKey($0))) }
     }
 
     /// `view` against `refs`. Hidden: the hidden branches and tags that exist but the current branch, each hidden local one's
@@ -5170,8 +5246,8 @@ final class RepoSession: Identifiable {
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
         // A workspace tab never commits or reaches a remote without its own profile.
-        if profileScope == .workspace, profile == nil, let profileID, write.needsProfile {
-            throw ProfileError.profileMissing(profileID)
+        if write.needsProfile, let missing = missingProfile {
+            throw ProfileError.profileMissing(missing.name)
         }
         let isRebase = if case .interactiveRebase = write { true } else { false }
         if isRebase {
@@ -5851,7 +5927,18 @@ final class RepoSession: Identifiable {
             let backend = try await setUpTask.value
             if !viewLoaded {
                 viewLoaded = true
-                view = backend.view
+                // A workspace's own view of the repo, else (a repo new to it) the global one, which the workspace
+                // records at once (even empty), so its file keeps the view the tab started from.
+                if case .workspace(let box) = viewRoute, let workspace = box.workspace {
+                    if let stored = workspace.view(for: url) {
+                        view = stored
+                    } else {
+                        view = backend.view
+                        workspace.setView(view, for: url)
+                    }
+                } else {
+                    view = backend.view
+                }
                 migrateHiddenRefs()
                 updateVisibility()
             }

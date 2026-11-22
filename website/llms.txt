@@ -2,7 +2,7 @@
 
 > Histq is a free, open-source (GPLv3) native macOS git client for macOS 15+ on Apple silicon that runs the git command line tool already on your Mac.
 
-Histq works with your existing repositories, git config, SSH keys and hooks. It has a fast commit graph with search, commit details, staging of files, hunks or single lines, a conflict editor, interactive rebase without an editor, undo and redo for local operations, worktrees, per-tab profiles (identity, commit signing, SSH key, GitHub account), tabs with session restore, a command palette, GitHub pull requests and issues with a token, optional AI assistance with your own provider key, and a terminal drawer per tab. It updates itself with Sparkle.
+Histq works with your existing repositories, git config, SSH keys and hooks. It has a fast commit graph with search, commit details, staging of files, hunks or single lines, a conflict editor, interactive rebase without an editor, undo and redo for local operations, worktrees, per-tab profiles (identity, commit signing, SSH key, GitHub account), tabs with session restore, workspaces (saved sets of windows, tabs, tab groups, profiles and graph views in a `.histqworkspace` file), a command palette, GitHub pull requests and issues with a token, optional AI assistance with your own provider key, and a terminal drawer per tab. It updates itself with Sparkle.
 
 ## Pages
 

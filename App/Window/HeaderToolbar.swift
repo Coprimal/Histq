@@ -37,7 +37,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         image: NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch"))
     /// As wide as its title (already cut at 24 characters), after its color dot.
     private let profileItem = ToolbarDropdown(ID.profile, label: "Profile", width: nil, image: nil)
-    /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
+    /// The color the profile chip's dot shows ("" for no profile, `missingProfileKey` for the warning), so the image is
+    /// only redrawn when it changes.
     private var profileDot: String?
     #if DEBUG || HISTQ_PERF
     /// The branch button's last `<title> busy=<0|1>`, for its `op-feedback branch` timing line.
@@ -45,6 +46,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     #endif
     /// The space between the profile chip's dot and its title.
     private static let profileDotGap: CGFloat = 5
+    /// `profileDot` while the chip shows a missing profile's warning (never a color).
+    private static let missingProfileKey = "missing"
     private let undoItem = NSToolbarItem(itemIdentifier: ID.undo)
     private let redoItem = NSToolbarItem(itemIdentifier: ID.redo)
     private let pullItem = NSMenuToolbarItem(itemIdentifier: ID.pull)
@@ -441,7 +444,16 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
         // Hidden, like the branch menu, where no repo tab shows (Welcome).
         set(profileItem.item, hidden: session == nil)
-        if let session {
+        if let session, let missing = session.missingProfile {
+            // A workspace profile this Mac lacks: the warning triangle instead of the dot and only the name (as wide as
+            // a normal chip, so the toolbar does not overflow); "Profile missing" is in the tooltip and the menu.
+            profileItem.title = Self.truncated(missing.name, 24)
+            profileItem.toolTip = "Profile missing. " + ProfilePicker.missingToolTip(missing)
+            if profileDot != Self.missingProfileKey {
+                profileDot = Self.missingProfileKey
+                profileItem.image = ProfilePicker.warning(gap: Self.profileDotGap)
+            }
+        } else if let session {
             let profile = session.profile
             profileItem.title = Self.truncated(ProfilePicker.title(profile), 24)
             profileItem.toolTip = ProfilePicker.toolTip(profile)

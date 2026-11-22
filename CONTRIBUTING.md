@@ -287,6 +287,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows (dimmed), as their header's eye button does. |
 | `-HistqSaveWorkspace <path>` | Once the launch's windows are open, Save Workspace As… to `<path>` from the front window, without a panel. |
 | `-HistqCloseWorkspace <name>` | Once the launch's windows are open, Close Workspace on the open workspace with that name. |
+| `-HistqImportProfiles YES` | When a workspace opens with the offer to import its missing profiles, presses Import about 1 s after the sheet shows. |
 | `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
 | `-HistqHTMLProbe YES` | Snapshots every GitHub HTML view (`html-<n>.png`) and logs its size. |
 | `-HistqSlotProbe YES` | Outlines the pull request and issue pages' overlay slots in red and logs `slot-probe <id> html <x,y,w,h> overlay <x,y,w,h> delta <d>` after each measurement; 3 s after the first, the window widens by 400 pt for a pass at another width. Stub only. |
@@ -316,6 +317,14 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqGenerateKey` | Opens Generate Key in Settings › SSH. |
 | `-HistqAIStub YES\|error` | Answers AI requests locally (or with HTTP 401), never reaching the network; logs each request's data block labels as `blocks [<label>, ...]` in `ai.log` (labels only, never content). |
 | `-HistqAI <hook>[,amend][,apply\|,cancel][,regenerate][,undo][,close-tab\|,close-window]` | Clicks one AI button: `generate`, `explain-wip`, `explain`, `resolve`, `resolve-all`, `improve-message`, `pr-describe`, `pr-resolve-ai`, `test`, `load-models` or `save-key`. `save-key` (with `-HistqKeychain memory`) removes the active provider's key, saves the fake one through Save and logs `key saved <provider>` or `key not saved <provider>: <why>` in `ai.log`. `improve-message` clicks Improve on the reword row (see `-HistqRewordRow`). `pr-describe` clicks Generate in the Create Pull Request form (needs `-HistqOpenCreatePR` and `-HistqGitHubStub YES`). `pr-resolve-ai` clicks Resolve with AI in the merge box of a pull request with conflicts (needs `-HistqGitHubStub YES`, `-HistqSelect pr:1` and `-HistqPRMergeable false`): `timing.log` gets `content resolve pr <n> ai stopped <N>`, then `select ai resolve-all` as Suggest All starts in the first conflicted file that both sides still have (UU or AA), and `ai.log` gets `batch finished ok=<n> failed=<m>`. `generate,amend` turns Amend on and clicks Generate Message once the last message has loaded. `regenerate` clicks Regenerate once after the first answer and logs `regenerate` in `ai.log`. `resolve-all` (Suggest All) logs `batch finished ok=<n> failed=<m>` once the batch ends; with `apply` it clicks Apply N and logs `apply-batch regions [...]`, and `undo` then does Undo AI and logs `unresolved <a>-><b>`. `close-tab` (another tab must stay open) or `close-window` closes the card's tab or window as soon as the card opens, while the job still reads its content (`resolve-all`: while the batch runs), as Cmd-W would, and logs a `close-tab …` or `close-window …` line; no stub request may follow. When AI is set up but the named hook's button is unavailable, `ai.log` gets `unavailable <hook>: <reason>` once per reason. Each single-card `apply` also logs `form-open <logName> <true\|false>` (whether the rebase or pull request form is still shown). Stub only. |
+
+Workspace QA (background, own state dir): make two or three `git init` repos with a commit next to a folder, open them
+as Untitled tabs, then relaunch with `-HistqSaveWorkspace <folder>/w.histqworkspace`. The file is mode `600` with
+relative tab `path`s, and `session.json` lists it under `workspaces` with `open: true` and no Untitled window. Kill and
+relaunch: the file's `shasum` stays the same (opening never rewrites it). `-HistqCloseWorkspace w` stores its layout with
+`open: false`. A tab whose profile id is not in the state's `profiles.json` refuses `-HistqCommit` (`fail commit` in
+`operations.txt`); `-HistqImportProfiles YES` accepts the import sheet. `kill` skips quit-time writes, so ⌘Q checks are
+manual.
 
 ## Project layout
 

@@ -60,7 +60,8 @@ final class Workspace {
     var repos: [String: WorkspaceFile.Repo]
     /// The absolute paths of the tabs that did not resolve ("Repo not found").
     var missing: Set<String>
-    /// The graph views by absolute repo path, written back unchanged.
+    /// The graph views by absolute repo path: those read from the file, then each tab's as it is first shown or
+    /// changes (`setView`). Capture writes those of the repos the windows' tabs have.
     var views: [String: RepoViewState]
 
     /// A workspace this build just wrote to `url` (New Workspace, Save As from Untitled windows): writable, with no
@@ -123,6 +124,28 @@ final class Workspace {
         return (workspace, resolved, repoKeys)
     }
 
+    /// Profiles just imported from this file (`ProfileImportSheet`): each becomes the baseline of the id it embeds, so
+    /// a later edit in Settings is written to the file, as for a profile the library had when the workspace opened.
+    func adoptBaseline(_ imported: [Profile]) {
+        for profile in imported where profiles.contains(where: { $0.id == profile.id }) {
+            profileBaseline[profile.id] = profile
+        }
+    }
+
+    /// The graph view the workspace has for the repo at `url` (keyed by its standardized absolute path); nil when it
+    /// has none.
+    func view(for url: URL) -> RepoViewState? {
+        views[WorkspaceFile.standardized(url.path)]
+    }
+
+    /// Sets the graph view of the repo at `url` and schedules a save of the file; an unchanged view changes nothing.
+    func setView(_ view: RepoViewState, for url: URL) {
+        let key = WorkspaceFile.standardized(url.path)
+        guard views[key] != view else { return }
+        views[key] = view
+        SessionStore.schedule()
+    }
+
     /// Points the workspace at `url` after Save As: the resolved paths get fresh strings relative to the new folder,
     /// the missing tabs and carried repos keep their `home` with a `path` from the new folder, and the new file is
     /// writable.
@@ -137,5 +160,15 @@ final class Workspace {
         isReadOnly = false
         writeFailed = false
         writeError = nil
+    }
+}
+
+/// A weak reference to a workspace (`RepoSession.ViewRoute`): a session never keeps its closed workspace alive.
+@MainActor
+final class WeakWorkspace {
+    weak var workspace: Workspace?
+
+    init(_ workspace: Workspace) {
+        self.workspace = workspace
     }
 }

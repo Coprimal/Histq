@@ -8,6 +8,7 @@
 // An AI card opened from the rebase or pull request form stacks above the form the same way, so the form keeps its
 // input; Escape then closes only the AI card.
 import AppKit
+import HistqCore
 import SwiftUI
 
 extension EnvironmentValues {
@@ -27,6 +28,8 @@ enum WindowModal: Identifiable {
     case tabEmoji(tabID: UUID)
     /// The palette's File History… (or Blame… when `blame`): a search of the tab `tabID`'s tracked files.
     case fileSearch(tabID: UUID, blame: Bool)
+    /// The offer to import these profiles of the window's workspace file (`ProfileImportSheet`).
+    case importProfiles([Profile])
 
     var id: String {
         switch self {
@@ -35,6 +38,7 @@ enum WindowModal: Identifiable {
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
         case .fileSearch(let id, let blame): "file search \(id) \(blame)"
+        case .importProfiles(let profiles): "import profiles \(profiles.map(\.id.uuidString).joined(separator: ","))"
         }
     }
 }
@@ -183,6 +187,13 @@ struct ModalHost: View {
         case .window(.fileSearch(let tabID, let blame)):
             if let session = model.sessions[tabID] {
                 FileSearchModal(session: session, blame: blame) { model.closeModal() }
+            }
+        case .window(.importProfiles(let profiles)):
+            ProfileImportSheet(profiles: profiles, workspaceName: model.workspace?.name ?? "") {
+                model.closeModal()
+                ProfileImportSheet.importProfiles(profiles, into: model.workspace)
+            } onClose: {
+                model.closeModal()
             }
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,

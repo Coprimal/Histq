@@ -435,9 +435,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                           isSelectedInGroup: saved.isSelectedInGroup)
         }
         // Two layouts may name one file (a symlink changed since): it opens once.
+        var restored: [Workspace] = []
         for (path, (workspace, resolved, repoKeys)) in opened
         where !workspaces.contains(where: { $0.key == workspace.key }) {
             placed += restoreWindows(of: workspace, resolved, repoKeys: repoKeys, layoutPath: path)
+            restored.append(workspace)
         }
         // A workspace file given at launch opens next: it shows instead.
         guard !placed.isEmpty else {
@@ -445,6 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         restoreGroups(placed)
+        for workspace in restored { offerProfileImport(workspace) }
     }
 
     /// A restored window waiting to be laid out: its native tab group (nil: a group of its own), its place in the
@@ -615,10 +618,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// One workspace's file as its windows have it now: their tabs and manual groups, the stored strings of every
-    /// unchanged path, the views and the carried-over repos as read, and the profiles the tabs use. Each keeps the
-    /// file's embedded definition, unless the library's differs from the one it had when the workspace opened (edited
-    /// in Settings since; an id with no baseline counts as unedited). An id the file does not embed takes the
-    /// library's; one the library lacks keeps the embedded definition.
+    /// unchanged path, the graph view of each tab's repo (`Workspace.views`), the carried-over repos as read, and the
+    /// profiles the tabs use. Each profile keeps the file's embedded definition, unless the library's differs from the
+    /// one it had when the workspace opened (edited in Settings since; an id with no baseline counts as unedited). An
+    /// id the file does not embed takes the library's; one the library lacks keeps the embedded definition.
     private func workspaceFile(for workspace: Workspace) -> WorkspaceFile {
         workspaceFile(for: workspace, windows: windows(of: workspace), fileURL: workspace.url,
                       originals: workspace.originals, carried: workspace.repos)
@@ -643,7 +646,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let library, let baseline = workspace.profileBaseline[id], library != baseline else { return embedded }
             return library
         }
-        return WorkspaceFile(windows: windows, views: workspace.views, profiles: profiles, carried: carried,
+        // The views of the tabs' repos (archived ones too); a repo with no view yet gets no entry, so it opens again
+        // from its global view.
+        let paths = Set(windows.flatMap { $0.tabs.compactMap(\.path) }.map(WorkspaceFile.standardized))
+        let views = workspace.views.filter { paths.contains(WorkspaceFile.standardized($0.key)) }
+        return WorkspaceFile(windows: windows, views: views, profiles: profiles, carried: carried,
                              originals: originals, repoOrder: workspace.repoOrder, profileOrder: workspace.profileOrder,
                              fileURL: fileURL, homeURL: Workspace.homeURL)
     }
@@ -996,6 +1003,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let (workspace, resolved, repoKeys) = try await Workspace.open(url)
                 if let open = workspaces.first(where: { $0.key == workspace.key }) { return bringForward(open) }
                 restoreGroups(restoreWindows(of: workspace, resolved, repoKeys: repoKeys))
+                offerProfileImport(workspace)
             } catch {
                 let reason = error.localizedDescription
                 Self.logger.error("workspace not opened: \(key, privacy: .private): \(reason, privacy: .public)")
@@ -1003,6 +1011,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if entries.isEmpty { show(newWindow()) }
                 showAlert("\"\(url.lastPathComponent)\" could not be opened.", Self.message(for: error))
             }
+        }
+    }
+
+    /// Once `workspace`'s windows show (called once per open, after `restoreGroups`): when the profiles its tabs use
+    /// include some the file defines and Settings › Profiles lacks (the badge's condition,
+    /// `WindowModel.missingProfile(of:)`), its front window offers to import them (`ProfileImportSheet`). Nothing is
+    /// offered when the profiles file cannot be read, the workspace closed meanwhile or the window shows a modal.
+    private func offerProfileImport(_ workspace: Workspace) {
+        Task { @MainActor in
+            guard await ProfileLibrary.shared.loaded() != nil,
+                  workspaces.contains(where: { $0 === workspace }), !workspace.isClosing else { return }
+            let members = windows(of: workspace)
+            var seen = Set<UUID>()
+            let missing = members.flatMap { entry in
+                entry.model.tabs.compactMap { entry.model.missingProfile(of: $0.id)?.embedded }
+            }.filter { seen.insert($0.id).inserted }
+            // The front one on screen: a native tab not selected in its group would hide the sheet.
+            let front = NSApp.orderedWindows.lazy.compactMap { window in
+                members.first { $0.window === window && window.isVisible }
+            }.first
+            guard !missing.isEmpty, let entry = front ?? members.first(where: { $0.window.isVisible }),
+                  entry.model.modal == nil else { return }
+            entry.model.presentModal(.importProfiles(missing))
+            #if DEBUG
+            // `-HistqImportProfiles YES`: accepts the sheet as its Import button does, once it has shown.
+            if AppState.launchFlag("-HistqImportProfiles") == "YES" {
+                try? await Task.sleep(for: .seconds(1))
+                guard case .importProfiles? = entry.model.modal else { return }
+                entry.model.closeModal()
+                ProfileImportSheet.importProfiles(missing, into: workspace)
+            }
+            #endif
         }
     }
 
@@ -1061,7 +1101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                      carried: workspace.repos)
             guard writeWorkspace(file, to: url) else { return }
             workspaces.append(workspace)
-            for entry in untitled { entry.model.workspace = workspace }
+            for entry in untitled { entry.model.join(workspace) }
             RecentRepos.workspaces.add(URL(filePath: workspace.key))
         }
     }
@@ -1104,6 +1144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         workspace.isClosing = true
         SessionStore.finish(workspace.key)
         workspaces.removeAll { $0 === workspace }
+        // Its tabs save no view as they close: not to the file just finished, never to the global files.
+        for entry in members {
+            for session in entry.model.sessions.values { session.viewRoute = .dropped }
+        }
         for entry in members { entry.window.close() }
     }
 
