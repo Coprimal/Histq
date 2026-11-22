@@ -51,11 +51,11 @@ enum TabStripMetrics {
     /// this). The tabs after it do not move.
     static let archiveShift: CGFloat = (HeaderMetrics.tabRowLeading - gap) / 2
 
-    /// A worktree box (`WorktreeBoxShape`): this far out from its tabs along the row, inside the gap, so two boxes
-    /// side by side (and a box beside a plain tab) keep a clear line between them; from the row's top to the hover
-    /// fill's bottom, clear of the sheet and of a group's line. A capsule, so its round ends meet the selected tab's
-    /// arcs when that tab is first or last in the box.
-    static let boxOutset: CGFloat = 1.5
+    /// A worktree box (`WorktreeBoxShape`): this far in from its first and last tab's edges, so two boxes side by side
+    /// (and a box beside a plain tab) keep a clear line between them; from the tabs' top to the hover fill's bottom,
+    /// clear of the sheet and of a group's line. A capsule: with that inset its round ends sit inside the selected
+    /// tab's top arcs, so a selected first or last tab hides the box's end.
+    static let boxInset: CGFloat = 1.5
     static let boxBottomInset: CGFloat = 3
     static let boxRadius: CGFloat = .infinity
 
@@ -387,10 +387,10 @@ private struct TabTrack: View {
                     : layout.boxSpan(box, at: target)
                 if let span = drawn {
                     let shape = WorktreeBoxShape(axis: .horizontal,
-                                                 start: span.start + flare - TabStripMetrics.boxOutset,
-                                                 end: span.end + flare + TabStripMetrics.boxOutset,
+                                                 start: span.start + flare + TabStripMetrics.boxInset,
+                                                 end: span.end + flare - TabStripMetrics.boxInset,
                                                  holeStart: hole.start, holeEnd: hole.end,
-                                                 crossStart: -TabStripMetrics.rowInset,
+                                                 crossStart: 0,
                                                  crossEndInset: TabStripMetrics.boxBottomInset,
                                                  holeCrossStart: 0, radius: TabStripMetrics.boxRadius,
                                                  holeRadius: TabStripMetrics.tabRadius, flare: flare)
