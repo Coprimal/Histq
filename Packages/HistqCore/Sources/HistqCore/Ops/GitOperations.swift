@@ -18,6 +18,7 @@
 // cherry-pick, revert, am, local branch create/delete/rename, discard) are snapshotted before and after inside their
 // own lane, so no other write can slip in between; `undo()` and `redo()` move between those snapshots.
 import Foundation
+import Synchronization
 
 public enum GitOperationError: Error, Equatable, Sendable {
     case invalidBranchName(String)
@@ -45,6 +46,9 @@ public enum GitOperationError: Error, Equatable, Sendable {
     case mainWorktree(String)
     /// The worktree the operations run in (removing it deletes the caller's folder).
     case currentWorktree(String)
+    /// A rebase with stashed local changes was rolled back: a commit did not replay cleanly (`localChanges` false) or
+    /// the changes did not apply cleanly to the rebased branch (true). `paths` are the conflicted files.
+    case rebaseWouldConflict(paths: [String], localChanges: Bool)
 }
 
 /// A network command that failed to sign in after the token gate kept the GitHub token back for `reason`; `error` is
@@ -792,11 +796,59 @@ public struct GitOperations: Sendable {
         return result.exitCode == 0
     }
 
-    /// Rebases the current branch onto `upstream`.
-    public func rebase(onto upstream: String) async throws {
-        try await journaled(.rebase, "Rebase onto \(Self.shortRevision(upstream))", mode: .carry) { ops in
-            try await ops.exec(["rebase", "--end-of-options", upstream])
+    /// Rebases the current branch onto `upstream`. `autostash`: the tracked local changes are stashed first (untracked
+    /// files stay where they are) and put back on the rebased branch, and nothing changes when anything conflicts: a
+    /// commit that does not replay cleanly (the rebase is aborted) or changes that do not apply cleanly to the rebased
+    /// branch (a trial apply, then a hard reset to where the branch was). Both throw
+    /// `GitOperationError.rebaseWouldConflict` once the branch and the changes are back as they were.
+    public func rebase(onto upstream: String, autostash: Bool = false) async throws {
+        let saved = StashHash()
+        let save: @Sendable (GitOperations) async throws -> String? = { ops in
+            let hash = try await ops.saveAutostash(includeUntracked: false)
+            saved.value.withLock { $0 = hash }
+            return hash
         }
+        try await journaled(
+            .rebase, "Rebase onto \(Self.shortRevision(upstream))", mode: .carry, before: autostash ? save : nil,
+            after: autostash ? Self.restoreAutostash : nil
+        ) { ops in
+            if let hash = saved.value.withLock({ $0 }) {
+                try await ops.rebaseOrRollBack(onto: upstream, stash: hash)
+            } else {
+                try await ops.exec(["rebase", "--end-of-options", upstream])
+            }
+        }
+    }
+
+    /// `rebase(onto:autostash:)`'s body with the changes in the stash `hash`: the tree is clean, so a failure leaves
+    /// it as the stash push did and `restoreAutostash` pops the stash back. A clean trial apply is reset away too:
+    /// the real one runs in `after`, once the journal has recorded the rebase.
+    private func rebaseOrRollBack(onto upstream: String, stash hash: String) async throws {
+        let original = try await exec(["rev-parse", "--verify", "HEAD"]).text.trimmingCharacters(in: .newlines)
+        do {
+            try await exec(["rebase", "--end-of-options", upstream])
+        } catch {
+            guard (try? await RepoState.readOperation(runner: runner, cwd: cwd, env: env)) == .rebase else { throw error }
+            let paths = await unmergedPaths()
+            try await exec(["rebase", "--abort"])
+            throw GitOperationError.rebaseWouldConflict(paths: paths, localChanges: false)
+        }
+        let ref = try await stashRef(hash)
+        let clean = await appliesCleanly(["stash", "apply", "--index", "--end-of-options", ref])
+        let paths = clean ? [] : await unmergedPaths()
+        try await exec(["reset", "-q", "--hard"] + (clean ? [] : ["--end-of-options", original, "--"]))
+        if !clean { throw GitOperationError.rebaseWouldConflict(paths: paths, localChanges: true) }
+    }
+
+    /// The stash `rebase(onto:autostash:)`'s `before` pushed, for its body.
+    private final class StashHash: Sendable {
+        let value = Mutex<String?>(nil)
+    }
+
+    /// The unmerged paths, relative to the top level.
+    private func unmergedPaths() async -> [String] {
+        let text = (try? await exec(["diff", "--name-only", "--diff-filter=U", "-z"]))?.text ?? ""
+        return text.split(separator: "\0").map(String.init)
     }
 
     /// Fast-forwards the local `branch` to `source`, a full ref (`refs/heads/x`, `refs/remotes/origin/x`). Refused
@@ -1084,11 +1136,12 @@ public struct GitOperations: Sendable {
         try await $0.restoreAutostash($1, failure: $2)
     }
 
-    /// `journaled`'s `before:` for an auto-stash: `stash push -u`. Returns the new stash's hash; nil when there was
-    /// nothing to save (an empty push leaves `refs/stash` as it was, so nothing is put back later).
-    private func saveAutostash() async throws -> String? {
+    /// `journaled`'s `before:` for an auto-stash: `stash push -u` (`-u` only with `includeUntracked`). Returns the new
+    /// stash's hash; nil when there was nothing to save (an empty push leaves `refs/stash` as it was, so nothing is
+    /// put back later).
+    private func saveAutostash(includeUntracked: Bool = true) async throws -> String? {
         let top = try await stashTop()
-        try await exec(["stash", "push", "-u"])
+        try await exec(["stash", "push"] + (includeUntracked ? ["-u"] : []))
         let saved = try await stashTop()
         return saved == top ? nil : saved
     }

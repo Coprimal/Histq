@@ -128,6 +128,22 @@ extension RepoSession {
                 isDestructive: false, asksAlways: true)
     }
 
+    /// Rebases the checked-out branch onto `upstream` (a full ref). With local changes (untracked files and submodules
+    /// aside, which a rebase leaves alone) and `PrefKey.autoStash` "ask", asks first: Stash & Rebase or Cancel.
+    /// "always" stashes without asking, "never" leaves them to git, which refuses. A stashed rebase goes through only
+    /// when nothing conflicts; otherwise nothing changes (`GitOperations.rebase(onto:autostash:)`).
+    func rebase(onto upstream: String, title: String) {
+        let preference = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue)
+        let dirty = status.value?.entries.contains { !$0.isSubmodule && $0.kind != .untracked } == true
+        let write = { (autostash: Bool) in RepoSession.Write.rebase(onto: upstream, checkoutFirst: nil, autostash: autostash) }
+        guard dirty, preference != "never" else { return run(write(false), title: title) }
+        if preference == "always" { return run(write(true), title: title) }
+        confirm("\(title) with uncommitted changes?",
+                message: "Stash & Rebase puts your changes in a stash, rebases, then brings them back. If the rebase "
+                    + "or your changes would conflict, nothing is changed.",
+                button: "Stash & Rebase", write: write(true), operation: title, isDestructive: false, asksAlways: true)
+    }
+
     func fetchAll() {
         let prune = Preferences.defaults.bool(forKey: PrefKey.pruneOnFetch.rawValue)
         run(.fetchAll(prune: prune), title: "Fetch", key: .fetch)
@@ -263,6 +279,9 @@ enum FailureHints {
                 return Hint(text: "Submodule recursion is on (\(keys.joined(separator: ", "))), so Histq did not send "
                     + "your GitHub token. Turn it off, or sign in with a credential helper of your own.")
             }
+        }
+        if case GitOperationError.rebaseWouldConflict = failure.error {
+            return Hint(text: "Commit or stash your changes, then rebase again to resolve the conflicts.")
         }
         guard let error = failure.error as? GitError else { return Hint() }
         switch error {

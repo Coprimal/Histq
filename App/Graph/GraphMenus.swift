@@ -677,7 +677,7 @@ enum RepoMenus {
             },
         ] + (twoWay ? [fastForwardBack] : []) + [
             .action("Rebase \(current) onto \(name)") {
-                session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
+                session.rebase(onto: ref, title: "Rebase \(current) onto \(name)")
             },
             .action("Interactive Rebase \(current) onto \(name)…", enabled: rebaseReason == nil, toolTip: rebaseReason) {
                 if let commit { session.openInteractiveRebase(onto: commit, name: name) }
@@ -1060,8 +1060,9 @@ enum RepoMenus {
         }
         if case .local = source {
             entries.append(.action("Rebase \(sourceName) onto \(targetName)") {
-                session.run(.rebase(onto: targetRef, checkoutFirst: sourceName == current ? nil : sourceName),
-                            title: "Rebase \(sourceName) onto \(targetName)")
+                let title = "Rebase \(sourceName) onto \(targetName)"
+                if sourceName == current { return session.rebase(onto: targetRef, title: title) }
+                session.run(.rebase(onto: targetRef, checkoutFirst: sourceName), title: title)
             })
         }
         if case .local = target {

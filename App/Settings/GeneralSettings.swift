@@ -50,8 +50,9 @@ struct GeneralSettings: View {
                         .fixedSize()
                 } label: {
                     Text("Uncommitted changes")
-                    SettingsHint("On a checkout or pull. Always stash puts them in a stash first and brings them "
-                        + "back after. Never stash carries them to the other branch, and pulls as git does.")
+                    SettingsHint("On a checkout, pull or rebase. Always stash puts them in a stash first and brings "
+                        + "them back after. Never stash carries them to the other branch, and pulls and rebases as "
+                        + "git does.")
                 }
                 .settingsSearchAnchor("Uncommitted changes")
                 SettingsDivider()

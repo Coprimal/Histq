@@ -1420,6 +1420,12 @@ struct ArchiveButton: View {
             ArchiveListPopover(model: model, isPresented: $showingList)
         }
         .background(WindowDragBlocker())
+        // DEBUG `-HistqOpenPopover archive` (website and QA shots): the list opens once the window has settled.
+        .task {
+            guard AppState.launchFlag("-HistqOpenPopover") == "archive" else { return }
+            try? await Task.sleep(for: .seconds(2))
+            showingList = true
+        }
     }
 }
 

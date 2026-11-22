@@ -126,8 +126,8 @@ enum PrefKey: String, CaseIterable {
     case authorEmojis
     /// Pull button: a `GitOperations.PullMode` case name, "fastForward" (merge if needed), "fastForwardOnly" or "rebase".
     case pullMode
-    /// A checkout or pull with local changes: "ask" (the dialog), "always" (stash them first and put them back) or
-    /// "never" (a checkout carries them, a pull runs without `--autostash`).
+    /// A checkout, pull or rebase with local changes: "ask" (the dialog), "always" (stash them first and put them back)
+    /// or "never" (a checkout carries them, a pull runs without `--autostash`, a rebase as git does).
     case autoStash
     /// Auto-fetch interval in minutes; 0 = off.
     case autoFetchMinutes
