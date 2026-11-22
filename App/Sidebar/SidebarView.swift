@@ -454,7 +454,7 @@ private struct WorktreeRow: View {
                 Spacer(minLength: 4)
                 if let changes {
                     Image(systemName: "pencil")
-                        .foregroundStyle(Color(nsColor: Palette.graphLanes[0]))
+                        .foregroundStyle(Color(nsColor: Palette.graphLanes[1]))
                         .help("Uncommitted changes: \(changes)")
                 }
                 Text(info.worktree.isPrunable ? "missing" : info.headLabel)
