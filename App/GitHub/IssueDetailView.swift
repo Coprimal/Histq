@@ -103,15 +103,15 @@ final class IssueDetailModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     /// The ids of optimistic replies (`PullRequestDetailModel`'s rule).
-    @ObservationIgnored private var optimisticID = 1 << 62
+    @ObservationIgnored private var optimisticID = PRPlaceholderID.base
 
     #if DEBUG
-    /// DEBUG `-HistqIssueAction comment|close|reopen|greply|gresolve|edit|edit-save|delete|delete-confirm`: runs
-    /// that action once, on the first load, without its confirmation, so a launch exercises the action path and its
-    /// reload. Only with `-HistqGitHubStub YES`: never an unconfirmed action on a real account. `greply` and
-    /// `gresolve` act on the first general thread of that load, `edit-save` on its first own comment
-    /// (`PRGeneralAction.launchAction`); `edit`, `delete` and `delete-confirm` open its editor or its confirmation
-    /// (`openLaunchStep`).
+    /// DEBUG `-HistqIssueAction comment|close|reopen|greply|gresolve|edit|edit-save|delete|delete-confirm|react|`
+    /// `react-new`: runs that action once, on the first load, without its confirmation, so a launch exercises the
+    /// action path and its reload. Only with `-HistqGitHubStub YES`: never an unconfirmed action on a real account.
+    /// `greply` and `gresolve` act on the first general thread of that load, `edit-save` on its first own comment and
+    /// `react` (`react-new`) on its first comment with (without) reactions (`PRGeneralAction.launchAction`); `edit`,
+    /// `delete` and `delete-confirm` open its editor or its confirmation (`openLaunchStep`).
     private static var launchActionName: String? = GitHubStub.isEnabled
         ? AppState.launchFlag("-HistqIssueAction") : nil
 
@@ -159,7 +159,7 @@ final class IssueDetailModel {
             return
         }
         let generation = generation
-        let general = PRGeneralOptions(api.client.capabilities, expanded: generalExpanded)
+        let general = PRGeneralOptions(api.client, expanded: generalExpanded)
         task = Task { [weak self] in
             let result = await Self.fetch(api.client, api.repository, number: number, loadID: generation,
                                           general: general)
@@ -212,16 +212,25 @@ final class IssueDetailModel {
         let endOperation = beginOperation("#\(number) \(action.progressTitle.dropLast())")
         // A general thread action shows at once (`PullRequestDetailModel.perform`'s rule).
         var optimistic: (shown: IssueDetail, comments: [HostedComment], general: PRGeneralOptions)?
+        // A reaction that keeps its row: the shown page with the row toggled, put in at once
+        // (`PullRequestDetailModel.perform`).
+        var ready: PRTimelineHTML?
         if case .general(let general) = action, self.number == number, let shown = state.value {
             if case .resolve(let root, true) = general { generalExpanded[root.id] = nil }
             if case .edit(let target, _) = general { editingComments.remove(target.key) }
             optimisticID &+= 1
+            let options = PRGeneralOptions(api.client, expanded: generalExpanded)
             optimistic = (shown, PRTimeline.patched(shown.comments, general, viewer: shown.viewer,
-                                                    replyID: optimisticID),
-                          PRGeneralOptions(api.client.capabilities, expanded: generalExpanded))
+                                                    replyID: optimisticID, kinds: options.reactions),
+                          options)
+            ready = PRTimeline.patched(shown.timeline, general)
         }
-        Task { [weak self] in
-            if let optimistic {
+        if let optimistic, let ready,
+           replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments, timeline: ready) {
+            UITiming.content("issue \(number) action \(action.timingName) patched")
+        }
+        Task { [weak self, ready] in
+            if let optimistic, ready == nil {
                 let page = await Self.page(optimistic.shown.issue, comments: optimistic.comments,
                                            general: optimistic.general)
                 if self?.replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments,
@@ -246,7 +255,11 @@ final class IssueDetailModel {
                         UITiming.content("issue \(number) action edit reopened cedit-\(target.key) open")
                     }
                 }
-                let message = PullRequestDetailModel.message(for: error, kind: api.client.kind)
+                var message = PullRequestDetailModel.message(for: error, kind: api.client.kind)
+                if case .general(let general) = action {
+                    message = PRGeneralAction.withPermissionHint(message, for: general, error: error,
+                                                                 kind: api.client.kind)
+                }
                 if showing {
                     actionError = "\(action.failureTitle): \(message)"
                 } else {

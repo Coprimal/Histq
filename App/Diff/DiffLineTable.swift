@@ -89,19 +89,31 @@ struct DiffRow: Sendable {
 enum DiffTableRow: Sendable {
     case single(DiffRow)
     case pair(old: DiffRow?, new: DiffRow?)
+    /// A review thread under the line before it (only in a table given `DiffLineTable.inlineThreads`).
+    case thread(DiffInlineThread)
+    /// The new comment's box under its (last) line (only with `DiffInlineThreads.newComments`).
+    case composer(DiffInlineComposer)
 
     /// The hunk whose header this row is.
     var hunk: Int? {
         if case .single(let row) = self, case .hunk(let index) = row.kind { index } else { nil }
     }
 
-    var isLine: Bool { hunk == nil }
+    /// A line (or a split pair of lines): not a hunk header or a thread.
+    var isLine: Bool {
+        switch self {
+        case .single(let row): row.isLine
+        case .pair: true
+        case .thread, .composer: false
+        }
+    }
 
     /// The lines the row shows (a context line once).
     var lines: [DiffRow] {
         switch self {
         case .single(let row): row.isLine ? [row] : []
         case .pair(let old, let new): old?.kind == .context ? [old].compactMap { $0 } : [old, new].compactMap { $0 }
+        case .thread, .composer: []
         }
     }
 
@@ -351,6 +363,9 @@ struct DiffLineTable: NSViewRepresentable {
     var isFirst = true
     /// Gets the table once made (the session's `diffTable`, the keyboard's target when the tab shows).
     var onTable: @MainActor (NSView) -> Void = { _ in }
+    /// A pull request's Files changed only: its review threads, each in a row under its line. nil everywhere else
+    /// (the staging, commit and file diffs), which keeps their rows as they are.
+    var inlineThreads: DiffInlineThreads?
     var onApply: @MainActor (PatchBuilder.Action, Set<DiffLineID>, FileDiff) -> Void = { _, _, _ in }
     var onClose: @MainActor () -> Void = {}
     /// The code font size: a new one reloads the rows at it.
@@ -406,6 +421,108 @@ struct DiffJump: Equatable {
 
     let direction: Direction
     let serial: Int
+}
+
+/// A review thread drawn under a diff line: its comments as plain text (never HTML), the replies indented.
+struct DiffInlineThread: Equatable, Sendable {
+    struct Comment: Equatable, Sendable {
+        let author: String
+        /// Already formatted.
+        let date: String
+        let body: String
+        let isReply: Bool
+    }
+
+    let id: Int
+    /// The line it sits under: a new-side line number (`newSide`), else an old-side one.
+    let line: Int
+    let newSide: Bool
+    /// "Line 6" or "Lines 4–6".
+    let title: String
+    let isResolved: Bool
+    let comments: [Comment]
+}
+
+/// What the Files changed tab of a pull request gives its table: the file's threads, which of them show collapsed
+/// (their header only), and what a click on a header or on "Reply in Conversation" does.
+struct DiffInlineThreads {
+    /// The file's path, for the DEBUG probe.
+    let path: String
+    let threads: [DiffInlineThread]
+    let collapsed: Set<Int>
+    /// A header click: the thread's id and whether it is collapsed now (the table shows it at once).
+    let onToggle: @MainActor (Int, Bool) -> Void
+    let onReply: @MainActor () -> Void
+    /// Where the host takes new inline comments: the "+" on a hovered line and the open comment box. nil hides both.
+    var newComments: DiffNewComments?
+}
+
+/// A diff line as its row shows it: what a new inline comment goes on.
+struct DiffInlineLine: Equatable, Sendable {
+    let kind: HostedInlinePosition.LineKind
+    let oldLine: Int?
+    let newLine: Int?
+
+    /// A line row's line; nil for a hunk header.
+    init?(_ row: DiffRow) {
+        switch row.kind {
+        case .added: kind = .added
+        case .removed: kind = .removed
+        case .context: kind = .context
+        case .hunk: return nil
+        }
+        oldLine = row.oldLine
+        newLine = row.newLine
+    }
+
+    init(kind: HostedInlinePosition.LineKind, oldLine: Int?, newLine: Int?) {
+        self.kind = kind
+        self.oldLine = oldLine
+        self.newLine = newLine
+    }
+
+    /// The number shown for it: the old one of a removed line, else the new one.
+    var number: Int? { kind == .removed ? oldLine : newLine }
+
+    /// `R6` (new side) or `L3` (a removed line), for the DEBUG probe.
+    var probe: String { (kind == .removed ? "L" : "R") + (number.map(String.init) ?? "?") }
+}
+
+/// The open new comment box of a file: under `end`, on the lines from `start` for a range; `message` says why the
+/// last range asked for was refused.
+struct DiffInlineComposer: Equatable, Sendable {
+    var end: DiffInlineLine
+    var start: DiffInlineLine?
+    var message: String?
+
+    /// "Comment on line 6", "Comment on lines 4–6"; a range from a removed line to a new one marks each side
+    /// ("Comment on lines −3–+5").
+    var title: String {
+        guard let start else { return "Comment on line \(end.number.map(String.init) ?? "?")" }
+        let mixed = (start.kind == .removed) != (end.kind == .removed)
+        func label(_ line: DiffInlineLine) -> String {
+            (mixed ? (line.kind == .removed ? "−" : "+") : "") + (line.number.map(String.init) ?? "?")
+        }
+        return "Comment on lines \(label(start))–\(label(end))"
+    }
+}
+
+/// A pull request's Files changed where the host takes new inline comments: the open box of this file, whether a
+/// shift-click makes a range, the host's range rule, and the box's text and buttons. The text lives with the owner
+/// (read when the box shows, written as it is typed), so a reload of the rows keeps it.
+struct DiffNewComments {
+    let composer: DiffInlineComposer?
+    let allowsRange: Bool
+    /// Another action of the pull request runs: Comment waits.
+    let isBusy: Bool
+    /// Why the host refuses a range from the first line to the second (both shown, in order); nil when it takes it.
+    let refusal: @MainActor (DiffInlineLine, DiffInlineLine) -> String?
+    let draft: @MainActor () -> String
+    /// A "+" click: the box opened (or moved, or made a range); the table shows it at once.
+    let onOpen: @MainActor (DiffInlineComposer) -> Void
+    let onDraft: @MainActor (String) -> Void
+    let onCancel: @MainActor () -> Void
+    let onPost: @MainActor (String) -> Void
 }
 
 /// Fonts and column positions of a table's rows. The gutters fit the largest line number; the content width fits the
@@ -561,6 +678,37 @@ final class DiffTableView: NSTableView {
     private var tookFocus = false
     /// The tab's repo folder name, for the `focus` timing line.
     var repo = ""
+    /// A pull request's Files changed where the host takes new comments: the pointer is followed for the "+"
+    /// (`DiffTableController.hoverComment`). Every other table never tracks it.
+    var tracksCommentHover = false {
+        didSet {
+            guard tracksCommentHover != oldValue else { return }
+            updateTrackingAreas()
+            observeClipScroll()
+        }
+    }
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        hoverArea = nil
+        guard tracksCommentHover else { return }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow,
+                                                         .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        if tracksCommentHover { controller?.hoverComment(at: convert(event.locationInWindow, from: nil)) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if tracksCommentHover { controller?.hoverComment(at: nil) }
+    }
 
     override func tile() {
         super.tile()
@@ -579,6 +727,7 @@ final class DiffTableView: NSTableView {
             NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: observedClip)
         }
         observedClip = enclosingScrollView?.contentView
+        observeClipScroll()
         guard let clip = observedClip else { return }
         // A card wider or narrower: the column follows (when the lines wrap or split, it is the card's width).
         clip.postsFrameChangedNotifications = true
@@ -590,6 +739,31 @@ final class DiffTableView: NSTableView {
         tile()
     }
 
+    /// The clip view whose scrolling moves the "+" (`clipScrolled`), observed only while `tracksCommentHover`.
+    private weak var scrollObservedClip: NSClipView?
+
+    /// Follows the clip view's scrolling only while the pointer is tracked: every other table adds no observer (and no
+    /// `scrollWheel` override, which would cost AppKit's responsive scrolling).
+    private func observeClipScroll() {
+        if let scrollObservedClip {
+            NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification,
+                                                      object: scrollObservedClip)
+        }
+        scrollObservedClip = nil
+        guard tracksCommentHover, let clip = enclosingScrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(clipScrolled),
+                                               name: NSView.boundsDidChangeNotification, object: clip)
+        scrollObservedClip = clip
+    }
+
+    /// The rows moved under a still pointer: the "+" follows to the line now under it.
+    @objc private func clipScrolled() {
+        guard tracksCommentHover, let window, window.isKeyWindow else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        controller?.hoverComment(at: visibleRect.contains(point) ? point : nil)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // In a hidden tab it waits until the tab shows (`WindowModel.focusShownTab`).
@@ -598,6 +772,18 @@ final class DiffTableView: NSTableView {
         // The other tables of the same diff do not steal it; a hidden tab's table does not keep it.
         if let focused = window.firstResponder as? DiffTableView, !focused.isHiddenOrHasHiddenAncestor { return }
         if window.makeFirstResponder(self) { UITiming.focus(repo, "diff") }
+    }
+
+    /// A table lets only a selected row's views take the keyboard, and the comment box's row is never selected: its
+    /// text (and buttons) take it anyway, so a click back into the box types there (and Esc cancels the box instead of
+    /// closing the file).
+    override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool {
+        var view = responder as? NSView
+        while let current = view, current !== self {
+            if current is DiffComposerCellView { return true }
+            view = current.superview
+        }
+        return super.validateProposedFirstResponder(responder, for: event)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -727,6 +913,19 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     private var jumpSerial: Int?
     /// Text selected by a drag; it and the selected lines never go together.
     private var textSelection: DiffTextSelection?
+    /// The threads the rows hold (`DiffLineTable.inlineThreads`), the ones shown collapsed, the rows they are in, and
+    /// the ones whose line is not in the rows (none of their own).
+    private var shownThreads: [DiffInlineThread] = []
+    private var collapsedThreads: Set<Int> = []
+    private var threadRows = IndexSet()
+    private var unplacedThreads: [Int] = []
+    /// Expanded threads' heights by thread id, for `threadHeightsWidth` (the width their boxes were laid out at).
+    private var threadHeights: [Int: CGFloat] = [:]
+    private var threadHeightsWidth: CGFloat = -1
+    /// The new comment box the rows hold (`DiffNewComments.composer`) and its row; the "+" over the hovered line.
+    private var shownComposer: DiffInlineComposer?
+    private var composerRow: Int?
+    private var commentButton: DiffCommentButton?
 
     private struct Shown: Equatable {
         let loadID: Int
@@ -742,6 +941,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     private static let splitID = NSUserInterfaceItemIdentifier("diffSplit")
     private static let hunkID = NSUserInterfaceItemIdentifier("diffHunk")
     private static let rowID = NSUserInterfaceItemIdentifier("diffRow")
+    private static let threadID = NSUserInterfaceItemIdentifier("diffThread")
+    private static let composerID = NSUserInterfaceItemIdentifier("diffComposer")
 
     func attach(_ table: DiffTableView) {
         self.table = table
@@ -756,12 +957,22 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         let key = Shown(loadID: view.loadID, mode: view.mode, side: view.section.side, wraps: view.wraps,
                         fontSize: view.fontSize)
         DiffLayout.use(view.fontSize)
-        if key != shown {
+        // Always empty outside a pull request's Files changed.
+        let threads = view.inlineThreads?.threads ?? []
+        let newComments = view.inlineThreads?.newComments
+        table.tracksCommentHover = newComments != nil
+        if newComments == nil { commentButton?.isHidden = true }
+        if key != shown || threads != shownThreads || newComments?.composer != shownComposer {
             let modeChanged = shown.map { $0.mode != key.mode } ?? false
             // A table that just appeared takes the press before it as seen.
             if shown == nil { jumpSerial = view.jump?.serial }
             shown = key
-            rows = view.section.tableRows(view.mode)
+            shownThreads = threads
+            shownComposer = newComments?.composer
+            collapsedThreads = view.inlineThreads?.collapsed ?? []
+            // Read before the rows change: the box's row is the shown one's.
+            let wasTyping = composerHasFocus()
+            placeRows(view)
             layout = DiffLayout(rows: view.section.rows(view.mode),
                                 oneGutter: [.untracked, .file].contains(view.section.side))
             heightsWidth = -1
@@ -770,16 +981,31 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             // `reloadData` keeps the selected row indexes, which would now point at other lines, so clear them.
             table.reloadData()
             table.deselectAll(nil)
+            commentButton?.isHidden = true
+            // The box closed (Esc, Cancel, Comment): give the keyboard back to the table, not the window.
+            if wasTyping, composerRow == nil {
+                table.window?.makeFirstResponder(table)
+            } else if wasTyping {
+                focusComposer()
+            }
             table.contentWidth = view.wraps || view.mode == .split ? 0 : layout.contentWidth
             table.tile()
             // The I-beam follows the new rows' text.
             table.window?.invalidateCursorRects(for: table)
             if modeChanged { scrollToFirstChange(table) }
             #if DEBUG
+            logProbe(table)
             runLaunchStage()
             #endif
         } else {
             refreshHunkButtons()
+            let collapsed = view.inlineThreads?.collapsed ?? []
+            for id in collapsed.symmetricDifference(collapsedThreads) {
+                setCollapsed(id, collapsed.contains(id))
+            }
+            // Comment follows the pull request's running action.
+            if let composerRow, let cell = table.view(atColumn: 0, row: composerRow, makeIfNecessary: false)
+                as? DiffComposerCellView { cell.setBusy(newComments?.isBusy == true) }
         }
         if let jump = view.jump, jump.serial != jumpSerial {
             jumpSerial = jump.serial
@@ -829,12 +1055,228 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         view?.onClose()
     }
 
+    // MARK: Threads
+
+    /// The section's rows, with the threads and the new comment box under their lines when there are any (never
+    /// outside a pull request's Files changed).
+    private func placeRows(_ view: DiffLineTable) {
+        rows = view.section.tableRows(view.mode)
+        threadRows = []
+        unplacedThreads = []
+        threadHeights = [:]
+        composerRow = nil
+        if !shownThreads.isEmpty || shownComposer != nil { placeThreads(shownThreads) }
+    }
+
+    /// Puts each thread in a row right after the row of its line on its side (a context line has both sides), several
+    /// on one line in their order, then the new comment box under its line; a thread whose line is not in the rows
+    /// gets none.
+    private func placeThreads(_ threads: [DiffInlineThread]) {
+        var newSide: [Int: [DiffInlineThread]] = [:]
+        var oldSide: [Int: [DiffInlineThread]] = [:]
+        for thread in threads {
+            if thread.newSide {
+                newSide[thread.line, default: []].append(thread)
+            } else {
+                oldSide[thread.line, default: []].append(thread)
+            }
+        }
+        var placed: [DiffTableRow] = []
+        placed.reserveCapacity(rows.count + threads.count)
+        for row in rows {
+            placed.append(row)
+            for line in row.lines {
+                var here: [DiffInlineThread] = []
+                if line.kind != .added, let number = line.oldLine { here += oldSide.removeValue(forKey: number) ?? [] }
+                if line.kind != .removed, let number = line.newLine { here += newSide.removeValue(forKey: number) ?? [] }
+                for thread in here {
+                    threadRows.insert(placed.count)
+                    placed.append(.thread(thread))
+                }
+            }
+            if let composer = shownComposer, composerRow == nil, case .single(let line) = row,
+               DiffInlineLine(line) == composer.end {
+                composerRow = placed.count
+                placed.append(.composer(composer))
+            }
+        }
+        rows = placed
+        unplacedThreads = threads.map(\.id).filter { id in
+            !threadRows.contains { if case .thread(let thread) = rows[$0] { thread.id == id } else { false } }
+        }
+    }
+
+    /// The width a thread's box lays out in: the card's visible width (the column is wider when a long line scrolls
+    /// sideways), as `DiffThreadCellView` draws it; 0 until the card is laid out.
+    private var threadWidth: CGFloat {
+        table?.enclosingScrollView?.contentView.bounds.width ?? 0
+    }
+
+    /// A thread row's height: its header alone when collapsed, else its whole box at `threadWidth`.
+    private func threadHeight(_ thread: DiffInlineThread) -> CGFloat {
+        if collapsedThreads.contains(thread.id) { return DiffThreadDrawing.collapsedHeight }
+        let width = threadWidth
+        // Not laid out yet: a header's height, measured once the card has its width (`widthChanged`).
+        guard width > 0 else { return DiffThreadDrawing.collapsedHeight }
+        if abs(width - threadHeightsWidth) > 0.5 {
+            threadHeights = [:]
+            threadHeightsWidth = width
+        }
+        if let height = threadHeights[thread.id] { return height }
+        let height = DiffThreadDrawing.height(thread, width: width)
+        threadHeights[thread.id] = height
+        return height
+    }
+
+    private func configure(_ cell: DiffThreadCellView, _ thread: DiffInlineThread) {
+        cell.configure(thread, collapsed: collapsedThreads.contains(thread.id),
+                       onToggle: { [weak self] in self?.toggleThread(thread.id) },
+                       onReply: { [weak self] in self?.view?.inlineThreads?.onReply() })
+    }
+
+    /// A header click: the thread collapses or expands at once, then the owner keeps the choice.
+    private func toggleThread(_ id: Int) {
+        let collapsed = !collapsedThreads.contains(id)
+        setCollapsed(id, collapsed)
+        view?.inlineThreads?.onToggle(id, collapsed)
+    }
+
+    /// Shows thread `id` collapsed or expanded: its row's height and its cell, without reloading the table.
+    private func setCollapsed(_ id: Int, _ collapsed: Bool) {
+        if collapsed { collapsedThreads.insert(id) } else { collapsedThreads.remove(id) }
+        guard let table, let index = threadRows.first(where: { index in
+            if case .thread(let thread) = rows[index] { thread.id == id } else { false }
+        }), case .thread(let thread) = rows[index] else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+        }
+        if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? DiffThreadCellView {
+            configure(cell, thread)
+        }
+        #if DEBUG
+        UITiming.probe("diff-probe", "thread \(id) \(collapsed ? "collapsed" : "expanded") "
+            + "height \(Int(table.rect(ofRow: index).height))")
+        #endif
+    }
+
+    // MARK: New comments
+
+    /// The line a "+" can comment on: a unified row's line (the pull request's Files changed is never split).
+    private func commentLine(_ row: Int) -> DiffInlineLine? {
+        guard rows.indices.contains(row), case .single(let line) = rows[row] else { return nil }
+        return DiffInlineLine(line)
+    }
+
+    /// The row showing `line`.
+    private func row(of line: DiffInlineLine) -> Int? {
+        rows.indices.first { index in
+            if case .single(let row) = rows[index] { DiffInlineLine(row) == line } else { false }
+        }
+    }
+
+    /// The pointer moved over the table (nil: it left it): the "+" goes to the line under it, or hides.
+    func hoverComment(at point: NSPoint?) {
+        guard let table, view?.inlineThreads?.newComments != nil, let point,
+              case let index = table.row(at: point), index >= 0, commentLine(index) != nil
+        else {
+            commentButton?.isHidden = true
+            return
+        }
+        let button = commentButton ?? {
+            let button = DiffCommentButton()
+            button.onPress = { [weak self] row, shift in self?.commentPressed(row: row, shift: shift) }
+            commentButton = button
+            return button
+        }()
+        let rect = table.rect(ofRow: index)
+        let side = min(18, max(12, DiffLayout.lineHeight - 2))
+        button.row = index
+        button.frame = NSRect(x: rect.minX + layout.signX - 7,
+                              y: rect.minY + (min(rect.height, DiffLayout.lineHeight) - side) / 2,
+                              width: side, height: side)
+        if table.subviews.last !== button {
+            // Above the row views, which the table adds as it scrolls.
+            table.addSubview(button, positioned: .above, relativeTo: nil)
+        }
+        button.isHidden = false
+        table.window?.invalidateCursorRects(for: button)
+    }
+
+    /// A "+" click on `row`: the box opens under it (a box already open elsewhere in the file moves there, its text
+    /// kept); with ⇧ and an open box, the lines from the box's first line to this one make a range, unless they cross
+    /// a hunk or the host refuses it (the box stays, saying why). Shown at once, then the owner keeps it.
+    private func commentPressed(row index: Int, shift: Bool) {
+        guard let newComments = view?.inlineThreads?.newComments, let line = commentLine(index) else { return }
+        var composer = DiffInlineComposer(end: line)
+        if shift, newComments.allowsRange, let open = shownComposer, let anchor = row(of: open.start ?? open.end),
+           anchor != index {
+            let first = min(anchor, index), last = max(anchor, index)
+            if let start = commentLine(first), let end = commentLine(last) {
+                if rows[first...last].contains(where: { $0.hunk != nil }) {
+                    composer = open
+                    composer.message = "A range stays in one hunk."
+                } else if let refusal = newComments.refusal(start, end) {
+                    composer = open
+                    composer.message = refusal
+                } else {
+                    composer = DiffInlineComposer(end: end, start: start)
+                }
+            }
+        }
+        showComposer(composer)
+        newComments.onOpen(composer)
+    }
+
+    /// Puts `composer` in the rows now (the click's own update), its text field focused.
+    private func showComposer(_ composer: DiffInlineComposer) {
+        guard let view, let table else { return }
+        shownComposer = composer
+        placeRows(view)
+        heightsWidth = -1
+        textSelection = nil
+        table.reloadData()
+        table.deselectAll(nil)
+        commentButton?.isHidden = true
+        focusComposer()
+        #if DEBUG
+        UITiming.probe("diff-probe", "composer open " + composerSummary())
+        #endif
+    }
+
+    private func configure(_ cell: DiffComposerCellView, _ composer: DiffInlineComposer) {
+        guard let newComments = view?.inlineThreads?.newComments else { return }
+        cell.configure(composer, text: newComments.draft(), busy: newComments.isBusy,
+                       onDraft: { [weak self] in self?.view?.inlineThreads?.newComments?.onDraft($0) },
+                       onCancel: { [weak self] in self?.view?.inlineThreads?.newComments?.onCancel() },
+                       onPost: { [weak self] in self?.view?.inlineThreads?.newComments?.onPost($0) })
+    }
+
+    private var composerCell: DiffComposerCellView? {
+        guard let table, let composerRow else { return nil }
+        return table.view(atColumn: 0, row: composerRow, makeIfNecessary: false) as? DiffComposerCellView
+    }
+
+    /// Whether the user is typing in the box (its text field has the keyboard).
+    private func composerHasFocus() -> Bool {
+        composerCell?.hasFocus == true
+    }
+
+    /// The box's text field takes the keyboard (scrolled into view first, so its cell exists).
+    private func focusComposer() {
+        guard let table, let composerRow else { return }
+        table.scrollRowToVisible(composerRow)
+        (table.view(atColumn: 0, row: composerRow, makeIfNecessary: true) as? DiffComposerCellView)?.focus()
+    }
+
     // MARK: Data
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         guard rows.indices.contains(row) else { return DiffLayout.lineHeight }
+        if case .thread(let thread) = rows[row] { return threadHeight(thread) }
+        if case .composer = rows[row] { return DiffComposerCellView.height }
         guard rows[row].isLine else { return DiffLayout.hunkHeight }
         guard view?.wraps == true else { return DiffLayout.lineHeight }
         measureHeights()
@@ -859,12 +1301,33 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
                 line.isLine ? DiffLayout.wrappedHeight([line.text], width: wrapWidth) : DiffLayout.hunkHeight
             case .pair(let old, let new):
                 DiffLayout.wrappedHeight([old?.text, new?.text].compactMap { $0 }, width: wrapWidth)
+            // Measured on its own (`threadHeight`): it does not wrap with the lines.
+            case .thread, .composer:
+                0
             }
         }
     }
 
-    /// The column got wider or narrower: wrapped rows are measured again (after this layout pass).
+    /// The column got wider or narrower: wrapped rows are measured again (after this layout pass), and thread rows
+    /// when the card's visible width changed.
     func widthChanged() {
+        if !threadRows.isEmpty, threadWidth > 0, abs(threadWidth - threadHeightsWidth) > 0.5 {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let table, !threadRows.isEmpty, threadWidth > 0,
+                      abs(threadWidth - threadHeightsWidth) > 0.5
+                else { return }
+                // Taken now, so a layout pass the new heights start does not come back here for the same width.
+                threadHeights = [:]
+                threadHeightsWidth = threadWidth
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0
+                    table.noteHeightOfRows(withIndexesChanged: threadRows)
+                }
+                #if DEBUG
+                UITiming.probe("diff-probe", threadSummary(table))
+                #endif
+            }
+        }
         guard view?.wraps == true, abs(rowWidth - heightsWidth) > 0.5 else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, let table, view?.wraps == true, abs(rowWidth - heightsWidth) > 0.5 else { return }
@@ -920,6 +1383,22 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             cell.newSelection = selectionPart(row: row, column: .new)
             cell.needsDisplay = true
             return cell
+        case .thread(let thread):
+            let cell = tableView.makeView(withIdentifier: Self.threadID, owner: nil) as? DiffThreadCellView ?? {
+                let cell = DiffThreadCellView()
+                cell.identifier = Self.threadID
+                return cell
+            }()
+            configure(cell, thread)
+            return cell
+        case .composer(let composer):
+            let cell = tableView.makeView(withIdentifier: Self.composerID, owner: nil) as? DiffComposerCellView ?? {
+                let cell = DiffComposerCellView()
+                cell.identifier = Self.composerID
+                return cell
+            }()
+            configure(cell, composer)
+            return cell
         }
     }
 
@@ -943,6 +1422,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         switch rows[row] {
         case .single(let line): return line.isLine ? line : nil
         case .pair(let old, let new): return column == .new ? new : old
+        case .thread, .composer: return nil
         }
     }
 
@@ -961,6 +1441,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             let half = column == .new ? (cell.width / 2).rounded(.down) : 0
             return (NSPoint(x: cell.minX + half + layout.splitTextX, y: y),
                     wraps ? layout.wrapWidth(rowWidth: cell.width, split: true) : nil)
+        case .thread, .composer:
+            return nil
         }
     }
 
@@ -1083,6 +1565,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
                                         width: max(0, cell.width - half - layout.splitTextX), height: cell.height))
                 }
                 return rects
+            case .thread, .composer:
+                return []
             }
         }
     }
@@ -1197,6 +1681,43 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     }
 
     #if DEBUG
+    /// The rows a load put in the table: `diff-probe <side> <mode> rows <n> hunks <n> height <points> width <points>`
+    /// (the regression check of the shared table: the same for the same diff).
+    private func logProbe(_ table: NSTableView) {
+        guard let view else { return }
+        let hunks = rows.count { $0.hunk != nil }
+        let height = rows.isEmpty ? 0 : table.rect(ofRow: rows.count - 1).maxY
+        // A pull request's file adds its threads; every other table logs the same line as before them.
+        UITiming.probe("diff-probe", "\(view.section.side) \(view.mode.rawValue) rows \(rows.count) hunks \(hunks) "
+            + "height \(Int(height)) width \(Int(rowWidth))"
+            + (view.inlineThreads == nil ? "" : " " + threadSummary(table))
+            + (shownComposer == nil ? "" : " composer " + composerSummary()))
+    }
+
+    /// `under <R|L><line>[ from <R|L><line>] row <index> h<height> text <characters>[ refused]`: where the new comment
+    /// box is, and how much text it holds.
+    private func composerSummary() -> String {
+        guard let composer = shownComposer else { return "none" }
+        let height = composerRow.flatMap { row in table.map { Int($0.rect(ofRow: row).height) } }
+        return "under \(composer.end.probe)" + (composer.start.map { " from \($0.probe)" } ?? "")
+            + " row \(composerRow.map(String.init) ?? "none") h\(height.map(String.init) ?? "?")"
+            + " text \(view?.inlineThreads?.newComments?.draft().count ?? 0)"
+            + (composer.message == nil ? "" : " refused")
+    }
+
+    /// `threads <path> width <points> placed <id>@<R|L><line>[ collapsed] h<height>,… unplaced <id>,…` (the rows
+    /// placed, under which line of which side, and their heights).
+    private func threadSummary(_ table: NSTableView) -> String {
+        let placed = threadRows.compactMap { index -> String? in
+            guard case .thread(let thread) = rows[index] else { return nil }
+            return "\(thread.id)@\(thread.newSide ? "R" : "L")\(thread.line)"
+                + (collapsedThreads.contains(thread.id) ? " collapsed" : "") + " h\(Int(table.rect(ofRow: index).height))"
+        }
+        return "threads \(view?.inlineThreads?.path ?? "?") width \(Int(threadWidth)) "
+            + "placed \(placed.isEmpty ? "none" : placed.joined(separator: ","))"
+            + " unplaced \(unplacedThreads.isEmpty ? "none" : unplacedThreads.map(String.init).joined(separator: ","))"
+    }
+
     /// Whether `-HistqStageLines` already ran in this launch.
     private static var launchStageDone = false
 
@@ -1651,6 +2172,524 @@ final class DiffHunkCellView: NSView {
         Palette.diffHunkEdge.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill(using: .sourceOver)
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill(using: .sourceOver)
+    }
+}
+
+/// How a thread row lays out, alike when measured (`height`) and drawn (`DiffThreadCellView`): a box inset in the
+/// card's visible width, its header (chevron, the line, Resolved; collapsed, also the first author and the count),
+/// then each comment (author, date, its body as plain text; a reply indented with a thread line) and the "Reply in
+/// Conversation" button. Collapsed, the header only.
+@MainActor
+enum DiffThreadDrawing {
+    static let margin: CGFloat = 6
+    static let inset: CGFloat = 8
+    static let padding: CGFloat = 8
+    static let headerHeight: CGFloat = 20
+    static let authorHeight: CGFloat = 16
+    static let bodyGap: CGFloat = 2
+    static let commentGap: CGFloat = 10
+    static let replyIndent: CGFloat = 18
+    static let footerGap: CGFloat = 10
+    static let footerHeight: CGFloat = 22
+    static let collapsedHeight = 2 * margin + 2 * padding + headerHeight
+
+    private static func attributes(_ size: CGFloat, _ weight: NSFont.Weight, _ color: NSColor,
+                                   wraps: Bool = false) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = wraps ? .byWordWrapping : .byTruncatingTail
+        return [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color,
+                .paragraphStyle: paragraph]
+    }
+
+    static let title = attributes(11, .semibold, .secondaryLabelColor)
+    static let summaryText = attributes(11, .regular, .secondaryLabelColor)
+    static let resolved = attributes(10, .semibold, Palette.diffAddedSign)
+    static let author = attributes(12, .semibold, .labelColor)
+    static let date = attributes(11, .regular, .secondaryLabelColor)
+    static let body = attributes(12, .regular, Palette.diffText, wraps: true)
+    static let boxFill = NSColor.white.withAlphaComponent(0.05)
+    static let boxEdge = NSColor.white.withAlphaComponent(0.12)
+    static let replyLine = NSColor.white.withAlphaComponent(0.15)
+
+    /// The box in a row `width` wide (the card's visible width) and `height` high.
+    static func box(width: CGFloat, height: CGFloat) -> NSRect {
+        NSRect(x: inset, y: margin, width: max(0, width - 2 * inset), height: max(0, height - 2 * margin))
+    }
+
+    /// The width a comment's body wraps at.
+    static func textWidth(width: CGFloat, isReply: Bool) -> CGFloat {
+        max(40, width - 2 * inset - 2 * padding - (isReply ? replyIndent : 0))
+    }
+
+    static func bodyHeight(_ text: String, width: CGFloat) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        return NSAttributedString(string: text, attributes: body)
+            .boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
+                          options: [.usesLineFragmentOrigin, .usesFontLeading])
+            .height.rounded(.up)
+    }
+
+    /// An expanded thread's row height in a row `width` wide.
+    static func height(_ thread: DiffInlineThread, width: CGFloat) -> CGFloat {
+        thread.comments.reduce(2 * margin + 2 * padding + headerHeight + footerGap + footerHeight) { height, comment in
+            height + commentGap + authorHeight + bodyGap
+                + bodyHeight(comment.body, width: textWidth(width: width, isReply: comment.isReply))
+        }
+    }
+
+    /// "alice · 2 comments": the collapsed header's summary.
+    static func summary(_ thread: DiffInlineThread) -> String {
+        let count = thread.comments.count
+        return [thread.comments.first?.author, count == 1 ? "1 comment" : "\(count) comments"].compactMap { $0 }
+            .joined(separator: " · ")
+    }
+}
+
+/// A review thread under its diff line, drawn natively (`DiffThreadDrawing`); its comments are plain text, never
+/// HTML. A click on the header collapses or expands it at once; "Reply in Conversation" goes to the Conversation tab,
+/// where replying and resolving are.
+final class DiffThreadCellView: NSView {
+    private var thread: DiffInlineThread?
+    private var collapsed = false
+    private var onToggle: (() -> Void)?
+    private var onReply: (() -> Void)?
+    private let reply = NSButton(title: "Reply in Conversation", target: nil, action: nil)
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        reply.bezelStyle = .push
+        // Every button of the app is a capsule (user, 2026-11-13).
+        if #available(macOS 26, *) { reply.borderShape = .capsule }
+        reply.controlSize = .small
+        reply.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        reply.target = self
+        reply.action = #selector(replyPressed)
+        addSubview(reply)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(_ thread: DiffInlineThread, collapsed: Bool, onToggle: @escaping () -> Void,
+                   onReply: @escaping () -> Void) {
+        self.thread = thread
+        self.collapsed = collapsed
+        self.onToggle = onToggle
+        self.onReply = onReply
+        // A thread the host has not answered yet has no reply row in the Conversation either (`PRPlaceholderID`).
+        reply.isHidden = collapsed || PRPlaceholderID.isPlaceholder(thread.id)
+        let comments = collapsed ? DiffThreadDrawing.summary(thread)
+            : thread.comments.map { "\($0.author), \($0.date): \($0.body)" }.joined(separator: ". ")
+        setAccessibilityLabel("Thread on \(thread.title)\(thread.isResolved ? ", resolved" : ""): \(comments)")
+        let toggle = NSAccessibilityCustomAction(name: collapsed ? "Expand" : "Collapse") { [weak self] in
+            self?.onToggle?()
+            return true
+        }
+        setAccessibilityCustomActions([toggle])
+        needsLayout = true
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// The card's visible width: the box stays in it when a long line makes the table wider.
+    private var visibleWidth: CGFloat {
+        let visible = enclosingScrollView?.contentView.bounds.width ?? 0
+        return visible > 0 ? min(bounds.width, visible) : bounds.width
+    }
+
+    private var box: NSRect { DiffThreadDrawing.box(width: visibleWidth, height: bounds.height) }
+
+    /// What a click toggles: the header (the whole box when collapsed).
+    private var headerRect: NSRect {
+        let box = box
+        let height = DiffThreadDrawing.padding + DiffThreadDrawing.headerHeight
+        return collapsed ? box : NSRect(x: box.minX, y: box.minY, width: box.width, height: height)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        if newSize != frame.size {
+            needsLayout = true
+            needsDisplay = true
+        }
+        super.setFrameSize(newSize)
+    }
+
+    override func layout() {
+        super.layout()
+        guard !collapsed else { return }
+        let box = box
+        let size = reply.fittingSize
+        reply.frame = NSRect(
+            x: box.minX + DiffThreadDrawing.padding,
+            y: box.maxY - DiffThreadDrawing.padding - (DiffThreadDrawing.footerHeight + size.height) / 2,
+            width: size.width, height: size.height)
+    }
+
+    @objc private func replyPressed() {
+        onReply?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Elsewhere in the row nothing happens: a thread is not a line the table selects.
+        if headerRect.contains(convert(event.locationInWindow, from: nil)) { onToggle?() }
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(headerRect, cursor: .pointingHand)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let thread else { return }
+        typealias D = DiffThreadDrawing
+        let width = visibleWidth
+        let box = box
+        let shape = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
+        D.boxFill.setFill()
+        shape.fill()
+        D.boxEdge.setStroke()
+        shape.lineWidth = 1
+        shape.stroke()
+
+        // The header: chevron, the line, Resolved, and when collapsed who started it and how many comments.
+        let headerY = box.minY + D.padding
+        var x = box.minX + D.padding
+        let right = box.maxX - D.padding
+        let chevron = collapsed ? "chevron.right" : "chevron.down"
+        let symbol = NSImage(systemSymbolName: chevron, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.secondaryLabelColor])))
+        if let symbol {
+            let size = symbol.size
+            symbol.draw(in: NSRect(x: x + (12 - size.width) / 2, y: headerY + (D.headerHeight - size.height) / 2,
+                                   width: size.width, height: size.height))
+        }
+        x += 18
+        let title = NSAttributedString(string: thread.title, attributes: D.title)
+        let titleSize = title.size()
+        title.draw(in: NSRect(x: x, y: headerY + (D.headerHeight - titleSize.height) / 2,
+                              width: min(titleSize.width, max(0, right - x)), height: titleSize.height))
+        x += titleSize.width + 8
+        if thread.isResolved, x < right {
+            let label = NSAttributedString(string: "✓ Resolved", attributes: D.resolved)
+            let size = label.size()
+            let capsule = NSRect(x: x, y: headerY + (D.headerHeight - size.height - 4) / 2, width: size.width + 12,
+                                 height: size.height + 4)
+            Palette.diffAddedSign.withAlphaComponent(0.16).setFill()
+            NSBezierPath(roundedRect: capsule, xRadius: capsule.height / 2, yRadius: capsule.height / 2).fill()
+            label.draw(at: NSPoint(x: capsule.minX + 6, y: capsule.minY + 2))
+            x = capsule.maxX + 8
+        }
+        if collapsed {
+            let summary = NSAttributedString(string: D.summary(thread), attributes: D.summaryText)
+            let size = summary.size()
+            if right - x > 20 {
+                summary.draw(in: NSRect(x: x, y: headerY + (D.headerHeight - size.height) / 2, width: right - x,
+                                        height: size.height))
+            }
+            return
+        }
+
+        // Each comment: author and date, then its body as plain text; a reply indented, with a thread line.
+        var y = headerY + D.headerHeight
+        for comment in thread.comments {
+            y += D.commentGap
+            let left = box.minX + D.padding + (comment.isReply ? D.replyIndent : 0)
+            let textWidth = D.textWidth(width: width, isReply: comment.isReply)
+            let bodyHeight = D.bodyHeight(comment.body, width: textWidth)
+            if comment.isReply {
+                D.replyLine.setFill()
+                NSRect(x: box.minX + D.padding + 5, y: y, width: 2, height: D.authorHeight + D.bodyGap + bodyHeight).fill()
+            }
+            let author = NSAttributedString(string: comment.author, attributes: D.author)
+            let authorWidth = min(author.size().width, textWidth)
+            author.draw(in: NSRect(x: left, y: y, width: authorWidth, height: D.authorHeight))
+            if !comment.date.isEmpty, textWidth - authorWidth > 20 {
+                let date = NSAttributedString(string: comment.date, attributes: D.date)
+                date.draw(in: NSRect(x: left + authorWidth + 6, y: y + 1, width: textWidth - authorWidth - 6,
+                                     height: D.authorHeight))
+            }
+            y += D.authorHeight + D.bodyGap
+            NSAttributedString(string: comment.body, attributes: D.body)
+                .draw(with: NSRect(x: left, y: y, width: textWidth, height: bodyHeight),
+                      options: [.usesLineFragmentOrigin, .usesFontLeading])
+            y += bodyHeight
+        }
+    }
+}
+
+/// The "+" over a hovered line's gutter in a pull request's Files changed: a click opens a new comment box under the
+/// line, ⇧-click makes a range with the open box.
+final class DiffCommentButton: NSView {
+    /// The row it sits on.
+    var row = 0
+    var onPress: ((Int, Bool) -> Void)?
+    private var pressed = false
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        toolTip = "Comment on this line (⇧-click another line for a range)"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Comment on this line")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        pressed = true
+        needsDisplay = true
+        // Acts on the press, as the line's own click would: the box shows in this event.
+        onPress?(row, event.modifierFlags.contains(.shift))
+        pressed = false
+        needsDisplay = true
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onPress?(row, false)
+        return true
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(Palette.primaryFill).withAlphaComponent(pressed ? 0.7 : 1).setFill()
+        // Every button of the app is a capsule (user, 2026-11-13): a circle on the square button.
+        let radius = min(bounds.width, bounds.height) / 2
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let symbol = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: bounds.height * 0.55, weight: .bold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white])))
+        if let symbol {
+            let size = symbol.size
+            symbol.draw(in: NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+                                   width: size.width, height: size.height))
+        }
+    }
+}
+
+/// The new comment box's text: ⌘↩ posts, Esc cancels; a grey placeholder while empty.
+final class DiffComposerTextView: NSTextView {
+    var onPost: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var placeholder = ""
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Only ⌘ of the modifier keys: keypad Enter (76) also carries `.numericPad` and `.function`.
+        if window?.firstResponder === self,
+           event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+           [36, 76].contains(event.keyCode) {
+            onPost?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        onCancel?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        let origin = textContainerOrigin
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        NSAttributedString(string: placeholder, attributes: [
+            .font: font ?? NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.placeholderTextColor,
+        ]).draw(at: NSPoint(x: origin.x + padding, y: origin.y))
+    }
+}
+
+/// A new inline comment's box under its line: in the thread rows' box, the line(s) it goes on (and why a range was
+/// refused), the text, then Cancel and Comment (⌘↩). Native, like the thread rows.
+final class DiffComposerCellView: NSView, NSTextViewDelegate {
+    private typealias D = DiffThreadDrawing
+    static let textHeight: CGFloat = 64
+    static let height = 2 * D.margin + 2 * D.padding + D.headerHeight + 6 + textHeight + 8 + D.footerHeight
+
+    private let title = NSTextField(labelWithString: "")
+    private let message = NSTextField(labelWithString: "")
+    private let scroll = NSScrollView()
+    private let text = DiffComposerTextView()
+    private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
+    private let comment = TintedCapsuleButton(title: "Comment", fill: NSColor(Palette.primaryFill))
+    private var busy = false
+    private var onDraft: ((String) -> Void)?
+    private var onCancel: (() -> Void)?
+    private var onPost: ((String) -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.textColor = .secondaryLabelColor
+        title.lineBreakMode = .byTruncatingTail
+        message.font = .systemFont(ofSize: 11)
+        message.textColor = Palette.diffRemovedSign
+        message.lineBreakMode = .byTruncatingTail
+        text.isRichText = false
+        text.allowsUndo = true
+        text.font = .systemFont(ofSize: 12)
+        text.textColor = Palette.diffText
+        text.insertionPointColor = .white
+        text.drawsBackground = false
+        text.textContainerInset = NSSize(width: 2, height: 4)
+        text.isAutomaticQuoteSubstitutionEnabled = false
+        text.isAutomaticDashSubstitutionEnabled = false
+        text.placeholder = "Leave a comment"
+        text.delegate = self
+        text.isVerticallyResizable = true
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        text.onPost = { [weak self] in self?.post() }
+        text.onCancel = { [weak self] in self?.onCancel?() }
+        text.setAccessibilityLabel("Comment")
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 6
+        scroll.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
+        scroll.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        scroll.layer?.borderWidth = 1
+        cancel.bezelStyle = .push
+        // Every button of the app is a capsule (user, 2026-11-13).
+        if #available(macOS 26, *) { cancel.borderShape = .capsule }
+        cancel.controlSize = .small
+        cancel.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        cancel.target = self
+        cancel.action = #selector(cancelPressed)
+        comment.target = self
+        comment.action = #selector(commentPressed)
+        comment.toolTip = "Comment (⌘↩)"
+        for view in [title, message, scroll, cancel, comment] { addSubview(view) }
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(_ composer: DiffInlineComposer, text draft: String, busy: Bool,
+                   onDraft: @escaping (String) -> Void, onCancel: @escaping () -> Void,
+                   onPost: @escaping (String) -> Void) {
+        self.onDraft = onDraft
+        self.onCancel = onCancel
+        self.onPost = onPost
+        title.stringValue = composer.title
+        message.stringValue = composer.message ?? ""
+        // The field keeps its own text (and caret) while it already holds the owner's.
+        if text.string != draft { text.string = draft }
+        setBusy(busy)
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    func setBusy(_ busy: Bool) {
+        self.busy = busy
+        updateComment()
+    }
+
+    var hasFocus: Bool { window?.firstResponder === text }
+
+    func focus() {
+        window?.makeFirstResponder(text)
+    }
+
+    private func updateComment() {
+        comment.isEnabled = !busy && !text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        comment.alphaValue = comment.isEnabled ? 1 : 0.5
+    }
+
+    func textDidChange(_ notification: Notification) {
+        onDraft?(text.string)
+        updateComment()
+        text.needsDisplay = true
+    }
+
+    @objc private func cancelPressed() {
+        onCancel?()
+    }
+
+    @objc private func commentPressed() {
+        post()
+    }
+
+    private func post() {
+        guard comment.isEnabled else { return }
+        onPost?(text.string.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The card's visible width: the box stays in it when a long line makes the table wider.
+    private var visibleWidth: CGFloat {
+        let visible = enclosingScrollView?.contentView.bounds.width ?? 0
+        return visible > 0 ? min(bounds.width, visible) : bounds.width
+    }
+
+    private var box: NSRect { D.box(width: visibleWidth, height: bounds.height) }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        if newSize != frame.size {
+            needsLayout = true
+            needsDisplay = true
+        }
+        super.setFrameSize(newSize)
+    }
+
+    override func layout() {
+        super.layout()
+        let box = box
+        let left = box.minX + D.padding, width = max(0, box.width - 2 * D.padding)
+        // The title in full ("Comment on lines −3–+2"): the whole row without a message, else its cell's width,
+        // rounded up (its `intrinsicContentSize` is a few points short: "Comment on lin…"), and the message the rest.
+        let titleWidth = message.stringValue.isEmpty
+            ? width : min(ceil(title.cell?.cellSize.width ?? title.intrinsicContentSize.width), width)
+        title.frame = NSRect(x: left, y: box.minY + D.padding + (D.headerHeight - 14) / 2, width: titleWidth,
+                             height: 14)
+        message.frame = NSRect(x: left + titleWidth + 8, y: title.frame.minY, width: max(0, width - titleWidth - 8),
+                               height: 14)
+        scroll.frame = NSRect(x: left, y: box.minY + D.padding + D.headerHeight + 6, width: width,
+                              height: Self.textHeight)
+        text.minSize = NSSize(width: 0, height: Self.textHeight)
+        text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        text.frame.size.width = scroll.contentSize.width
+        text.sizeToFit()
+        let footerY = scroll.frame.maxY + 8
+        let commentSize = comment.intrinsicContentSize
+        comment.frame = NSRect(x: box.maxX - D.padding - commentSize.width,
+                               y: footerY + (D.footerHeight - commentSize.height) / 2,
+                               width: commentSize.width, height: commentSize.height)
+        let cancelSize = cancel.fittingSize
+        cancel.frame = NSRect(x: comment.frame.minX - 8 - cancelSize.width,
+                              y: footerY + (D.footerHeight - cancelSize.height) / 2,
+                              width: cancelSize.width, height: cancelSize.height)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // A click in the box but off its controls: nothing (it is not a line the table selects).
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let shape = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
+        D.boxFill.setFill()
+        shape.fill()
+        D.boxEdge.setStroke()
+        shape.lineWidth = 1
+        shape.stroke()
     }
 }
 

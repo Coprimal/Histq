@@ -41,6 +41,9 @@ struct PRFile: Identifiable, Sendable {
     let file: HostedPullRequestFile
     let change: FileChange
     let section: DiffSection?
+    /// The review threads on this file (joined by path, `PullRequestDetailModel.joined`), oldest first; Files
+    /// changed draws those with a line in the current diff under it.
+    var threads: [HostedReviewThread] = []
 
     var id: String { file.filename }
 }
@@ -98,7 +101,8 @@ struct PullRequestDetail: Sendable {
     let viewer: HostedUser?
     let reviewers: [PRReviewer]
     let commits: Loadable<[HostedCommit]>
-    let files: Loadable<[PRFile]>
+    /// Each with its threads, joined again whenever `threads` changes.
+    var files: Loadable<[PRFile]>
     let checks: Loadable<[HostedCheckRun]>
     /// As loaded, or as an optimistic edit or delete of a review comment patched them.
     var threads: Loadable<PRThreads>
@@ -126,6 +130,9 @@ enum PullRequestAction: Equatable, Sendable {
     /// A reply to or a resolve of a general thread, or an edit or delete of an own comment (`PRGeneralAction`), shown
     /// before the host answers (optimistic).
     case general(PRGeneralAction)
+    /// A new inline comment from Files changed, shown under its line and in the Conversation before the host answers
+    /// (optimistic).
+    case newInline(PRNewInline)
 
     var progressTitle: String {
         switch self {
@@ -137,6 +144,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .resolve(_, let resolved): resolved ? "Resolving…" : "Unresolving…"
         case .unapprove: "Revoking the approval…"
         case .general(let action): action.progressTitle
+        case .newInline: "Commenting…"
         }
     }
 
@@ -150,6 +158,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .resolve(_, let resolved): resolved ? "Resolve failed" : "Unresolve failed"
         case .unapprove: "The approval was not revoked"
         case .general(let action): action.failureTitle
+        case .newInline: "The comment was not posted"
         }
     }
 
@@ -164,6 +173,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .resolve(_, let resolved): resolved ? "Resolve on \(number) failed" : "Unresolve on \(number) failed"
         case .unapprove: "The approval of \(number) was not revoked"
         case .general(let action): action.failureTitle(of: number)
+        case .newInline: "The comment on \(number) was not posted"
         }
     }
 
@@ -178,8 +188,77 @@ enum PullRequestAction: Equatable, Sendable {
         case .resolve(_, let resolved): resolved ? "resolve" : "unresolve"
         case .unapprove: "unapprove"
         case .general(let action): action.timingName
+        case .newInline: "new-inline-post"
         }
     }
+}
+
+/// A new inline comment: the file (its `PRFile.id`) and the box it was written in (put back with its text when the
+/// write fails), the position the host gets (`position`), and the text.
+struct PRNewInline: Equatable, Sendable {
+    let path: String
+    let composer: DiffInlineComposer
+    let position: HostedInlinePosition
+    let body: String
+
+    /// The comment written in `composer` on `file` of a patch loaded at `headSHA`: the last line's numbers by its
+    /// kind (an added line its new number, a removed line its old one, a context line both), the first line's the
+    /// same way for a range, and the old path of a renamed file.
+    init(_ composer: DiffInlineComposer, on file: HostedPullRequestFile, headSHA: String, body: String) {
+        func numbers(_ line: DiffInlineLine) -> (old: Int?, new: Int?) {
+            switch line.kind {
+            case .added: (nil, line.newLine)
+            case .removed: (line.oldLine, nil)
+            case .context: (line.oldLine, line.newLine)
+            }
+        }
+        let end = numbers(composer.end)
+        let start = composer.start.map(numbers)
+        path = file.filename
+        self.composer = composer
+        position = HostedInlinePosition(
+            path: file.filename, oldPath: file.previousFilename, oldLine: end.old, newLine: end.new,
+            lineKind: composer.end.kind, startOldLine: start?.old, startNewLine: start?.new, headSHA: headSHA)
+        self.body = body
+    }
+
+    /// Why `kind`'s client refuses a range from `start` to `end` unsent (the same rule): Bitbucket takes a range on
+    /// one side only (its first line needs a number on the last line's side); GitHub and GitLab take any. nil when
+    /// the host takes it.
+    static func rangeRefusal(_ kind: HostingKind, start: DiffInlineLine, end: DiffInlineLine) -> String? {
+        guard kind == .bitbucketCloud else { return nil }
+        let newSide = end.kind != .removed
+        guard (newSide ? start.newLine : start.oldLine) == nil else { return nil }
+        let lines = newSide ? "an added or unchanged" : "a removed or unchanged"
+        return "Bitbucket ranges stay on one side: start on \(lines) line."
+    }
+
+    /// The thread the comment makes, for the optimistic page: by `viewer` (else "you"), now, under its last line on its
+    /// side, id `id` (`PullRequestDetailModel.optimisticID`); nil when the comment cannot be read back.
+    func thread(id: Int, viewer: HostedUser?) -> HostedReviewThread? {
+        let removed = position.lineKind == .removed
+        // Only `id` and `path` are required: the rest is set below (the model's init is the core's own).
+        guard let data = try? JSONSerialization.data(withJSONObject: ["id": id, "path": position.path]),
+              var comment = try? JSONDecoder().decode(HostedReviewComment.self, from: data)
+        else { return nil }
+        comment.line = removed ? position.oldLine : position.newLine
+        comment.originalLine = comment.line
+        // The first line's number on the last line's side, else (a removed line before an added one) its other side.
+        comment.startLine = removed ? position.startOldLine ?? position.startNewLine
+            : position.startNewLine ?? position.startOldLine
+        comment.originalStartLine = comment.startLine
+        comment.side = removed ? "LEFT" : "RIGHT"
+        comment.body = body
+        comment.user = viewer ?? HostedUser(id: 0, login: "you")
+        comment.createdAt = .now
+        return HostedReviewThread.group([comment], states: []).unattached.first
+    }
+}
+
+/// The open new inline comment box of Files changed: its file (`PRFile.id`) and where it is.
+struct PRInlineComposer: Equatable {
+    let path: String
+    var composer: DiffInlineComposer
 }
 
 extension HostedMergeMethod {
@@ -253,6 +332,10 @@ final class PullRequestDetailModel {
     /// The comments being edited in place and their editors' text, by `PRCommentTarget.key` (`PRGeneralThreadModel`).
     var editingComments: Set<String> = []
     var commentEditDrafts: [String: String] = [:]
+    /// The open new inline comment box (one at a time) and its text. The text is not observed: the box reads it when
+    /// it shows and writes it as it is typed, so typing never redraws the detail.
+    var inlineComposer: PRInlineComposer?
+    @ObservationIgnored var inlineDraft = ""
     #if DEBUG
     var launchDelete: (target: PRCommentTarget, confirm: Bool)?
     #endif
@@ -268,9 +351,9 @@ final class PullRequestDetailModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadCount = 0
-    /// The ids of optimistic replies: above any id a host gives, so they never meet a real one, and digits only, as
-    /// the page's slot ids are.
-    @ObservationIgnored private var optimisticID = 1 << 62
+    /// The ids of optimistic replies and new inline threads (`PRPlaceholderID`: no menu, reactions or reply row on
+    /// them until the reload brings the host's).
+    @ObservationIgnored private var optimisticID = PRPlaceholderID.base
 
     /// DEBUG `-HistqPRTab commits|files|checks`: the tab a pull request opens on (QA shots of each tab).
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
@@ -293,15 +376,17 @@ final class PullRequestDetailModel {
     case "reopen": .setOpen(true)
     default: nil
     }
-    /// DEBUG `-HistqPRAction reply|resolve|unresolve|greply|gresolve|edit|edit-save|delete|delete-confirm`: like
-    /// `launchAction`, on a review thread (or a general thread: `greply`, `gresolve`; or the first own comment: `edit`
-    /// opens its editor, `edit-save` saves "edited" into it, `delete` opens its confirmation, `delete-confirm`
-    /// confirms it) of the first load, which picks it (`threadLaunchAction(_:in:)`): only with `-HistqGitHubStub YES`
-    /// too.
+    /// DEBUG `-HistqPRAction reply|resolve|unresolve|greply|gresolve|edit|edit-save|delete|delete-confirm|react|`
+    /// `react-new|new-inline|new-inline-post`: like `launchAction`, on a review thread (or a general thread:
+    /// `greply`, `gresolve`; or the first own comment: `edit` opens its editor, `edit-save` saves "edited" into it,
+    /// `delete` opens its confirmation, `delete-confirm` confirms it; or the first comment with reactions, `react`, or
+    /// with none, `react-new`, gets a reaction; or the first added line of the first file: `new-inline` opens a new
+    /// comment box under it, `new-inline-post` posts "stub inline" there) of the first load, which picks it
+    /// (`threadLaunchAction(_:in:)`): only with `-HistqGitHubStub YES` too.
     private static var threadLaunchActionName: String? = GitHubStub.isEnabled
         ? AppState.launchFlag("-HistqPRAction").flatMap {
-            ["reply", "resolve", "unresolve", "greply", "gresolve", "edit", "edit-save", "delete", "delete-confirm"]
-                .contains($0) ? $0 : nil
+            ["reply", "resolve", "unresolve", "greply", "gresolve", "edit", "edit-save", "delete", "delete-confirm",
+             "react", "react-new", "new-inline", "new-inline-post"].contains($0) ? $0 : nil
         }
         : nil
     /// `merge-stale-closed`: the detail closes while the merge runs, so its failure is another detail's (the PRs tab's
@@ -310,16 +395,20 @@ final class PullRequestDetailModel {
 
     /// `reply` posts "QA reply" to the first thread, `resolve` resolves the first unresolved one and `unresolve`
     /// unresolves the first resolved one, whatever `viewerCanResolve` says (the stub answers both); `greply` and
-    /// `gresolve` act on the first general thread and `edit-save` on the first own comment
-    /// (`PRGeneralAction.launchAction`); nil when no thread fits, and for `edit`, `delete` and `delete-confirm`
-    /// (`openLaunchStep`).
+    /// `gresolve` act on the first general thread, `edit-save` on the first own comment and `react`/`react-new` on
+    /// the first comment with or without reactions (`PRGeneralAction.launchAction`); nil when no thread fits, and for
+    /// `edit`, `delete` and `delete-confirm` (`openLaunchStep`).
     private static func threadLaunchAction(_ name: String, in detail: PullRequestDetail) -> PullRequestAction? {
         let threads = detail.threads.value?.all ?? []
         switch name {
-        case "greply", "gresolve", "edit-save":
+        case "greply", "gresolve", "edit-save", "react", "react-new":
             return PRGeneralAction.launchAction(
                 name, in: detail.comments, reviewComments: threads.flatMap(\.comments), page: detail.timeline
             ).map { .general($0) }
+        case "new-inline-post":
+            return launchInline(in: detail).map { file, composer in
+                .newInline(PRNewInline(composer, on: file.file, headSHA: detail.pull.head.sha, body: "stub inline"))
+            }
         case "reply":
             return threads.first.map { .reply(rootID: $0.id, body: "QA reply") }
         case "resolve", "unresolve":
@@ -331,9 +420,24 @@ final class PullRequestDetailModel {
         }
     }
 
+    /// DEBUG `new-inline` and `new-inline-post`: a box under the first added line of the first file; nil when that
+    /// file has none (or the files did not load).
+    private static func launchInline(in detail: PullRequestDetail) -> (file: PRFile, composer: DiffInlineComposer)? {
+        guard let file = detail.files.value?.first,
+              let line = file.section?.rows(.diff).first(where: { $0.kind == .added }).flatMap(DiffInlineLine.init)
+        else { return nil }
+        return (file, DiffInlineComposer(end: line))
+    }
+
     /// `edit` opens the first own comment's editor, `delete` and `delete-confirm` its confirmation (the page opens it,
-    /// `launchDelete`); nothing for another name or when no comment fits.
+    /// `launchDelete`), `new-inline` a new comment box in Files changed (`launchInline`); nothing for another name or
+    /// when no comment fits.
     private func openLaunchStep(_ name: String, in detail: PullRequestDetail) {
+        if name == "new-inline" {
+            guard let (file, composer) = Self.launchInline(in: detail) else { return }
+            openInline(composer, in: file.id)
+            return
+        }
         let target = PRGeneralAction.launchTarget(
             name, in: detail.comments, reviewComments: detail.threads.value?.all.flatMap(\.comments) ?? [],
             page: detail.timeline)
@@ -365,6 +469,8 @@ final class PullRequestDetailModel {
             generalExpanded = [:]
             editingComments = []
             commentEditDrafts = [:]
+            inlineComposer = nil
+            inlineDraft = ""
             actionError = nil
         }
         self.number = number
@@ -378,7 +484,7 @@ final class PullRequestDetailModel {
         let loadID = loadCount
         // The page is built with the threads the user expanded or collapsed by now.
         let expanded = threadExpanded
-        let general = PRGeneralOptions(api.client.capabilities, expanded: generalExpanded)
+        let general = PRGeneralOptions(api.client, expanded: generalExpanded)
         task = Task { [weak self] in
             let result = await Self.fetch(
                 api.client, api.repository, number: number, loadID: loadID, expanded: expanded, general: general)
@@ -406,6 +512,9 @@ final class PullRequestDetailModel {
                 }
                 if let name = Self.threadLaunchActionName {
                     Self.threadLaunchActionName = nil
+                    // A new inline comment is Files changed's: it waits for that tab, not for the Conversation.
+                    let gate: @MainActor (@escaping @MainActor () -> Void) -> Void = name.hasPrefix("new-inline")
+                        ? PRFilesLaunchGate.run : PRLaunchActionGate.run
                     if let action = Self.threadLaunchAction(name, in: detail) {
                         if GitHubHTMLProbe.slotsEnabled {
                             // Like `launchAction`: after the slot probe's passes at both widths.
@@ -414,10 +523,10 @@ final class PullRequestDetailModel {
                                 self?.perform(action, on: number, github: github)
                             }
                         } else {
-                            PRLaunchActionGate.run { [weak self] in self?.perform(action, on: number, github: github) }
+                            gate { [weak self] in self?.perform(action, on: number, github: github) }
                         }
                     } else {
-                        PRLaunchActionGate.run { [weak self] in self?.openLaunchStep(name, in: detail) }
+                        gate { [weak self] in self?.openLaunchStep(name, in: detail) }
                     }
                 }
                 #endif
@@ -507,6 +616,10 @@ final class PullRequestDetailModel {
         // its page rebuilt off the main actor before the write; a failure puts them and the page back.
         var optimistic: (shown: PullRequestDetail, comments: [HostedComment], threads: Loadable<PRThreads>,
                          general: PRGeneralOptions)?
+        // A reaction on a comment that keeps its row changes no HTML: its page is the shown one with the row toggled,
+        // put in at once, in the click's update, instead of being rebuilt off the main actor (a first reaction or the
+        // last one removed adds or drops the row: rebuilt, as the other actions).
+        var ready: PRTimelineHTML?
         if case .general(let general) = action, self.number == number, let shown = state.value {
             // A thread just resolved takes its default (collapsed), on the page and after; one being unresolved
             // stays as the user expanded it.
@@ -517,20 +630,50 @@ final class PullRequestDetailModel {
             optimisticID &+= 1
             // Bitbucket keeps a deleted comment that has replies, as "This comment was deleted".
             let keepsDeleted = api.client.kind == .bitbucketCloud
+            let options = PRGeneralOptions(api.client, expanded: generalExpanded)
             optimistic = (shown, PRTimeline.patched(shown.comments, general, viewer: shown.viewer,
-                                                    replyID: optimisticID, keepsDeleted: keepsDeleted),
-                          PRTimeline.patched(shown.threads, general, keepsDeleted: keepsDeleted),
-                          PRGeneralOptions(api.client.capabilities, expanded: generalExpanded))
+                                                    replyID: optimisticID, keepsDeleted: keepsDeleted,
+                                                    kinds: options.reactions),
+                          PRTimeline.patched(shown.threads, general, keepsDeleted: keepsDeleted,
+                                             kinds: options.reactions),
+                          options)
+            ready = PRTimeline.patched(shown.timeline, general)
+        }
+        // A new inline comment closes its box and shows its thread under the line at once, in the click's update
+        // (the shown page until its rebuild with the thread, off the main actor, comes in); its text stays with the
+        // action, and a failure opens the box again with it.
+        var threadShown = false
+        if case .newInline(let new) = action, self.number == number, let shown = state.value {
+            if inlineComposer?.path == new.path { inlineComposer = nil }
+            inlineDraft = ""
+            optimisticID &+= 1
+            var threads = shown.threads
+            if case .loaded(let loaded) = threads, let thread = new.thread(id: optimisticID, viewer: shown.viewer) {
+                threads = .loaded(PRThreads(
+                    byReview: loaded.byReview, replyOnlyReviewIDs: loaded.replyOnlyReviewIDs,
+                    unattached: loaded.unattached + [thread], resolveUnavailable: loaded.resolveUnavailable,
+                    statesFailed: loaded.statesFailed))
+            }
+            optimistic = (shown, shown.comments, threads, PRGeneralOptions(api.client, expanded: generalExpanded))
+            threadShown = replacePage(of: shown.loadID, number: number, comments: shown.comments, threads: threads,
+                                      timeline: shown.timeline)
+            if threadShown { UITiming.content("pr \(number) action \(action.timingName) patched") }
+        }
+        if let optimistic, let ready,
+           replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments,
+                       threads: optimistic.threads, timeline: ready) {
+            UITiming.content("pr \(number) action \(action.timingName) patched")
         }
         let expanded = threadExpanded
-        Task { [weak self] in
-            if let optimistic {
+        Task { [weak self, ready, threadShown] in
+            if let optimistic, ready == nil {
                 let page = await Self.page(
                     optimistic.shown, comments: optimistic.comments, threads: optimistic.threads,
                     noun: api.client.kind.pullRequestNoun, expanded: expanded, general: optimistic.general)
                 if self?.replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments,
                                      threads: optimistic.threads, timeline: page) == true {
-                    UITiming.content("pr \(number) action \(action.timingName) patched")
+                    UITiming.content("pr \(number) action \(action.timingName) "
+                        + (threadShown ? "page" : "patched"))
                 }
             }
             let error = await Self.run(action, hostKey: hostKey, api.client, api.repository, number: number)
@@ -549,7 +692,18 @@ final class PullRequestDetailModel {
                         UITiming.content("pr \(number) action edit reopened cedit-\(target.key) open")
                     }
                 }
-                let message = Self.message(for: error, kind: api.client.kind)
+                // The box comes back with the text, unless another one was opened meanwhile.
+                if case .newInline(let new) = action, self.number == number, inlineComposer == nil {
+                    inlineComposer = PRInlineComposer(path: new.path, composer: new.composer)
+                    inlineDraft = new.body
+                    UITiming.content("pr \(number) action new-inline-post reopened \(new.path) "
+                        + "\(new.composer.end.probe) text \(new.body.count)")
+                }
+                var message = Self.message(for: error, kind: api.client.kind)
+                if case .general(let general) = action {
+                    message = PRGeneralAction.withPermissionHint(message, for: general, error: error,
+                                                                 kind: api.client.kind)
+                }
                 UITiming.content("pr \(number) action error \(message)")
                 if showing {
                     actionError = "\(action.failureTitle): \(message)"
@@ -577,7 +731,7 @@ final class PullRequestDetailModel {
             case .general(let general):
                 if case .reply(let root, _) = general, self.number == number { generalReplyDrafts[root.id] = nil }
                 if case .edit(let target, _) = general, self.number == number { savedEdit(target.key) }
-            case .merge, .setOpen, .unapprove: break
+            case .merge, .setOpen, .unapprove, .newInline: break
             }
             afterSuccess?()
             github.refreshNow()
@@ -595,6 +749,7 @@ final class PullRequestDetailModel {
         guard self.number == number, case .loaded(var detail) = state, detail.loadID == loadID else { return false }
         detail.comments = comments
         detail.threads = threads
+        detail.files = Self.joined(detail.files, threads)
         detail.timeline = timeline
         detail.timelineCount = timeline.count
         state = .loaded(detail)
@@ -666,8 +821,9 @@ final class PullRequestDetailModel {
             } ?? false
             return .success(PullRequestDetail(
                 loadID: loadID, pull: pull, timelineCount: timeline.count, timeline: timeline, comments: comments,
-                reviews: reviews, viewer: viewer, reviewers: reviewers, commits: await commits, files: fileList,
-                checks: await checks, threads: threads, viewerApproved: viewerApproved))
+                reviews: reviews, viewer: viewer, reviewers: reviewers, commits: await commits,
+                files: joined(fileList, threads), checks: await checks, threads: threads,
+                viewerApproved: viewerApproved))
         } catch {
             return .failure(error)
         }
@@ -700,6 +856,19 @@ final class PullRequestDetailModel {
         case .failed(let message): return .failed(message)
         case .idle, .loading: return .idle
         }
+    }
+
+    /// `files`, each with the threads on its path (`PRFile.threads`), oldest first. A load, an optimistic thread
+    /// change and files that arrive after the threads (a host that loads them later) all join through here.
+    nonisolated static func joined(_ files: Loadable<[PRFile]>, _ threads: Loadable<PRThreads>) -> Loadable<[PRFile]> {
+        guard case .loaded(var list) = files else { return files }
+        let byPath = Dictionary(grouping: threads.value?.all ?? [], by: \.path)
+        for index in list.indices {
+            list[index].threads = (byPath[list[index].id] ?? []).sorted { a, b in
+                (a.comments.first?.createdAt ?? .distantPast, a.id) < (b.comments.first?.createdAt ?? .distantPast, b.id)
+            }
+        }
+        return .loaded(list)
     }
 
     @concurrent
@@ -771,6 +940,8 @@ final class PullRequestDetailModel {
                 _ = try await client.setReviewThread(thread, resolved: resolved)
             case .unapprove: try await client.unapprove(number, in: repository)
             case .general(let action): try await action.run(client, on: .pullRequest(number), in: repository)
+            case .newInline(let new):
+                _ = try await client.createInlineComment(at: new.position, on: number, in: repository, body: new.body)
             }
             return nil
         } catch {
@@ -803,6 +974,56 @@ extension PullRequestDetailModel: PRGeneralThreadModel {
         perform(.general(action), on: number, github: github)
     }
 }
+
+extension PullRequestDetailModel {
+    /// A "+" click in Files changed on `path` (its table already shows the box): the box is kept here, so a reload
+    /// keeps it; its text moves with it.
+    func openInline(_ composer: DiffInlineComposer, in path: String) {
+        inlineComposer = PRInlineComposer(path: path, composer: composer)
+        UITiming.content("pr \(number.map(String.init) ?? "?") action new-inline open \(path) \(composer.end.probe)"
+            + (composer.start.map { " from \($0.probe)" } ?? "") + (composer.message.map { " refused: \($0)" } ?? ""))
+    }
+
+    /// Cancel: the box and its text go.
+    func cancelInline() {
+        inlineComposer = nil
+        inlineDraft = ""
+    }
+
+    /// Comment: `body` posted at the box's line(s) of `file`, on the head the shown patch was loaded at (`perform`
+    /// shows it at once).
+    func postInline(_ body: String, file: PRFile, detail: PullRequestDetail, github: HostingStore) {
+        guard let open = inlineComposer, open.path == file.id, let number, !body.isEmpty else { return }
+        perform(.newInline(PRNewInline(open.composer, on: file.file, headSHA: detail.pull.head.sha, body: body)),
+                on: number, github: github)
+    }
+}
+
+#if DEBUG
+/// DEBUG `-HistqPRAction new-inline|new-inline-post` with `-HistqPRTab files`: the action waits until Files changed
+/// shows and its table loaded, as a click there does; on another tab it runs once the detail loaded (the files come
+/// with it).
+@MainActor
+enum PRFilesLaunchGate {
+    private static let waitsForFiles = AppState.launchFlag("-HistqPRTab") == "files"
+    private static var shown = false
+    private static var pending: [@MainActor () -> Void] = []
+
+    static func run(_ action: @escaping @MainActor () -> Void) {
+        guard waitsForFiles, !shown else { return action() }
+        pending.append(action)
+    }
+
+    /// Files changed appeared: the waiting actions run after its table's first load (this update's).
+    static func filesDidShow() {
+        guard !shown else { return }
+        shown = true
+        let actions = pending
+        pending = []
+        DispatchQueue.main.async { actions.forEach { $0() } }
+    }
+}
+#endif
 
 extension HostedPullRequest {
     /// The head is a branch of the base's repository, not of a fork: its label's owner is the base's.
@@ -1131,7 +1352,12 @@ private struct PRContent: View {
                 .onAppear { UITiming.content("pr \(number) commits \(Self.count(detail.commits))") }
         case .files:
             PRFilesTab(session: session, detail: detail)
-                .onAppear { UITiming.content("pr \(number) files \(Self.count(detail.files))") }
+                .onAppear {
+                    UITiming.content("pr \(number) files \(Self.count(detail.files))")
+                    #if DEBUG
+                    PRFilesLaunchGate.filesDidShow()
+                    #endif
+                }
         case .checks:
             PRChecksTab(checks: detail.checks, hostName: session.github.kind.name)
                 .onAppear { UITiming.content("pr \(number) checks \(Self.count(detail.checks))") }
@@ -2058,6 +2284,7 @@ private struct PRFilesTab: View {
         if let section = file.section, !section.rows(.diff).isEmpty {
             SectionCard(file.change.name, systemImage: file.change.systemImage, contentPadding: 0) {
                 DiffLineTable(section: section, mode: .diff, loadID: detail.loadID,
+                              inlineThreads: inlineThreads(file),
                               onApply: { _, _, _ in }, onClose: { [session] in session.closeFile() })
                     .frame(maxHeight: .infinity)
             } accessory: {
@@ -2077,6 +2304,70 @@ private struct PRFilesTab: View {
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
         }
+    }
+
+    /// The file's threads with a line in the current diff, for its table: under the line of their side (an outdated
+    /// thread, whose line is gone, stays in the Conversation only), collapsed as on the Conversation page (resolved,
+    /// unless the user chose otherwise there or here: `threadExpanded` is shared).
+    private func inlineThreads(_ file: PRFile) -> DiffInlineThreads {
+        let expanded = session.pullDetail.threadExpanded
+        let dates = Self.dateFormatter()
+        let threads = file.threads.compactMap { thread -> DiffInlineThread? in
+            // The root's own line: `thread.line` falls back to the line it was written on, of an older diff.
+            guard let line = thread.comments.first?.line else { return nil }
+            let start = thread.comments.first?.startLine
+            return DiffInlineThread(
+                id: thread.id, line: line, newSide: thread.side != "LEFT",
+                title: start.map { $0 != line ? "Lines \($0)–\(line)" : "Line \(line)" } ?? "Line \(line)",
+                isResolved: thread.state?.isResolved == true,
+                comments: thread.comments.enumerated().map { index, comment in
+                    DiffInlineThread.Comment(
+                        author: comment.user?.login ?? "ghost", date: comment.createdAt.map(dates.string) ?? "",
+                        body: (comment.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines), isReply: index > 0)
+                })
+        }
+        return DiffInlineThreads(
+            path: file.id, threads: threads,
+            collapsed: Set(file.threads.filter { PRTimeline.isCollapsed($0, expanded: expanded) }.map(\.id)),
+            onToggle: { [session] id, collapsed in session.pullDetail.threadExpanded[id] = !collapsed },
+            onReply: { [session] in session.pullDetail.tab = .conversation },
+            newComments: newComments(file))
+    }
+
+    /// The "+" and the new comment box of `file`'s table, where the host takes new inline comments (none without
+    /// `.newInlineComments`; ⇧-click ranges only with `.multiLineInlineComments`, under the host's own range rule).
+    private func newComments(_ file: PRFile) -> DiffNewComments? {
+        guard let client = session.github.api?.client, client.capabilities.contains(.newInlineComments) else {
+            return nil
+        }
+        let model = session.pullDetail
+        let kind = client.kind
+        return DiffNewComments(
+            composer: model.inlineComposer.flatMap { $0.path == file.id ? $0.composer : nil },
+            allowsRange: client.capabilities.contains(.multiLineInlineComments),
+            isBusy: model.running != nil,
+            refusal: { PRNewInline.rangeRefusal(kind, start: $0, end: $1) },
+            draft: { [model] in model.inlineDraft },
+            onOpen: { [model] composer in model.openInline(composer, in: file.id) },
+            onDraft: { [model] text in model.inlineDraft = text },
+            onCancel: { [model] in model.cancelInline() },
+            onPost: { [session, detail] body in
+                session.pullDetail.postInline(body, file: file, detail: detail, github: session.github)
+            })
+    }
+
+    /// The user's date format (Settings › Appearance, 24 h by default), as the Conversation page dates its comments;
+    /// made again only when the format changes.
+    private static var dates: (format: String, formatter: DateFormatter)?
+
+    private static func dateFormatter() -> DateFormatter {
+        let format = Preferences.defaults.string(forKey: PrefKey.dateFormat.rawValue) ?? "MM/dd/yy @ HH:mm"
+        if let dates, dates.format == format { return dates.formatter }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: Locale.current.identifier)
+        formatter.dateFormat = format
+        dates = (format, formatter)
+        return formatter
     }
 
     private func counts(_ file: HostedPullRequestFile) -> some View {

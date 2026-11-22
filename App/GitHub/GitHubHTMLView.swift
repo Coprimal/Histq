@@ -268,13 +268,14 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// GitHub's HTML (`.body`) is skipped: only Histq's own markup places native views. So is a hidden one (in a
         /// collapsed thread, a closed editor), which has no box to draw on. Only the timeline's own id formats count
         /// (`PRTimeline`: `avatar-d`, `avatar-c|i|r<n>`, `chevron-<n>`, `reply-<n>` for a slot, `thread-<n>` for
-        /// `collapsed`, a general thread's `gchevron-<n>`, `greply-<n>` and `gthread-<n>`, and a comment's menu and
-        /// editor, `cmenu-<g|r><n>` and `cedit-<g|r><n>`, the editor open as `editing` says), in case GitHub's HTML
+        /// `collapsed`, a general thread's `gchevron-<n>`, `greply-<n>` and `gthread-<n>`, and a comment's menu,
+        /// editor, reaction row and add-reaction button, `cmenu-<g|r><n>`, `cedit-<g|r><n>`, `creact-<g|r><n>` and
+        /// `cadd-<g|r><n>`, the editor open as `editing` says), in case GitHub's HTML
         /// ever left `.body` unbalanced. `width` is the page's own, for the DEBUG slot probe. Runs in the app's own content world
         /// (`.defaultClient`), apart from the page, which still has no JavaScript of its own: the page's settings and
         /// policy stay as they are.
         private static let measureScript = """
-            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit)-[gr][0-9]+)$/;
+            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add)-[gr][0-9]+)$/;
             for (const slot of document.querySelectorAll('[data-slot]')) {
               if (slot.closest('.body') || !own.test(slot.dataset.slot)) continue;
               const height = heights[slot.dataset.slot];
@@ -511,10 +512,12 @@ enum HostedHTML {
                 .comment > .body { padding: 4px 0 0 26px; }
                 .thread .slot-reply, .item > .slot-reply { margin: 0 10px 8px 36px; }
                 .item.collapsed > :not(.head) { display: none; } .head .slot-chevron { align-self: center; }
-                .slot-menu { flex: none; align-self: center; width: 18px; height: 18px; }
+                .slot-menu, .slot-add { flex: none; align-self: center; width: 18px; height: 18px; }
                 .slot-edit { display: none; } .slot-edit.open { display: block; height: 120px; }
                 .item > .slot-edit { margin: 0 10px; } .comment > .slot-edit { margin: 0 0 0 26px; }
                 .body:has(+ .slot-edit.open) { display: none; }
+                .slot-react { height: 22px; } .item > .slot-react { margin: 0 10px 8px; }
+                .comment > .slot-react { margin: 6px 0 0 26px; }
                 .replies { margin: 0 10px 8px 19px; border-left: 2px solid \(border); }
                 .replies .replies { margin: 0 0 0 21px; } .thread > .replies { margin: 0 0 0 19px; }
                 .replies > .comment { border-top: 0; padding: 4px 10px 6px 12px; }
