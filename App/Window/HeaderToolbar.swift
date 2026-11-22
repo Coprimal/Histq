@@ -64,12 +64,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
     /// Its own capsule, green, first of the trailing ones, shown only while Sparkle has an update (as EchoDiar's).
     private let updateItem = NSToolbarItem(itemIdentifier: ID.update)
-    /// The window's workspace: its name, with the file's path as tooltip, or a warning when the file is read-only or
-    /// its last write failed. Hidden in Untitled windows.
-    private let workspaceItem = NSToolbarItem(itemIdentifier: ID.workspace)
-    private let workspaceIcon = NSImageView()
-    private let workspaceLabel = NSTextField(labelWithString: "")
-    /// What `workspaceItem` shows now, so its views are only written when it changes.
+    /// The window's workspace: a pull-down with its name (the file's path as tooltip, or a warning when the file is
+    /// read-only or its last write failed) and the workspace commands. Hidden in Untitled windows.
+    private let workspaceItem = ToolbarDropdown(
+        ID.workspace, label: "Workspace", width: nil,
+        image: NSImage(systemSymbolName: workspaceSymbol, accessibilityDescription: "Workspace"))
+    /// What `workspaceItem` shows now, so it is only written when it changes.
     private var workspaceShown: (text: String, toolTip: String, isWarning: Bool)?
     /// The saved configuration was checked for the workspace item this launch (`insertWorkspaceItemIfMissing`).
     private static var checkedWorkspaceItem = false
@@ -127,7 +127,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     private func configureItems() {
         configureWorkspaceItem()
-        for dropdown in [repoItem, branchItem, profileItem] {
+        for dropdown in [workspaceItem, repoItem, branchItem, profileItem] {
             dropdown.menu.delegate = self
             dropdown.overflowMenu.delegate = self
         }
@@ -219,28 +219,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         for (id, item) in groups { if let palette = Self.palette[id] { item.paletteLabel = palette.label } }
     }
 
-    /// The workspace label: an icon and the text, not clickable, as wide as the text (the name is cut in `apply`, never
-    /// the warning).
+    /// The workspace pull-down: as wide as its name (cut in `apply`), its menu built on open (`workspaceEntries`).
     private func configureWorkspaceItem() {
-        workspaceItem.label = "Workspace"
-        workspaceItem.paletteLabel = "Workspace"
         // A plain name is the first to go to the overflow menu when the toolbar is full (the default width has about
         // 100 pt free); a warning stays (`applyWorkspace` raises it), so an unsaved workspace is never hidden.
-        workspaceItem.visibilityPriority = .low
-        workspaceItem.autovalidates = false
-        workspaceItem.isHidden = true
-        workspaceIcon.setContentHuggingPriority(.required, for: .horizontal)
-        workspaceIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
-        workspaceLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
-        workspaceLabel.usesSingleLineMode = true
-        let stack = NSStackView(views: [workspaceIcon, workspaceLabel])
-        stack.orientation = .horizontal
-        stack.spacing = 5
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
-        workspaceItem.view = stack
-        let form = NSMenuItem(title: "Workspace", action: nil, keyEquivalent: "")
-        form.isEnabled = false
-        workspaceItem.menuFormRepresentation = form
+        workspaceItem.item.visibilityPriority = .low
+        workspaceItem.item.isHidden = true
     }
 
     /// A menu whose items are built when it opens (`menuNeedsUpdate`), never on a model change.
@@ -340,7 +324,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // The customization palette's sample: a new item, as the live one's view would leave the window's toolbar.
         guard flag else { return Self.paletteItem(itemIdentifier) }
         return switch itemIdentifier {
-        case ID.workspace: workspaceItem
+        case ID.workspace: workspaceItem.item
         case ID.repo: repoItem.item
         case ID.branch: branchItem.item
         case ID.profile: profileItem.item
@@ -505,7 +489,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// read-only file or a failed write turns it into a warning (triangle, a toast's orange) and the tooltip says why.
     private func applyWorkspace() {
         guard let workspace = model.workspace else {
-            set(workspaceItem, hidden: true)
+            set(workspaceItem.item, hidden: true)
             return
         }
         let name = Self.truncated(workspace.name, 12)
@@ -525,23 +509,20 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             || workspaceShown?.isWarning != shown.isWarning
         {
             if workspaceShown?.isWarning != shown.isWarning {
-                let symbol = shown.isWarning ? "exclamationmark.triangle.fill" : Self.workspaceSymbol
-                workspaceIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-                    .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
-                let color = shown.isWarning ? Palette.graphLanes[1] : NSColor.secondaryLabelColor
-                workspaceIcon.contentTintColor = color
-                workspaceLabel.textColor = shown.isWarning ? color : .labelColor
+                // The orange triangle (as the missing-profile chip), else the stack icon as a template.
+                workspaceItem.image = shown.isWarning
+                    ? ProfilePicker.warning(gap: ToolbarDropdown.iconGap)
+                    : NSImage(systemSymbolName: Self.workspaceSymbol, accessibilityDescription: "Workspace")
+                        .map(ToolbarDropdown.padded)
             }
             workspaceShown = shown
-            workspaceItem.visibilityPriority = shown.isWarning ? .high : .low
-            workspaceLabel.stringValue = shown.text
-            workspaceItem.view?.toolTip = shown.toolTip
+            workspaceItem.item.visibilityPriority = shown.isWarning ? .high : .low
+            workspaceItem.title = shown.text
             workspaceItem.toolTip = shown.toolTip
-            workspaceItem.menuFormRepresentation?.title = shown.text
             let state = workspace.isReadOnly ? ", read-only" : workspace.writeFailed ? ", not saved" : ""
-            workspaceItem.view?.setAccessibilityLabel("Workspace \(shown.text)\(state)")
+            workspaceItem.button.setAccessibilityLabel("Workspace \(shown.text)\(state)")
         }
-        set(workspaceItem, hidden: false)
+        set(workspaceItem.item, hidden: false)
     }
 
     // Each setter writes only a changed value: an unchanged write still relayouts the toolbar.
@@ -693,6 +674,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         let entries: [MenuEntry] = switch menu {
+        case workspaceItem.menu, workspaceItem.overflowMenu: workspaceEntries()
         case repoItem.menu, repoItem.overflowMenu: repoEntries()
         case branchItem.menu, branchItem.overflowMenu: model.actionSession.map(RepoMenus.branchPicker) ?? []
         case profileItem.menu, profileItem.overflowMenu:
@@ -713,7 +695,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             // The recent repos under a section header.
             items[index] = NSMenuItem.sectionHeader(title: "Recent")
         }
-        if let dropdown = [repoItem, branchItem, profileItem].first(where: { $0.menu === menu }) {
+        if menu === workspaceItem.menu || menu === workspaceItem.overflowMenu,
+           let index = items.firstIndex(where: { $0.title == Self.recentMarker })
+        {
+            items[index] = NSMenuItem.sectionHeader(title: "Recent Workspaces")
+        }
+        if let dropdown = [workspaceItem, repoItem, branchItem, profileItem].first(where: { $0.menu === menu }) {
             menu.items = [dropdown.titleItem] + items
         } else if menu.identifier == Self.rowHeightMenuID {
             menu.items = [NSMenuItem.sectionHeader(title: "Row Height")] + items
@@ -734,6 +721,34 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Stands for the "Recent" section header in `repoEntries`, which `MenuEntry` cannot express.
     private static let recentMarker = "\u{1}recent"
+
+    /// The window's workspace commands: Reveal in Finder, Save Workspace As…, Close Workspace, the recent workspaces
+    /// other than this one (a pick opens it, or brings it forward), then New Workspace and Open Workspace….
+    private func workspaceEntries() -> [MenuEntry] {
+        guard let workspace = model.workspace else { return [] }
+        func send(_ action: Selector) { NSApp.sendAction(action, to: nil, from: nil) }
+        var entries: [MenuEntry] = [
+            .action("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([workspace.url]) },
+            .action("Save Workspace As…") { send(#selector(AppDelegate.saveWorkspaceAs(_:))) },
+            .action("Close Workspace") { send(#selector(AppDelegate.closeWorkspace(_:))) },
+        ]
+        let key = workspace.url.standardizedFileURL.path
+        let recent = RecentRepos.workspaces.urls.filter { $0.standardizedFileURL.path != key }
+        if !recent.isEmpty {
+            entries += [.separator, .action(Self.recentMarker, enabled: false) {}]
+            entries += recent.map { url in
+                .action(url.deletingPathExtension().lastPathComponent) {
+                    (NSApp.delegate as? AppDelegate)?.openWorkspace(url)
+                }
+            }
+        }
+        entries += [
+            .separator,
+            .action("New Workspace") { send(#selector(AppDelegate.newWorkspace(_:))) },
+            .action("Open Workspace…") { send(#selector(AppDelegate.openWorkspaceDocument(_:))) },
+        ]
+        return entries
+    }
 
     /// The window's repo tabs (the selected one checked; a pick selects that tab at once, as a click on it does), the
     /// recent repos not open here (a pick opens it as `openTab`), then Open…, then the tab's repository actions
@@ -893,7 +908,7 @@ private final class ToolbarDropdown {
 
     /// `image` with `iconGap` of transparent space after it, still a template. A symbol is drawn at the large scale
     /// the toolbar's pull-down gave it (the padded image is no symbol any more, so the button no longer scales it).
-    private static func padded(_ image: NSImage) -> NSImage {
+    static func padded(_ image: NSImage) -> NSImage {
         let image = image.withSymbolConfiguration(NSImage.SymbolConfiguration(scale: .large)) ?? image
         let size = image.size
         let padded = NSImage(size: NSSize(width: size.width + iconGap, height: size.height), flipped: false) { _ in
