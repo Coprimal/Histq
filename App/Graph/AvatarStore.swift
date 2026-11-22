@@ -356,24 +356,27 @@ final class AvatarStore {
         return image
     }
 
-    /// The emoji centered on the generated avatar's dark disc.
+    /// The emoji centered on the generated avatar's dark disc, its glyph `emojiFill` of the disc's diameter.
     private func emojiAvatar(_ emoji: String) -> NSImage {
         let cacheKey = "e|\(emoji)" as NSString
         if let image = drawn.object(forKey: cacheKey) { return image }
         let background = Self.background
-        let image = NSImage(size: NSSize(width: 20, height: 20), flipped: true) { rect in
+        let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
             background.setFill()
             rect.fill()
-            let side = rect.width * 0.62
-            var text = NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: side)])
-            // The emoji's glyph box is larger than its font size: shrink the font until it fits `side`.
-            let measured = text.size()
-            let scale = min(1, side / max(measured.width, measured.height, 1))
-            if scale < 1 {
-                text = NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: side * scale)])
-            }
-            let size = text.size()
-            text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+            guard let context = NSGraphicsContext.current?.cgContext else { return true }
+            // Sized and centered by the glyph's own box (from the baseline, y up), not the line's, which adds leading
+            // and descent around it.
+            let side = rect.width * Self.emojiFill
+            let line = CTLineCreateWithAttributedString(
+                NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: side)]))
+            let glyph = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+            guard glyph.width > 0, glyph.height > 0 else { return true }
+            let scale = side / max(glyph.width, glyph.height)
+            context.translateBy(x: rect.midX, y: rect.midY)
+            context.scaleBy(x: scale, y: scale)
+            context.textPosition = CGPoint(x: -glyph.midX, y: -glyph.midY)
+            CTLineDraw(line, context)
             return true
         }
         drawn.setObject(image, forKey: cacheKey)
@@ -402,6 +405,8 @@ final class AvatarStore {
         return image
     }
 
+    /// An emoji avatar's glyph box, as a fraction of the disc's diameter: the emoji fills the disc inside the lane ring.
+    private static let emojiFill: CGFloat = 0.9
     /// The generated avatar's background: darker than the card so the pattern stands out. #1C1C1E
     private static let background = NSColor(srgbRed: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
     /// The initials avatar's disc and letters. #48484A, white 0.92
