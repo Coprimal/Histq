@@ -753,6 +753,12 @@ final class RepoSession: Identifiable {
         /// The conflict editor's Create Conflict Chunks: `content` (git's conflict markers) written to a conflicted file
         /// like `resolveConflict`, without `git add`, so the path stays conflicted.
         case writeConflictChunks(path: String, content: Data)
+        /// The file editor's Save: `content` written to the worktree file `path` like `writeConflictChunks`
+        /// (atomically, keeping its mode), never staged and not journaled. `base`: the bytes the editor loaded or last
+        /// saved; the file is read again first, in the same hop, and a change since refuses the write
+        /// (`EditorSaveRefused`). Nil (Keep Mine) writes over a change. A removed file or folder always refuses it:
+        /// nothing is made again.
+        case saveFile(path: String, content: Data, base: Data?)
         /// `git mergetool` on one conflicted path: `tool` is `PrefKey.mergeTool`, nil for git's configured tool. It runs
         /// the repo's configured merge command, so only on the user's click.
         case mergeTool(path: String, tool: String?)
@@ -960,6 +966,11 @@ final class RepoSession: Identifiable {
     /// (`Write.mergeInWorktree`), so its Undo reads the entry the write journaled. Set by `WindowModel` when it makes
     /// the session.
     @ObservationIgnored var refreshWorktreeTab: @MainActor (String) -> Void = { _ in }
+    /// Before this tab removes a worktree: a tab of it in this window with unsaved edits shows its leave prompt
+    /// (`WindowModel.revealUnsavedTab`), whose Save or Don't Save runs `retry` (the removal again); Cancel keeps the
+    /// worktree. True when it asked: the removal waits. Set by `WindowModel` when it makes the session.
+    @ObservationIgnored var asksBeforeRemovingWorktree:
+        @MainActor (String, _ retry: @escaping @MainActor () -> Void) -> Bool = { _, _ in false }
 
     /// The repo's remotes and their fetch URLs (`git remote -v`), read with the refs: a remote with no fetched branch
     /// shows too.
@@ -988,11 +999,17 @@ final class RepoSession: Identifiable {
     private(set) var aiBatch: AIBatch?
     /// The conflict editor's Save asks how to write the conflicts left unresolved (`ConflictSaveModal`).
     var conflictSavePrompt = false
-    /// Leaving a conflict editor with unsaved ticks or edits asks first (`ConflictLeaveModal`): the way out waits here.
+    /// Leaving a conflict editor with unsaved ticks or edits, or the file editor with unsaved text, asks first
+    /// (`ConflictLeaveModal`): the way out waits here.
     private(set) var conflictLeave: ConflictLeave?
     /// The way out the leave prompt's Save took on: applied once the write succeeds, after the save prompt
-    /// (`conflictSavePrompt`) when conflicts are left; dropped when that prompt is cancelled.
+    /// (`conflictSavePrompt`) when conflicts are left; dropped when that prompt is cancelled, or when the file editor's
+    /// save is blocked or fails.
     private var pendingLeave: ConflictLeave?
+    /// A close or quit asked while a write of unsaved edits ran (`askBeforeClosing`): run once that write ends, after a
+    /// success (it checks again: closes, or asks if edits are still unsaved); dropped after a failure. `closeFile()`
+    /// never clears it: only the write's end takes it.
+    @ObservationIgnored private var closeRetry: (@MainActor () -> Void)?
 
     /// The conflict editor before the last AI Apply (Undo AI): valid only while the editor shows the same load of the
     /// same file. Any other change to the resolution (tick, edit, Reset), a reload, Save or leaving drops it.
@@ -1005,11 +1022,17 @@ final class RepoSession: Identifiable {
         let current: Int
     }
 
-    /// A way out of a dirty conflict editor (another file, graph row, ref, pull request, or its close button): `name`
-    /// is the open file's name; `navigate` runs once the editor is closed (Save or Don't Save).
+    /// A way out of a dirty conflict editor or file editor (another file, graph row, ref, pull request, its close
+    /// button, a close or quit): `name` is the open file's name; `navigate` runs once the editor is closed (Save or
+    /// Don't Save).
     struct ConflictLeave {
         let name: String
         let navigate: @MainActor () -> Void
+        /// The file editor's unsaved text asks, not the conflict editor's choices: `ConflictLeaveModal` words it so.
+        var isEditor = false
+        /// Raised by a close or quit (`askBeforeClosing`): `closeModals()` leaves it up (a page change or Settings
+        /// closing while the window is prepared); only Save, Don't Save, Cancel or `cancelPinnedLeave()` end it.
+        var pinned = false
     }
 
     /// A form, confirmation, host-key or rebase modal is open (`ModalHost` shows it over the window).
@@ -1019,7 +1042,8 @@ final class RepoSession: Identifiable {
             || patchPreview != nil
     }
 
-    /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
+    /// Cancels every open modal, as their Cancel buttons do (a tab or page change). A close or quit's leave prompt
+    /// (`ConflictLeave.pinned`) stays up, and the file editor's text is never touched.
     func closeModals() {
         dialog = nil
         confirmation = nil
@@ -1029,7 +1053,7 @@ final class RepoSession: Identifiable {
         pullRequestForm = nil
         patchPreview = nil
         cancelConflictSave()
-        conflictLeave = nil
+        if conflictLeave?.pinned != true { conflictLeave = nil }
         closeAI()
     }
     /// The undo journal's next entries, read with the refs; the toolbar, the Edit menu and the palette show them.
@@ -1205,6 +1229,29 @@ final class RepoSession: Identifiable {
     /// can only start once the file has loaded, so it waits here. Selecting another file, closing the editor or a
     /// failed load drops it.
     @ObservationIgnored private var pendingAIBatchPath: String?
+    /// The file editor of the open WIP file (`openEditor`): set from its Edit tab until the file is left, also while
+    /// its Diff, Split or Full file tab shows (`FileEditor.showsEditor`). Views read it; `RepoSession+Editor.swift`
+    /// writes it.
+    var editor: FileEditor?
+    /// The bytes the editor last loaded or saved: what its buffer and the disk are compared with.
+    @ObservationIgnored var editorBase = Data()
+    /// How the loaded file's text is written back (its BOM, its line breaks); nil until a text loads.
+    @ObservationIgnored var editorCodec: EditableText?
+    /// The editor's scroll view, text view and long-lived text delegate (`FileEditorView` makes them once per buffer):
+    /// kept here so the text, its undo history, the caret and the scroll outlive every unmount (a mode tab, keep-alive
+    /// eviction, a layout switch, a move to another window). The buffer is `editorTextView.string`: Save, the
+    /// prompt's Save and a close or quit read it there. Dropped with the editor.
+    @ObservationIgnored var editorScrollView: NSScrollView?
+    @ObservationIgnored var editorTextView: NSTextView?
+    @ObservationIgnored var editorTextDelegate: NSObject?
+    /// Bumped by every load, Reload, save start and end and every edit: a disk check or silent reload read before
+    /// one of them does not replace the text.
+    @ObservationIgnored var editorDiskGeneration = 0
+    /// The editor's load (open, Reload), its disk check after a status refresh (with the silent reload it may run),
+    /// and the debounced byte compare after an edit.
+    @ObservationIgnored var editorLoadTask: Task<Void, Never>?
+    @ObservationIgnored var editorDiskTask: Task<Void, Never>?
+    @ObservationIgnored var editorDirtyCheck: Task<Void, Never>?
 
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "repo")
 
@@ -2021,16 +2068,18 @@ final class RepoSession: Identifiable {
         }
         guard vanished else { return }
         // The pane closes in Stacked too: what it shows (a WIP file once the tree is clean) may be gone. A removed
-        // submodule leaves its removal staged: the WIP shows it.
+        // submodule leaves its removal staged: the WIP shows it. The file editor stays (a save back to HEAD, a stash in
+        // a terminal): a refresh never closes it or asks.
+        let keepsPanel2 = editor != nil
         if hasChanges, Self.movesToWIP(selection) {
-            selectGraph([.wip], keepsPanel2: false)
+            selectGraph([.wip], keepsPanel2: keepsPanel2)
         } else if let head = status.value?.branch.commit {
-            selectGraph([.commit(head)], keepsPanel2: false)
+            selectGraph([.commit(head)], keepsPanel2: keepsPanel2)
         } else {
             // An unborn branch: the overview cards.
             graphSelection = []
             UITiming.select(timingDetail(.overview))
-            select(.overview)
+            select(.overview, keepsPanel2: keepsPanel2)
         }
     }
 
@@ -2147,7 +2196,10 @@ final class RepoSession: Identifiable {
             status = .loaded(newStatus)
             statusReads &+= 1
             if let target = openFile, target.source == .wip {
-                if target.isConflict {
+                if editor != nil {
+                    // The file editor keeps its buffer; a path turned unmerged goes to the conflict editor only clean.
+                    followStatusForEditor()
+                } else if target.isConflict {
                     // The conflict editor keeps its ticks and edits; it closes once the path is resolved (its Save, the
                     // merge tool, a `git add` in a terminal).
                     if !newStatus.conflicted.contains(where: { $0.path == target.path }) { closeFile() }
@@ -3218,10 +3270,13 @@ final class RepoSession: Identifiable {
     /// tool (a history row) passes it as `returnTool`: a file history keeps panel 1 while the diff shows.
     /// While a file history shows, a commit's file (panel 3) shows that file's history instead, at the same commit; while
     /// a blame shows, a file of panel 3 shows its blame.
-    func selectFile(_ target: FileTarget, returnTool: RepoTool? = nil) {
+    /// `editing` (`openEditor`): the file editor shows instead of the diff, its placeholder in the click's frame, its
+    /// text read off the main actor. The edited file's row again keeps the buffer and the view; any other file drops
+    /// the editor, asking first when its text is unsaved.
+    func selectFile(_ target: FileTarget, returnTool: RepoTool? = nil, editing: Bool = false) {
         // While a blame shows, a file of panel 3 shows its blame instead, at the file's revision. A file blame can't
-        // read (untracked, deleted, an image, a conflict, a submodule) opens its diff.
-        if returnTool == nil, case .blame? = openTool, !target.isConflict, !target.isImage,
+        // read (untracked, deleted, an image, a conflict, a submodule) opens its diff. Edit never opens a blame.
+        if !editing, returnTool == nil, case .blame? = openTool, !target.isConflict, !target.isImage,
            target.file.kind != .untracked, target.file.kind != .deleted, !target.file.isSubmodule
         {
             let blame = RepoTool.blame(path: target.path, rev: Self.blameRev(of: target.source))
@@ -3234,11 +3289,18 @@ final class RepoSession: Identifiable {
         {
             returnTool = .fileHistory(path: target.path, rev: rev, follow: follow)
         }
-        if isConflictDirty {
+        let keepsEditor = isEditedFile(target)
+        if hasUnsavedEdits || editor?.saving == true {
             // The open conflict's row again keeps its ticks (a reload would drop them).
-            if target == openFile { return }
-            if asksBeforeLeavingConflict({ [weak self] in self?.selectFile(target, returnTool: returnTool) }) { return }
+            if isConflictDirty, target == openFile { return }
+            // The edited file's row again (staged or unstaged) keeps its buffer, with no prompt.
+            if !keepsEditor, asksBeforeLeavingConflict({ [weak self] in
+                self?.selectFile(target, returnTool: returnTool, editing: editing)
+            }) { return }
         }
+        // The editor belongs to its path in the WIP: any other file (a commit's or a stash's of the same path, its
+        // conflict) drops it, once the gate above let it go.
+        if editor != nil, !keepsEditor { dropEditor() }
         // A pending Suggest All belongs to the conflict Resolve with AI opened, never to another file.
         if !(target.isConflict && target.path == pendingAIBatchPath) { pendingAIBatchPath = nil }
         UITiming.select(fileDetail(target))
@@ -3251,7 +3313,18 @@ final class RepoSession: Identifiable {
         self.returnTool = returnTool
         openFile = target
         fileIgnoresSizeLimit = false
-        startFileLoad()
+        if editing {
+            // The diff is read when a diff tab is picked (`showDiff`), never under the editor's own load.
+            fileToken &+= 1
+            fileTask?.cancel()
+            fileTask = nil
+            fileDiffPrefetch?.cancel()
+            fileDiffPrefetch = nil
+            fileDiff = .idle
+            beginEditing(target.path)
+        } else {
+            startFileLoad()
+        }
         // Another file's history: panel 1 reads it while panel 2 loads the diff.
         if let returnTool, returnTool != loadedTool { loadTool(returnTool) }
     }
@@ -3309,6 +3382,12 @@ final class RepoSession: Identifiable {
     /// Opens a WIP file by its path (DEBUG `-HistqSelect file:<path>`) as its row in the WIP panel would: an
     /// untracked file as untracked, a file with unstaged changes as its Unstaged row, else as its Staged row.
     func selectWIPFile(_ path: String) {
+        selectFile(wipFileTarget(path))
+    }
+
+    /// A WIP file by its path, as its row in the WIP panel stands for it (`selectWIPFile`); a clean tracked file is
+    /// `.modified` (its diff shows the "no change" card). The file editor's target, followed on each status read.
+    func wipFileTarget(_ path: String) -> FileTarget {
         let entry = status.value?.entries.first { $0.path == path }
         let isSubmodule = entry?.isSubmodule ?? false
         let file: FileChange = switch entry {
@@ -3321,14 +3400,15 @@ final class RepoSession: Identifiable {
                        isSubmodule: isSubmodule)
         case nil: FileChange(kind: .modified, path: path)
         }
-        selectFile(FileTarget(source: .wip, file: file))
+        return FileTarget(source: .wip, file: file)
     }
 
     /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
-    /// The conflict editor's unsaved ticks and edits go with it. An open pull request, issue or tool closes too. A diff
-    /// opened from a blame or the reflog (`returnTool`) shows that tool again instead, with its read (read again only if
-    /// replaced); one opened from a file history closes it, except in Columns (the history stays in panel 1, its diff
-    /// column empty).
+    /// The conflict editor's unsaved ticks and edits go with it, and the file editor with its buffer (the way out after
+    /// Save or Don't Save; a user's close asks first through `closeFileAsking`). An open pull request, issue or tool
+    /// closes too. A diff opened from a blame or the reflog (`returnTool`) shows that tool again instead, with its read
+    /// (read again only if replaced); one opened from a file history closes it, except in Columns (the history stays in
+    /// panel 1, its diff column empty).
     func closeFile() {
         if openHosted != nil {
             openHosted = nil
@@ -3342,6 +3422,7 @@ final class RepoSession: Identifiable {
         if case .fileHistory? = back, LayoutPreset.current != .columns { back = nil }
         returnTool = nil
         pendingAIBatchPath = nil
+        if editor != nil { dropEditor() }
         guard openFile != nil else { return }
         fileTask?.cancel()
         fileTask = nil
@@ -3374,44 +3455,148 @@ final class RepoSession: Identifiable {
         closeFile()
     }
 
+    /// A user's close of panel 2's file (the diff's or the file editor's close button, Esc): shows the graph again,
+    /// asking first when its edits are not saved.
+    func closeFileAsking() {
+        if asksBeforeLeavingConflict({}) { return }
+        closeFile()
+    }
+
     /// The open conflict editor has ticks or edits that are not saved.
     var isConflictDirty: Bool {
         openFile?.isConflict == true && conflict.value?.merge?.hasResolutions == true
     }
 
-    /// Leaving a dirty conflict editor (`isConflictDirty`) shows the leave prompt in this call (nothing read) and
-    /// returns true: `navigate` waits for its Save or Don't Save. False when nothing is unsaved: go on at once.
+    /// The file editor's buffer differs from the file it loaded or last saved.
+    var isEditorDirty: Bool { editor?.isDirty == true }
+
+    /// The leave, close and quit guards' one predicate: the conflict editor's choices or the file editor's text are
+    /// not saved.
+    var hasUnsavedEdits: Bool { isConflictDirty || isEditorDirty }
+
+    /// The file the leave prompt names: the file editor's when its text is unsaved, else the open (conflicted) file.
+    private var leaveName: String? {
+        let path = isEditorDirty ? editor?.path : openFile?.path
+        return path.map { ($0 as NSString).lastPathComponent }
+    }
+
+    /// Leaving unsaved edits (`hasUnsavedEdits`) shows the leave prompt in this call (nothing read) and returns true:
+    /// `navigate` waits for its Save or Don't Save. False when nothing is unsaved: go on at once.
     private func asksBeforeLeavingConflict(_ navigate: @escaping @MainActor () -> Void) -> Bool {
         // While a merge editor with unsaved choices is being written (Save, Save Output, Create Conflict Chunks), it
         // can't be left: the click is dropped, so a Save's own way out is never raced by a newer one. A chooser's
-        // write (nothing unsaved) never holds a click.
+        // write (nothing unsaved) never holds a click. The same holds for the file editor's save.
         if conflictBusy != nil, isConflictDirty { return true }
-        guard isConflictDirty, let target = openFile else { return false }
+        if editor?.saving == true { return true }
+        guard hasUnsavedEdits, let name = leaveName else { return false }
         if conflictLeave == nil {
-            conflictLeave = ConflictLeave(name: (target.path as NSString).lastPathComponent, navigate: navigate)
+            conflictLeave = ConflictLeave(name: name, navigate: navigate, isEditor: isEditorDirty)
         }
         return true
     }
 
+    /// A close or quit of this tab (the tab, its window, its workspace, the app) with unsaved edits: raises the leave
+    /// prompt, pinned (`ConflictLeave.pinned`), and returns true. `retry` runs after its Save succeeds or its Don't
+    /// Save, never after Cancel or a blocked or failed save. A leave prompt already up (a file switch) is taken over:
+    /// its way out becomes `retry`. While a write of the unsaved edits runs, `retry` waits for it instead: it runs once
+    /// the write succeeds (and checks again), and is dropped when it fails (the write's error shows). False: nothing is
+    /// unsaved, go on.
+    func askBeforeClosing(then retry: @escaping @MainActor () -> Void) -> Bool {
+        if (conflictBusy != nil && isConflictDirty) || editor?.saving == true {
+            closeRetry = retry
+            return true
+        }
+        guard hasUnsavedEdits, let name = leaveName else { return false }
+        conflictLeave = ConflictLeave(name: name, navigate: retry, isEditor: isEditorDirty, pinned: true)
+        return true
+    }
+
+    /// Ends a close or quit's prompt as its Cancel does (the user left its tab): the prompt goes, the text stays, and
+    /// its retry (or one held for a write in flight) never runs.
+    func cancelPinnedLeave() {
+        closeRetry = nil
+        if conflictLeave?.pinned == true { conflictLeave = nil }
+    }
+
     /// The leave prompt's Save: the editor's Save (with conflicts left, the save prompt follows); the way out runs once
-    /// the file is written.
+    /// the file is written. The file editor's save that is blocked (changed or deleted on disk) or fails drops the way
+    /// out, and the editor stays with its notice or error.
     func leaveConflictSaving() {
         guard let leave = conflictLeave else { return }
         conflictLeave = nil
+        if editor != nil {
+            // Undone back to the saved text since the prompt showed: nothing to write.
+            guard isEditorDirty else {
+                closeFile()
+                return leave.navigate()
+            }
+            pendingLeave = leave
+            if saveEditor() == nil { pendingLeave = nil }
+            return
+        }
         pendingLeave = leave
         if saveConflict() == nil, !conflictSavePrompt { pendingLeave = nil }
     }
 
-    /// The leave prompt's Don't Save: drops the ticks and edits and takes the way out.
+    /// The leave prompt's Don't Save: drops the ticks and edits (or the file editor's text) and takes the way out.
     func leaveConflictDiscarding() {
         guard let leave = conflictLeave else { return }
         closeFile()
         leave.navigate()
     }
 
-    /// The leave prompt's Cancel (Escape): the editor stays as it was.
+    /// The leave prompt's Cancel (Escape): the editor stays as it was, and a close or quit waiting on it is dropped.
     func cancelConflictLeave() {
         conflictLeave = nil
+    }
+
+    /// The way out the leave prompt's Save left for the file editor's save starting now (nil for Save or Keep Mine).
+    func takePendingLeave() -> ConflictLeave? {
+        defer { pendingLeave = nil }
+        return pendingLeave
+    }
+
+    /// The file editor's save ended: after a success the leave prompt's way out runs (or the prompt shows again when
+    /// keys were typed during the write), then a close or quit held for it; a blocked or failed save drops both.
+    func endEditorWrite(_ leave: ConflictLeave?, saved: Bool) {
+        if saved, let leave {
+            if hasUnsavedEdits {
+                if conflictLeave == nil { conflictLeave = leave }
+            } else {
+                closeFile()
+                leave.navigate()
+            }
+        }
+        endWriteRetry(succeeded: saved)
+    }
+
+    /// Runs a close or quit held while a write of unsaved edits ran (`closeRetry`) after a success; drops it otherwise.
+    private func endWriteRetry(succeeded: Bool) {
+        let retry = closeRetry
+        closeRetry = nil
+        if succeeded { retry?() }
+    }
+
+    /// The status branch for the file editor (and again after its save or Reload, whose own refresh it skipped):
+    /// nothing while it saves. A path turned unmerged hands a clean buffer to the conflict editor, and marks a dirty
+    /// one changed on disk (it never gets a conflict target, so the conflict editor never takes its text). Else
+    /// `openFile` follows the status by path, the disk is checked (`checksDisk`), and a diff on screen reloads quietly.
+    func followStatusForEditor(checksDisk: Bool = true) {
+        guard let editor, !editor.saving, let target = openFile else { return }
+        if status.value?.conflicted.contains(where: { $0.path == editor.path }) == true {
+            if !editor.isDirty {
+                dropEditor()
+                openFile = FileTarget(source: .wip, file: FileChange(kind: .conflicted, path: editor.path))
+                fileIgnoresSizeLimit = false
+                return startFileLoad()
+            }
+            if editor.diskChange == nil { self.editor?.diskChange = .modified }
+        } else {
+            let derived = wipFileTarget(editor.path)
+            if derived != target { openFile = derived }
+            if checksDisk { checkEditorDisk() }
+        }
+        if !editor.showsEditor { loadFile(quietly: true) }
     }
 
     /// The save prompt's Cancel (Escape): nothing is written, and a way out waiting on the save is dropped.
@@ -3607,10 +3792,14 @@ final class RepoSession: Identifiable {
         target.isConflict ? "conflict \(target.path)" : "file \(target.path)"
     }
 
-    private func startFileLoad() {
+    /// Reads the open file again in the click's frame: its diff (placeholder first) or its conflict. The file editor's
+    /// diff tabs call it too (`showDiff`), and never drop its leave prompt or its Save's way out.
+    func startFileLoad() {
         fileToken &+= 1
-        cancelConflictSave()
-        conflictLeave = nil
+        if editor == nil {
+            cancelConflictSave()
+            conflictLeave = nil
+        }
         if openFile?.isConflict == true {
             conflict = .loading
             conflictBusy = nil
@@ -3658,8 +3847,9 @@ final class RepoSession: Identifiable {
                     ignoresWhitespace: ignoresWhitespace, loadID: loadID)
                 try Task.checkCancellation()
                 guard token == fileToken, openFile == target else { return }
-                // Ignoring whitespace, no diff can mean a whitespace-only change: the file stays open.
-                if quietly, !ignoresWhitespace, case .unchanged = loaded.content { return closeFile() }
+                // Ignoring whitespace, no diff can mean a whitespace-only change: the file stays open. So does an
+                // edited file (a save back to HEAD): its diff shows the "no change" card.
+                if quietly, !ignoresWhitespace, editor == nil, case .unchanged = loaded.content { return closeFile() }
                 fileDiff = .loaded(loaded)
                 if !ignoresSizeLimit {
                     fileDiffCache.insert(loaded, for: .init(target: target, ignoresWhitespace: ignoresWhitespace))
@@ -4184,6 +4374,9 @@ final class RepoSession: Identifiable {
         return Task { [weak self] in
             defer { endOperation() }
             guard let self else { return false }
+            // A close or quit held while this write ran goes on once it ends, after the way out (`askBeforeClosing`).
+            var succeeded = false
+            defer { endWriteRetry(succeeded: succeeded) }
             do {
                 try await perform(write)
             } catch {
@@ -4192,6 +4385,7 @@ final class RepoSession: Identifiable {
                 conflictBusy = nil
                 return false
             }
+            succeeded = true
             guard token == fileToken else { return true }
             conflictBusy = nil
             if let leave {
@@ -5478,6 +5672,8 @@ final class RepoSession: Identifiable {
         case .resolveConflict(let path, let content): try await ops.resolve(path: path, content: content)
         case .writeConflictChunks(let path, let content):
             try GitOperations.writeResolution(content, to: path, cwd: cwd)
+        case .saveFile(let path, let content, let base):
+            try writeEditedFile(content, to: path, base: base, cwd: cwd)
         case .mergeTool(let path, let tool):
             let runner = backend.runner
             let args = ["--literal-pathspecs", "mergetool", "--no-prompt"] + (tool.map { ["--tool=\($0)"] } ?? [])
@@ -5555,8 +5751,13 @@ final class RepoSession: Identifiable {
     /// Runs a user operation (the action bar, a menu, a dialog) through `perform` without blocking: it is in `running`
     /// when this returns (with `key`, the action bar button that shows it). Its outcome shows as a toast
     /// (`postToast`); a failure also goes to `failure` (`report`), which a new operation clears. `then` runs after a
-    /// write that went through (not stopped), once the status and the refs are read again; never after a failure.
+    /// write that went through (not stopped), once the status and the refs are read again; never after a failure. A
+    /// worktree removal whose tabs have unsaved edits waits for their leave prompt instead (`asksBeforeRemovingWorktree`).
     func run(_ write: Write, title: String, key: ActionBarAction? = nil, then: (@MainActor () -> Void)? = nil) {
+        // Its tabs close once it is gone (`worktreeRemoved`): their unsaved text is asked about first.
+        if case .removeWorktree(let path, _) = write, asksBeforeRemovingWorktree(path, { [weak self] in
+            self?.run(write, title: title, key: key, then: then)
+        }) { return }
         let timingID = UITiming.nextOpID()
         UITiming.opClick(timingID, write, repo: url.lastPathComponent)
         nextOperationID &+= 1

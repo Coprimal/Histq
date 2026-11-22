@@ -276,8 +276,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     #endif
 
     /// Quit saves the session while the windows are still open; the windows closing after it save nothing. A close
-    /// burst still pending settles first.
+    /// burst still pending settles first. A tab with unsaved edits cancels it first: its leave prompt shows, and its
+    /// Save or Don't Save quits again.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if revealUnsavedTab(in: entries, retry: { NSApp.terminate(nil) }) { return .terminateCancel }
         isTerminating = true
         settleCloseBursts()
         SessionStore.saveForQuit()
@@ -813,6 +815,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     #endif
 
+    /// A window with unsaved edits in a tab stays open: its leave prompt shows, and its Save or Don't Save closes the
+    /// window again.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let entry = entry(for: sender) else { return true }
+        return !revealUnsavedTab(in: [entry]) { [weak sender] in sender?.performClose(nil) }
+    }
+
+    /// A close or quit of `entries`' windows: the first one with unsaved edits in a tab comes forward and shows that
+    /// tab with its leave prompt (`WindowModel.revealUnsavedTab`), whose Save or Don't Save runs `retry`. True when it
+    /// asked: the close or quit waits.
+    private func revealUnsavedTab(in entries: [Entry], retry: @escaping @MainActor () -> Void) -> Bool {
+        let unsaved = entries.first { entry in entry.model.sessions.values.contains { $0.hasUnsavedEdits } }
+        guard let entry = unsaved else { return false }
+        present(entry.window)
+        return entry.model.revealUnsavedTab(in: entry.model.tabs.map(\.id), retry: retry)
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         let model = entries.first { $0.window === window }?.model
@@ -911,6 +930,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func patchSession() -> RepoSession? {
         guard let model = target()?.model, !model.isShowingModal, let session = model.actionSession,
               session.repoState?.isOperationInProgress != true
+        else { return nil }
+        return session
+    }
+
+    /// File › Save (⌘S): saves the key window's file editor. A menu item, not a view shortcut: the hidden kept-alive
+    /// tabs stay mounted, and one of them could take it.
+    @objc func saveEditedFile(_ sender: Any?) {
+        editorSession()?.saveEditor()
+    }
+
+    /// The key window's selected repo tab whose file editor has unsaved text and no save in flight, with no modal,
+    /// Settings or palette over it.
+    private func editorSession() -> RepoSession? {
+        guard let model = entry(for: NSApp.keyWindow)?.model, !model.isShowingModal, let session = model.actionSession,
+              let editor = session.editor, editor.isDirty, !editor.saving
         else { return nil }
         return session
     }
@@ -1231,8 +1265,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Close Workspace: its file is written one last time with every window (then never again), its layout is kept
-    /// with `open: false` (it stays closed at the next launch), and its windows close without capturing anything.
+    /// with `open: false` (it stays closed at the next launch), and its windows close without capturing anything. A tab
+    /// with unsaved edits in one of its windows stops it first (its windows close without `windowShouldClose`): its
+    /// leave prompt shows, and its Save or Don't Save closes the workspace again.
     private func close(_ workspace: Workspace) {
+        if revealUnsavedTab(in: windows(of: workspace), retry: { [weak self] in self?.close(workspace) }) { return }
         settleCloseBursts()
         guard workspaces.contains(where: { $0 === workspace }), !workspace.isClosing else { return }
         let members = windows(of: workspace)
@@ -1373,6 +1410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
+        if menuItem.action == #selector(saveEditedFile(_:)) { return editorSession() != nil }
         // Close Workspace only on a workspace window; Save Workspace As… on any window (an Untitled one saves every
         // Untitled window).
         if menuItem.action == #selector(closeWorkspace(_:)) { return target()?.model.workspace != nil }
@@ -1458,6 +1496,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .target = self
         fileMenu.addItem(withTitle: "Close Workspace", action: #selector(closeWorkspace(_:)), keyEquivalent: "")
             .target = self
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Save", action: #selector(saveEditedFile(_:)), keyEquivalent: "s").target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab(_:)), keyEquivalent: "w").target = self
         fileMenu.addItem(withTitle: "Reopen Closed Tab", action: #selector(reopenClosedTab(_:)), keyEquivalent: "T")

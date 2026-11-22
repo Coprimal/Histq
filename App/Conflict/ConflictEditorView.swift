@@ -463,14 +463,17 @@ struct ConflictSaveModal: View {
 /// Leaving the conflict editor with unsaved ticks or edits (another file, graph row, ref or pull request, the close
 /// button): Save runs the editor's Save (the save prompt follows when conflicts are left) and then leaves, Don't Save
 /// drops them and leaves, Cancel (Escape) stays. No button is one Return away: Save writes the file, Don't Save loses
-/// the choices.
+/// the choices. The file editor's unsaved text asks the same, worded for its text.
 struct ConflictLeaveModal: View {
     let session: RepoSession
     let fileName: String
 
     var body: some View {
+        // The prompt's own flag, not the live `editor.isDirty`: a compare may clear that while the prompt is up.
+        let isEditor = session.conflictLeave?.isEditor == true
         ModalCard(title: "Save changes to \(fileName)?",
-                  subtitle: "Your conflict resolutions will be lost if you don't save them.",
+                  subtitle: isEditor ? "Your changes to this file will be lost if you don't save them."
+                      : "Your conflict resolutions will be lost if you don't save them.",
                   systemImage: "exclamationmark.triangle", width: 460, takesFocus: true) {
             EmptyView()
         } actions: {
@@ -479,10 +482,11 @@ struct ConflictLeaveModal: View {
                 .keyboardShortcut(.cancelAction)
             Button("Don't Save") { session.leaveConflictDiscarding() }
                 .buttonStyle(RowTextButtonStyle(formRow: true))
-                .help("Drop the ticks and edits, then go on")
+                .help(isEditor ? "Drop the changes, then go on" : "Drop the ticks and edits, then go on")
             Button("Save") { session.leaveConflictSaving() }
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
-                .help("Save the Output (asks how when conflicts are left), then go on")
+                .help(isEditor ? "Save the file, then go on"
+                    : "Save the Output (asks how when conflicts are left), then go on")
         }
     }
 }

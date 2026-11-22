@@ -266,7 +266,6 @@ private struct DiffFileHeader: View {
     static let height: CGFloat = 40
 
     var body: some View {
-        @Bindable var session = session
         let detail = session.fileDiff.value
         HStack(spacing: Self.controlSpacing) {
             HStack(spacing: 8) {
@@ -279,8 +278,7 @@ private struct DiffFileHeader: View {
             if !target.file.isSubmodule,
                !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true
             {
-                CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
-                            compact: true, small: true)
+                FileModeTabs(session: session, target: target)
                     .fixedSize()
             }
         }
@@ -500,7 +498,7 @@ struct DiffControlsCard: View {
 
     private var closeButton: some View {
         Button {
-            session.closeFile()
+            session.closeFileAsking()
         } label: {
             Image(systemName: "xmark")
                 .font(.system(size: 14, weight: .semibold))
@@ -681,7 +679,7 @@ private struct DiffContent: View {
                 jump: session.diffJump, isFirst: isFirst,
                 onTable: { [session] table in if isFirst { session.diffTable = table } },
                 onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
-                onClose: { [session] in session.closeFile() })
+                onClose: { [session] in session.closeFileAsking() })
                 .frame(maxHeight: .infinity)
         }
     }

@@ -326,7 +326,7 @@ struct RepoLayoutView: View {
     /// skeleton until its first diff opens, else an empty card, so opening a file never shifts the layout.
     @ViewBuilder private var diffColumn: some View {
         if let target = session.openFile, !target.isConflict {
-            DiffView(session: session, target: target)
+            fileView(target)
         } else if case .fileHistory(let path, _, _)? = session.openTool {
             FileHistoryDiffPlaceholder(session: session, path: path)
         } else {
@@ -447,8 +447,17 @@ struct RepoLayoutView: View {
             if target.isConflict {
                 ConflictEditorView(session: session, target: target)
             } else if !isColumns {
-                DiffView(session: session, target: target)
+                fileView(target)
             }
+        }
+    }
+
+    /// The open (not conflicted) file: its editor while the Edit tab shows for it, else its diff.
+    @ViewBuilder private func fileView(_ target: FileTarget) -> some View {
+        if session.editor?.showsEditor == true, session.isEditedFile(target) {
+            FileEditorView(session: session, target: target)
+        } else {
+            DiffView(session: session, target: target)
         }
     }
 
