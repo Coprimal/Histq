@@ -22,7 +22,7 @@
   <body>
     <a class="skip" href="#main">Skip to content</a>
 
-    <header class="nav">
+    <header class="nav nav--sticky">
       <div class="container nav__inner">
         <a class="brand" href="./" aria-label="Histq home">
           <img src="logo.png" alt="" width="30" height="30" />
@@ -32,279 +32,164 @@
           <a class="nav__hide" href="docs.html">Docs</a>
           <a class="nav__hide" href="https://github.com/Coprimal/Histq/blob/main/CHANGELOG.md">Changelog</a>
           <a href="https://github.com/Coprimal/Histq">GitHub</a>
-          <a class="btn btn--line btn--sm" href="https://github.com/Coprimal/Histq/releases/latest">Download</a>
+          <a class="btn btn--sm" href="https://github.com/Coprimal/Histq/releases/latest">Download</a>
         </nav>
       </div>
     </header>
 
     <main id="main">
-      <!-- Hero: the page drawn as a git log. HEAD is the headline, each branch tip is a section. -->
-      <section class="hero" aria-labelledby="hero-title" data-mode="drawn">
-        <script>if (!matchMedia("(prefers-reduced-motion: reduce)").matches) document.currentScript.parentElement.dataset.mode = "ascii";</script>
-        <div class="container hero__inner">
-          <span class="head-lane" aria-hidden="true"></span>
-          <div class="hero__head">
-            <span class="head-node" aria-hidden="true"><span class="ascii-char">*</span></span>
-            <span class="ascii-trunk" aria-hidden="true"></span>
-            <h1 id="hero-title">Git history, drawn to be read.</h1>
-            <p class="lead">A native macOS git client that runs the git you already have.</p>
-            <div class="actions">
-              <a class="btn" href="https://github.com/Coprimal/Histq/releases/latest">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
-                Download for macOS
-              </a>
-              <a class="btn btn--line" href="https://github.com/Coprimal/Histq">Read the source</a>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="container">
+          <div class="hero__top">
+            <div class="hero__text">
+              <h1 id="hero-title">Git history, drawn to be read.</h1>
+              <p class="lead">A native macOS git client that runs the git you already have. Branches, tags, stashes, remotes and worktrees in one window, each one click away.</p>
             </div>
-            <p class="hero__note">Free and open source.</p>
-          </div>
-
-          <div class="log" role="group" aria-label="This page as a git log: each branch is a section">
-            <div class="log__bar">
-              <div class="seg" role="radiogroup" aria-label="Draw the graph as">
-                <button type="button" class="seg__btn" role="radio" aria-checked="false" data-mode-set="ascii"><code>git log --graph</code></button>
-                <button type="button" class="seg__btn" role="radio" aria-checked="true" data-mode-set="drawn">Histq</button>
+            <div class="hero__cta">
+              <div class="actions">
+                <a class="btn" href="https://github.com/Coprimal/Histq/releases/latest">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
+                  Download for macOS
+                </a>
+                <a class="btn btn--line" href="https://github.com/Coprimal/Histq">Read the source</a>
               </div>
+              <p class="hero__note">Free and open source · macOS 15+ · Apple silicon</p>
             </div>
-            <ol class="log__rows">
-              <li class="row" style="--l:1"><a href="#every-branch">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">every-branch</span><span class="row__msg">Every ref in one window</span></a></li>
-              <li class="row" style="--l:2"><a href="#stage-lines">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">|</b><b style="--l:2">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">stage-lines</span><span class="row__msg">A file, a hunk or one line</span></a></li>
-              <li class="row" style="--l:3"><a href="#profiles">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">|</b><b style="--l:2">|</b><b style="--l:3">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">profiles</span><span class="row__msg">One git identity per tab</span></a></li>
-              <li class="row" style="--l:4"><a href="#pull-requests">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">|</b><b style="--l:2">|</b><b style="--l:3">|</b><b style="--l:4">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">pull-requests</span><span class="row__msg">Review and merge in place</span></a></li>
-              <li class="row" style="--l:5"><a href="#layouts">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">|</b><b style="--l:2">|</b><b style="--l:3">|</b><b style="--l:4">|</b><b style="--l:5">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">layouts</span><span class="row__msg">Four layouts, one terminal</span></a></li>
-              <li class="row" style="--l:6"><a href="#ai-drafts">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">|</b><b style="--l:2">|</b><b style="--l:3">|</b><b style="--l:4">|</b><b style="--l:5">|</b><b style="--l:6">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">ai-drafts</span><span class="row__msg">Drafts from your diff</span></a></li>
-              <li class="row" style="--l:7"><a href="#workspaces">
-                <span class="row__graph" aria-hidden="true"><span class="ascii"><b style="--l:0">|</b><b style="--l:1">|</b><b style="--l:2">|</b><b style="--l:3">|</b><b style="--l:4">|</b><b style="--l:5">|</b><b style="--l:6">|</b><b style="--l:7">*</b></span><i class="row__lane"></i><i class="row__stub"></i><i class="row__node"></i></span>
-                <span class="pill">workspaces</span><span class="row__msg">One file, all your windows</span></a></li>
-            </ol>
           </div>
-        </div>
-      </section>
-
-      <!-- every-branch merges into main -->
-      <section class="sec" id="every-branch" aria-labelledby="every-branch-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:1">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:2"></i><i class="lane" style="--l:3"></i><i class="lane" style="--l:4"></i><i class="lane" style="--l:5"></i><i class="lane" style="--l:6"></i><i class="lane" style="--l:7"></i>
-            <i class="lane lane--in" style="--l:1"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="every-branch-title">Every branch in one picture.</h2>
-            <p class="lead">Branches, tags, stashes, remotes and worktrees in one window, each one click away.</p>
-            <p class="ref"><span class="pill" style="--l:1">every-branch</span></p>
-          </div>
-          <figure class="shot shot--callouts" data-slot="graph" data-kind="product" data-alt="Histq main window: sidebar, commit graph and commit details">
-            <img src="shots/graph-full.webp" alt="Histq’s main window: a sidebar of local and remote branches, a commit graph in coloured lanes with branch badges, and the selected commit’s details and files" width="2880" height="1800" loading="lazy" />
-            <ul class="callouts" data-keep>
-              <li style="--x:9%;--y:42%;--i:0"><span>Sidebar cards</span></li>
-              <li style="--x:28%;--y:7%;--i:1"><span>Worktree group</span></li>
-              <li style="--x:24%;--y:61%;--i:2"><span>Branch badges</span></li>
-              <li style="--x:38%;--y:78%;--i:3"><span>A colour per branch</span></li>
-              <li style="--x:86%;--y:20%;--i:4"><span>Commit details</span></li>
-              <li style="--x:84%;--y:58%;--i:5"><span>Changed files</span></li>
+          <figure class="shot hero__shot" id="every-branch">
+            <img src="shots/hero.webp" alt="Histq’s main window in a workspace: the acme-shop workspace and Personal profile in the toolbar; a closed-groups button, the archive button, a pinned tab, a worktree box of three tabs and a Sprint 42 tab group; the sidebar, the commit graph in coloured lanes, the selected commit’s details and files, and a terminal under the graph" width="2880" height="1800" fetchpriority="high" />
+            <ul class="callouts" aria-label="Parts of the window">
+              <li data-side="top" data-row="a" data-x="2.4" data-y="5.4" data-lane="28" style="--lx:4">Closed groups</li>
+              <li data-side="top" data-row="b" data-x="4.7" data-y="5.4" data-lane="23" style="--lx:13">Archived tabs</li>
+              <li data-side="top" data-row="a" data-x="8.2" data-y="5.4" data-lane="18" style="--lx:22">Pinned tab</li>
+              <li data-side="top" data-row="b" data-x="15.1" data-y="2.9" data-lane="13" style="--lx:31">Workspace</li>
+              <li data-side="top" data-row="a" data-x="28" data-y="5.6" data-lane="8" style="--lx:40.5">Worktree group</li>
+              <li data-side="top" data-row="b" data-x="47" data-y="2.9" data-lane="13" style="--lx:50.5">Profile</li>
+              <li data-side="top" data-row="a" data-x="53.6" data-y="5.6" data-lane="8" style="--lx:61">Tab group</li>
+              <li data-side="top" data-row="b" data-x="75.3" data-y="21.1" data-lane="10" style="--lx:78">Commit details</li>
+              <li data-side="bottom" data-row="a" data-x="1.6" data-y="68" data-lane="14" style="--lx:6">Sidebar cards</li>
+              <li data-side="bottom" data-row="b" data-x="20.7" data-y="71.3" data-lane="10" style="--lx:18">Terminal</li>
+              <li data-side="bottom" data-row="a" data-x="26" data-y="55" data-lane="22" style="--lx:30">Branch badges</li>
+              <li data-side="bottom" data-row="b" data-x="31" data-y="61.7" data-lane="14" style="--lx:43">A colour per branch</li>
+              <li data-side="bottom" data-row="a" data-x="77.3" data-y="52.7" data-lane="14" style="--lx:80">Changed files</li>
             </ul>
           </figure>
         </div>
       </section>
-      <!-- stage-lines merges into main -->
-      <section class="sec" id="stage-lines" aria-labelledby="stage-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:2">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:3"></i><i class="lane" style="--l:4"></i><i class="lane" style="--l:5"></i><i class="lane" style="--l:6"></i><i class="lane" style="--l:7"></i>
-            <i class="lane lane--in" style="--l:2"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="stage-title">Stage the lines you mean.</h2>
-            <p class="lead">Diff, Split or Full file, with syntax colours. Click a line to stage it.</p>
-            <p class="ref"><span class="pill" style="--l:2">stage-lines</span></p>
-          </div>
-          <div class="split split--5-7">
-            <figure class="stage graph" aria-label="Diagram: staging single lines of a hunk from the working tree into the index">
-              <div class="stage__col">
-                <p class="stage__title">Working tree <span class="stage__count" data-count="unstaged">5</span></p>
-                <ol class="hunk" data-list="unstaged">
-                  <li class="hl hl--del" data-i="0"><button type="button" aria-pressed="false"><span class="hl__sign">−</span><code>if coupon.expiresAt &lt; now() {</code></button></li>
-                  <li class="hl hl--add" data-i="2"><button type="button" aria-pressed="false"><span class="hl__sign">+</span><code>if let start = coupon.startsAt, start &gt; today {</code></button></li>
-                  <li class="hl hl--add" data-i="3"><button type="button" aria-pressed="false"><span class="hl__sign">+</span><code>  return .failure(.notStarted(startsAt: start))</code></button></li>
-                  <li class="hl hl--add" data-i="4"><button type="button" aria-pressed="false"><span class="hl__sign">+</span><code>}</code></button></li>
-                  <li class="hl hl--add" data-i="5"><button type="button" aria-pressed="false"><span class="hl__sign">+</span><code>if usedCodes.contains(coupon.code) {</code></button></li>
-                </ol>
-              </div>
-              <div class="stage__col stage__col--index">
-                <p class="stage__title">Index <span class="stage__count" data-count="staged">1</span></p>
-                <ol class="hunk" data-list="staged"><li class="hl hl--add" data-i="1"><button type="button" aria-pressed="true"><span class="hl__sign">+</span><code>let today = now()</code></button></li></ol>
-                <p class="stage__empty">Nothing staged yet.</p>
-              </div>
-              <div class="stage__bar">
-                <button type="button" class="seg__btn seg__btn--line" data-stage="all">Stage hunk</button>
-                <button type="button" class="seg__btn seg__btn--line" data-stage="none">Unstage all</button>
-              </div>
-            </figure>
-            <figure class="shot" data-slot="stage" data-kind="product" data-alt="Histq staging view: a diff with Stage Hunk, and unstaged and staged file lists" style="--ratio: 2344 / 1597">
+
+      <section class="band" id="fast" aria-labelledby="fast-title">
+        <div class="container band__inner">
+          <h2 id="fast-title" class="band__fig"><span class="band__num">1,000,000</span> commits, a new one in about 0.7&#8239;s.</h2>
+          <dl class="band__facts">
+            <div><dt>Native</dt><dd>SwiftUI and AppKit.</dd></div>
+            <div><dt>Instant staging</dt><dd>Files move as you click.</dd></div>
+            <div><dt>⌘F search</dt><dd>Matches light up.</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="feats" aria-label="Features">
+        <div class="container bento">
+          <article class="tile tile--8" id="stage-lines" aria-labelledby="stage-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:2">stage-lines</span>
+              <h2 id="stage-title">Stage the lines you mean.</h2>
+              <p>Diff, Split or Full file, with syntax colours. Click a line to stage it.</p>
+            </header>
+            <figure class="shot" data-slot="stage" data-kind="product" style="--ratio: 2344 / 1597">
               <img src="shots/stage.webp" alt="Histq’s staging view: the diff of CouponValidator.swift with Stage Hunk and Discard Hunk, the staged part below, and unstaged and staged file lists on the right" width="2344" height="1597" loading="lazy" />
             </figure>
-          </div>
-          <div class="split split--4-8 blame">
-            <div class="blame__text">
-              <h3>Who changed it, and when.</h3>
-              <p>File History lists every commit that touched a file. Blame names the last change on each line.</p>
+          </article>
+
+          <article class="tile tile--4" id="ai-drafts" data-swap aria-labelledby="ai-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:6">ai-drafts</span>
+              <h2 id="ai-title">AI drafts it. You apply it.</h2>
+              <p>Your key: OpenAI, Anthropic, Google Gemini, xAI or any OpenAI-compatible server.</p>
+            </header>
+            <figure class="shot swapshot" data-slot="ai" data-kind="product" style="--ratio: 1200 / 803">
+              <img class="is-on" data-view="commit" src="shots/aicommit.webp" alt="Histq’s AI commit message sheet with a drafted message and an Apply button" width="1200" height="803" loading="lazy" />
+              <img data-view="explain" src="shots/aiexplain.webp" alt="Histq explaining a commit in plain words" width="1200" height="803" loading="lazy" />
+              <img data-view="resolve" src="shots/airesolve.webp" alt="Histq suggesting a merge for a conflict, with its reason" width="1200" height="803" loading="lazy" />
+            </figure>
+            <div class="picks" role="tablist" aria-label="What AI drafts" aria-orientation="vertical">
+              <button type="button" role="tab" aria-selected="true" data-show="commit"><strong>Commit messages</strong><span>From the staged diff, in your repo’s style.</span></button>
+              <button type="button" role="tab" aria-selected="false" tabindex="-1" data-show="explain"><strong>Explanations</strong><span>What a commit does, in plain words.</span></button>
+              <button type="button" role="tab" aria-selected="false" tabindex="-1" data-show="resolve"><strong>Conflicts</strong><span>A suggested merge, with its reason.</span></button>
             </div>
-            <figure class="shot" data-slot="history" data-kind="product" data-alt="Histq File History: commits that touched a file beside the diff" style="--ratio: 2117 / 832">
+            <p class="tile__note">Also drafts rebase messages and pull requests. <code>.aiignore</code> keeps files out.</p>
+          </article>
+
+          <article class="tile tile--12 tile--row" aria-labelledby="history-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:2">file-history</span>
+              <h2 id="history-title">Who changed it, and when.</h2>
+              <p>File History lists every commit that touched a file. Blame names the last change on each line.</p>
+            </header>
+            <figure class="shot" data-slot="history" data-kind="product" style="--ratio: 2117 / 832">
               <img src="shots/history.webp" alt="Histq’s File History: four commits that touched SettingsView.swift, beside the selected commit’s diff" width="2117" height="832" loading="lazy" />
             </figure>
-          </div>
-        </div>
-      </section>
+          </article>
 
-      <!-- a commit on main: the speed band -->
-      <section class="sec sec--night" id="fast" aria-labelledby="fast-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:3"></i><i class="lane" style="--l:4"></i><i class="lane" style="--l:5"></i><i class="lane" style="--l:6"></i><i class="lane" style="--l:7"></i>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="fast-title">A new commit in about 0.7&#8239;s, at a million.</h2>
-          </div>
-          <div class="split split--7-5 fast">
-            <div class="fast__text">
-              <p class="fast__fig"><span class="fast__num">1,000,000</span><span class="fast__unit">commits</span></p>
-              <p class="lead">Built for long-lived repositories.</p>
-              <dl class="facts">
-                <div><dt>Native</dt><dd>SwiftUI and AppKit.</dd></div>
-                <div><dt>Instant staging</dt><dd>Files move as you click.</dd></div>
-                <div><dt>⌘F search</dt><dd>Matches light up.</dd></div>
-              </dl>
+          <article class="tile tile--7" id="pull-requests" data-swap aria-labelledby="pr-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:4">pull-requests</span>
+              <h2 id="pr-title">Reply, resolve and merge in the tab.</h2>
+              <p>Your PRs, review requests and issues. Reply to threads, resolve or reopen them, merge, or resolve conflicts with AI.</p>
+            </header>
+            <div class="seg" role="tablist" aria-label="Pull request view">
+              <button type="button" class="seg__btn" role="tab" aria-selected="true" data-show="conversation">Conversation</button>
+              <button type="button" class="seg__btn" role="tab" aria-selected="false" tabindex="-1" data-show="files">Files changed</button>
             </div>
-            <figure class="stream" data-loop>
-              <div class="stream__view">
-                <img class="stream__img" src="shots/layout-focus-left.webp" alt="Histq’s commit graph in the Focus layout: dozens of branches in coloured lanes with their commit messages" width="2600" height="1625" loading="lazy" />
-              </div>
-              <button class="loop-toggle" type="button" data-loop-toggle>Pause</button>
+            <figure class="shot swapshot" data-slot="pr" data-kind="product" style="--ratio: 2880 / 1360">
+              <img class="is-on" data-view="conversation" src="shots/pr-conversation.webp" alt="A pull request’s conversation in Histq: the description, a review with an inline thread, reviewers and labels" width="2880" height="1597" loading="lazy" />
+              <img data-view="files" src="shots/pr-files.webp" alt="A pull request’s changed files in Histq, with a diff and review comments" width="2880" height="1597" loading="lazy" />
             </figure>
-          </div>
-        </div>
-      </section>
+          </article>
 
-      <!-- profiles merges into main -->
-      <section class="sec" id="profiles" aria-labelledby="profiles-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:3">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:4"></i><i class="lane" style="--l:5"></i><i class="lane" style="--l:6"></i><i class="lane" style="--l:7"></i>
-            <i class="lane lane--in" style="--l:3"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="profiles-title">A profile for every tab.</h2>
-            <p class="lead">Identity, signing, SSH key and GitHub account, per git command. Your git config stays untouched.</p>
-            <p class="ref"><span class="pill" style="--l:3">profiles</span></p>
-          </div>
-          <div class="prof graph" data-profile="personal" role="group" aria-label="Diagram: the same repository pushed as two profiles">
-            <div class="prof__side">
-              <div class="seg seg--tabs" role="tablist" aria-label="Profile of this tab">
-                <button type="button" class="seg__btn" role="tab" aria-selected="true" aria-controls="prof-sheet" data-profile-set="personal"><i class="pdot pdot--personal" aria-hidden="true"></i>Personal</button>
-                <button type="button" class="seg__btn" role="tab" aria-selected="false" aria-controls="prof-sheet" tabindex="-1" data-profile-set="work"><i class="pdot pdot--work" aria-hidden="true"></i>Work</button>
-              </div>
-              <div class="route" aria-hidden="true">
-                <span class="route__from"><i class="pdot"></i><code>git push</code></span>
-                <span class="route__line"><i class="route__dot"></i></span>
-                <span class="route__to"><span class="swap"><span class="v v--personal">github.com</span><span class="v v--work">ghe.example.com</span></span></span>
-              </div>
-              <p class="prof__note">Tokens stay in your Keychain.</p>
+          <article class="tile tile--5 prof" id="profiles" data-profile="personal" aria-labelledby="profiles-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:3">profiles</span>
+              <h2 id="profiles-title">A profile for every tab.</h2>
+              <p>Identity, signing, SSH key and GitHub account, per git command. Your git config stays untouched.</p>
+            </header>
+            <div class="seg" role="tablist" aria-label="Profile of this tab">
+              <button type="button" class="seg__btn" role="tab" aria-selected="true" aria-controls="prof-sheet" data-profile-set="personal"><i class="pdot pdot--personal" aria-hidden="true"></i>Personal</button>
+              <button type="button" class="seg__btn" role="tab" aria-selected="false" aria-controls="prof-sheet" tabindex="-1" data-profile-set="work"><i class="pdot pdot--work" aria-hidden="true"></i>Work</button>
             </div>
             <dl class="sheet" id="prof-sheet" role="tabpanel" aria-live="polite">
-              <div><dt>Commits as</dt><dd class="swap"><span class="v v--personal">you@example.com</span><span class="v v--work">you@work.example</span></dd></div>
-              <div><dt>Signing</dt><dd class="swap"><span class="v v--personal">SSH key</span><span class="v v--work">GPG</span></dd></div>
-              <div><dt>SSH key</dt><dd class="swap"><code class="v v--personal">id_ed25519</code><code class="v v--work">id_work</code></dd></div>
-              <div><dt>GitHub</dt><dd class="swap"><span class="v v--personal">@you</span><span class="v v--work">@you-work</span></dd></div>
+              <div><dt><code>git push</code> to</dt><dd><span class="v v--personal">github.com</span><span class="v v--work">ghe.example.com</span></dd></div>
+              <div><dt>Commits as</dt><dd><span class="v v--personal">you@example.com</span><span class="v v--work">you@work.example</span></dd></div>
+              <div><dt>Signing</dt><dd><span class="v v--personal">SSH key</span><span class="v v--work">GPG</span></dd></div>
+              <div><dt>SSH key</dt><dd><code class="v v--personal">id_ed25519</code><code class="v v--work">id_work</code></dd></div>
+              <div><dt>GitHub</dt><dd><span class="v v--personal">@you</span><span class="v v--work">@you-work</span></dd></div>
             </dl>
-          </div>
-        </div>
-      </section>
+            <p class="tile__note">Tokens stay in your Keychain.</p>
+          </article>
 
-      <!-- pull-requests merges into main -->
-      <section class="sec" id="pull-requests" aria-labelledby="pr-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:4">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:5"></i><i class="lane" style="--l:6"></i><i class="lane" style="--l:7"></i>
-            <i class="lane lane--in" style="--l:4"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="pr-title">Reply, resolve and merge in the tab.</h2>
-            <p class="lead">Read, review and merge without leaving the repository.</p>
-            <p class="ref"><span class="pill" style="--l:4">pull-requests</span></p>
-          </div>
-          <div class="split split--8-4 pr">
-            <div class="pr__view">
-              <div class="seg" role="tablist" aria-label="Pull request view">
-                <button type="button" class="seg__btn" role="tab" aria-selected="true" data-pr-set="conversation">Conversation</button>
-                <button type="button" class="seg__btn" role="tab" aria-selected="false" tabindex="-1" data-pr-set="files">Files changed</button>
+          <article class="tile tile--12 lay" id="layouts" data-layout="classic" data-tabs="top" data-term="off" aria-labelledby="layouts-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:5">layouts</span>
+              <h2 id="layouts-title">Four layouts, two tab styles.</h2>
+              <p>Classic, Stacked, Columns or Focus, with tabs on top or down the side. A terminal opens under the graph with <kbd>⌃`</kbd>.</p>
+            </header>
+            <div class="lay__side">
+              <div class="tile__controls">
+                <div class="seg" role="radiogroup" aria-label="Layout">
+                  <button type="button" class="seg__btn" role="radio" aria-checked="true" data-lay="classic">Classic</button>
+                  <button type="button" class="seg__btn" role="radio" aria-checked="false" tabindex="-1" data-lay="stacked">Stacked</button>
+                  <button type="button" class="seg__btn" role="radio" aria-checked="false" tabindex="-1" data-lay="columns">Columns</button>
+                  <button type="button" class="seg__btn" role="radio" aria-checked="false" tabindex="-1" data-lay="focus">Focus</button>
+                </div>
+                <div class="seg" role="radiogroup" aria-label="Tabs">
+                  <button type="button" class="seg__btn" role="radio" aria-checked="true" data-tabs-set="top">Top</button>
+                  <button type="button" class="seg__btn" role="radio" aria-checked="false" tabindex="-1" data-tabs-set="side">Side</button>
+                </div>
+                <div class="seg">
+                  <button type="button" class="seg__btn" aria-pressed="false" data-term-toggle>Terminal <kbd>⌃`</kbd></button>
+                </div>
               </div>
-              <figure class="shot swapshot" data-slot="pr" data-kind="product" data-alt="Histq pull request page" style="--ratio: 2880 / 1597" data-show="conversation">
-                <img data-view="conversation" src="shots/pr-conversation.webp" alt="A pull request’s conversation in Histq: the description, a review with an inline thread, reviewers and labels" width="2880" height="1597" loading="lazy" />
-                <img data-view="files" src="shots/pr-files.webp" alt="A pull request’s changed files in Histq, with a diff and review comments" width="2880" height="1597" loading="lazy" />
-              </figure>
-            </div>
-            <dl class="list">
-              <div><dt>Your queue</dt><dd>My PRs, review requests, issues.</dd></div>
-              <div><dt>Threads</dt><dd>Reply, resolve, reopen.</dd></div>
-              <div><dt>Merge box</dt><dd>Merge, or resolve conflicts with AI.</dd></div>
-              <div><dt>New pull requests</dt><dd>AI drafts the description.</dd></div>
-            </dl>
-          </div>
-        </div>
-      </section>
-
-      <!-- layouts merges into main -->
-      <section class="sec" id="layouts" aria-labelledby="layouts-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:5">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:6"></i><i class="lane" style="--l:7"></i>
-            <i class="lane lane--in" style="--l:5"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="layouts-title">Four layouts, two tab styles.</h2>
-            <p class="lead">Group a repo with its worktrees, pin the tabs you keep, archive the rest.</p>
-            <p class="ref"><span class="pill" style="--l:5">layouts</span></p>
-          </div>
-          <div class="lay" data-layout="classic" data-tabs="top" data-term="off">
-            <div class="lay__controls">
-              <div class="seg" role="radiogroup" aria-label="Layout">
-                <button type="button" class="seg__btn" role="radio" aria-checked="true" data-lay="classic">Classic</button>
-                <button type="button" class="seg__btn" role="radio" aria-checked="false" data-lay="stacked">Stacked</button>
-                <button type="button" class="seg__btn" role="radio" aria-checked="false" data-lay="columns">Columns</button>
-                <button type="button" class="seg__btn" role="radio" aria-checked="false" data-lay="focus">Focus</button>
-              </div>
-              <div class="seg" role="radiogroup" aria-label="Tabs">
-                <button type="button" class="seg__btn" role="radio" aria-checked="true" data-tabs-set="top">Top</button>
-                <button type="button" class="seg__btn" role="radio" aria-checked="false" data-tabs-set="side">Side</button>
-              </div>
-              <div class="seg">
-                <button type="button" class="seg__btn" aria-pressed="false" data-term-toggle>Terminal <kbd>⌃`</kbd></button>
-              </div>
-            </div>
-            <div class="split split--4-8 lay__stage">
-              <div class="schema graph" role="img" aria-label="Diagram of the window’s panes in the chosen layout">
+              <div class="schema" role="img" aria-label="Diagram of the window’s panes in the chosen layout">
                 <span class="pane p-tabs"><span>Tabs</span><i></i><i></i><i></i></span>
                 <span class="pane p-side"><span>Sidebar</span></span>
                 <span class="pane p-graph"><span>Graph</span><b style="--l:1"></b><b style="--l:2"></b><b style="--l:3"></b></span>
@@ -312,115 +197,102 @@
                 <span class="pane p-diff"><span>Diff</span></span>
                 <span class="pane p-term"><span>Terminal</span><code>deep main ❯ git log</code></span>
               </div>
-              <figure class="shot swapshot" data-slot="layout" data-kind="product" data-alt="Histq window in the chosen layout" style="--ratio: 2600 / 1625">
+            </div>
+            <div class="lay__main">
+              <figure class="shot swapshot" data-slot="layout" data-kind="product" style="--ratio: 2600 / 1625">
                 <img class="is-on" src="shots/layout-classic-top.webp" alt="Histq in the Classic layout with tabs on top" width="2600" height="1625" loading="lazy" />
                 <img src="shots/layout-classic-top.webp" alt="" width="2600" height="1625" loading="lazy" />
               </figure>
+              <p class="tile__note lay__cap" aria-live="polite">Sidebar, graph and details; a file opens over the graph.</p>
             </div>
-            <p class="lay__cap" aria-live="polite">Sidebar, graph and details; a file opens over the graph.</p>
-          </div>
+          </article>
+
         </div>
       </section>
 
-      <!-- ai-drafts merges into main -->
-      <section class="sec" id="ai-drafts" aria-labelledby="ai-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:6">
-            <i class="lane" style="--l:0"></i><i class="lane" style="--l:7"></i>
-            <i class="lane lane--in" style="--l:6"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
+      <section class="org" id="tabs" aria-labelledby="tabs-title">
+        <div class="container">
+          <header class="org__head">
+            <h2 id="tabs-title">Tabs that keep your work in order.</h2>
+            <p class="lead">Pin, group, archive and close tabs without losing them, then keep the whole set in a workspace file.</p>
+          </header>
+          <div class="org__grid">
+            <article class="kind">
+              <div class="strip strip--shot"><img src="shots/tab-pinned.webp" alt="A pinned tab in Histq: its chart icon alone, before the deep tab" width="185" height="48" loading="lazy" /></div>
+              <h3>Pinned tabs</h3>
+              <p>Pin the repositories you always keep open. A pinned tab shrinks to its icon and stays first.</p>
+            </article>
+            <article class="kind">
+              <div class="strip strip--shot"><img src="shots/tab-worktree.webp" alt="Three tabs, deep, dark-mode and race-fix, in one worktree box" width="358" height="48" loading="lazy" /></div>
+              <h3>Worktree groups</h3>
+              <p>Tabs of one repository’s worktrees sit side by side in a box and always move together.</p>
+            </article>
+            <article class="kind">
+              <div class="strip strip--shot"><img src="shots/tab-group.webp" alt="The green Sprint 42 chip before its tabs api-server and subs, with a green line under them" width="307" height="48" loading="lazy" /></div>
+              <h3>Tab groups</h3>
+              <p>Put any tabs in a group with a color and a name. Click its chip to collapse it, drag the chip to move the whole group.</p>
+            </article>
+            <article class="kind">
+              <div class="strip strip--shot strip--tall"><img src="shots/tab-archived.webp" alt="The archive button’s dropdown: a search field over the archived tabs api-guide and spike-wasm" width="290" height="162" loading="lazy" /></div>
+              <h3>Archived tabs</h3>
+              <p>Archive a tab to clear the strip. The archive button lists them in a searchable dropdown; Unarchive Tab puts one back.</p>
+            </article>
+            <article class="kind">
+              <div class="strip strip--shot strip--tall"><img src="shots/tab-closed.webp" alt="The closed groups button’s list: the Release 0.4 group, 1 tab" width="290" height="95" loading="lazy" /></div>
+              <h3>Closed groups</h3>
+              <p>Like tab groups in Google Chrome: Close Group puts a group away with its tabs, and the grid button lists the closed groups by color, name and tab count. Click one to open it again.</p>
+            </article>
+            <article class="kind">
+              <div class="strip strip--shot strip--tall"><img src="shots/tab-side.webp" alt="Vertical tabs: the pinned chart tab, the deep worktree box and the Sprint 42 group down the left side" width="165" height="240" loading="lazy" /></div>
+              <h3>Tabs down the side</h3>
+              <p>The same pins, boxes and groups in a column on the left. Move a tab to another window with its terminal and graph view; <kbd>⇧⌘T</kbd> brings back what you closed.</p>
+            </article>
           </div>
-          <div class="sec__head">
-            <h2 id="ai-title">AI drafts it. You apply it.</h2>
-            <p class="lead">Your key: OpenAI, Anthropic, Google Gemini, xAI or any OpenAI-compatible server.</p>
-            <p class="ref"><span class="pill" style="--l:6">ai-drafts</span></p>
-          </div>
-          <div class="split split--7-5 ai" data-ai="commit">
-            <div class="deck">
-              <figure class="card" data-ai-card="commit"><img src="shots/aicommit.webp" alt="Histq’s AI commit message sheet with a drafted message and an Apply button" width="1200" height="803" loading="lazy" /></figure>
-              <figure class="card" data-ai-card="explain"><img src="shots/aiexplain.webp" alt="Histq explaining a commit in plain words" width="1200" height="803" loading="lazy" /></figure>
-              <figure class="card" data-ai-card="resolve"><img src="shots/airesolve.webp" alt="Histq suggesting a merge for a conflict, with its reason" width="1200" height="803" loading="lazy" /></figure>
-            </div>
-            <div class="ai__side">
-              <div class="picks" role="tablist" aria-label="What AI drafts" aria-orientation="vertical">
-                <button type="button" role="tab" aria-selected="true" data-ai-set="commit"><strong>Commit messages</strong><span>From the staged diff, in your repo’s style.</span></button>
-                <button type="button" role="tab" aria-selected="false" tabindex="-1" data-ai-set="explain"><strong>Explanations</strong><span>What a commit does, in plain words.</span></button>
-                <button type="button" role="tab" aria-selected="false" tabindex="-1" data-ai-set="resolve"><strong>Conflicts</strong><span>A suggested merge, with its reason.</span></button>
+
+          <article class="tile ws" id="workspaces" data-swap aria-labelledby="ws-title">
+            <header class="tile__head">
+              <span class="pill" style="--l:7">workspaces</span>
+              <h2 id="ws-title">One file, all your windows.</h2>
+              <p>Tabs, tab groups (closed ones too), each repository’s graph view and the profiles in a <code>.histqws</code> file. Open several at once, on any Mac.</p>
+            </header>
+            <div class="ws__body">
+            <div class="ws__side">
+              <div class="seg" role="tablist" aria-label="Workspace to open">
+                <button type="button" class="seg__btn" role="tab" aria-selected="true" data-show="shop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>acme-shop<code>.histqws</code></button>
+                <button type="button" class="seg__btn" role="tab" aria-selected="false" tabindex="-1" data-show="hotfix"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>hotfix<code>.histqws</code></button>
               </div>
-              <p class="ai__note">Also drafts rebase messages and pull requests. <code>.aiignore</code> keeps files out.</p>
+              <ul class="ws__facts">
+                <li><b>Saves itself</b> as you change it.</li>
+                <li><b>Paths travel with it:</b> stored relative to the file and from <code>~</code>.</li>
+                <li><b>Profiles, no secrets:</b> identities and keys, never passwords or tokens.</li>
+                <li><b>Stays yours:</b> window frames and collapsed groups stay on this Mac.</li>
+              </ul>
             </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- workspaces merges into main -->
-      <section class="sec" id="workspaces" aria-labelledby="ws-title">
-        <div class="container sec__inner">
-          <div class="rail" aria-hidden="true" style="--m:7">
-            <i class="lane" style="--l:0"></i>
-            <i class="lane lane--in" style="--l:7"></i>
-            <svg class="cap" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M100 0 C100 62 0 38 0 100" vector-effect="non-scaling-stroke" /></svg>
-            <i class="node"></i>
-          </div>
-          <div class="sec__head">
-            <h2 id="ws-title">One file, all your windows.</h2>
-            <p class="lead">Tabs, groups, graph views and profiles in a <code>.histqws</code> file. Open it on any Mac.</p>
-            <p class="ref"><span class="pill" style="--l:7">workspaces</span></p>
-          </div>
-          <div class="ws graph" data-ws="shop">
-            <div class="ws__files" role="tablist" aria-label="Workspace to open" aria-orientation="vertical">
-              <button type="button" class="wsfile" role="tab" aria-selected="true" aria-controls="ws-shot" data-ws-set="shop" style="--fc: oklch(55% 0.15 150); --gc: oklch(62% 0.15 150)">
-                <span class="wsfile__name"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>acme-shop<code>.histqws</code></span>
-                <span class="minitabs" aria-hidden="true"><i class="g"></i><i class="in on"></i><i class="in"></i><i class="in"></i><i></i></span>
-              </button>
-              <button type="button" class="wsfile" role="tab" aria-selected="false" aria-controls="ws-shot" tabindex="-1" data-ws-set="hotfix" style="--fc: oklch(55% 0.19 355); --gc: oklch(60% 0.19 355)">
-                <span class="wsfile__name"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>hotfix<code>.histqws</code></span>
-                <span class="minitabs" aria-hidden="true"><i class="g"></i><i class="in on"></i><i class="in"></i><i></i></span>
-              </button>
-              <span class="ws__wire" aria-hidden="true"><i></i></span>
-            </div>
-            <figure class="shot swapshot" id="ws-shot" role="tabpanel" data-slot="workspace" data-kind="product" data-alt="Histq window of the opened workspace" style="--ratio: 2880 / 1800" data-show="shop">
-              <img data-view="shop" src="shots/workspace-shop.webp" alt="The acme-shop workspace open in Histq: its name in the toolbar, a Sprint 42 tab group and four tabs" width="2880" height="1800" loading="lazy" />
+            <figure class="shot swapshot" data-slot="workspace" data-kind="product" style="--ratio: 2880 / 1800">
+              <img class="is-on" data-view="shop" src="shots/workspace-shop.webp" alt="The acme-shop workspace open in Histq: its name in the toolbar, a Sprint 42 tab group and four tabs" width="2880" height="1800" loading="lazy" />
               <img data-view="hotfix" src="shots/workspace-hotfix.webp" alt="The hotfix workspace open in Histq: its name in the toolbar, the Work profile and a Coupons tab group" width="2880" height="1800" loading="lazy" />
             </figure>
-            <ul class="ws__facts">
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/></svg>Saves itself</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="13" height="10" rx="2"/><rect x="8" y="10" width="13" height="10" rx="2"/></svg>Several open at once</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>Paths travel with it</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>Profiles, no secrets</li>
-            </ul>
-          </div>
+            </div>
+          </article>
         </div>
       </section>
 
-      <!-- the root commit: where you start -->
-      <section class="sec sec--root" id="download" aria-labelledby="download-title">
-        <div class="container sec__inner">
-          <div class="rail rail--root" aria-hidden="true">
-            <i class="lane" style="--l:0"></i>
-            <i class="node node--root"></i>
-          </div>
-          <div class="sec__head">
+      <section class="get" id="download" aria-labelledby="download-title">
+        <div class="container get__inner">
+          <div>
             <h2 id="download-title">Native on macOS. Windows and Linux next.</h2>
             <p class="lead">Needs git 2.36 or later. Histq updates itself.</p>
           </div>
-          <div class="split split--6-6 get">
-            <div class="get__act">
-              <a class="btn btn--lg" href="https://github.com/Coprimal/Histq/releases/latest">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
-                Download for macOS
-              </a>
-            </div>
-            <table class="platforms">
-              <caption class="visually-hidden">Platforms</caption>
-              <thead><tr><th scope="col">Platform</th><th scope="col">Status</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">macOS 15+, Apple silicon</th><td><strong>Available</strong></td></tr>
-                <tr><th scope="row">Windows</th><td>Coming soon</td></tr>
-                <tr><th scope="row">Linux</th><td>Coming soon</td></tr>
-              </tbody>
-            </table>
+          <div class="get__act">
+            <a class="btn" href="https://github.com/Coprimal/Histq/releases/latest">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
+              Download for macOS
+            </a>
+            <ul class="platforms" aria-label="Platforms">
+              <li class="is-on">macOS 15+, Apple silicon <b>Available</b></li>
+              <li>Windows <b>Coming soon</b></li>
+              <li>Linux <b>Coming soon</b></li>
+            </ul>
           </div>
         </div>
       </section>
@@ -428,7 +300,7 @@
 
     <footer class="foot">
       <div class="container foot__inner">
-        <a class="brand" href="./" aria-label="Histq home"><img src="logo.png" alt="" width="26" height="26" /><span>Histq</span></a>
+        <a class="brand" href="./" aria-label="Histq home"><img src="logo.png" alt="" width="22" height="22" /><span>Histq</span></a>
         <p>Free software under the GPLv3, made by <a href="https://coprimal.dev">Coprimal</a>.</p>
         <nav class="foot__links" aria-label="Footer">
           <a href="docs.html">Docs</a>

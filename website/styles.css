@@ -2,7 +2,7 @@
  * pills and footer; this file only adds the reading column and the table of contents, drawn as a
  * lane with one commit node per section. */
 
-html { scroll-behavior: smooth; scroll-padding-top: var(--space-lg); }
+html { scroll-behavior: smooth; scroll-padding-top: 84px; }
 
 /* nav: the version beside the wordmark, the current page underlined in the signal colour */
 .brand-group { display: inline-flex; align-items: center; gap: var(--space-sm); }
@@ -19,7 +19,7 @@ html { scroll-behavior: smooth; scroll-padding-top: var(--space-lg); }
 
 /* docs: contents on the left, where the landing's rail runs; the text in a 46rem column */
 .docs-layout { display: grid; grid-template-columns: 14rem minmax(0, 46rem); gap: var(--space-2xl); align-items: start; }
-.toc { position: sticky; top: var(--space-lg); max-height: calc(100dvh - 2 * var(--space-lg)); overflow-y: auto; overscroll-behavior: contain; }
+.toc { position: sticky; top: calc(60px + var(--space-lg)); max-height: calc(100dvh - 60px - 2 * var(--space-lg)); overflow-y: auto; overscroll-behavior: contain; }
 .toc ul { position: relative; margin: 0; padding: var(--space-2xs) 0; list-style: none; }
 .toc ul::before { content: ""; position: absolute; left: 9px; top: 18px; bottom: 18px; width: var(--line); margin-left: calc(var(--line) / -2); background: var(--color-rule-2); }
 .toc a { position: relative; display: flex; align-items: center; min-height: 32px; padding: 0 var(--space-xs) 0 28px; border-radius: var(--radius-inner); color: var(--color-ink-2); font-size: var(--text-sm); text-decoration: none; transition: color var(--dur-short) var(--ease-out), background-color var(--dur-short) var(--ease-out); }
