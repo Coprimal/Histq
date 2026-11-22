@@ -914,7 +914,7 @@ private struct WorkingChangesNotice: View {
 
     var body: some View {
         if let count {
-            let tone = Color.accentColor
+            let tone = Color(nsColor: Palette.graphLanes[1])
             SectionCard(nil, contentPadding: 10) {
                 HStack(spacing: 10) {
                     Image(systemName: "pencil.line")
