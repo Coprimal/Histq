@@ -44,7 +44,7 @@ struct TabGroupPopover: View {
                 }
                 row("Delete Group", systemImage: "trash", disabled: holdsAll,
                     help: holdsAll ? Self.holdsAllHelp : "Close the group and its tabs; ⇧⌘T brings them back.") {
-                    model.deleteGroup(groupID)
+                    model.confirmDeleteGroup(groupID)
                 }
                 row("Ungroup", systemImage: "square.dashed") { model.ungroup(groupID) }
             }

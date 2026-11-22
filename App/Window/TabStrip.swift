@@ -1380,7 +1380,8 @@ private struct ArchiveListPopover: View {
                     }
                     .padding(.horizontal, 10)
                 }
-                .frame(height: min(320, CGFloat(matches.count) * (SidebarItemStyle.height + SidebarItemStyle.spacing)))
+                .frame(height: min(320, CGFloat(matches.count) * SidebarItemStyle.height
+                    + CGFloat(max(matches.count - 1, 0)) * SidebarItemStyle.spacing))
             }
         }
         // Vertical only: the rows' inset is inside the scroll view, so its scroller runs along the popover's edge.

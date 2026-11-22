@@ -57,7 +57,8 @@ private struct ClosedGroupsPopover: View {
             }
             .padding(.horizontal, 10)
         }
-        .frame(height: min(320, CGFloat(groups.count) * (SidebarItemStyle.height + SidebarItemStyle.spacing)))
+        .frame(height: min(320, CGFloat(groups.count) * SidebarItemStyle.height
+                    + CGFloat(max(groups.count - 1, 0)) * SidebarItemStyle.spacing))
         // Vertical only: the rows' inset is inside the scroll view, so its scroller runs along the popover's edge.
         .padding(.vertical, 10)
         .frame(width: 280)
@@ -99,7 +100,7 @@ private struct ClosedGroupsPopover: View {
         Button("Open Group") { act { model.openClosedGroup(group.id) } }
         Button("Open Group in New Window") { act { model.openClosedGroupInNewWindow(group.id) } }
             .disabled(model.openWindow == nil)
-        Button("Delete Group") { act { model.deleteClosedGroup(group.id) } }
+        Button("Delete Group") { act { model.confirmDeleteClosedGroup(group.id) } }
         Divider()
         Button("Tabs in Group") {}
             .disabled(true)

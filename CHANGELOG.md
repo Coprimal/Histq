@@ -8,7 +8,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Closed tab groups: Close Group now hides the group with its tabs, and a grid button before the archive button lists the window's closed groups (color, name, tab count). Click one to open it again at the end of the tabs; right-click it to open it, open it in a new window, delete it, or open it on one of its tabs. Closed groups are restored with the session.
 
 ### Changed
-- A group's menu has Delete Group, which closes the group and its tabs as Close Group used to (⇧⌘T brings them back).
+- A group's menu has Delete Group, which asks first, then closes the group and its tabs as Close Group used to (⇧⌘T brings them back).
 
 ## [0.3.0] - 2026-11-21
 

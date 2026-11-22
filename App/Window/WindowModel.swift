@@ -1367,6 +1367,35 @@ final class WindowModel {
         normalEnd > 0 && (0..<normalEnd).allSatisfy { tabs[$0].groupID == id }
     }
 
+    /// The popover's Delete Group: asks first, then `deleteGroup`.
+    func confirmDeleteGroup(_ id: UUID) {
+        let count = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }.count
+        presentModal(.confirmation(ModalConfirmation(
+            title: Self.deleteGroupTitle(groups.first { $0.id == id }?.name),
+            message: "\(Self.tabCount(count)) close. ⇧⌘T brings them back.",
+            button: "Delete Group", isDestructive: true) { [weak self] in self?.deleteGroup(id) }))
+    }
+
+    /// A closed group's menu › Delete Group: asks first, then `deleteClosedGroup`.
+    func confirmDeleteClosedGroup(_ id: UUID) {
+        guard let group = closedGroups.first(where: { $0.id == id }) else { return }
+        presentModal(.confirmation(ModalConfirmation(
+            title: Self.deleteGroupTitle(group.name),
+            message: "It leaves Closed Groups. ⇧⌘T brings \(Self.tabCount(group.tabs.count).lowercased()) back.",
+            button: "Delete Group", isDestructive: true) { [weak self] in self?.deleteClosedGroup(id) }))
+    }
+
+    /// The Delete Group confirmation's title, naming the group when it has a name.
+    private static func deleteGroupTitle(_ name: String?) -> String {
+        guard let name, !name.isEmpty else { return "Delete this group?" }
+        return "Delete the group \"\(name)\"?"
+    }
+
+    /// "Its 1 tab" / "Its N tabs", for the Delete Group confirmations.
+    private static func tabCount(_ count: Int) -> String {
+        count == 1 ? "Its 1 tab" : "Its \(count) tabs"
+    }
+
     /// The popover's Delete Group: closes the group's tabs as one batch, which one ⇧⌘T reopens whole.
     func deleteGroup(_ id: UUID) {
         guard !groupHoldsAllNormalTabs(id) else { return }
