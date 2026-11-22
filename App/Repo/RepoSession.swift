@@ -189,13 +189,15 @@ struct BranchMap: Sendable {
     }
 }
 
-/// Which commits of a log snapshot are on another worktree's branch only, from its fork off this worktree's history
-/// (`WorktreeReach.masks`): the graph fades them, and a selected one shows its worktree's again. `masks[i]` is
-/// `commits[i]`'s, bit `k` for the other worktree at `paths[k]`. `logGeneration` and `masks.count` tell the snapshot it
-/// was computed for; `generation` is new for each computed map.
+/// Which worktrees' HEADs reach each commit of a log snapshot (`WorktreeReach.masks`): the graph fades the commits the
+/// lit worktree (this one, or the one of the selected rows) does not reach. `masks[i]` is `commits[i]`'s, bit `k` for
+/// the other worktree at `paths[k]` and `head` for this one. `logGeneration` and `masks.count` tell the snapshot it was
+/// computed for; `generation` is new for each computed map.
 struct WorktreeMap: Sendable {
     var paths: [String] = []
     var masks: [UInt64] = []
+    /// This worktree's bit (after the others'); 0 when the map has no masks.
+    var head: UInt64 = 0
     var logGeneration = -1
     var generation = 0
 
@@ -3011,7 +3013,7 @@ final class RepoSession: Identifiable {
     private func updateWorktreeMap() {
         guard let log = log.value else { return }
         let others = (worktrees.value ?? []).filter { !$0.isCurrent && !$0.worktree.isBare }
-            .prefix(WorktreeReach.maxTips)
+            .prefix(WorktreeReach.maxTips - 1)
         let refs = refs.value
         let head = refs?.head.commit ?? worktrees.value?.first { $0.isCurrent }?.worktree.head
         let tips = others.map { info in
@@ -3021,18 +3023,20 @@ final class RepoSession: Identifiable {
         let paths = others.map(\.path)
         worktreeMapTask?.cancel()
         worktreeMapTask = Task { [weak self] in
-            let masks = await Self.worktreeMasks(log, head: head, tips: tips)
+            let masks = await Self.worktreeMasks(log, tips: tips + [head])
             guard !Task.isCancelled, let self else { return }
             worktreeMap = WorktreeMap(
-                paths: paths, masks: masks, logGeneration: log.generation, generation: worktreeMap.generation &+ 1)
+                paths: paths, masks: masks, head: masks.isEmpty ? 0 : 1 << UInt64(paths.count),
+                logGeneration: log.generation, generation: worktreeMap.generation &+ 1)
             worktreeMapTask = nil
         }
     }
 
     @concurrent
-    private nonisolated static func worktreeMasks(_ log: LogSnapshot, head: String?, tips: [String?]) async -> [UInt64] {
-        guard tips.contains(where: { $0 != nil }) else { return [] }
-        return WorktreeReach.masks(commits: log.commits, index: log.commitIndex, head: head, tips: tips)
+    private nonisolated static func worktreeMasks(_ log: LogSnapshot, tips: [String?]) async -> [UInt64] {
+        // The last tip is this worktree's HEAD: without another worktree's, nothing fades.
+        guard tips.dropLast().contains(where: { $0 != nil }) else { return [] }
+        return WorktreeReach.masks(commits: log.commits, index: log.commitIndex, tips: tips)
     }
 
     /// `BranchAttribution.claims` of `log` and `refs`, with how long it took (ms).

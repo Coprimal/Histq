@@ -153,8 +153,8 @@ struct GraphView: NSViewRepresentable {
     /// The branch each commit is on (`RepoSession.branchMap`): a lone selected commit without a branch badge of its own
     /// shows its branch's badge faded.
     var branchMap = BranchMap()
-    /// The commits on another worktree's branch only (`RepoSession.worktreeMap`): faded, with their lines, until a row
-    /// of that worktree's (a commit, or its WIP row) is selected.
+    /// The worktrees reaching each commit (`RepoSession.worktreeMap`): one worktree is lit at a time (this one, or the
+    /// one of the selected rows), every other worktree's commits fade with their lines and WIP rows.
     var worktreeMap = WorktreeMap()
     /// The rows the graph search dims (`GraphSearch.dimming`).
     var dimming = GraphDimming()
@@ -496,8 +496,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var badges: [String: [RefBadge]] = [:]
     private var branchMap = BranchMap()
     private var worktreeMap = WorktreeMap()
-    /// The other worktrees whose rows show unfaded: those of the selected rows (`WorktreeMap` bits).
-    private var revealedWorktrees: UInt64 = 0
+    /// The other worktree whose rows show unfaded (one `WorktreeMap` bit): the selected rows'; 0 for this one's.
+    private var litWorktree: UInt64 = 0
+    /// The lit worktree's `WorktreeMap` bit.
+    private var litBit: UInt64 { litWorktree == 0 ? worktreeMap.head : litWorktree }
     /// The faded badge on the selected row (`RefBadge.isGhost`), with the row and commit it was made for.
     private struct Ghost: Equatable {
         let row: Int
@@ -790,6 +792,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         if view.branchMap.generation != branchMap.generation { branchMap = view.branchMap }
         if view.worktreeMap.generation != worktreeMap.generation {
+            // Other worktrees, other bits: `refreshWorktreeFade` lights the selected rows' again.
+            if view.worktreeMap.paths != worktreeMap.paths { litWorktree = 0 }
             worktreeMap = view.worktreeMap
             reloadVisible = true
         }
@@ -1257,39 +1261,46 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         isWorktreeFaded(row: row) || dimming.isDimmed(row: row, in: log)
     }
 
-    /// Another worktree's row, faded so it does not read as this worktree's: its WIP row, and its branch's commits from
-    /// where it forks off this worktree's history (`WorktreeMap`). Unfaded while a row of that worktree is selected.
+    /// A row of a worktree that is not lit, faded so it does not read as the lit one's: another worktree's WIP row (this
+    /// one's while another is lit), and the commits from where they fork off the lit worktree's history (`WorktreeMap`).
     private func isWorktreeFaded(row: Int) -> Bool {
         switch log.entry(at: row) {
         case .commit(let index): isWorktreeFaded(commit: index)
         case .synthetic(let synthetic, _) where synthetic.kind == .worktreeWIP:
-            worktreeMap.bit(of: synthetic.id) & revealedWorktrees == 0
+            worktreeMap.bit(of: synthetic.id) & litBit == 0
+        case .synthetic(let synthetic, _) where synthetic.kind == .wip: litWorktree != 0
         default: false
         }
     }
 
-    /// `log.commits[index]` is on a faded worktree's branch only; its lines to its parents fade with it.
+    /// `log.commits[index]` is a worktree's but not the lit one's; its lines to its parents fade with it.
     private func isWorktreeFaded(commit index: Int) -> Bool {
         let mask = worktreeMap.mask(at: index, in: log)
-        return mask != 0 && mask & revealedWorktrees == 0
+        return mask != 0 && mask & litBit == 0
     }
 
-    /// The other worktrees of `row` (`WorktreeMap` bits): a commit's, or a worktree WIP row's own.
+    /// The worktrees of `row` (`WorktreeMap` bits): a commit's, or a WIP row's own.
     private func worktreeBits(row: Int) -> UInt64 {
         switch log.entry(at: row) {
         case .commit(let index): worktreeMap.mask(at: index, in: log)
         case .synthetic(let synthetic, _) where synthetic.kind == .worktreeWIP: worktreeMap.bit(of: synthetic.id)
+        case .synthetic(let synthetic, _) where synthetic.kind == .wip: worktreeMap.head
         default: 0
         }
     }
 
-    /// Reveals the worktrees of the selected rows and fades the others again, redrawing the cells the table has made
-    /// (on screen and just around it) when that changed. In the click's frame: no read, only the map.
+    /// Lights one worktree of the selected rows and fades every other one (this one too), redrawing the cells the table
+    /// has made (on screen and just around it) when that changed. The lit worktree stays while a selected row is on it;
+    /// else this one when a selected row is on it or none is, else the first. In the click's frame: only the map.
     private func refreshWorktreeFade() {
         guard let table else { return }
-        let revealed = table.selectedRowIndexes.reduce(UInt64(0)) { $0 | worktreeBits(row: $1) }
-        guard revealed != revealedWorktrees else { return }
-        revealedWorktrees = revealed
+        let bits = table.selectedRowIndexes.reduce(UInt64(0)) { $0 | worktreeBits(row: $1) }
+        let lit: UInt64 =
+            if litWorktree != 0, bits & litWorktree != 0 { litWorktree }
+            else if bits == 0 || bits & worktreeMap.head != 0 { 0 }
+            else { bits & (0 &- bits) }
+        guard lit != litWorktree else { return }
+        litWorktree = lit
         let graph = table.column(withIdentifier: GraphColumn.graph.identifier)
         let refs = table.column(withIdentifier: GraphColumn.refs.identifier)
         table.enumerateAvailableRowViews { rowView, row in

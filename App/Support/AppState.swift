@@ -181,8 +181,9 @@ enum PrefKey: String, CaseIterable {
     case graphShowMessage
     case graphShowAuthor
     case graphShowDate
-    /// In a worktree's tab, the graph fades the other worktrees' branches from where they fork off its history, until
-    /// one of their rows is selected (`WorktreeMap`). Off: only their WIP rows fade.
+    /// In a worktree's tab, the graph fades the other worktrees' branches from where they fork off its history; a
+    /// selected row of another worktree lights that one and fades this one's (`WorktreeMap`). Off (the default): only
+    /// their WIP rows fade.
     case graphFadeOtherWorktrees
     /// Terminal font family; empty = the system monospaced font.
     case terminalFontName
@@ -285,7 +286,7 @@ enum PrefKey: String, CaseIterable {
         case .sidebarSectionOrder, .hiddenSidebarSections: ""
         case .graphColumnWidths: ""
         case .graphShowMessage, .graphShowAuthor, .graphShowDate: true
-        case .graphFadeOtherWorktrees: true
+        case .graphFadeOtherWorktrees: false
         case .terminalFontName: ""
         case .terminalFontSize: 12.0
         case .terminalShell: ""
