@@ -1,7 +1,9 @@
 // The app entry: an AppKit delegate that owns the windows, their tabs, the main menu and the open handling.
 import AppKit
 import HistqCore
+import os
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// AppKit entry point: no SwiftUI `App`, so SwiftUI is only loaded inside the windows.
 @main
@@ -39,7 +41,7 @@ final class WindowState {
 
 /// Owns the windows, one `WindowModel` each, and the main menu for the app lifetime.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate {
     /// A window with its tabs, visibility and toolbar.
     private final class Entry {
         let window: NSWindow
@@ -59,12 +61,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private var entries: [Entry] = []
+    /// The layouts of the workspaces not open now, at most one per identity key, each with its own `open`: read at
+    /// launch, written back as they were so a capture never drops them. Opening a workspace takes its entry out.
+    private var workspaceLayouts: [WorkspaceLayout] = []
+    /// The open workspaces; their windows point to them (`WindowModel.workspace`).
+    private(set) var workspaces: [Workspace] = []
+    /// The identity keys of the workspace files being read (`openWorkspace`): a second open of one is a no-op, and
+    /// Save As / New Workspace refuse them.
+    private var openingKeys = Set<String>()
+    /// The files of the workspaces a settled close burst dropped, by identity key, for the next write pass.
+    private var settledFiles: [String: (file: WorkspaceFile, isReadOnly: Bool)] = [:]
+    /// Workspace files opened while the launch restores the last session, opened after it; nil once it has.
+    private var launchWorkspaces: [URL]? = []
+    /// Quit has begun: closing windows keep no close-burst snapshot.
+    private var isTerminating = false
+    private static let logger = Logger(subsystem: "com.math2it.histq", category: "session")
     /// The tab position and layout preset the windows' minimum sizes were last set for.
     private var tabPosition = TabPosition.current
     private var layoutPreset = LayoutPreset.current
     /// Sparkle; stays off (menu item disabled) while `SUPublicEDKey` is empty. Each window's toolbar shows its Update
     /// button.
     private let updater = Updater()
+    /// File › Recent Workspaces, filled when it opens (`menuNeedsUpdate`).
+    private let recentWorkspacesMenu = NSMenu(title: "Recent Workspaces")
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Histq is dark mode only, whatever the system's appearance.
@@ -96,8 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         updater.start()
         // Folders given at launch (`open -a Histq <repo>`) arrive in `application(_:open:)` first and already made
-        // the window: they are what this launch shows. Without any, the last session comes back once read.
-        guard entries.isEmpty else { return finishLaunching() }
+        // the window: they are what this launch shows. Without any, the last session comes back once read. Either way
+        // capture starts only once the saved session is read, so its workspace layouts are kept.
         Task { @MainActor in
             await self.restoreLastSession()
             self.finishLaunching()
@@ -107,8 +126,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// The launch's windows are open: capture starts (saving them now, so a launch with folders is restorable too),
     /// then the DEBUG `-HistqSelect` request.
     private func finishLaunching() {
-        SessionStore.start { [unowned self] in self.currentSession() }
+        SessionStore.onWriteResult = { [unowned self] key, error in
+            guard let workspace = workspaces.first(where: { $0.key == key }) else { return }
+            workspace.writeFailed = error != nil
+            workspace.writeError = error?.localizedDescription
+        }
+        SessionStore.start { [unowned self] in
+            // First: a workspace whose windows all closed by hand is written as it was before (`settleCloseBursts`).
+            settleCloseBursts()
+            var files = currentWorkspaceFiles()
+            for (key, settled) in settledFiles where files[key] == nil { files[key] = settled }
+            settledFiles = [:]
+            return SessionStore.Snapshot(session: currentSession(), workspaces: files)
+        }
         SessionStore.schedule()
+        // Workspace files given at launch (Finder, `open -a Histq <file>`), after the last session.
+        let queued = launchWorkspaces ?? []
+        launchWorkspaces = nil
+        for url in queued { openWorkspace(url) }
         if let request = AppState.launchSelection {
             // Next turn, once the launch's folders are open as tabs.
             Task { @MainActor in self.target()?.model.select(request) }
@@ -119,6 +154,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         if let spec = AppState.launchFind {
             Task { @MainActor in await self.debugFind(spec) }
+        }
+        if let path = AppState.launchSaveWorkspace {
+            // Once the restored tabs have settled (their repo keys are read off the main thread).
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let entry = self.target() else { return }
+                self.saveWorkspace(to: URL(filePath: (path as NSString).expandingTildeInPath), from: entry)
+            }
+        }
+        if let name = AppState.launchCloseWorkspace {
+            Task { @MainActor in
+                guard let workspace = self.workspaces.first(where: { $0.name == name }) else { return }
+                self.close(workspace)
+            }
         }
         // `-HistqTabWalk <rounds>[,<ms>]`: at window level, once per launch (a session's flag would run in every tab).
         if let spec = AppState.launchFlag("-HistqTabWalk") {
@@ -215,8 +264,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     #endif
 
-    /// Quit saves the session while the windows are still open; the windows closing after it save nothing.
+    /// Quit saves the session while the windows are still open; the windows closing after it save nothing. A close
+    /// burst still pending settles first.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        isTerminating = true
+        settleCloseBursts()
         SessionStore.saveForQuit()
         return .terminateNow
     }
@@ -226,9 +278,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    /// Folders opened from Finder, the Dock or `open -a Histq <folder>…` become tabs in the key window.
+    /// Workspace files open as workspaces (at launch, once the last session is restored); folders opened from
+    /// Finder, the Dock or `open -a Histq <folder>…` become tabs in the key window.
     func application(_ application: NSApplication, open urls: [URL]) {
-        openFolders(urls)
+        let files = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == Self.workspaceExtension }
+        if launchWorkspaces != nil {
+            launchWorkspaces?.append(contentsOf: files)
+        } else {
+            for file in files { openWorkspace(file) }
+        }
+        openFolders(urls.filter { !files.contains($0) })
     }
 
     // MARK: Windows
@@ -243,9 +302,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return entries.first { $0.window === window }
     }
 
-    /// Creates a window with one Welcome tab, at `frame` when it is on a screen (session restore); it is not shown yet.
-    private func newWindow(frame: NSRect? = nil) -> Entry {
+    /// Creates a window with one Welcome tab, at `frame` when it is on a screen (session restore), in `workspace` (nil:
+    /// Untitled); it is not shown yet.
+    private func newWindow(frame: NSRect? = nil, workspace: Workspace? = nil) -> Entry {
         let model = WindowModel()
+        // Before any session is made, so each one's `profileScope` follows the membership.
+        model.workspace = workspace
         let state = WindowState()
         let hosting = NSHostingController(
             rootView: MainView(navigation: model.navigation).environment(state).environment(model))
@@ -256,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let window = NSWindow(contentViewController: hosting)
         let toolbar = HeaderToolbar(model: model, updater: updater)
         window.toolbar = toolbar.toolbar
+        toolbar.insertWorkspaceItemIfMissing()
         window.title = "Histq"
         window.titleVisibility = .hidden
         // One row for the traffic lights and the toolbar; the tab strip is the content's first row under it.
@@ -299,10 +362,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         DocumentWindow.configure(window, model: model) { [weak self] window in self?.openNativeTab(of: window) }
         model.closeWindow = { [weak window] in window?.performClose(nil) }
-        // A group's menu › Move Group to New Window: its tabs open in a new window, as a session restore does.
-        model.openWindow = { [weak self] tabs, groups, selected, missing in
+        // A workspace keeps its file as it was before a close burst that may close all its windows.
+        model.willEmpty = { [weak self, weak model] in
+            guard let self, let workspace = model?.workspace else { return }
+            keepPreCloseSnapshot(of: workspace)
+        }
+        // A group's menu › Move Group to New Window: its tabs open in a new window of the same workspace, as a session
+        // restore does.
+        model.openWindow = { [weak self, weak model] tabs, groups, selected, missing in
             guard let self else { return }
-            let entry = newWindow()
+            let entry = newWindow(workspace: model?.workspace)
             entry.model.restore(tabs, selected: selected, missing: missing, groups: groups)
             show(entry)
         }
@@ -335,21 +404,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: Session
 
-    /// Reopens the last session's windows: each native tab group in its tab order, with its selected tab, frames and
-    /// app tabs; the front group ends up key. No saved session (or none readable) shows one Welcome window.
+    /// Reopens the last session's windows: the Untitled ones and those of every workspace that was open (each read off
+    /// the main thread; one that cannot be read is logged and skipped, its layout kept `open` for the next launch),
+    /// laid out by their native tab groups. No window at all shows one Welcome window. The saved workspace layouts are
+    /// kept for capture in every case, a launch with folders included.
     private func restoreLastSession() async {
         let loaded = await SessionStore.loaded()
+        workspaceLayouts = loaded?.session.workspaces ?? []
         // A folder opened while the session was read (Finder, the Dock) is what this launch shows.
         guard entries.isEmpty else { return }
-        guard let loaded else { return show(newWindow()) }
-        // Back to front, so the front group is ordered in last.
-        for group in loaded.session.groups.reversed() {
-            let windows = group.map { saved in
-                let entry = newWindow(frame: saved.frame)
-                entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded.missing,
-                                    groups: saved.manualTabGroups)
-                return entry
+        let reads = workspaceLayouts.filter(\.open).map { layout in
+            (layout.path, Task { try await Workspace.open(URL(fileURLWithPath: layout.path, isDirectory: false)) })
+        }
+        var opened: [(path: String, read: (Workspace, WorkspaceFile.Resolved, repoKeys: [String: String]))] = []
+        for (path, read) in reads {
+            do {
+                opened.append((path, try await read.value))
+            } catch {
+                let reason = error.localizedDescription
+                Self.logger.error("workspace not reopened: \(path, privacy: .private): \(reason, privacy: .public)")
             }
+        }
+        // Same while the workspaces were read: their layouts stay `open` for the next launch.
+        guard entries.isEmpty else { return }
+        var placed = (loaded?.session.windows ?? []).map { saved in
+            let entry = newWindow(frame: saved.frame)
+            entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded?.missing ?? [],
+                                groups: saved.manualTabGroups)
+            return Placed(entry: entry, group: saved.group, tabIndex: saved.tabIndex,
+                          isSelectedInGroup: saved.isSelectedInGroup)
+        }
+        // Two layouts may name one file (a symlink changed since): it opens once.
+        for (path, (workspace, resolved, repoKeys)) in opened
+        where !workspaces.contains(where: { $0.key == workspace.key }) {
+            placed += restoreWindows(of: workspace, resolved, repoKeys: repoKeys, layoutPath: path)
+        }
+        // A workspace file given at launch opens next: it shows instead.
+        guard !placed.isEmpty else {
+            if launchWorkspaces?.isEmpty ?? true { show(newWindow()) }
+            return
+        }
+        restoreGroups(placed)
+    }
+
+    /// A restored window waiting to be laid out: its native tab group (nil: a group of its own), its place in the
+    /// group's tab bar and whether its group shows it.
+    private struct Placed {
+        let entry: Entry
+        let group: Int?
+        let tabIndex: Int
+        let isSelectedInGroup: Bool
+    }
+
+    /// Restores the windows of `workspace` as `resolved` (read off the main thread, `Workspace.open`) has them, with
+    /// the frames, native groups, selection and collapsed manual groups of its layout (the entry at `layoutPath`, else
+    /// at its key), which it takes out of `workspaceLayouts`; with none, each window gets the default frame and a group
+    /// of its own, its first tab selected. The workspace then joins `workspaces` and seeds the writer with its file as
+    /// captured now, so it is written only once it changes. The caller lays the windows out (`restoreGroups`).
+    private func restoreWindows(of workspace: Workspace, _ resolved: WorkspaceFile.Resolved,
+                                repoKeys: [String: String], layoutPath: String? = nil) -> [Placed] {
+        let path = layoutPath ?? workspace.key
+        let layout = workspaceLayouts.first { $0.path == path }
+        workspaceLayouts.removeAll { $0.path == path || $0.path == workspace.key }
+        var saved: [UUID: WorkspaceLayout.Window] = [:]
+        for window in layout?.windows ?? [] where saved[window.id] == nil { saved[window.id] = window }
+        let placed = resolved.windows.map { window in
+            let place = saved[window.id]
+            let entry = newWindow(frame: place.map { NSRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) },
+                                  workspace: workspace)
+            entry.model.windowID = window.id
+            let collapsed = Set(place?.collapsedGroups ?? [])
+            let groups = window.tabGroups?.map { group in
+                SavedTabGroup(id: group.id, name: group.name, color: group.color,
+                              collapsed: collapsed.contains(group.id) ? true : nil)
+            }
+            entry.model.restore(window.tabs, selected: selectedTab(of: window, path: place?.selectedPath,
+                                                                    collapsed: collapsed),
+                                missing: resolved.missing, groups: groups, repoKeys: repoKeys)
+            return Placed(entry: entry, group: place?.group, tabIndex: place?.tabIndex ?? 0,
+                          isSelectedInGroup: place?.isSelectedInGroup ?? true)
+        }
+        workspaces.append(workspace)
+        SessionStore.seed(workspace.key, workspaceFile(for: workspace))
+        RecentRepos.workspaces.add(URL(filePath: workspace.key))
+        return placed
+    }
+
+    /// The offset in `window.tabs` (archived entries included) of the tab at `path`; with none, the first tab outside
+    /// a collapsed manual group, so a saved collapse is not undone, else the first.
+    private func selectedTab(of window: WorkspaceFile.LiveWindow, path: String?, collapsed: Set<UUID>) -> Int {
+        if let path = path.map(WorkspaceFile.standardized),
+           let index = window.tabs.firstIndex(where: { $0.path.map(WorkspaceFile.standardized) == path }) {
+            return index
+        }
+        return window.tabs.firstIndex { tab in
+            tab.archived != true && (tab.pinned == true || tab.tabGroup.map { !collapsed.contains($0) } ?? true)
+        } ?? 0
+    }
+
+    /// Lays restored windows out by native tab group: each group in its tab order with its selected window on screen
+    /// first, groups front first by number (a window with none after them, each in its own group); the front group ends
+    /// up key.
+    private func restoreGroups(_ placed: [Placed]) {
+        let numbered = Dictionary(grouping: placed.filter { $0.group != nil }) { $0.group ?? 0 }
+        let groups = numbered.keys.sorted().map { key in (numbered[key] ?? []).sorted { $0.tabIndex < $1.tabIndex } }
+            + placed.filter { $0.group == nil }.map { [$0] }
+        // Back to front, so the front group is ordered in last.
+        for group in groups.reversed() {
+            let windows = group.map(\.entry)
             // The group's selected tab goes on screen first (no other tab flashes); the others join it in their saved
             // order, each next to its neighbour (`.above` = after it, `.below` = before it).
             let selected = group.firstIndex(where: \.isSelectedInGroup) ?? 0
@@ -365,8 +527,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !AppState.isBackgroundLaunch { NSApp.activate() }
     }
 
-    /// The open windows as the session saves them: grouped by native tab group, groups front to back (the front
-    /// window's group first), each in its tab bar order.
+    /// The open windows as the session saves them: the Untitled ones, grouped by native tab group, groups front to back
+    /// (the front window's group first), each in its tab bar order; then one layout per open workspace, its windows
+    /// numbered with the same groups (a native group mixing workspaces stays one), then the layouts of the workspaces
+    /// not open now, their groups numbered past every live one. A closing workspace (Close Workspace) counts as not
+    /// open; a closed one's layout is kept only while its file is in Recent Workspaces.
     private func currentSession() -> SavedSession {
         var depth: [ObjectIdentifier: Int] = [:]
         for (index, window) in NSApp.orderedWindows.enumerated() { depth[ObjectIdentifier(window)] = index }
@@ -379,21 +544,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return left < right
         }
         var windows: [SavedWindow] = []
+        var layoutWindows: [ObjectIdentifier: WorkspaceLayout.Window] = [:]
         for (group, members) in ordered.enumerated() {
             for entry in members {
                 let window = entry.window
                 let tabGroup = window.tabGroup
+                let tabIndex = tabGroup?.windows.firstIndex(of: window) ?? 0
+                let isSelectedInGroup = tabGroup.map { $0.selectedWindow === window } ?? true
+                let model = entry.model
+                guard model.workspace == nil else {
+                    let collapsed = model.savedTabGroups?.filter { $0.collapsed == true }.map(\.id) ?? []
+                    layoutWindows[ObjectIdentifier(entry)] = WorkspaceLayout.Window(
+                        id: model.windowID, x: window.frame.minX, y: window.frame.minY, width: window.frame.width,
+                        height: window.frame.height, group: group, tabIndex: tabIndex,
+                        isSelectedInGroup: isSelectedInGroup,
+                        selectedPath: model.selectedIndex.flatMap { model.tabs[$0].repoURL?.path },
+                        collapsedGroups: collapsed.isEmpty ? nil : collapsed)
+                    continue
+                }
                 windows.append(SavedWindow(
                     x: window.frame.minX, y: window.frame.minY, width: window.frame.width, height: window.frame.height,
-                    group: group,
-                    tabIndex: tabGroup?.windows.firstIndex(of: window) ?? 0,
-                    isSelectedInGroup: tabGroup.map { $0.selectedWindow === window } ?? true,
-                    tabs: entry.model.savedTabs,
-                    selectedTab: entry.model.selectedIndex,
-                    manualTabGroups: entry.model.savedTabGroups))
+                    group: group, tabIndex: tabIndex, isSelectedInGroup: isSelectedInGroup,
+                    tabs: model.savedTabs, selectedTab: model.selectedIndex, manualTabGroups: model.savedTabGroups))
             }
         }
-        return SavedSession(windows: windows)
+        var layouts: [WorkspaceLayout] = []
+        for workspace in workspaces where !workspace.isClosing {
+            let members = self.windows(of: workspace).compactMap { layoutWindows[ObjectIdentifier($0)] }
+            guard !members.isEmpty else { continue }
+            layouts.append(WorkspaceLayout(path: workspace.key, open: true, windows: members))
+        }
+        // The kept layouts' groups after the live ones, in their own order, so a reopened workspace's windows never
+        // join an unrelated group that reuses an old number.
+        let live = Set(layouts.map(\.path))
+        // Both sides standardized alike (`RecentRepos` stores `/private/tmp/…` as `/tmp/…`).
+        let recent = Set(RecentRepos.workspaces.urls.map(\.path))
+        var kept = workspaceLayouts.filter { layout in
+            !live.contains(layout.path)
+                && (layout.open || recent.contains(URL(filePath: layout.path).standardizedFileURL.path))
+        }
+        let numbers = Set(kept.flatMap { $0.windows.map(\.group) }).sorted()
+        let renumbered = Dictionary(uniqueKeysWithValues: numbers.enumerated().map { ($1, ordered.count + $0) })
+        for index in kept.indices {
+            for window in kept[index].windows.indices {
+                kept[index].windows[window].group = renumbered[kept[index].windows[window].group] ?? ordered.count
+            }
+        }
+        layouts += kept
+        return SavedSession(windows: windows, workspaces: layouts.isEmpty ? nil : layouts)
+    }
+
+    /// The windows of `workspace` in its file's order, windows added since appended in the order they opened.
+    private func windows(of workspace: Workspace) -> [Entry] {
+        let members = entries.filter { $0.model.workspace === workspace }
+        var position: [UUID: Int] = [:]
+        for (index, id) in workspace.windowOrder.enumerated() where position[id] == nil { position[id] = index }
+        let known = members.filter { position[$0.model.windowID] != nil }
+            .sorted { (position[$0.model.windowID] ?? 0) < (position[$1.model.windowID] ?? 0) }
+        return known + members.filter { position[$0.model.windowID] == nil }
+    }
+
+    /// Every open workspace's file as captured now, by identity key, with whether it is read-only; a workspace with no
+    /// window is left out (never written empty).
+    private func currentWorkspaceFiles() -> [String: (file: WorkspaceFile, isReadOnly: Bool)] {
+        var files: [String: (file: WorkspaceFile, isReadOnly: Bool)] = [:]
+        for workspace in workspaces where files[workspace.key] == nil && !windows(of: workspace).isEmpty {
+            files[workspace.key] = (workspaceFile(for: workspace), workspace.isReadOnly)
+        }
+        return files
+    }
+
+    /// One workspace's file as its windows have it now: their tabs and manual groups, the stored strings of every
+    /// unchanged path, the views and the carried-over repos as read, and the profiles the tabs use. Each keeps the
+    /// file's embedded definition, unless the library's differs from the one it had when the workspace opened (edited
+    /// in Settings since; an id with no baseline counts as unedited). An id the file does not embed takes the
+    /// library's; one the library lacks keeps the embedded definition.
+    private func workspaceFile(for workspace: Workspace) -> WorkspaceFile {
+        workspaceFile(for: workspace, windows: windows(of: workspace), fileURL: workspace.url,
+                      originals: workspace.originals, carried: workspace.repos)
+    }
+
+    /// `workspaceFile(for:)` with these windows, saved at `fileURL` with these stored strings and carried repos (Save
+    /// As: the windows that join it, and `WorkspaceFile.rebased`'s results, as `Workspace.rebind` leaves them).
+    private func workspaceFile(for workspace: Workspace, windows entries: [Entry], fileURL: URL,
+                               originals: [String: WorkspaceFile.Original],
+                               carried: [String: WorkspaceFile.Repo]) -> WorkspaceFile {
+        let windows = entries.map { entry in
+            WorkspaceFile.LiveWindow(
+                id: entry.model.windowID,
+                tabGroups: entry.model.savedTabGroups?.map { .init(id: $0.id, name: $0.name, color: $0.color) },
+                tabs: entry.model.savedTabs)
+        }
+        let used = Set(windows.flatMap { $0.tabs.compactMap { $0.profile?.profileID } })
+        let store = ProfileLibrary.shared.store
+        let profiles = used.compactMap { id -> Profile? in
+            let library = store?.profile(id: id)
+            guard let embedded = workspace.profiles.first(where: { $0.id == id }) else { return library }
+            guard let library, let baseline = workspace.profileBaseline[id], library != baseline else { return embedded }
+            return library
+        }
+        return WorkspaceFile(windows: windows, views: workspace.views, profiles: profiles, carried: carried,
+                             originals: originals, repoOrder: workspace.repoOrder, profileOrder: workspace.profileOrder,
+                             fileURL: fileURL, homeURL: Workspace.homeURL)
     }
 
     private func show(_ entry: Entry) {
@@ -415,9 +667,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// The native tab bar's "+": a new window with a Welcome tab, as the next native tab of `window`'s group.
+    /// The native tab bar's "+": a new window with a Welcome tab, as the next native tab of `window`'s group, in
+    /// `window`'s workspace.
     private func openNativeTab(of window: NSWindow) {
-        let entry = newWindow()
+        let entry = newWindow(workspace: self.entry(for: window)?.model.workspace)
         window.addTabbedWindow(entry.window, ordered: .above)
         show(entry)
     }
@@ -464,6 +717,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model?.sessions.values.forEach { $0.closeAI() }
         // Closing a window never calls the sessions' `close()`: their shells end here.
         model?.sessions.values.forEach { $0.endTerminal() }
+        // Before it leaves `entries`: the first window of a workspace closed by hand keeps the file as it was.
+        if let workspace = model?.workspace { keepPreCloseSnapshot(of: workspace) }
         entries.removeAll { $0.window === window }
         SessionStore.schedule()
     }
@@ -506,8 +761,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: Menu actions
 
+    /// New Window (⇧⌘N): in the target window's workspace.
     @objc func newWindowAction(_ sender: Any?) {
-        show(newWindow())
+        show(newWindow(workspace: target()?.model.workspace))
     }
 
     @objc func newTab(_ sender: Any?) {
@@ -643,6 +899,280 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updater.checkForUpdates()
     }
 
+    // MARK: Workspaces
+
+    /// A workspace file's extension.
+    private static let workspaceExtension = "histqworkspace"
+
+    /// The workspace file type the panels show.
+    private static var workspaceType: UTType {
+        UTType(filenameExtension: workspaceExtension, conformingTo: .json) ?? .json
+    }
+
+    /// File › New Workspace: asks where to save it, writes a workspace with one window and a Welcome tab, then opens
+    /// that window.
+    @objc func newWorkspace(_ sender: Any?) {
+        let panel = workspaceSavePanel(name: "Untitled", folder: nil)
+        Task { @MainActor in
+            guard await panel.begin() == .OK, let url = panel.url else { return }
+            self.createWorkspace(at: url)
+        }
+    }
+
+    /// File › Open Workspace…: asks for a workspace file and opens it.
+    @objc func openWorkspaceDocument(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [Self.workspaceType]
+        panel.prompt = "Open"
+        Task { @MainActor in
+            guard await panel.begin() == .OK, let url = panel.url else { return }
+            self.openWorkspace(url)
+        }
+    }
+
+    /// Recent Workspaces › a file (the item's `representedObject`, its URL).
+    @objc func openRecentWorkspace(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        openWorkspace(url)
+    }
+
+    /// Recent Workspaces › Clear Menu.
+    @objc func clearRecentWorkspaces(_ sender: Any?) {
+        RecentRepos.workspaces.clear()
+    }
+
+    /// File › Recent Workspaces as it opens: the files opened lately, most recent first (a pick opens it), then Clear
+    /// Menu. Built from the list in memory, never checking the disk.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === recentWorkspacesMenu else { return }
+        menu.removeAllItems()
+        for url in RecentRepos.workspaces.urls {
+            let item = menu.addItem(withTitle: url.deletingPathExtension().lastPathComponent,
+                                    action: #selector(openRecentWorkspace(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = url
+            item.toolTip = (url.path as NSString).abbreviatingWithTildeInPath
+        }
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+        menu.addItem(withTitle: "Clear Menu", action: #selector(clearRecentWorkspaces(_:)), keyEquivalent: "")
+            .target = self
+    }
+
+    /// File › Save Workspace As…: asks for the new file, then saves the target window's workspace there (from an
+    /// Untitled window, every Untitled window), `saveWorkspace(to:from:)`.
+    @objc func saveWorkspaceAs(_ sender: Any?) {
+        guard let entry = target() else { return }
+        let workspace = entry.model.workspace
+        let panel = workspaceSavePanel(name: workspace?.name ?? "Untitled",
+                                       folder: workspace?.url.deletingLastPathComponent())
+        Task { @MainActor in
+            guard await panel.begin() == .OK, let url = panel.url else { return }
+            self.saveWorkspace(to: url, from: entry)
+        }
+    }
+
+    /// File › Close Workspace: closes the target window's workspace with all its windows.
+    @objc func closeWorkspace(_ sender: Any?) {
+        guard let workspace = target()?.model.workspace else { return }
+        close(workspace)
+    }
+
+    /// Opens the workspace file at `url`, or brings its front window forward when it is open already (same identity
+    /// key: a symlink or another spelling of the path is the same file). Returns at once: the file is read off the main
+    /// thread, then its windows are restored; an open of the same file in flight makes this one a no-op. A file that
+    /// cannot be read shows an alert and nothing is written; one with keys this build would drop opens read-only.
+    func openWorkspace(_ url: URL) {
+        Task { @MainActor in
+            let key = await Task.detached { WorkspaceFile.identityKey(for: url) }.value
+            settleCloseBursts()
+            if let open = workspaces.first(where: { $0.key == key }) { return bringForward(open) }
+            guard !openingKeys.contains(key) else { return }
+            openingKeys.insert(key)
+            defer { openingKeys.remove(key) }
+            do {
+                let (workspace, resolved, repoKeys) = try await Workspace.open(url)
+                if let open = workspaces.first(where: { $0.key == workspace.key }) { return bringForward(open) }
+                restoreGroups(restoreWindows(of: workspace, resolved, repoKeys: repoKeys))
+            } catch {
+                let reason = error.localizedDescription
+                Self.logger.error("workspace not opened: \(key, privacy: .private): \(reason, privacy: .public)")
+                // The alert needs a window: a launch whose only file failed shows the Welcome window.
+                if entries.isEmpty { show(newWindow()) }
+                showAlert("\"\(url.lastPathComponent)\" could not be opened.", Self.message(for: error))
+            }
+        }
+    }
+
+    /// Shows the front window of `workspace` (it was opened again) and moves its file up in Recent Workspaces.
+    private func bringForward(_ workspace: Workspace) {
+        RecentRepos.workspaces.add(URL(filePath: workspace.key))
+        let members = windows(of: workspace)
+        let front = NSApp.orderedWindows.lazy.compactMap { window in members.first { $0.window === window } }.first
+        if let entry = front ?? members.first { show(entry) }
+    }
+
+    /// New Workspace at `url`: the file, with one window and a Welcome tab, is written first; only then does the window
+    /// open in it.
+    private func createWorkspace(at url: URL) {
+        settleCloseBursts()
+        guard canSaveWorkspace(to: url, as: nil) else { return }
+        let workspace = Workspace(url: url)
+        let windowID = UUID()
+        workspace.windowOrder = [windowID]
+        let file = WorkspaceFile(windows: [.init(id: windowID, tabs: [SavedTab()])], views: [:], profiles: [],
+                                 carried: [:], originals: [:], repoOrder: [], profileOrder: [], fileURL: url,
+                                 homeURL: Workspace.homeURL)
+        guard writeWorkspace(file, to: url) else { return }
+        let entry = newWindow(workspace: workspace)
+        entry.model.windowID = windowID
+        workspaces.append(workspace)
+        RecentRepos.workspaces.add(URL(filePath: workspace.key))
+        show(entry)
+    }
+
+    /// Save Workspace As… to `url` from `entry`'s window. From a workspace window, that workspace is written there and
+    /// rebound to it (every path relative to the new folder; the old file keeps its last content); from an Untitled
+    /// window, every Untitled window joins a new workspace written there. The file is written first: on failure an
+    /// alert names the error and every window stays where it was.
+    private func saveWorkspace(to url: URL, from entry: Entry) {
+        settleCloseBursts()
+        guard entries.contains(where: { $0 === entry }) else { return }
+        if let workspace = entry.model.workspace {
+            guard workspaces.contains(where: { $0 === workspace }), !workspace.isClosing,
+                  canSaveWorkspace(to: url, as: workspace)
+            else { return }
+            let rebased = WorkspaceFile.rebased(originals: workspace.originals, missing: workspace.missing,
+                                                carried: workspace.repos, fileURL: url, homeURL: Workspace.homeURL)
+            let file = workspaceFile(for: workspace, windows: windows(of: workspace), fileURL: url,
+                                     originals: rebased.originals, carried: rebased.carried)
+            guard writeWorkspace(file, to: url) else { return }
+            workspace.rebind(to: url)
+            RecentRepos.workspaces.add(URL(filePath: workspace.key))
+            SessionStore.schedule()
+        } else {
+            guard canSaveWorkspace(to: url, as: nil) else { return }
+            let untitled = entries.filter { $0.model.workspace == nil }
+            let workspace = Workspace(url: url)
+            workspace.windowOrder = untitled.map(\.model.windowID)
+            let file = workspaceFile(for: workspace, windows: untitled, fileURL: url, originals: workspace.originals,
+                                     carried: workspace.repos)
+            guard writeWorkspace(file, to: url) else { return }
+            workspaces.append(workspace)
+            for entry in untitled { entry.model.workspace = workspace }
+            RecentRepos.workspaces.add(URL(filePath: workspace.key))
+        }
+    }
+
+    /// Whether `url` may become the file of `workspace` (nil: a new one): not the file of another open workspace, nor
+    /// one being opened. Shows an alert when not.
+    private func canSaveWorkspace(to url: URL, as workspace: Workspace?) -> Bool {
+        let key = WorkspaceFile.identityKey(for: url)
+        guard openingKeys.contains(key) || workspaces.contains(where: { $0.key == key && $0 !== workspace }) else {
+            return true
+        }
+        showAlert("\"\(url.lastPathComponent)\" is open as another workspace.",
+                  "Close that workspace first, or choose another file.")
+        return false
+    }
+
+    /// Writes a new workspace file now (Save As, New Workspace); false, with an alert naming the error, on failure.
+    private func writeWorkspace(_ file: WorkspaceFile, to url: URL) -> Bool {
+        do {
+            try SessionStore.writeNow(file, to: url)
+            return true
+        } catch {
+            let reason = error.localizedDescription
+            Self.logger.error("workspace not saved: \(reason, privacy: .public)")
+            showAlert("\"\(url.lastPathComponent)\" could not be saved.", Self.message(for: error))
+            return false
+        }
+    }
+
+    /// Close Workspace: its file is written one last time with every window (then never again), its layout is kept
+    /// with `open: false` (it stays closed at the next launch), and its windows close without capturing anything.
+    private func close(_ workspace: Workspace) {
+        settleCloseBursts()
+        guard workspaces.contains(where: { $0 === workspace }), !workspace.isClosing else { return }
+        let members = windows(of: workspace)
+        workspace.preCloseSnapshot = nil
+        if let layout = currentSession().workspaces?.first(where: { $0.path == workspace.key }) {
+            keepClosedLayout(layout)
+        }
+        workspace.isClosing = true
+        SessionStore.finish(workspace.key)
+        workspaces.removeAll { $0 === workspace }
+        for entry in members { entry.window.close() }
+    }
+
+    /// Keeps `layout` in `workspaceLayouts` as a closed workspace's (`open: false`), replacing any entry of its file.
+    private func keepClosedLayout(_ layout: WorkspaceLayout) {
+        var layout = layout
+        layout.open = false
+        workspaceLayouts.removeAll { $0.path == layout.path }
+        workspaceLayouts.append(layout)
+    }
+
+    /// Keeps `workspace`'s file and layout as they are now, before one of its windows closes by hand (or ⌘W, a tab's
+    /// close button or Close Tabs empties it), unless a snapshot is kept already (a burst of closes keeps its first),
+    /// the workspace is closing or quit has begun.
+    private func keepPreCloseSnapshot(of workspace: Workspace) {
+        guard !isTerminating, !workspace.isClosing, workspace.preCloseSnapshot == nil,
+              workspaces.contains(where: { $0 === workspace }),
+              let layout = currentSession().workspaces?.first(where: { $0.path == workspace.key })
+        else { return }
+        workspace.preCloseSnapshot = (workspaceFile(for: workspace), layout)
+    }
+
+    /// Settles the close bursts, before a capture: a workspace left with no window since its `preCloseSnapshot` was
+    /// kept counts as closed — the snapshot's file (every window it had) goes to the next write pass, its layout is
+    /// kept with `open: false` and it leaves `workspaces`, so it is never written with fewer windows; one with windows
+    /// left drops its snapshot, and the pass writes the windows left.
+    private func settleCloseBursts() {
+        for workspace in workspaces {
+            guard let snapshot = workspace.preCloseSnapshot else { continue }
+            workspace.preCloseSnapshot = nil
+            guard windows(of: workspace).isEmpty else { continue }
+            keepClosedLayout(snapshot.layout)
+            settledFiles[workspace.key] = (snapshot.file, workspace.isReadOnly)
+            workspaces.removeAll { $0 === workspace }
+        }
+    }
+
+    /// A save panel for a workspace file named `name`, in `folder` when given.
+    private func workspaceSavePanel(name: String, folder: URL?) -> NSSavePanel {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [Self.workspaceType]
+        panel.nameFieldStringValue = "\(name).\(Self.workspaceExtension)"
+        if let folder { panel.directoryURL = folder }
+        return panel
+    }
+
+    /// A warning alert as a sheet on the target window (none: logged only), so it never blocks the app.
+    private func showAlert(_ message: String, _ detail: String) {
+        guard let window = target()?.window else {
+            return Self.logger.error("alert not shown, no window: \(message, privacy: .private)")
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.beginSheetModal(for: window)
+    }
+
+    /// Why a workspace file could not be read or written, for an alert.
+    private static func message(for error: Error) -> String {
+        guard let error = error as? WorkspaceFile.FileError else { return error.localizedDescription }
+        return switch error {
+        case .unsupportedVersion(let version):
+            "It was saved by another version of Histq (workspace format \(version)) and is left unchanged."
+        case .undecodable: "It is not a Histq workspace file."
+        case .empty: "A workspace needs a window with at least one tab."
+        }
+    }
+
     // MARK: Find
 
     /// `performFindPanelAction(_:)` with `showFindPanel`, as the focused view gets it: the Find item's stand-in when it
@@ -700,6 +1230,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
+        // Close Workspace only on a workspace window; Save Workspace As… on any window (an Untitled one saves every
+        // Untitled window).
+        if menuItem.action == #selector(closeWorkspace(_:)) { return target()?.model.workspace != nil }
+        if menuItem.action == #selector(saveWorkspaceAs(_:)) { return target() != nil }
+        if menuItem.action == #selector(clearRecentWorkspaces(_:)) { return !RecentRepos.workspaces.urls.isEmpty }
         if menuItem.action == #selector(reopenClosedTab(_:)) {
             return entry(for: NSApp.keyWindow)?.model.canReopenClosedTab ?? false
         }
@@ -769,6 +1304,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         paletteItem.target = self
         paletteItem.isHidden = true
         paletteItem.allowsKeyEquivalentWhenHidden = true
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "New Workspace", action: #selector(newWorkspace(_:)), keyEquivalent: "")
+            .target = self
+        fileMenu.addItem(withTitle: "Open Workspace…", action: #selector(openWorkspaceDocument(_:)), keyEquivalent: "")
+            .target = self
+        recentWorkspacesMenu.delegate = self
+        fileMenu.addItem(withTitle: "Recent Workspaces", action: nil, keyEquivalent: "").submenu = recentWorkspacesMenu
+        fileMenu.addItem(withTitle: "Save Workspace As…", action: #selector(saveWorkspaceAs(_:)), keyEquivalent: "")
+            .target = self
+        fileMenu.addItem(withTitle: "Close Workspace", action: #selector(closeWorkspace(_:)), keyEquivalent: "")
+            .target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab(_:)), keyEquivalent: "w").target = self
         fileMenu.addItem(withTitle: "Reopen Closed Tab", action: #selector(reopenClosedTab(_:)), keyEquivalent: "T")

@@ -1,7 +1,8 @@
 // The command palette's rows for one window, copied when it opens (task 8.5): Undo / Redo, the toolbar's repo actions and their
 // Pull ▾ / Push ▾ menus, the repo menu and each submodule's menu, Show All Branches and Hide / Show Stale Branches,
-// "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…, the Settings pages, the
-// tab position and the layout presets, the Settings switches and short choices (`PaletteSettings`), then
+// "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…, the workspace commands
+// and recent workspaces, the Settings pages, the tab position and the layout presets, the Settings switches and short
+// choices (`PaletteSettings`), then
 // the repo's menu operations (working tree, the selected commit, the stashes, each branch, remote branch and tag, the
 // remotes). Every repo row runs the same `MenuEntry` or `ToolbarAction` the menus and buttons run, so its
 // confirmations, forms and enabled state are theirs.
@@ -183,10 +184,34 @@ enum PaletteCommands {
         }
     }
 
-    /// Open Repository…, the Settings pages, the tab position, the layout presets and Reset Layout.
+    /// Open Repository…, File's workspace commands (Close Workspace only in a workspace window) and the recent
+    /// workspaces, the Settings pages, the tab position, the layout presets and Reset Layout.
     private static func app(_ model: WindowModel, into snapshot: inout PaletteSnapshot) {
         snapshot.add("Open Repository…", detail: "⌘O", section: .app, systemImage: "folder.badge.plus") {
             NSApp.sendAction(#selector(AppDelegate.openDocument(_:)), to: nil, from: nil)
+        }
+        var workspaceRows = [
+            ("New Workspace", "plus.rectangle.on.rectangle", #selector(AppDelegate.newWorkspace(_:))),
+            ("Open Workspace…", "square.stack.3d.up", #selector(AppDelegate.openWorkspaceDocument(_:))),
+            ("Save Workspace As…", "square.and.arrow.down", #selector(AppDelegate.saveWorkspaceAs(_:))),
+        ]
+        if model.workspace != nil {
+            workspaceRows.append(("Close Workspace", "xmark.square", #selector(AppDelegate.closeWorkspace(_:))))
+        }
+        for (title, image, action) in workspaceRows {
+            snapshot.add(title, detail: "File › \(title)", section: .app, systemImage: image) {
+                NSApp.sendAction(action, to: nil, from: nil)
+            }
+        }
+        // File › Recent Workspaces: the item's `representedObject` is the file, as the menu's are.
+        for url in RecentRepos.workspaces.urls {
+            snapshot.add("Open Workspace: \(url.deletingPathExtension().lastPathComponent)",
+                         detail: (url.path as NSString).abbreviatingWithTildeInPath, section: .app,
+                         systemImage: "square.stack.3d.up") {
+                let item = NSMenuItem()
+                item.representedObject = url
+                NSApp.sendAction(#selector(AppDelegate.openRecentWorkspace(_:)), to: nil, from: item)
+            }
         }
         for section in SettingsSection.allCases {
             snapshot.add("Settings › \(section.label.title)", detail: "Settings", section: .app,

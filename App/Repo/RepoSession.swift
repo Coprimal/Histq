@@ -795,6 +795,41 @@ final class RepoSession: Identifiable {
             default: false
             }
         }
+
+        /// The writes that make commits or write to a remote: a workspace tab whose profile is missing refuses them
+        /// (`perform`), so it never acts with the user's own identity instead.
+        var needsProfile: Bool {
+            switch self {
+            case .commit, .amend, .editMessage, .applyPatchCommits, .merge, .rebase, .interactiveRebase, .cherryPick,
+                 .revert, .stashPush, .stashPaths, .continueOperation, .skipOperation, .createTag, .pull, .pullBranch,
+                 .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteBranchAndRemote, .deleteRemoteTag,
+                 .checkoutPullRequest, .addSubmodule, .updateSubmodules:
+                true
+            default: false
+            }
+        }
+    }
+
+    /// Where the tab's window belongs: an Untitled window, or a workspace file.
+    enum ProfileScope {
+        /// A profile id the store does not have falls back to the default profile.
+        case untitled
+        /// A profile id the store does not have (or a store not read yet) is no profile: no identity, no token, and
+        /// the writes that need one (`Write.needsProfile`) are refused.
+        case workspace
+    }
+
+    /// A write that needs the tab's profile, refused in a workspace tab whose profile this Mac does not have.
+    enum ProfileError: LocalizedError {
+        case profileMissing(UUID)
+
+        var errorDescription: String? {
+            switch self {
+            case .profileMissing:
+                "This workspace tab's profile is not in Settings › Profiles: pick a profile for the tab to commit or "
+                    + "reach a remote."
+            }
+        }
     }
 
     let id = UUID()
@@ -974,6 +1009,8 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var profileTask: Task<Void, Never>?
     /// Set once the repo resolved its profile or the user picked one; a late store read then changes nothing.
     @ObservationIgnored private(set) var profileResolved = false
+    /// Set by the window from its membership (`WindowModel.workspace`); decides what a missing profile id means.
+    @ObservationIgnored var profileScope = ProfileScope.untitled
 
     /// The runner and the folders, set up once (`backend()`).
     @ObservationIgnored private var setUpTask: Task<Backend, Error>?
@@ -1392,9 +1429,11 @@ final class RepoSession: Identifiable {
     // MARK: Profile
 
     /// The tab's profile as the store has it now. An id the store no longer has (the profile was deleted) falls back
-    /// to the default profile, as deleting it promised; nil while the store is not read.
+    /// to the default profile, as deleting it promised, in an Untitled window only: a workspace tab gets none. nil
+    /// while the store is not read.
     var profile: Profile? {
         guard let profileID, let store = ProfileLibrary.shared.store else { return nil }
+        if profileScope == .workspace { return store.profile(id: profileID) }
         return store.profile(id: profileID) ?? store.defaultProfile
     }
 
@@ -5130,6 +5169,10 @@ final class RepoSession: Identifiable {
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
+        // A workspace tab never commits or reaches a remote without its own profile.
+        if profileScope == .workspace, profile == nil, let profileID, write.needsProfile {
+            throw ProfileError.profileMissing(profileID)
+        }
         let isRebase = if case .interactiveRebase = write { true } else { false }
         if isRebase {
             rebaseStarts += 1

@@ -4,6 +4,9 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+### Added
+- Workspaces: a `.histqworkspace` file keeps a set of windows and their tabs, manual tab groups and the profiles they use (without secrets), with repository paths stored relative to the file and from `~`, so the file and its repositories can be moved or shared together. Several workspaces can be open at once and each one saves itself as you change it. The File menu and the command palette have New Workspace, Open Workspace…, Save Workspace As…, Recent Workspaces and Close Workspace, and a workspace window shows its name in the toolbar. Window frames and collapsed groups stay on this Mac. A workspace tab whose profile is missing cannot commit or push. A file with settings this version does not know opens read-only, and one from a newer format version is refused.
+
 ## [0.3.0] - 2026-11-21
 
 ### Added

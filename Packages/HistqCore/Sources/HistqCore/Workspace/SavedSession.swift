@@ -20,6 +20,13 @@ public struct SavedSession: Codable, Equatable, Sendable {
         self.workspaces = workspaces
     }
 
+    /// The session as read: one workspace layout per `path` (the first kept), and nil for an empty list.
+    public func normalized() -> SavedSession {
+        var paths = Set<String>()
+        let layouts = workspaces?.filter { paths.insert($0.path).inserted }
+        return SavedSession(version: version, windows: windows, workspaces: layouts?.isEmpty == false ? layouts : nil)
+    }
+
     /// The windows by native tab group, groups front first, each group in its tab order.
     public var groups: [[SavedWindow]] {
         Set(windows.map(\.group)).sorted().map { group in

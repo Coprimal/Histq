@@ -285,6 +285,8 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqFileSearch "<query>"` | Types that query in the File History… or Blame… modal when it opens (`-HistqOpenPalette "File History" -HistqPaletteRun`). |
 | `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell. |
 | `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows (dimmed), as their header's eye button does. |
+| `-HistqSaveWorkspace <path>` | Once the launch's windows are open, Save Workspace As… to `<path>` from the front window, without a panel. |
+| `-HistqCloseWorkspace <name>` | Once the launch's windows are open, Close Workspace on the open workspace with that name. |
 | `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
 | `-HistqHTMLProbe YES` | Snapshots every GitHub HTML view (`html-<n>.png`) and logs its size. |
 | `-HistqSlotProbe YES` | Outlines the pull request and issue pages' overlay slots in red and logs `slot-probe <id> html <x,y,w,h> overlay <x,y,w,h> delta <d>` after each measurement; 3 s after the first, the window widens by 400 pt for a pass at another width. Stub only. |

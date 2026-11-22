@@ -1,23 +1,30 @@
-// The repositories opened lately, most recent first, for the Welcome page. Kept in `Preferences.defaults`
-// (`PrefKey.recentRepos`), so reading them never touches the disk on the main thread.
+// The repositories opened lately, most recent first, for the Welcome page, and the workspace files opened lately, for
+// Recent Workspaces. Kept in `Preferences.defaults` (`PrefKey.recentRepos`, `.recentWorkspaces`), so reading them
+// never touches the disk on the main thread.
 import Foundation
 import Observation
 
 @Observable
 @MainActor
 final class RecentRepos {
-    static let shared = RecentRepos()
-    /// How many folders the list keeps.
-    static let limit = 10
+    static let shared = RecentRepos(key: .recentRepos, limit: 10, directoryHint: .isDirectory)
+    /// The workspace files, added by identity key (`WorkspaceFile.identityKey(for:)`) and stored standardized
+    /// (`/private/tmp/…` as `/tmp/…`).
+    static let workspaces = RecentRepos(key: .recentWorkspaces, limit: 10, directoryHint: .notDirectory)
 
-    /// Folder URLs, most recent first.
+    /// How many entries the list keeps.
+    let limit: Int
+
+    /// File URLs, most recent first.
     private(set) var urls: [URL]
 
-    private static var key: String { PrefKey.recentRepos.rawValue }
+    private let key: String
 
-    private init() {
-        urls = (Preferences.defaults.stringArray(forKey: Self.key) ?? [])
-            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+    private init(key: PrefKey, limit: Int, directoryHint: URL.DirectoryHint) {
+        self.key = key.rawValue
+        self.limit = limit
+        urls = (Preferences.defaults.stringArray(forKey: key.rawValue) ?? [])
+            .map { URL(filePath: $0, directoryHint: directoryHint) }
     }
 
     /// Puts `url` first (moving it up if already listed), keeping `limit` entries.
@@ -25,7 +32,7 @@ final class RecentRepos {
         let url = url.standardizedFileURL
         var list = urls.filter { $0.path != url.path }
         list.insert(url, at: 0)
-        urls = Array(list.prefix(Self.limit))
+        urls = Array(list.prefix(limit))
         save()
     }
 
@@ -34,7 +41,13 @@ final class RecentRepos {
         save()
     }
 
+    /// Empties the list (Recent Workspaces › Clear Menu).
+    func clear() {
+        urls = []
+        save()
+    }
+
     private func save() {
-        Preferences.defaults.set(urls.map(\.path), forKey: Self.key)
+        Preferences.defaults.set(urls.map(\.path), forKey: key)
     }
 }

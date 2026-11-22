@@ -1,6 +1,6 @@
-// The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the repo
-// menu (the window's repo tabs, recent
-// repos, Open…), the branch menu (checks out the picked branch),
+// The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the
+// workspace's name (workspace windows only, with its read-only or not-saved warning), the repo menu (the window's repo
+// tabs, recent repos, Open…), the branch menu (checks out the picked branch),
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge the green Update button while Sparkle has an update
 // (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, Row Height ▾ (the graph's
 // row heights), then Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed.
@@ -61,6 +61,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
     /// Its own capsule, green, first of the trailing ones, shown only while Sparkle has an update (as EchoDiar's).
     private let updateItem = NSToolbarItem(itemIdentifier: ID.update)
+    /// The window's workspace: its name, with the file's path as tooltip, or a warning when the file is read-only or
+    /// its last write failed. Hidden in Untitled windows.
+    private let workspaceItem = NSToolbarItem(itemIdentifier: ID.workspace)
+    private let workspaceIcon = NSImageView()
+    private let workspaceLabel = NSTextField(labelWithString: "")
+    /// What `workspaceItem` shows now, so its views are only written when it changes.
+    private var workspaceShown: (text: String, toolTip: String, isWarning: Bool)?
+    /// The saved configuration was checked for the workspace item this launch (`insertWorkspaceItemIfMissing`).
+    private static var checkedWorkspaceItem = false
     private var groups: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     /// On macOS 26, the button showing each plain button item (`hoverButton`), by the item.
     private var hoverButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
@@ -74,6 +83,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     private enum ID {
+        static let workspace = NSToolbarItem.Identifier("workspace")
         static let repo = NSToolbarItem.Identifier("repo")
         static let branch = NSToolbarItem.Identifier("branch")
         static let profile = NSToolbarItem.Identifier("profile")
@@ -113,6 +123,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: Items
 
     private func configureItems() {
+        configureWorkspaceItem()
         for dropdown in [repoItem, branchItem, profileItem] {
             dropdown.menu.delegate = self
             dropdown.overflowMenu.delegate = self
@@ -205,6 +216,30 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         for (id, item) in groups { if let palette = Self.palette[id] { item.paletteLabel = palette.label } }
     }
 
+    /// The workspace label: an icon and the text, not clickable, as wide as the text (the name is cut in `apply`, never
+    /// the warning).
+    private func configureWorkspaceItem() {
+        workspaceItem.label = "Workspace"
+        workspaceItem.paletteLabel = "Workspace"
+        // A plain name is the first to go to the overflow menu when the toolbar is full (the default width has about
+        // 100 pt free); a warning stays (`applyWorkspace` raises it), so an unsaved workspace is never hidden.
+        workspaceItem.visibilityPriority = .low
+        workspaceItem.autovalidates = false
+        workspaceItem.isHidden = true
+        workspaceIcon.setContentHuggingPriority(.required, for: .horizontal)
+        workspaceIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        workspaceLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        workspaceLabel.usesSingleLineMode = true
+        let stack = NSStackView(views: [workspaceIcon, workspaceLabel])
+        stack.orientation = .horizontal
+        stack.spacing = 5
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+        workspaceItem.view = stack
+        let form = NSMenuItem(title: "Workspace", action: nil, keyEquivalent: "")
+        form.isEnabled = false
+        workspaceItem.menuFormRepresentation = form
+    }
+
     /// A menu whose items are built when it opens (`menuNeedsUpdate`), never on a model change.
     private func makeMenu(_ identifier: NSUserInterfaceItemIdentifier? = nil) -> NSMenu {
         let menu = NSMenu()
@@ -286,8 +321,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let gap: [NSToolbarItem.Identifier] = PlatformFeatures.liquidGlass ? [.space] : []
         let sync = PlatformFeatures.liquidGlass ? [ID.pull] + gap + [ID.push] + gap + [ID.fetch] : [ID.syncGroup]
         // The Update button right after the flexible space: hidden, it and its gap only widen the empty middle.
-        return [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.update] + gap + [ID.historyGroup] + gap + sync + gap + [ID.branchGroup]
-            + gap + [ID.rowHeight] + gap + [ID.toolsGroup]
+        return [ID.workspace, ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.update] + gap + [ID.historyGroup] + gap
+            + sync + gap + [ID.branchGroup] + gap + [ID.rowHeight] + gap + [ID.toolsGroup]
     }
 
     /// Each default item once, then the spaces (the default set repeats `.space`).
@@ -302,6 +337,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // The customization palette's sample: a new item, as the live one's view would leave the window's toolbar.
         guard flag else { return Self.paletteItem(itemIdentifier) }
         return switch itemIdentifier {
+        case ID.workspace: workspaceItem
         case ID.repo: repoItem.item
         case ID.branch: branchItem.item
         case ID.profile: profileItem.item
@@ -311,6 +347,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Each item's name and icon in the customization palette.
     private static let palette: [NSToolbarItem.Identifier: (label: String, image: String)] = [
+        ID.workspace: ("Workspace", workspaceSymbol),
         ID.repo: ("Repository", "book.closed"),
         ID.branch: ("Branch", "lucide-git-branch"),
         ID.profile: ("Profile", "person.crop.circle"),
@@ -334,6 +371,16 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         return item
     }
 
+    /// Adds the workspace item at the leading edge when the saved configuration (from a build without it) lacks it,
+    /// once per launch, not on every workspace join; every window shares the configuration, so all of them get it
+    /// (hidden in Untitled windows). Called once the toolbar is in its window, so its items are loaded.
+    func insertWorkspaceItemIfMissing() {
+        guard !Self.checkedWorkspaceItem else { return }
+        Self.checkedWorkspaceItem = true
+        guard !toolbar.items.contains(where: { $0.itemIdentifier == ID.workspace }) else { return }
+        toolbar.insertItem(withItemIdentifier: ID.workspace, at: 0)
+    }
+
     /// Whether this toolbar shows and has the Update slot (the user may have removed it in Customize Toolbar).
     var hasUpdateItem: Bool {
         toolbar.isVisible && toolbar.items.contains { $0.itemIdentifier == ID.update }
@@ -342,10 +389,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: State
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
-    /// selected tab's repo, its session's refs, running operations, status, stashes, remotes, profile, undo status,
-    /// operation in progress and terminal drawer, the profile store, the page, the Settings modal and whether Sparkle
-    /// has an update are read, so
-    /// other tabs and the content's own state never wake the toolbar.
+    /// window's workspace (name, path, read-only and write state), the selected tab's repo, its session's refs,
+    /// running operations, status, stashes, remotes, profile, undo status, operation in progress and terminal drawer,
+    /// the profile store, the page, the Settings modal and whether Sparkle has an update are read, so other tabs and
+    /// the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -356,6 +403,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     private func apply() {
+        applyWorkspace()
         let selected = model.selectedIndex.map { model.tabs[$0] }
         let session = model.actionSession
         // The folder's name, never the tab's alias: the alias only shortens the tab itself.
@@ -440,6 +488,50 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         #endif
     }
 
+    /// The workspace label from the window's workspace (its name, path, read-only flag and last write's error), hidden
+    /// in an Untitled window. The toolbar has about 100 pt free at the default width, so only a short name shows; a
+    /// read-only file or a failed write turns it into a warning (triangle, a toast's orange) and the tooltip says why.
+    private func applyWorkspace() {
+        guard let workspace = model.workspace else {
+            set(workspaceItem, hidden: true)
+            return
+        }
+        let name = Self.truncated(workspace.name, 12)
+        let path = (workspace.url.path as NSString).abbreviatingWithTildeInPath
+        let reason = workspace.writeError ?? "the file could not be written"
+        let shown: (text: String, toolTip: String, isWarning: Bool) = if workspace.isReadOnly {
+            (name,
+             "\(path)\nRead-only: made by a newer Histq, so changes to this workspace are not saved. "
+                 + "Save Workspace As… makes a copy this version saves.", true)
+        } else if workspace.writeFailed {
+            (name,
+             "\(path)\nNot saved: \(reason)\nChanges to this workspace are not saved until a write succeeds.", true)
+        } else {
+            (name, path, false)
+        }
+        if workspaceShown?.text != shown.text || workspaceShown?.toolTip != shown.toolTip
+            || workspaceShown?.isWarning != shown.isWarning
+        {
+            if workspaceShown?.isWarning != shown.isWarning {
+                let symbol = shown.isWarning ? "exclamationmark.triangle.fill" : Self.workspaceSymbol
+                workspaceIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                    .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+                let color = shown.isWarning ? Palette.graphLanes[1] : NSColor.secondaryLabelColor
+                workspaceIcon.contentTintColor = color
+                workspaceLabel.textColor = shown.isWarning ? color : .labelColor
+            }
+            workspaceShown = shown
+            workspaceItem.visibilityPriority = shown.isWarning ? .high : .low
+            workspaceLabel.stringValue = shown.text
+            workspaceItem.view?.toolTip = shown.toolTip
+            workspaceItem.toolTip = shown.toolTip
+            workspaceItem.menuFormRepresentation?.title = shown.text
+            let state = workspace.isReadOnly ? ", read-only" : workspace.writeFailed ? ", not saved" : ""
+            workspaceItem.view?.setAccessibilityLabel("Workspace \(shown.text)\(state)")
+        }
+        set(workspaceItem, hidden: false)
+    }
+
     // Each setter writes only a changed value: an unchanged write still relayouts the toolbar.
 
     private func set(_ item: NSToolbarItem, title: String) {
@@ -480,6 +572,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private static let undoSymbol = "arrow.uturn.backward"
     private static let redoSymbol = "arrow.uturn.forward"
     private static let updateSymbol = "arrow.down.circle.fill"
+    private static let workspaceSymbol = "square.stack.3d.up"
     private static let rowHeightSymbol = "arrow.up.and.down.text.horizontal"
     /// Marks the Row Height menus (the item's, the macOS 26 button's and the overflow's) for `menuNeedsUpdate`.
     private static let rowHeightMenuID = NSUserInterfaceItemIdentifier("rowHeight")

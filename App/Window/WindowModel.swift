@@ -106,6 +106,17 @@ final class WindowModel {
     var groupPopoverID: UUID?
     /// The repo tabs' sessions, by tab.
     private(set) var sessions: [Tab.ID: RepoSession] = [:]
+    /// The workspace file the window belongs to; nil = Untitled. Its sessions' `profileScope` follows it, and a change
+    /// saves the session.
+    var workspace: Workspace? {
+        didSet {
+            guard workspace !== oldValue else { return }
+            for session in sessions.values { session.profileScope = profileScope }
+            SessionStore.schedule()
+        }
+    }
+    /// The window's id in its workspace file: the file's on restore, else a new one. Stable while the window is open.
+    @ObservationIgnored var windowID = UUID()
     /// The Welcome tabs' state (the clone in flight, the git check), by tab: it outlives the view across tab
     /// switches. Created on first use by `welcome(for:)`.
     @ObservationIgnored private var welcomes: [Tab.ID: WelcomeModel] = [:]
@@ -132,6 +143,9 @@ final class WindowModel {
     private(set) var modal: WindowModal?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
+    /// Called by `closeTab` / `closeTabs` before they remove the tab(s) whose close then closes the window, while the
+    /// window still has them; set by the AppDelegate (a workspace keeps its file as it was before the close).
+    @ObservationIgnored var willEmpty: () -> Void = {}
     /// Opens a new window restored from these tabs, their group table, the selected offset and the missing folders
     /// (Move Group to New Window); set by the AppDelegate. Nil: the group stays.
     @ObservationIgnored var openWindow: ((_ tabs: [SavedTab], _ groups: [SavedTabGroup], _ selected: Int,
@@ -245,12 +259,19 @@ final class WindowModel {
     /// session will start with: the saved one, else the repo's remembered one. nil for a Welcome or missing tab, no
     /// profile, or while the store is not read.
     func profile(of tab: Tab) -> Profile? {
+        // Read first: a change of membership redraws the dot.
+        let scope = profileScope
         if let session = sessions[tab.id] { return session.profile }
         guard let url = tab.repoURL, !tab.isMissing, let store = ProfileLibrary.shared.store else { return nil }
         guard let saved = restored[tab.id]?.profile else { return store.profile(forRepo: url) }
-        // As `RepoSession.profile`: a deleted profile falls back to the default.
-        return saved.profileID.flatMap { store.profile(id: $0) ?? store.defaultProfile }
+        // As `RepoSession.profile`: a deleted profile falls back to the default, in an Untitled window only.
+        return saved.profileID.flatMap {
+            scope == .workspace ? store.profile(id: $0) : store.profile(id: $0) ?? store.defaultProfile
+        }
     }
+
+    /// What a missing profile id means in this window's sessions (`RepoSession.profileScope`).
+    private var profileScope: RepoSession.ProfileScope { workspace == nil ? .untitled : .workspace }
 
     /// Switches a repo tab to a profile (nil: none), from the toolbar chip or the tab's right-click menu. A tab not
     /// selected yet has no session: its pick waits in `restored` until its session is made, without loading the repo.
@@ -421,6 +442,7 @@ final class WindowModel {
     /// as a new tab does.
     private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
         let session = RepoSession(url: url)
+        session.profileScope = profileScope
         // A worktree's "Open in New Tab" and a double-click on its sidebar row open it in this window, beside this
         // tab's group. The worktree's tab shows its changes, else its HEAD commit, even when it was open on another
         // row.
@@ -634,8 +656,10 @@ final class WindowModel {
     /// selected tab opens, as a click would show it. Not `openTab`: no recent-repos update, and the other tabs get their
     /// session only when selected. The archived entries go back to the archive, but the selected one: it is popped
     /// out again, last and selected. `groups` is the window's manual group table; a tab's group not in it is dropped,
-    /// as is an entry no tab is in.
-    func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>, groups: [SavedTabGroup]? = nil) {
+    /// as is an entry no tab is in. `repoKeys` (`RepoGroupKey` by repo path, read with a workspace file) are set before
+    /// the tabs are put in order, so the later `applyRepoKeys` finds them equal and changes nothing.
+    func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>, groups: [SavedTabGroup]? = nil,
+                 repoKeys: [String: String] = [:]) {
         guard !saved.isEmpty else { return }
         welcomes.removeAll()
         var entries: [SavedTab] = []
@@ -659,8 +683,10 @@ final class WindowModel {
         }
         tabs = entries.map { tab in
             let archived = tab.archived == true
+            let isMissing = tab.path.map(missing.contains) ?? false
             return Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
-                       isMissing: tab.path.map(missing.contains) ?? false, alias: tab.alias, emoji: tab.emoji,
+                       isMissing: isMissing, repoKey: archived || isMissing ? nil : tab.path.flatMap { repoKeys[$0] },
+                       alias: tab.alias, emoji: tab.emoji,
                        pinned: archived ? false : tab.pinned ?? false, iconColor: tab.iconColor, archived: archived,
                        groupID: archived ? nil : tab.tabGroup)
         }
@@ -772,6 +798,9 @@ final class WindowModel {
     private func closeTab(id: Tab.ID, archiving: Bool) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
         let wasWelcome = tabs[index].repoURL == nil
+        // The window closes when this is its last tab and no archive is left (the tab itself may go to it) for a
+        // Welcome tab to keep reachable.
+        if tabs.count == 1, wasWelcome || (archivedTabs.isEmpty && !archiving && !tabs[index].archived) { willEmpty() }
         remove(at: index, archiving: archiving)
         // A lone Welcome tab still closes the window (⌘W), its archive with it.
         if tabs.isEmpty, !archivedTabs.isEmpty, !wasWelcome {
@@ -829,6 +858,8 @@ final class WindowModel {
     /// tab of a collapsed group, else the popped-out archived tab; no tab in between gets a session.
     private func closeTabs(_ ids: Set<Tab.ID>, batch: UUID?) -> Bool {
         guard let last = tabs.lastIndex(where: { ids.contains($0.id) }) else { return !tabs.isEmpty }
+        // Every tab goes and none of them fills the archive: the window closes.
+        if archivedTabs.isEmpty, tabs.allSatisfy({ ids.contains($0.id) && !$0.archived }) { willEmpty() }
         if let selectedTabID, ids.contains(selectedTabID) {
             let rest = (0..<normalEnd).filter { !ids.contains(tabs[$0].id) }
             let popped = archivedOut.flatMap { ids.contains($0.id) ? nil : tabs.count - 1 }

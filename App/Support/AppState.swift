@@ -54,6 +54,14 @@ enum AppState {
     /// DEBUG `-HistqFindEarly YES`: `-HistqFind` starts once the log's first page shows, not its whole log, and types
     /// the query at once (QA of a query typed while the log is still read).
     static let launchFindEarly: Bool = launchFlag("-HistqFindEarly") == "YES"
+
+    /// DEBUG `-HistqSaveWorkspace <path>`: once the launch's windows are open, the front window's Save Workspace As…
+    /// writes to `<path>` without a panel (`AppDelegate.saveWorkspace(to:from:)`).
+    static let launchSaveWorkspace: String? = launchFlag("-HistqSaveWorkspace")
+
+    /// DEBUG `-HistqCloseWorkspace <name>`: once the launch's windows are open, Close Workspace runs on the open
+    /// workspace with that name.
+    static let launchCloseWorkspace: String? = launchFlag("-HistqCloseWorkspace")
 }
 
 /// Where the app keeps its files: `~/Library/Application Support/Histq`, or the DEBUG state dir.
@@ -192,6 +200,8 @@ enum PrefKey: String, CaseIterable {
     case terminalOpenWithNewTab
     /// The Welcome page's recent repositories: folder paths, most recent first (`RecentRepos`).
     case recentRepos
+    /// Recent Workspaces: workspace file paths, most recent first (`RecentRepos.workspaces`).
+    case recentWorkspaces
     /// The detail panel's file lists: "tree" (rows under their folders) or "path" (one row per file). Settings ›
     /// Appearance sets it for every card; each files card keeps its own (`FileListCard.key`), switched from its header.
     case fileListMode
@@ -283,7 +293,7 @@ enum PrefKey: String, CaseIterable {
         case .terminalCursor: "block"
         case .terminalBoldText: false
         case .terminalOpenWithNewTab: false
-        case .recentRepos: [String]()
+        case .recentRepos, .recentWorkspaces: [String]()
         case .fileListMode: "tree"
         case .commitShowsAllFiles: false
         case .showFileSizes: true
