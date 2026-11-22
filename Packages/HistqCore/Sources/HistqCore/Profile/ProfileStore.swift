@@ -91,6 +91,16 @@ public struct ProfileStore: Codable, Sendable, Equatable {
         }
     }
 
+    /// Adds the profiles whose id is not known yet (locally, or earlier in `profiles`: the first wins) and returns
+    /// them. Never replaces a local profile and never touches `defaultProfileID` or `repoProfiles`.
+    @discardableResult
+    public mutating func importProfiles(_ profiles: [Profile]) -> [Profile] {
+        var known = Set(self.profiles.map(\.id))
+        let added = profiles.filter { known.insert($0.id).inserted }
+        self.profiles.append(contentsOf: added)
+        return added
+    }
+
     /// Removes the profile, the repos that remembered it (they fall back to the default) and, when it was the
     /// default, the default.
     public mutating func delete(id: UUID) {

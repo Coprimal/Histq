@@ -4,110 +4,11 @@
 // "Repo not found" tab.
 import AppKit
 import Foundation
+import HistqCore
 import os
 
-/// What the last run had open: one entry per document window, front group first.
-struct SavedSession: Codable, Equatable, Sendable {
-    /// The file format; a file of another version is ignored.
-    static let currentVersion = 1
-
-    var version = Self.currentVersion
-    var windows: [SavedWindow]
-
-    /// The windows by native tab group, groups front first, each group in its tab order.
-    var groups: [[SavedWindow]] {
-        Set(windows.map(\.group)).sorted().map { group in
-            windows.filter { $0.group == group }.sorted { $0.tabIndex < $1.tabIndex }
-        }
-    }
-}
-
-/// A document window: its frame, its place in a native tab group, and its app tabs.
-struct SavedWindow: Codable, Equatable, Sendable {
-    /// Screen points, origin at the bottom left (`NSWindow.frame`).
-    var x: Double
-    var y: Double
-    var width: Double
-    var height: Double
-    /// Windows with the same group are native tabs of one window; groups are numbered front to back.
-    var group: Int
-    /// The window's place in its group's tab bar.
-    var tabIndex: Int
-    /// The native tab its group shows.
-    var isSelectedInGroup: Bool
-    var tabs: [SavedTab]
-    /// The selected app tab's index.
-    var selectedTab: Int?
-    /// The window's manual tab groups, in order; nil when it has none. Absent from files of older builds.
-    var manualTabGroups: [SavedTabGroup]?
-
+extension SavedWindow {
     var frame: NSRect { NSRect(x: x, y: y, width: width, height: height) }
-}
-
-/// An app tab: a repo folder with its profile, or a Welcome tab.
-struct SavedTab: Codable, Equatable, Sendable {
-    /// The repo folder; nil for a Welcome tab.
-    var path: String?
-    /// The tab's profile as chosen in that session; nil when it was not known yet (the repo then resolves its own,
-    /// as a new tab does).
-    var profile: SavedProfile?
-    /// The tab's alias (its menu's Set Alias…); nil shows the folder's name. Absent from files of older builds.
-    var alias: String?
-    /// The tab's emoji (its menu's Set Emoji…); nil shows none. Absent from files of older builds.
-    var emoji: String?
-    /// The tab is pinned; nil reads as false, and an unpinned tab is written as nil so files stay small. Absent from
-    /// files of older builds.
-    var pinned: Bool?
-    /// The tab's book icon color (its menu's Icon Color), an index into `Palette.graphLanes`; nil for the default.
-    /// Absent from files of older builds.
-    var iconColor: Int?
-    /// The tab is in the window's archive (its menu's Archive This Tab); nil reads as false, and a tab not archived is
-    /// written as nil. Archived entries come after every other tab; the selected one is the tab popped out beside the
-    /// archive button. Absent from files of older builds.
-    var archived: Bool?
-    /// The manual group it is in (`SavedWindow.manualTabGroups`); nil for none. Absent from files of older builds.
-    var tabGroup: UUID?
-
-    /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab: an archived tab's row in the archive's
-    /// list.
-    var title: String {
-        alias ?? path.map { URL(fileURLWithPath: $0, isDirectory: true).lastPathComponent } ?? "New Tab"
-    }
-}
-
-/// A manual tab group of a window. Absent from files of older builds.
-struct SavedTabGroup: Codable, Equatable, Sendable {
-    var id: UUID
-    /// The name the user gave it; nil for none.
-    var name: String?
-    /// Its swatch: 0 is grey, 1–8 a lane color (`Palette.graphLanes`); clamped to 0...8 on restore.
-    var color: Int
-    /// The group shows only its chip; nil reads as false, and an expanded group is written as nil.
-    var collapsed: Bool?
-}
-
-/// A tab's profile choice. Stored as one string: a profile id, or "none" (git uses the user's own config).
-enum SavedProfile: Codable, Equatable, Sendable {
-    case none
-    case id(UUID)
-
-    var profileID: UUID? {
-        if case .id(let id) = self { id } else { nil }
-    }
-
-    init(_ profileID: UUID?) {
-        self = profileID.map(Self.id) ?? .none
-    }
-
-    init(from decoder: Decoder) throws {
-        let text = try decoder.singleValueContainer().decode(String.self)
-        self = UUID(uuidString: text).map(Self.id) ?? .none
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(profileID?.uuidString ?? "none")
-    }
 }
 
 /// Reads the saved session at launch and writes it on changes. Capture is off until the launch has opened its
@@ -194,25 +95,7 @@ enum SessionStore {
         // Closing the last window saves an empty session: a normal state, not a broken file.
         guard !session.windows.isEmpty else { return nil }
         let paths = Set(session.windows.flatMap { $0.tabs.compactMap(\.path) })
-        return Loaded(session: session, missing: paths.filter { !isRepository($0) })
-    }
-
-    /// Whether `path` still opens as a repo: a folder inside a work tree (`.git` is a folder, or a file for a linked
-    /// worktree or a submodule, in it or in a parent), or a bare repository. File checks only, no git.
-    nonisolated static func isRepository(_ path: String) -> Bool {
-        let fm = FileManager.default
-        var isDirectory: ObjCBool = false
-        guard fm.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
-        let folder = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
-        let bare = ["HEAD", "objects", "refs"].allSatisfy { fm.fileExists(atPath: folder.appending(path: $0).path) }
-        if bare { return true }
-        var current = folder
-        while true {
-            if fm.fileExists(atPath: current.appending(path: ".git").path) { return true }
-            let parent = current.deletingLastPathComponent()
-            if parent.path == current.path { return false }
-            current = parent
-        }
+        return Loaded(session: session, missing: paths.filter { !SavedSession.isRepository($0) })
     }
 
     /// Writes `session` atomically (a temp file in the same folder, then `rename(2)`), with mode 600: it lists the

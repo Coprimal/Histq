@@ -1,6 +1,7 @@
 // Key-feature tests for ProfileStore (task 7.1), in a temp folder (never the app's Application Support): a
 // remembered repo resolves to its profile after a save and reload, under another spelling of its path; an
-// unknown repo gets the default; a repo whose profile was deleted falls back to the default.
+// unknown repo gets the default; a repo whose profile was deleted falls back to the default. Importing a
+// workspace's profiles (workspaces plan, phase 1) only adds unknown ids and never changes local settings.
 import Foundation
 import HistqCore
 import Testing
@@ -73,5 +74,36 @@ struct ProfileStoreTests {
         store.delete(id: Self.work.id)
         #expect(store.profile(forRepo: sandbox.repo("repo-a")) == Self.personal)
         #expect(store.repoProfiles.isEmpty)
+    }
+
+    @Test("importing a workspace's profiles adds the unknown ones once, the first of a repeated id")
+    func importAddsUnknownProfilesOnce() {
+        let shared = Profile(name: "Shared", color: "#55AA55", identity: .init(name: "Team", email: "team@histq.invalid"))
+        var repeated = shared
+        repeated.name = "Shared (later copy)"
+        var store = ProfileStore(profiles: [Self.personal])
+
+        let added = store.importProfiles([shared, repeated])
+        #expect(added == [shared])
+        #expect(store.profiles == [Self.personal, shared])
+    }
+
+    @Test("importing never replaces a local profile of the same id, nor the default or the repos' profiles")
+    func importKeepsLocalProfilesAndSettings() throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        var store = ProfileStore(profiles: [Self.personal, Self.work], defaultProfileID: Self.personal.id)
+        store.remember(Self.work.id, forRepo: sandbox.repo("repo-a"))
+        let before = store
+        var foreignWork = Self.work
+        foreignWork.name = "Work (from a workspace)"
+        foreignWork.identity.email = "someone@else.invalid"
+
+        let added = store.importProfiles([foreignWork])
+        #expect(added.isEmpty)
+        #expect(store == before)
+        #expect(store.profile(id: Self.work.id) == Self.work)
+        #expect(store.defaultProfileID == Self.personal.id)
+        #expect(store.repoProfiles == before.repoProfiles && store.repoProfiles.count == 1)
     }
 }

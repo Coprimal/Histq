@@ -1,5 +1,6 @@
 // The app entry: an AppKit delegate that owns the windows, their tabs, the main menu and the open handling.
 import AppKit
+import HistqCore
 import SwiftUI
 
 /// AppKit entry point: no SwiftUI `App`, so SwiftUI is only loaded inside the windows.
