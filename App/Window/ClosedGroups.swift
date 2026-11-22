@@ -38,6 +38,12 @@ struct ClosedGroupsButton: View {
             ClosedGroupsPopover(model: model, isPresented: $showingList)
         }
         .background(WindowDragBlocker())
+        // DEBUG `-HistqOpenPopover closedgroups` (website and QA shots): the list opens once the window has settled.
+        .task {
+            guard AppState.launchFlag("-HistqOpenPopover") == "closedgroups" else { return }
+            try? await Task.sleep(for: .seconds(2))
+            showingList = true
+        }
     }
 }
 
