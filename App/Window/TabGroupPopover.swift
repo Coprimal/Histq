@@ -2,9 +2,9 @@
 import SwiftUI
 
 /// A group's popover, styled as the tab list's (`TabListPopover`): its name (live, empty for none; focused when it
-/// opens), its 9 swatches (the current one ringed), then New Tab in Group, Move Group to New Window, Close Group and
-/// Ungroup. Close and Move are off while the group holds every normal tab of the window. A row closes the popover
-/// before it acts; Return and Esc close it.
+/// opens), its 9 swatches (the current one ringed), then New Tab in Group, Move Group to New Window, Close Group (hides
+/// the group in the window's closed groups), Delete Group (closes its tabs) and Ungroup. Move and Delete are off while
+/// the group holds every normal tab of the window. A row closes the popover before it acts; Return and Esc close it.
 struct TabGroupPopover: View {
     let model: WindowModel
     let groupID: UUID
@@ -38,9 +38,13 @@ struct TabGroupPopover: View {
                         : "Terminals and AI jobs in its tabs stop; the tabs reopen in the new window.") {
                     model.moveGroupToNewWindow(groupID)
                 }
-                row("Close Group", systemImage: "xmark.circle", disabled: holdsAll,
-                    help: holdsAll ? Self.holdsAllHelp : nil) {
+                row("Close Group", systemImage: "xmark.circle",
+                    help: "Hide the group; reopen it from Closed Groups.") {
                     model.closeGroup(groupID)
+                }
+                row("Delete Group", systemImage: "trash", disabled: holdsAll,
+                    help: holdsAll ? Self.holdsAllHelp : "Close the group and its tabs; ⇧⌘T brings them back.") {
+                    model.confirmDeleteGroup(groupID)
                 }
                 row("Ungroup", systemImage: "square.dashed") { model.ungroup(groupID) }
             }
@@ -53,7 +57,7 @@ struct TabGroupPopover: View {
         .onAppear { DispatchQueue.main.async { nameFocused = true } }
     }
 
-    /// Why Close Group and Move Group to New Window are off.
+    /// Why Delete Group and Move Group to New Window are off.
     private static let holdsAllHelp = "The group holds every tab of the window."
 
     /// The 9 colors as circles, spread over the row; a click recolors the group at once.

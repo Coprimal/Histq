@@ -48,7 +48,8 @@ enum TabStripMetrics {
     static let archivedTabWidth: CGFloat = 160
     /// How far the archive button sits left of the strip's start, and the room it adds after itself, so it stands as
     /// far from the sheet's left edge (`HeaderMetrics.tabRowLeading` minus this) as from what follows it (`gap` plus
-    /// this). The tabs after it do not move.
+    /// this). The tabs after it do not move. The closed groups button, when shown before it, is pulled the same
+    /// (`TabStrip`).
     static let archiveShift: CGFloat = (HeaderMetrics.tabRowLeading - gap) / 2
 
     /// A worktree box (`WorktreeBoxShape`): this far in from its first and last tab's edges, so two boxes side by side
@@ -109,8 +110,9 @@ enum TabGroupColors {
     static let archiveChip = Color(nsColor: Palette.graphBadgeFills[archiveLane])
 }
 
-/// The archive button with the popped-out archived tab (once the window has an archive), the window's tabs, then New
-/// Tab and the tab list. A press on a tab selects it at once (on mouse-down); a drag past a few points reorders it.
+/// The closed groups button (once the window has closed groups), the archive button with the popped-out archived tab
+/// (once the window has an archive), the window's tabs, then New Tab and the tab list. A press on a tab selects it at
+/// once (on mouse-down); a drag past a few points reorders it.
 struct TabStrip: View {
     @Environment(WindowModel.self) private var model
     /// Shared by the track and the archive's popped-out tab, so the selected tab's shape slides between them.
@@ -122,7 +124,11 @@ struct TabStrip: View {
             // flare room (the button's or the popped tab's) and the track starts with its first tab's, so the two
             // overlap by both. Above the track, so the overlap's clicks reach the button or the popped tab.
             HStack(spacing: 0) {
-                if !model.archivedTabs.isEmpty || model.archivedOut != nil {
+                let archive = !model.archivedTabs.isEmpty || model.archivedOut != nil
+                if !model.closedGroups.isEmpty {
+                    closedGroupsButton(beforeArchive: archive)
+                }
+                if archive {
                     ArchiveCluster(model: model, namespace: namespace)
                         .padding(.trailing, TabStripMetrics.gap - 2 * TabStripMetrics.flare)
                         .zIndex(1)
@@ -131,6 +137,23 @@ struct TabStrip: View {
             }
             TabStripButtons(model: model, popoverEdge: .bottom, buttonHeight: TabStripMetrics.buttonHeight)
         }
+    }
+
+    /// The closed groups button at the strip's start, pulled `archiveShift` left as the archive button is alone. Before
+    /// the archive, it leaves `gap` to the archive button (whose own pull takes back `archiveShift`), so the archive
+    /// button, its line and popped tab keep their place against the tabs. Alone, it ends as the archive button does
+    /// alone: flare room and `archiveShift` after it, overlapping the track's first flare room.
+    private func closedGroupsButton(beforeArchive: Bool) -> some View {
+        let flare = TabStripMetrics.flare
+        let shift = TabStripMetrics.archiveShift
+        return ClosedGroupsButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.groupChipHeight)
+            .frame(height: TabStripMetrics.tabHeight)
+            .padding(.leading, -shift)
+            .padding(.trailing, beforeArchive ? TabStripMetrics.gap + shift
+                                              : flare + shift + TabStripMetrics.gap - 2 * flare)
+            .padding(.top, TabStripMetrics.rowInset)
+            .frame(height: TabStripMetrics.tabHeight + TabStripMetrics.rowInset)
+            .zIndex(1)
     }
 }
 
@@ -617,10 +640,10 @@ private final class ScrollGeometryBox {
     var value: ScrollGeometry?
 }
 
-/// The strip's far left, before the pinned tabs: the archive button and the archived tab popped out beside it
-/// (`WindowModel.archivedOut`), one group marked by the archive's line under both (`TabGroupLine`), open under the
-/// popped tab while it is selected, as a group's line is. With nothing popped out, the button alone, with no line. A
-/// press selects the popped tab at once (on mouse-down); it never reorders.
+/// The strip's far left (after the closed groups button, when shown), before the pinned tabs: the archive button and
+/// the archived tab popped out beside it (`WindowModel.archivedOut`), one group marked by the archive's line under both
+/// (`TabGroupLine`), open under the popped tab while it is selected, as a group's line is. With nothing popped out, the
+/// button alone, with no line. A press selects the popped tab at once (on mouse-down); it never reorders.
 private struct ArchiveCluster: View {
     let model: WindowModel
     /// The strip's, shared with `TabTrack`, so the selected tab's shape slides between them.
@@ -1278,7 +1301,8 @@ private struct TabListPopover: View {
 
 /// The archive button: a capsule in the archive's color with its `archivebox` icon, shown once the window has an
 /// archive (`WindowModel.archivedTabs`, or a tab popped out). A click opens the archived tabs' list
-/// (`ArchiveListPopover`). The tab strip shows it at its far left, the vertical tabs in their bottom row.
+/// (`ArchiveListPopover`). The tab strip shows it at its far left (after the closed groups button, when shown), the
+/// vertical tabs in their bottom row.
 struct ArchiveButton: View {
     let model: WindowModel
     /// Where the list's popover opens from the button.
@@ -1356,7 +1380,8 @@ private struct ArchiveListPopover: View {
                     }
                     .padding(.horizontal, 10)
                 }
-                .frame(height: min(320, CGFloat(matches.count) * (SidebarItemStyle.height + SidebarItemStyle.spacing)))
+                .frame(height: min(320, CGFloat(matches.count) * SidebarItemStyle.height
+                    + CGFloat(max(matches.count - 1, 0)) * SidebarItemStyle.spacing))
             }
         }
         // Vertical only: the rows' inset is inside the scroll view, so its scroller runs along the popover's edge.
