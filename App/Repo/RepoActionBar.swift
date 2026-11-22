@@ -244,6 +244,14 @@ enum FailureHints {
             case .forceRemoveWorktree, .forceRemoveSubmodule: "Remove Anyway"
             }
         }
+
+        /// A forced delete or removal: the toast's button is red.
+        var isDestructive: Bool {
+            switch self {
+            case .checkHostKey, .pull: false
+            case .forceDelete, .forceRemoveWorktree, .forceRemoveSubmodule: true
+            }
+        }
     }
 
     struct Hint {

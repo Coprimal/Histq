@@ -218,7 +218,7 @@ final class WindowModel {
         guard let tabID else { return appendToast(toast) }
         if tabID != selectedTabID { toast.repo = tabs.first { $0.id == tabID }?.title }
         if let action = toast.action {
-            toast.action = OperationToast.Action(title: action.title) { [weak self] in
+            toast.action = OperationToast.Action(title: action.title, destructive: action.destructive) { [weak self] in
                 self?.selectTab(id: tabID)
                 action.perform()
             }

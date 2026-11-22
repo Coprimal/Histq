@@ -13,6 +13,8 @@ struct OperationToast: Identifiable, Equatable {
     /// A button on the card ("Delete Anyway"); the toast closes when it is clicked.
     struct Action {
         let title: String
+        /// A red button ("Delete Anyway"), not the blue one.
+        var destructive = false
         let perform: @MainActor () -> Void
     }
 
@@ -226,7 +228,7 @@ private struct ToastCard: View {
                         dismiss()
                         action.perform()
                     }
-                    .buttonStyle(RowTextButtonStyle())
+                    .buttonStyle(RowTextButtonStyle(prominent: true, destructive: action.destructive))
                     .padding(.top, 4)
                 }
             }

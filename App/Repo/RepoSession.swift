@@ -5778,7 +5778,7 @@ final class RepoSession: Identifiable {
         self.failure = failure
         let hint = FailureHints.hint(for: failure)
         let action = hint.action.map { action in
-            OperationToast.Action(title: action.title) { [weak self] in
+            OperationToast.Action(title: action.title, destructive: action.isDestructive) { [weak self] in
                 guard let self else { return }
                 FailureHints.perform(action, for: failure, in: self)
             }
