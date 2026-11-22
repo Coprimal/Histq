@@ -1,4 +1,4 @@
-// An open workspace file (`*.histqworkspace`): its windows' membership, and everything capture needs to write the
+// An open workspace file (`*.histqws`): its windows' membership, and everything capture needs to write the
 // file back as it was read: the stored path strings, the repos and profiles in file order, the repos that did not
 // resolve, the graph views and the embedded profiles. The file is read and resolved off the main thread.
 import Foundation

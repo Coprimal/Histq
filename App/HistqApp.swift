@@ -1001,7 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: Workspaces
 
     /// A workspace file's extension.
-    private static let workspaceExtension = "histqworkspace"
+    private static let workspaceExtension = "histqws"
 
     /// The workspace file type the panels show.
     private static var workspaceType: UTType {

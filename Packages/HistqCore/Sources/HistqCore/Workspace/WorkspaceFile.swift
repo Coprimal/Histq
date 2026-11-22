@@ -1,4 +1,4 @@
-// A workspace file (`*.histqworkspace`): a working set of windows, their app tabs, the profiles those tabs use and each
+// A workspace file (`*.histqws`): a working set of windows, their app tabs, the profiles those tabs use and each
 // repo's graph view. Paths are stored twice: `path` relative to the file's folder and `home` in the `~/…` form, so
 // the file opens on another Mac or after a move. The app works with absolute paths: `resolved` maps the file to them,
 // `init(windows:…)` maps them back, reusing the stored strings of every path the file already had, so an unchanged

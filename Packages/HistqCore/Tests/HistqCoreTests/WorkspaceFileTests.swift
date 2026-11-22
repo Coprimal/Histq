@@ -106,7 +106,7 @@ struct WorkspaceFileTests {
     func versionOneDecodesVersionTwoIsRefused() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let file = try sandbox.writeFile("ws/team.histqworkspace", try Self.teamFile())
+        let file = try sandbox.writeFile("ws/team.histqws", try Self.teamFile())
         let read = try WorkspaceFile.read(file)
         #expect(read.isLossless)
         #expect(read.file.version == 1)
@@ -122,7 +122,7 @@ struct WorkspaceFileTests {
         #expect(read.file.profiles == [Self.work, Self.personal])
 
         // A profile written by hand, as in profiles.json.
-        let signed = try sandbox.writeFile("ws/signed.histqworkspace", """
+        let signed = try sandbox.writeFile("ws/signed.histqws", """
         { "version": 1, "windows": [ { "id": "\(Self.windowA.uuidString)", "tabs": [ {} ] } ], "repos": [],
           "profiles": [ { "id": "\(Self.work.id.uuidString)", "name": "Work", "color": "#3A8EE5",
                           "identity": { "name": "Me", "email": "me@work.invalid" },
@@ -135,7 +135,7 @@ struct WorkspaceFileTests {
             signing: .gpg(keyID: "ABCD1234"), signByDefault: true, ssh: .keyFile(path: "~/.ssh/id_work"),
             github: .init(login: "me"))])
 
-        let newer = try sandbox.writeFile("ws/newer.histqworkspace", #"{ "version": 2, "windows": [], "tiles": [] }"#)
+        let newer = try sandbox.writeFile("ws/newer.histqws", #"{ "version": 2, "windows": [], "tiles": [] }"#)
         #expect(throws: WorkspaceFile.FileError.unsupportedVersion(2)) { try WorkspaceFile.read(newer) }
     }
 
@@ -190,17 +190,17 @@ struct WorkspaceFileTests {
         let expected: [String: String]  // repo name → resolved (or missing) key
         switch move {
         case .together:
-            fileURL = try sandbox.writeFile("moved/ws/team.histqworkspace", try Self.teamFile())
+            fileURL = try sandbox.writeFile("moved/ws/team.histqws", try Self.teamFile())
             try sandbox.makeRepo("moved/repos/app")
             try sandbox.makeRepo("moved/repos/lib")
             expected = ["app": sandbox.key("moved/repos/app"), "lib": sandbox.key("moved/repos/lib")]
         case .fileAlone:
-            fileURL = try sandbox.writeFile("elsewhere/ws/team.histqworkspace", try Self.teamFile())
+            fileURL = try sandbox.writeFile("elsewhere/ws/team.histqws", try Self.teamFile())
             try sandbox.makeRepo("home/git/repos/app")
             try sandbox.makeRepo("home/git/repos/lib")
             expected = ["app": sandbox.key("home/git/repos/app"), "lib": sandbox.key("home/git/repos/lib")]
         case .neither:
-            fileURL = try sandbox.writeFile("lonely/ws/team.histqworkspace", try Self.teamFile())
+            fileURL = try sandbox.writeFile("lonely/ws/team.histqws", try Self.teamFile())
             expected = ["app": sandbox.key("home/git/repos/app"), "lib": sandbox.key("home/git/repos/lib")]
         }
 
@@ -241,7 +241,7 @@ struct WorkspaceFileTests {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
         // The README example: `null` values for optional keys.
-        let withNulls = try sandbox.writeFile("ws/nulls.histqworkspace", """
+        let withNulls = try sandbox.writeFile("ws/nulls.histqws", """
         { "version": 1,
           "windows": [ { "id": "\(Self.windowA.uuidString)",
             "tabs": [ { "path": "../repos/app", "home": "~/git/repos/app", "profile": "none", "alias": "App",
@@ -254,7 +254,7 @@ struct WorkspaceFileTests {
         #expect(try WorkspaceFile.read(withNulls).isLossless)
 
         // A later build's field on a tab.
-        let withUnknown = try sandbox.writeFile("ws/unknown.histqworkspace", """
+        let withUnknown = try sandbox.writeFile("ws/unknown.histqws", """
         { "version": 1,
           "windows": [ { "id": "\(Self.windowA.uuidString)",
             "tabs": [ { "path": "../repos/app", "home": "~/git/repos/app", "badge": "beta" } ] } ],
@@ -267,7 +267,7 @@ struct WorkspaceFileTests {
     func writeRefusesEmpty() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let target = sandbox.url("empty.histqworkspace")
+        let target = sandbox.url("empty.histqws")
         #expect(throws: WorkspaceFile.FileError.empty) { try WorkspaceFile(windows: []).write(to: target) }
         let emptyWindow = WorkspaceFile(windows: [.init(id: Self.windowA, tabs: [.init()]), .init(id: Self.windowB, tabs: [])])
         #expect(throws: WorkspaceFile.FileError.empty) { try emptyWindow.write(to: target) }
@@ -279,8 +279,8 @@ struct WorkspaceFileTests {
     func writeThroughSymlink() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let target = try sandbox.writeFile("team/ws/team.histqworkspace", "{}")
-        let link = try sandbox.makeLink("desk/team.histqworkspace", to: target)
+        let target = try sandbox.writeFile("team/ws/team.histqws", "{}")
+        let link = try sandbox.makeLink("desk/team.histqws", to: target)
         let file = try JSONDecoder().decode(WorkspaceFile.self, from: Data(try Self.teamFile().utf8))
 
         try file.write(to: link)
@@ -289,7 +289,7 @@ struct WorkspaceFileTests {
         #expect(try manager.attributesOfItem(atPath: link.path)[.type] as? FileAttributeType == .typeSymbolicLink)
         #expect(try manager.attributesOfItem(atPath: target.path)[.posixPermissions] as? Int == 0o600)
         #expect(try manager.contentsOfDirectory(atPath: target.deletingLastPathComponent().path)
-            == ["team.histqworkspace"])
+            == ["team.histqws"])
         let text = try String(contentsOf: target, encoding: .utf8)
         let keys = try ["\"profiles\"", "\"repos\"", "\"version\"", "\"windows\""]
             .map { try #require(text.range(of: $0)?.lowerBound) }
@@ -302,12 +302,12 @@ struct WorkspaceFileTests {
     func symlinkUsesTargetFolder() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let target = try sandbox.writeFile("team/ws/team.histqworkspace", """
+        let target = try sandbox.writeFile("team/ws/team.histqws", """
         { "version": 1, "windows": [ { "id": "\(Self.windowA.uuidString)", "tabs": [ { "path": "../repos/app" } ] } ],
           "repos": [], "profiles": [] }
         """)
         try sandbox.makeRepo("team/repos/app")
-        let link = try sandbox.makeLink("desk/team.histqworkspace", to: target)
+        let link = try sandbox.makeLink("desk/team.histqws", to: target)
 
         let resolved = try WorkspaceFile.read(link).file.resolved(fileURL: link, homeURL: sandbox.home,
                                                                   isRepository: SavedSession.isRepository)
@@ -326,7 +326,7 @@ struct WorkspaceFileTests {
         defer { sandbox.remove() }
         try FileManager.default.createDirectory(at: sandbox.url("real"), withIntermediateDirectories: true)
         _ = try sandbox.makeLink("linked", to: sandbox.url("real"))
-        let fileURL = try sandbox.writeFile("linked/ws/team.histqworkspace", "{}")
+        let fileURL = try sandbox.writeFile("linked/ws/team.histqws", "{}")
         try sandbox.makeRepo("linked/repos/app")
 
         func stored(_ absolute: String) -> String? {
@@ -349,7 +349,7 @@ struct WorkspaceFileTests {
     func symlinkedRepoKeepsLexicalPath() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let fileURL = try sandbox.writeFile("team/ws/team.histqworkspace", "{}")
+        let fileURL = try sandbox.writeFile("team/ws/team.histqws", "{}")
         try sandbox.makeRepo("elsewhere/app")
         _ = try sandbox.makeLink("team/repos/app", to: sandbox.url("elsewhere/app"))
 
@@ -369,7 +369,7 @@ struct WorkspaceFileTests {
     func saveAsRebasesUnresolvedEntries() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let oldURL = try sandbox.writeFile("home/old/ws/team.histqworkspace", """
+        let oldURL = try sandbox.writeFile("home/old/ws/team.histqws", """
         { "version": 1,
           "windows": [ { "id": "\(Self.windowA.uuidString)",
             "tabs": [ { "path": "../repos/app", "home": "~/stale/app" },
@@ -387,7 +387,7 @@ struct WorkspaceFileTests {
         #expect(Set(resolved.carried.keys) == [sandbox.key("home/git/lost")])
 
         // One level deeper than the old file, so every relative path changes.
-        let newURL = sandbox.url("home/new/deep/team.histqworkspace")
+        let newURL = sandbox.url("home/new/deep/team.histqws")
         let rebased = WorkspaceFile.rebased(originals: resolved.originals, missing: resolved.missing,
                                             carried: resolved.carried, fileURL: newURL, homeURL: sandbox.home)
         let saved = WorkspaceFile(windows: resolved.windows, views: resolved.views, profiles: [],
@@ -411,11 +411,11 @@ struct WorkspaceFileTests {
     func identityKeyIsStable() throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
-        let file = sandbox.url("team.histqworkspace")
+        let file = sandbox.url("team.histqws")
         let before = WorkspaceFile.identityKey(for: file)
         try Data("{}".utf8).write(to: file)
         let after = WorkspaceFile.identityKey(for: file)
-        let link = sandbox.url("link.histqworkspace")
+        let link = sandbox.url("link.histqws")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
         #expect(before == after)
         #expect(WorkspaceFile.identityKey(for: link) == after)

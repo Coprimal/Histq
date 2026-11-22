@@ -16,7 +16,7 @@
 	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
-	<!-- Workspace files (*.histqworkspace): JSON, opened by Histq. -->
+	<!-- Workspace files (*.histqws): JSON, opened by Histq. -->
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -33,7 +33,7 @@
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>histqworkspace</string>
+					<string>histqws</string>
 				</array>
 			</dict>
 		</dict>
