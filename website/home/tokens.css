@@ -28,6 +28,7 @@
   --lane-4: oklch(53% 0.19 356);
   --lane-5: oklch(51% 0.1 205);
   --lane-6: oklch(49% 0.17 302);
+  --lane-7: oklch(50% 0.13 135);
   --lane-ink: oklch(22% 0.032 258);
   --color-add: oklch(46% 0.12 150); --color-add-bg: oklch(92% 0.045 150); --color-del: oklch(50% 0.17 25); --color-del-bg: oklch(93% 0.03 25);
 
@@ -39,7 +40,7 @@
   --tracking-display: -0.03em;
 
   /* the graph rail */
-  --rail-pad: 22px; --lane-gap: 18px; --rail-w: 152px; --line: 3px; --node: 18px; --cap: 64px; --row-h: 44px;
+  --rail-pad: 22px; --lane-gap: 18px; --rail-w: 170px; --line: 3px; --node: 18px; --cap: 64px; --row-h: 44px;
 }
-@media (max-width: 60rem) { :root { --lane-gap: 12px; --rail-pad: 12px; --rail-w: 104px; --sec-pad: 80px; --sec-pad-s: 64px; } }
-@media (max-width: 40rem) { :root { --lane-gap: 11px; --rail-pad: 8px; --rail-w: 88px; --sec-pad: 48px; --sec-pad-s: 40px; --node: 14px; --row-h: 40px; } }
+@media (max-width: 60rem) { :root { --lane-gap: 12px; --rail-pad: 12px; --rail-w: 116px; --sec-pad: 80px; --sec-pad-s: 64px; } }
+@media (max-width: 40rem) { :root { --lane-gap: 11px; --rail-pad: 8px; --rail-w: 99px; --sec-pad: 48px; --sec-pad-s: 40px; --node: 14px; --row-h: 40px; } }

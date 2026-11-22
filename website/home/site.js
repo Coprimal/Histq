@@ -140,6 +140,28 @@
     roving($('[role="tablist"]', pr), tabs, set);
   }
 
+  /* Workspaces: a file opens into its window; the wire runs from the chosen file. */
+  const ws = $(".ws");
+  if (ws) {
+    const tabs = $$("[data-ws-set]", ws);
+    const shot = $(".swapshot", ws);
+    const files = $(".ws__files", ws);
+    const wire = () => {
+      const t = tabs.find((b) => b.getAttribute("aria-selected") === "true") || tabs[0];
+      files.style.setProperty("--wy", `${t.offsetTop + t.offsetHeight / 2}px`);
+      files.style.setProperty("--fc", getComputedStyle(t).getPropertyValue("--fc"));
+    };
+    const set = (t) => {
+      choose(tabs, t, "aria-selected");
+      ws.dataset.ws = shot.dataset.show = t.dataset.wsSet;
+      wire();
+    };
+    tabs.forEach((t) => t.addEventListener("click", () => set(t)));
+    roving($('[role="tablist"]', ws), tabs, set);
+    wire();
+    addEventListener("resize", wire);
+  }
+
   /* Layouts: the panes rearrange, then the real window crossfades in. */
   const lay = $(".lay");
   if (lay) {
