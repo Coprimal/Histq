@@ -285,4 +285,109 @@ struct AutoStashTests {
         #expect(try fx.read("collide.txt") == "theirs\n")
         #expect(try await fx.git(["show", "\(hash)^3:collide.txt"]) == "mine")
     }
+
+    // MARK: Rebase with stashed changes: it goes through, or nothing changes.
+
+    /// From a clean tree: `topic` (from main) adds topic.txt, then main gets `main` (path → content) as one commit;
+    /// ends on topic.
+    func topicBehindMain(_ fx: Repo, main: [String: String]) async throws {
+        try await fx.clean()
+        try await fx.git(["switch", "-q", "-c", "topic"])
+        try fx.write("topic\n", to: "topic.txt")
+        try await fx.git(["add", "topic.txt"])
+        try await fx.git(["commit", "-q", "-m", "Add topic.txt"])
+        try await fx.git(["switch", "-q", "main"])
+        for (path, text) in main { try fx.write(text, to: path) }
+        try await fx.git(["add", "--"] + Array(main.keys))
+        try await fx.git(["commit", "-q", "-m", "Main change"])
+        try await fx.git(["switch", "-q", "topic"])
+    }
+
+    /// `rebase` must throw `rebaseWouldConflict` with these paths and kind.
+    func expectRolledBack(_ fx: Repo, paths: [String], localChanges: Bool) async {
+        await #expect(throws: GitOperationError.rebaseWouldConflict(paths: paths, localChanges: localChanges)) {
+            try await fx.ops.rebase(onto: "main", autostash: true)
+        }
+    }
+
+    @Test("(g) a rebase with staged, unstaged and untracked changes moves the branch and puts them all back")
+    func rebaseAutostashClean() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        try await topicBehindMain(fx, main: ["CHANGELOG.md": "main changelog\n"])
+        try fx.write("staged readme\n", to: "README.md")
+        try await fx.git(["add", "README.md"])
+        try fx.write("unstaged app\n", to: "src/app.swift")
+        try fx.write("scratch\n", to: "scratch-local.txt")
+        let staged = try await fx.git(["diff", "--cached", "--binary"])
+        let unstaged = try await fx.git(["diff", "--binary"])
+        let older = try await fx.stashes()
+        let original = try await fx.git(["rev-parse", "HEAD"])
+
+        try await fx.ops.rebase(onto: "main", autostash: true)
+        #expect(try await fx.git(["rev-parse", "HEAD~1"]) == (try await fx.git(["rev-parse", "main"])))
+        #expect(try fx.read("topic.txt") == "topic\n")
+        #expect(try await fx.git(["diff", "--cached", "--binary"]) == staged)
+        #expect(try await fx.git(["diff", "--binary"]) == unstaged)
+        #expect(try fx.read("scratch-local.txt") == "scratch\n")
+        #expect(try await fx.stashes() == older)
+        #expect(try fx.journal.load().nextUndo?.kind == .rebase)
+
+        // As after a Stash & Checkout, undo needs the tree the rebase left: then it takes the branch back.
+        try await fx.git(["reset", "-q", "--hard"])
+        #expect(try await fx.ops.undo().kind == .rebase)
+        #expect(try await fx.git(["rev-parse", "HEAD"]) == original)
+    }
+
+    @Test("(h) a rebase whose commit does not replay cleanly is aborted: branch, changes and stashes as before")
+    func rebaseAutostashReplayConflict() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        try await topicBehindMain(fx, main: ["topic.txt": "main\n"])
+        try fx.write("staged readme\n", to: "README.md")
+        try await fx.git(["add", "README.md"])
+        try fx.write("unstaged app\n", to: "src/app.swift")
+        let before = try await fx.state()
+        let older = try await fx.stashes()
+
+        await expectRolledBack(fx, paths: ["topic.txt"], localChanges: false)
+        #expect(try await fx.state() == before)
+        #expect(try await fx.stashes() == older)
+        #expect(try await fx.unmerged().isEmpty)
+        #expect(try fx.journal.load().nextUndo == nil)
+    }
+
+    @Test("(i) a rebase whose local changes conflict with the rebased branch is reset: everything as before")
+    func rebaseAutostashReapplyConflict() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        try await topicBehindMain(fx, main: ["README.md": "main readme\n"])
+        try fx.write("local readme\n", to: "README.md")
+        try fx.write("staged app\n", to: "src/app.swift")
+        try await fx.git(["add", "src/app.swift"])
+        let before = try await fx.state()
+        let older = try await fx.stashes()
+
+        await expectRolledBack(fx, paths: ["README.md"], localChanges: true)
+        #expect(try await fx.state() == before)
+        #expect(try fx.read("README.md") == "local readme\n")
+        #expect(try await fx.stashes() == older)
+        #expect(try fx.journal.load().nextUndo == nil)
+    }
+
+    @Test("(j) a rebase onto a branch that tracks one of the untracked files fails with everything as before")
+    func rebaseAutostashUntrackedCollision() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        try await topicBehindMain(fx, main: ["collide.txt": "theirs\n"])
+        try fx.write("mine\n", to: "collide.txt")
+        try fx.write("local readme\n", to: "README.md")
+        let before = try await fx.state()
+        let older = try await fx.stashes()
+
+        await #expect(throws: (any Error).self) { try await fx.ops.rebase(onto: "main", autostash: true) }
+        #expect(try await fx.state() == before)
+        #expect(try fx.read("collide.txt") == "mine\n")
+        #expect(try await fx.stashes() == older)
+    }
 }

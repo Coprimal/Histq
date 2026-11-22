@@ -9,6 +9,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Move Tab to Window: move a tab to another window from the tab's menu, the command palette or by dragging it onto another window. It keeps its terminal, AI run and graph view. One tab moves at a time, and not into a window where its repository is already open; a worktree box or a tab group dropped outside its window snaps back.
 - Closed tab groups: Close Group now hides the group with its tabs, and a grid button before the archive button lists the window's closed groups (color, name, tab count). Click one to open it again at the end of the tabs; right-click it to open it, open it in a new window, delete it, or open it on one of its tabs. Closed groups are restored with the session.
 
+- Rebase with uncommitted changes: Rebase … onto … asks Stash & Rebase or Cancel (or follows Settings › General › Uncommitted changes). Your changes are stashed, the branch is rebased and the changes come back; if a commit would not replay cleanly or your changes would conflict with the rebased branch, nothing is changed and the failure names the conflicted files. Untracked files stay where they are.
+
 ### Changed
 - Fade Other Worktrees is off by default. When it is on, selecting a row of another worktree lights only that worktree: every other one fades, the current tab's own commits and WIP row too.
 - A branch checked out in another worktree shows the worktree icon on its graph badge, and keeps it when the badge is cut short. Worktrees use a folder-with-branch icon in the graph, the sidebar and the WIP panel.

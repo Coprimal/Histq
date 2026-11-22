@@ -718,8 +718,10 @@ final class RepoSession: Identifiable {
         /// git's config decide. A fast-forward-only merge into `checkoutFirst` that has diverged from `revision` is
         /// refused before the checkout.
         case merge(String, checkoutFirst: String?, mode: GitOperations.MergeMode?)
-        /// Rebases the current branch onto `upstream`; `checkoutFirst` switches to that branch first.
-        case rebase(onto: String, checkoutFirst: String?)
+        /// Rebases the current branch onto `upstream`; `checkoutFirst` switches to that branch first. `autostash`:
+        /// the local changes are stashed and put back, and any conflict leaves everything as it was (see
+        /// `GitOperations.rebase(onto:autostash:)`).
+        case rebase(onto: String, checkoutFirst: String?, autostash: Bool = false)
         /// Fast-forwards the local branch to a full ref (`refs/heads/x`, `refs/remotes/origin/x`).
         case fastForward(String, to: String)
         case cherryPick(String, mainline: Int?)
@@ -5431,9 +5433,9 @@ final class RepoSession: Identifiable {
                 try await ops.checkout(branch: checkoutFirst)
             }
             try await ops.merge(revision, mode: mode)
-        case .rebase(let upstream, let checkoutFirst):
+        case .rebase(let upstream, let checkoutFirst, let autostash):
             if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
-            try await ops.rebase(onto: upstream)
+            try await ops.rebase(onto: upstream, autostash: autostash)
         case .fastForward(let branch, let source): try await ops.fastForward(branch, to: source)
         case .cherryPick(let commit, let mainline): try await ops.cherryPick([commit], mainline: mainline)
         case .revert(let commit, let mainline): try await ops.revert(commit, mainline: mainline)
@@ -6027,6 +6029,12 @@ final class RepoSession: Identifiable {
             case .notAWorktree(let path): "\(path) is not a worktree of this repository."
             case .mainWorktree: "The main worktree cannot be removed."
             case .currentWorktree: "This tab's own worktree cannot be removed from here."
+            case .rebaseWouldConflict(let paths, let localChanges):
+                (localChanges ? "Your uncommitted changes would conflict with the rebased branch"
+                    : "The rebase would stop on conflicts")
+                    + (paths.isEmpty ? "" : " in " + ListFormatter.localizedString(
+                        byJoining: paths.count > 5 ? Array(paths.prefix(4)) + ["\(paths.count - 4) other files"] : paths))
+                    + ", so nothing was changed: the branch and your changes are as they were."
             }
         case let error as SubmoduleOperationError:
             switch error {

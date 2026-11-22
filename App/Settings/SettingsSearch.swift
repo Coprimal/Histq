@@ -139,7 +139,7 @@ struct SettingsSearchItem: Identifiable {
         .init(section: .general, group: "Pull and fetch", title: "Pull",
               keywords: ["fast-forward", "rebase", "merge", "toolbar"]),
         .init(section: .general, group: "Pull and fetch", title: "Uncommitted changes",
-              keywords: ["stash", "autostash", "checkout", "ask", "always", "never"]),
+              keywords: ["stash", "autostash", "checkout", "rebase", "ask", "always", "never"]),
         .init(section: .general, group: "Pull and fetch", title: "Fetch automatically",
               keywords: ["auto fetch", "interval", "minutes", "remotes"]),
         .init(section: .general, group: "Pull and fetch", title: "Prune on fetch",
