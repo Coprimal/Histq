@@ -811,15 +811,15 @@ private struct PRHeaderCard: View {
                         .accessibilityHidden(true)
                     if let title {
                         Text(title)
-                            .font(.body.weight(.semibold))
+                            .font(.title3.weight(.semibold))
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .help(title)
                     } else {
-                        SkeletonLine(width: 180, height: 12)
+                        SkeletonLine(width: 180, height: 14)
                     }
                     Text("#\(number)")
-                        .font(.body.weight(.semibold))
+                        .font(.title3.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)

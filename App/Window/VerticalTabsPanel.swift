@@ -467,8 +467,10 @@ private struct OverlayScroller: NSViewRepresentable {
 }
 
 /// The panel's bottom: the archived tab popped out (`WindowModel.archivedOut`) as a row indented as a group's, then the
-/// archive button (once the window has an archive), New tab and the tab list in one row. The archive's line runs down
-/// the popped row's indent to the archive button, marking the two as one group, as a group's line does under its name.
+/// closed groups button (once the window has closed groups), the archive button (once the window has an archive), New
+/// tab and the tab list in one row. The archive's line runs down the popped row's indent to the archive button, marking
+/// the two as one group, as a group's line does under its name; with the closed groups button before the archive
+/// button, the row and the line move right by that button and its gap (`archiveOffset`).
 /// With nothing popped out, the button row alone, with no line. A press selects the popped row at once (on
 /// mouse-down); it never reorders.
 private struct VerticalArchiveFooter: View {
@@ -486,9 +488,13 @@ private struct VerticalArchiveFooter: View {
                     // Room for the selected row's flares above and below, as the list has inside its scroll view.
                     .padding(.vertical, TabStripMetrics.flare)
             }
-            // `TabStripButtons` pads itself by `rowInset`: the archive button takes the same inset on its leading side,
-            // and the spacing gives back the other one, so the three buttons stand `gap` apart.
+            // `TabStripButtons` pads itself by `rowInset`: the closed groups and archive buttons take the same inset on
+            // their leading side, and the spacing gives back the other one, so the buttons stand `gap` apart.
             HStack(spacing: TabStripMetrics.gap - TabStripMetrics.rowInset) {
+                if !model.closedGroups.isEmpty {
+                    ClosedGroupsButton(model: model, popoverEdge: .trailing, height: SidebarItemStyle.height)
+                        .padding(.leading, TabStripMetrics.rowInset)
+                }
                 if !model.archivedTabs.isEmpty || model.archivedOut != nil {
                     ArchiveButton(model: model, popoverEdge: .trailing, height: SidebarItemStyle.height)
                         .padding(.leading, TabStripMetrics.rowInset)
@@ -505,6 +511,12 @@ private struct VerticalArchiveFooter: View {
         .animation(reduceMotion ? nil : Motion.standard, value: model.selectedTabID)
     }
 
+    /// How far the archive button stands right of the row's start: the closed groups button and its `gap` when shown.
+    /// The popped row and the archive's line move by as much, so the line keeps meeting the archive button.
+    private var archiveOffset: CGFloat {
+        model.closedGroups.isEmpty ? 0 : ClosedGroupsButton.width(height: SidebarItemStyle.height) + TabStripMetrics.gap
+    }
+
     /// The archive's line, down the middle of the popped row's indent from its top to the archive button's edge (the
     /// button's center lies right of the indent, so the line keeps to the indent as a group's does). The exact x and
     /// end are tuned against a QA shot. Decorative.
@@ -519,7 +531,8 @@ private struct VerticalArchiveFooter: View {
             // The row, its flares' room under it, then the button row's `rowInset` above the archive button.
             .frame(width: TabStripMetrics.groupLine,
                    height: SidebarItemStyle.height + TabStripMetrics.flare + TabStripMetrics.rowInset + dip)
-            .offset(x: TabStripMetrics.rowInset + (VerticalTabsMetrics.groupIndent - TabStripMetrics.groupLine) / 2,
+            .offset(x: archiveOffset + TabStripMetrics.rowInset
+                        + (VerticalTabsMetrics.groupIndent - TabStripMetrics.groupLine) / 2,
                     y: TabStripMetrics.flare)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
@@ -540,9 +553,9 @@ private struct VerticalArchiveFooter: View {
             .background(MiddleClickCatcher { TabMenu.middleClick(tab.id, model) })
             // Outside the list's scroll view, so it needs its own: a press on the row never drags the window.
             .background(WindowDragBlocker())
-            // Lined up with a group's rows in the list, right of the archive's line; none on the trailing side,
-            // where the selected row meets the sheet.
-            .padding(.leading, TabStripMetrics.rowInset + VerticalTabsMetrics.groupIndent)
+            // Lined up with a group's rows in the list (moved by `archiveOffset`), right of the archive's line; none on
+            // the trailing side, where the selected row meets the sheet.
+            .padding(.leading, archiveOffset + TabStripMetrics.rowInset + VerticalTabsMetrics.groupIndent)
             .gesture(press(tab.id))
             .contextMenu { MenuEntriesView(entries: TabMenu.entries(for: tab.id, model: model, vertical: true)) }
             .id(tab.id)

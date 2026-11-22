@@ -394,13 +394,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return entry
     }
 
-    /// Saves the session when a window's tabs, its selected tab, a tab's commit or profile, or a manual group change.
-    /// Re-armed after each change, as long as the window is open.
+    /// Saves the session when a window's tabs, its selected tab, a tab's commit or profile, a manual group or its
+    /// closed groups change. Re-armed after each change, as long as the window is open.
     private func trackSession(of model: WindowModel) {
         withObservationTracking {
             _ = model.savedTabs
             _ = model.selectedIndex
             _ = model.savedTabGroups
+            _ = model.savedClosedGroups
         } onChange: { [weak self, weak model] in
             // Called before the change lands, off any isolation: re-arm on the main actor once it has.
             Task { @MainActor in
@@ -439,7 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         var placed = (loaded?.session.windows ?? []).map { saved in
             let entry = newWindow(frame: saved.frame)
             entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded?.missing ?? [],
-                                groups: saved.manualTabGroups)
+                                groups: saved.manualTabGroups, closedGroups: saved.closedTabGroups)
             return Placed(entry: entry, group: saved.group, tabIndex: saved.tabIndex,
                           isSelectedInGroup: saved.isSelectedInGroup)
         }
@@ -492,7 +493,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             entry.model.restore(window.tabs, selected: selectedTab(of: window, path: place?.selectedPath,
                                                                     collapsed: collapsed),
-                                missing: resolved.missing, groups: groups, repoKeys: repoKeys)
+                                missing: resolved.missing, groups: groups, closedGroups: window.closedTabGroups,
+                                repoKeys: repoKeys)
             return Placed(entry: entry, group: place?.group, tabIndex: place?.tabIndex ?? 0,
                           isSelectedInGroup: place?.isSelectedInGroup ?? true)
         }
@@ -577,7 +579,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 windows.append(SavedWindow(
                     x: window.frame.minX, y: window.frame.minY, width: window.frame.width, height: window.frame.height,
                     group: group, tabIndex: tabIndex, isSelectedInGroup: isSelectedInGroup,
-                    tabs: model.savedTabs, selectedTab: model.selectedIndex, manualTabGroups: model.savedTabGroups))
+                    tabs: model.savedTabs, selectedTab: model.selectedIndex, manualTabGroups: model.savedTabGroups,
+                    closedTabGroups: model.savedClosedGroups))
             }
         }
         var layouts: [WorkspaceLayout] = []
@@ -645,9 +648,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             WorkspaceFile.LiveWindow(
                 id: entry.model.windowID,
                 tabGroups: entry.model.savedTabGroups?.map { .init(id: $0.id, name: $0.name, color: $0.color) },
-                tabs: entry.model.savedTabs)
+                tabs: entry.model.savedTabs, closedTabGroups: entry.model.savedClosedGroups)
         }
-        let used = Set(windows.flatMap { $0.tabs.compactMap { $0.profile?.profileID } })
+        // Every tab's, those in closed groups too.
+        let allTabs = windows.flatMap { $0.tabs + ($0.closedTabGroups ?? []).flatMap(\.tabs) }
+        let used = Set(allTabs.compactMap { $0.profile?.profileID })
         let store = ProfileLibrary.shared.store
         let profiles = used.compactMap { id -> Profile? in
             let library = store?.profile(id: id)
@@ -655,9 +660,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let library, let baseline = workspace.profileBaseline[id], library != baseline else { return embedded }
             return library
         }
-        // The views of the tabs' repos (archived ones too); a repo with no view yet gets no entry, so it opens again
-        // from its global view.
-        let paths = Set(windows.flatMap { $0.tabs.compactMap(\.path) }.map(WorkspaceFile.standardized))
+        // The views of the tabs' repos (archived and closed ones too); a repo with no view yet gets no entry, so it
+        // opens again from its global view.
+        let paths = Set(allTabs.compactMap(\.path).map(WorkspaceFile.standardized))
         let views = workspace.views.filter { paths.contains(WorkspaceFile.standardized($0.key)) }
         return WorkspaceFile(windows: windows, views: views, profiles: profiles, carried: carried,
                              originals: originals, repoOrder: workspace.repoOrder, profileOrder: workspace.profileOrder,

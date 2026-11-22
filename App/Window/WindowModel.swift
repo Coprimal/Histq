@@ -74,7 +74,7 @@ final class WindowModel {
         let saved: SavedTab
         let repoKey: String?
         let group: Group?
-        /// The tabs closed together (Close Group) share one, so one ⇧⌘T reopens them all; nil for a tab closed alone.
+        /// The tabs closed together (Delete Group) share one, so one ⇧⌘T reopens them all; nil for a tab closed alone.
         let batch: UUID?
         let index: Int
     }
@@ -88,6 +88,10 @@ final class WindowModel {
     /// They have no `Tab` and no session; `openArchived(at:)` pops one out as the last of `tabs`. Observed: the session
     /// saves them (`savedTabs`).
     private(set) var archivedTabs: [SavedTab] = []
+    /// The window's closed groups (a group's Close Group), most recently closed first: each with its tabs, saved with
+    /// `tabGroup`, `pinned` and `archived` nil. They have no `Tab` and no session; `openClosedGroup` opens one again.
+    /// Observed: the session saves them (`savedClosedGroups`).
+    private(set) var closedGroups: [SavedClosedTabGroup] = []
     private(set) var selectedTabID: Tab.ID? {
         didSet {
             expandSelectedGroup()
@@ -733,12 +737,19 @@ final class WindowModel {
     /// selected tab opens, as a click would show it. Not `openTab`: no recent-repos update, and the other tabs get their
     /// session only when selected. The archived entries go back to the archive, but the selected one: it is popped
     /// out again, last and selected. `groups` is the window's manual group table; a tab's group not in it is dropped,
-    /// as is an entry no tab is in. `repoKeys` (`RepoGroupKey` by repo path, read with a workspace file) are set before
-    /// the tabs are put in order, so the later `applyRepoKeys` finds them equal and changes nothing.
+    /// as is an entry no tab is in. `closedGroups` are the window's closed groups; one with no repo tab is dropped.
+    /// `repoKeys` (`RepoGroupKey` by repo path, read with a workspace file) are set before the tabs are put in order,
+    /// so the later `applyRepoKeys` finds them equal and changes nothing.
     func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>, groups: [SavedTabGroup]? = nil,
-                 repoKeys: [String: String] = [:]) {
+                 closedGroups: [SavedClosedTabGroup]? = nil, repoKeys: [String: String] = [:]) {
         guard !saved.isEmpty else { return }
         welcomes.removeAll()
+        self.closedGroups = (closedGroups ?? []).compactMap { group in
+            guard group.tabs.contains(where: { $0.path != nil }) else { return nil }
+            var group = group
+            group.color = min(max(group.color, 0), 8)
+            return group
+        }
         var entries: [SavedTab] = []
         var popped: SavedTab?
         var selectedEntry: Int?
@@ -805,6 +816,11 @@ final class WindowModel {
         return saved.isEmpty ? nil : saved
     }
 
+    /// The closed groups as the session saves them; nil when there is none. Observable, as `savedTabs`.
+    var savedClosedGroups: [SavedClosedTabGroup]? {
+        closedGroups.isEmpty ? nil : closedGroups
+    }
+
     /// One tab as the session saves it (`savedTabs`), and as ⇧⌘T reopens it.
     private func saved(_ tab: Tab) -> SavedTab {
         let path = tab.repoURL?.path
@@ -864,9 +880,9 @@ final class WindowModel {
     }
 
     /// Closes a tab; when it was the selected one, its neighbor is selected. Returns false when no tab is left (the
-    /// caller closes the window). The popped-out archived tab goes back to the archive. A window whose archive is not
-    /// empty does not close when its last repo tab closes: a Welcome tab takes its place, so the archive stays
-    /// reachable. Closing that lone Welcome tab closes the window.
+    /// caller closes the window). The popped-out archived tab goes back to the archive. A window whose archive or
+    /// closed groups are not empty does not close when its last repo tab closes: a Welcome tab takes its place, so they
+    /// stay reachable. Closing that lone Welcome tab closes the window.
     func closeTab(id: Tab.ID) -> Bool {
         closeTab(id: id, archiving: false)
     }
@@ -879,8 +895,8 @@ final class WindowModel {
         // Welcome tab to keep reachable.
         if tabs.count == 1, wasWelcome || (archivedTabs.isEmpty && !archiving && !tabs[index].archived) { willEmpty() }
         remove(at: index, archiving: archiving)
-        // A lone Welcome tab still closes the window (⌘W), its archive with it.
-        if tabs.isEmpty, !archivedTabs.isEmpty, !wasWelcome {
+        // A lone Welcome tab still closes the window (⌘W), its archive and closed groups with it.
+        if tabs.isEmpty, !archivedTabs.isEmpty || !closedGroups.isEmpty, !wasWelcome {
             let welcome = Tab()
             tabs = [welcome]
             selectedTabID = welcome.id
@@ -926,7 +942,8 @@ final class WindowModel {
 
     /// A multi-selection's menu › Close Tabs: closes the tabs `ids`, pinned ones too, left to right (so ⇧⌘T, last
     /// closed first, puts each back at its index); the multi-selection ends. Returns false when no tab is left (the
-    /// caller closes the window): when they are every tab, a Welcome tab takes their place if the archive is not empty.
+    /// caller closes the window): when they are every tab, a Welcome tab takes their place if the archive or the closed
+    /// groups are not empty.
     func closeTabs(_ ids: Set<Tab.ID>) -> Bool {
         let open = closeTabs(ids, batch: nil)
         clearSelection()
@@ -952,7 +969,7 @@ final class WindowModel {
         }
         // After the removals: a popped-out archived tab in the set has just gone to the archive.
         if tabs.isEmpty {
-            guard !archivedTabs.isEmpty else {
+            guard !archivedTabs.isEmpty || !closedGroups.isEmpty else {
                 selectedTabID = nil
                 return false
             }
@@ -974,8 +991,8 @@ final class WindowModel {
     }
 
     /// A worktree removed from another tab (its sidebar or graph menu): its tabs in this window close, and ⇧⌘T forgets
-    /// them, as its folder is gone, and so does the archive (a popped-out tab of that worktree included). The window's
-    /// last tab stays (it shows "Repo not found").
+    /// them, as its folder is gone, and so do the archive (a popped-out tab of that worktree included) and the closed
+    /// groups (a group left with no repo tab goes). The window's last tab stays (it shows "Repo not found").
     private func closeRemovedWorktreeTabs(_ path: String) {
         // The folder is gone: its parent's symlinks are resolved (git's `/private/tmp/…` is a tab's `/tmp/…`).
         func key(_ url: URL) -> String {
@@ -989,12 +1006,18 @@ final class WindowModel {
         // After the loop: a popped-out tab of that worktree was just stowed, and the archive forgets it too.
         archivedTabs.removeAll { $0.path.map { key(URL(filePath: $0)) } == removed }
         closedTabs.removeAll { $0.saved.path.map { key(URL(filePath: $0)) } == removed }
+        let kept = closedGroups.compactMap { group -> SavedClosedTabGroup? in
+            var group = group
+            group.tabs.removeAll { $0.path.map { key(URL(filePath: $0)) } == removed }
+            return group.tabs.contains { $0.path != nil } ? group : nil
+        }
+        if kept != closedGroups { closedGroups = kept }
     }
 
     /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens, with its
     /// manual group and `batch`. The popped-out archived tab, or any tab when `archiving`, goes to the archive's front
-    /// instead (unpinned, in no group); with `remembering` false (Move Group to New Window) it goes nowhere. A manual
-    /// group left with no tab is dropped. The tab leaves the multi-selection.
+    /// instead (unpinned, in no group); with `remembering` false (Move Group to New Window, Close Group) it goes
+    /// nowhere. A manual group left with no tab is dropped. The tab leaves the multi-selection.
     private func remove(at index: Int, archiving: Bool = false, batch: UUID? = nil, remembering: Bool = true) {
         let tab = tabs[index]
         if !remembering {
@@ -1030,7 +1053,7 @@ final class WindowModel {
     /// ⇧⌘T: reopens the last closed repo tab at its index, back in its worktree box and its manual group (recreated,
     /// same id, name and color, when it is gone; `normalize`), with its profile, commit, alias, emoji and pin, and
     /// selects it. A repo open again in another tab meanwhile is selected instead, and one in the archive pops out.
-    /// Tabs closed together (Close Group) all come back in one step (`reopenClosedBatch`).
+    /// Tabs closed together (Delete Group) all come back in one step (`reopenClosedBatch`).
     func reopenClosedTab() {
         if let batch = closedTabs.last?.batch { return reopenClosedBatch(batch) }
         guard let closed = closedTabs.popLast(), let path = closed.saved.path else { return }
@@ -1577,14 +1600,43 @@ final class WindowModel {
         clearSelection()
     }
 
-    /// The group `id` holds every normal tab of the window (pinned ones included): Close Group and Move Group to New
+    /// The group `id` holds every normal tab of the window (pinned ones included): Delete Group and Move Group to New
     /// Window are disabled, as no tab would be left.
     func groupHoldsAllNormalTabs(_ id: UUID) -> Bool {
         normalEnd > 0 && (0..<normalEnd).allSatisfy { tabs[$0].groupID == id }
     }
 
-    /// The popover's Close Group: closes the group's tabs as one batch, which one ⇧⌘T reopens whole.
-    func closeGroup(_ id: UUID) {
+    /// The popover's Delete Group: asks first, then `deleteGroup`.
+    func confirmDeleteGroup(_ id: UUID) {
+        let count = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }.count
+        presentModal(.confirmation(ModalConfirmation(
+            title: Self.deleteGroupTitle(groups.first { $0.id == id }?.name),
+            message: "\(Self.tabCount(count)) close. ⇧⌘T brings them back.",
+            button: "Delete Group", isDestructive: true) { [weak self] in self?.deleteGroup(id) }))
+    }
+
+    /// A closed group's menu › Delete Group: asks first, then `deleteClosedGroup`.
+    func confirmDeleteClosedGroup(_ id: UUID) {
+        guard let group = closedGroups.first(where: { $0.id == id }) else { return }
+        presentModal(.confirmation(ModalConfirmation(
+            title: Self.deleteGroupTitle(group.name),
+            message: "It leaves Closed Groups. ⇧⌘T brings \(Self.tabCount(group.tabs.count).lowercased()) back.",
+            button: "Delete Group", isDestructive: true) { [weak self] in self?.deleteClosedGroup(id) }))
+    }
+
+    /// The Delete Group confirmation's title, naming the group when it has a name.
+    private static func deleteGroupTitle(_ name: String?) -> String {
+        guard let name, !name.isEmpty else { return "Delete this group?" }
+        return "Delete the group \"\(name)\"?"
+    }
+
+    /// "Its 1 tab" / "Its N tabs", for the Delete Group confirmations.
+    private static func tabCount(_ count: Int) -> String {
+        count == 1 ? "Its 1 tab" : "Its \(count) tabs"
+    }
+
+    /// The popover's Delete Group: closes the group's tabs as one batch, which one ⇧⌘T reopens whole.
+    func deleteGroup(_ id: UUID) {
         guard !groupHoldsAllNormalTabs(id) else { return }
         let ids = Set(tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }.map(\.id))
         guard !ids.isEmpty else { return }
@@ -1617,6 +1669,118 @@ final class WindowModel {
         }
         normalize()
         openWindow(entries, table, selected, missing)
+    }
+
+    // MARK: Closed groups
+
+    /// The popover's Close Group: the group goes to the front of the closed groups with its tabs (their profile,
+    /// commit, alias, emoji and icon color kept), not onto the ⇧⌘T stack; their sessions close, terminals and AI jobs
+    /// included. The selection moves as when the group collapses; when the group held every normal tab, a Welcome tab
+    /// takes their place. A group of Welcome tabs only just closes. A group whose id is stowed already (⇧⌘T brought
+    /// one of its tabs back) adds its tabs to that entry, which moves to the front.
+    func closeGroup(_ id: UUID) {
+        guard let group = groups.first(where: { $0.id == id }) else { return }
+        let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }
+        guard !members.isEmpty else { return }
+        // Saved before the removals: `saved(_:)` reads the sessions and the restored state.
+        let entries = members.map { tab in
+            var entry = saved(tab)
+            entry.tabGroup = nil
+            entry.pinned = nil
+            entry.archived = nil
+            return entry
+        }
+        let leaving = Set(members.map(\.id))
+        if let selectedTabID, leaving.contains(selectedTabID) {
+            let popped = archivedOut == nil ? nil : tabs.count - 1
+            if let next = shownNeighbor(outside: leaving) ?? popped { selectTab(at: next) } else { openTab(nil) }
+        }
+        while let index = tabs.firstIndex(where: { leaving.contains($0.id) }) {
+            remove(at: index, remembering: false)
+        }
+        if entries.contains(where: { $0.path != nil }) {
+            let earlier = closedGroups.firstIndex { $0.id == id }.map { closedGroups.remove(at: $0).tabs } ?? []
+            closedGroups.insert(SavedClosedTabGroup(id: id, name: group.name, color: group.colorIndex,
+                                                    tabs: earlier + entries), at: 0)
+        }
+        normalize()
+        clearSelection()
+    }
+
+    /// A closed group's row, its menu's Open Group, or a tab under its "Tabs in Group": the group comes back at the end
+    /// of the normal tabs (before the popped-out archived tab), expanded, with its id, name and color, and its tab
+    /// `tabIndex` (its first one for nil) is selected as ⇧⌘T selects a tab. A member whose repo is open in this window
+    /// or in the archive is skipped: that open tab is selected when it is the one picked, or when every member is
+    /// skipped. A folder gone shows "Repo not found".
+    func openClosedGroup(_ id: UUID, selecting tabIndex: Int? = nil) {
+        guard let index = closedGroups.firstIndex(where: { $0.id == id }) else { return }
+        let entry = closedGroups.remove(at: index)
+        navigation.page = .home
+        closeSettings()
+        // In the table first: `normalize` drops a group it does not hold (and one left with no tab here). ⇧⌘T may
+        // have recreated it already.
+        if !groups.contains(where: { $0.id == id }) {
+            groups.append(ManualTabGroup(id: id, name: entry.name, colorIndex: entry.color, collapsed: false))
+        }
+        let openID: (SavedTab) -> Tab.ID? = { [tabs] member in
+            member.path.flatMap { path in tabs.first { $0.repoURL?.path == path }?.id }
+        }
+        var opened: [Int: Tab.ID] = [:]
+        for (offset, member) in entry.tabs.enumerated() {
+            if let path = member.path,
+               tabs.contains(where: { $0.repoURL?.path == path }) || archivedIndex(of: path) != nil { continue }
+            let tab = Tab(repoURL: member.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
+                          isMissing: member.path.map { !Self.folderExists($0) } ?? false, alias: member.alias,
+                          emoji: member.emoji, pinned: false, iconColor: member.iconColor, archived: false,
+                          groupID: id)
+            tabs.insert(tab, at: normalEnd)
+            restored[tab.id] = member
+            opened[offset] = tab.id
+        }
+        normalize()
+        let reopened = Set(opened.values)
+        resolveRepoKeys(tabs.filter { reopened.contains($0.id) && !$0.isMissing }.map(\.id))
+        let picked = tabIndex.flatMap { entry.tabs.indices.contains($0) ? opened[$0] ?? openID(entry.tabs[$0]) : nil }
+        let first = entry.tabs.indices.lazy.compactMap { opened[$0] }.first
+        guard let target = picked ?? first ?? entry.tabs.first.flatMap(openID) else { return }
+        guard reopened.contains(target) else { return selectTab(id: target) }
+        UITiming.select("closed group")
+        selectedTabID = target
+        activateSelectedTab()
+    }
+
+    /// A closed group's menu › Open Group in New Window: the group leaves the closed groups and opens in a new window
+    /// with its tabs, as Move Group to New Window opens one, through `openWindow` (a folder gone shows "Repo not
+    /// found"). Nil `openWindow`: it stays.
+    func openClosedGroupInNewWindow(_ id: UUID) {
+        guard let openWindow, let index = closedGroups.firstIndex(where: { $0.id == id }) else { return }
+        let entry = closedGroups.remove(at: index)
+        let entries = entry.tabs.map { member in
+            var member = member
+            member.tabGroup = id
+            return member
+        }
+        let missing = Set(entries.compactMap(\.path).filter { !Self.folderExists($0) })
+        openWindow(entries, [SavedTabGroup(id: id, name: entry.name, color: entry.color, collapsed: nil)], 0, missing)
+    }
+
+    /// A closed group's menu › Delete Group: the group leaves the closed groups and its repo tabs go on the ⇧⌘T stack
+    /// as one batch with the group, at the end of the normal tabs, so one ⇧⌘T reopens them whole.
+    func deleteClosedGroup(_ id: UUID) {
+        guard let index = closedGroups.firstIndex(where: { $0.id == id }) else { return }
+        let entry = closedGroups.remove(at: index)
+        let group = ClosedTab.Group(id: id, name: entry.name, colorIndex: entry.color)
+        let batch = UUID()
+        for member in entry.tabs where member.path != nil {
+            closedTabs.append(ClosedTab(saved: member, repoKey: nil, group: group, batch: batch, index: normalEnd))
+            if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
+        }
+    }
+
+    /// `path` is a folder: a closed group's member whose folder is gone shows "Repo not found".
+    private static func folderExists(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     /// The last index of the worktree box the tab at `index` is in; `index` itself when it is in none.
@@ -1784,6 +1948,20 @@ final class WindowModel {
                 return
             }
             openArchived(at: index)
+        case .closegroup:
+            // `closegroup`: the selected tab's group › Close Group.
+            guard let id = selectedIndex.flatMap({ tabs[$0].groupID }) else {
+                Self.logger.error("-HistqSelect closegroup: the selected tab is in no group")
+                return
+            }
+            closeGroup(id)
+        case .closedgroup:
+            // `closedgroup:<n>`: a click on the closed groups' row n.
+            guard let index = request.value.flatMap(Int.init), closedGroups.indices.contains(index) else {
+                Self.logger.error("-HistqSelect closedgroup: no closed group \(request.value ?? "", privacy: .public)")
+                return
+            }
+            openClosedGroup(closedGroups[index].id)
         case .settings:
             guard let value = request.value else {
                 openSettings()

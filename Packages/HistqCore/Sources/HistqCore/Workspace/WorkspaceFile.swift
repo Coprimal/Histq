@@ -22,15 +22,34 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
         self.profiles = profiles
     }
 
-    /// A window: its manual tab groups (nil when none) and its app tabs, archived ones last.
+    /// A window: its manual tab groups (nil when none), its app tabs, archived ones last, and its closed groups (nil
+    /// when none).
     public struct Window: Codable, Sendable, Equatable {
         public var id: UUID
         public var tabGroups: [TabGroup]?
         public var tabs: [Tab]
+        public var closedTabGroups: [ClosedTabGroup]?
 
-        public init(id: UUID, tabGroups: [TabGroup]? = nil, tabs: [Tab]) {
+        public init(id: UUID, tabGroups: [TabGroup]? = nil, tabs: [Tab], closedTabGroups: [ClosedTabGroup]? = nil) {
             self.id = id
             self.tabGroups = tabGroups
+            self.tabs = tabs
+            self.closedTabGroups = closedTabGroups
+        }
+    }
+
+    /// A manual tab group stowed by its Close Group, as `SavedClosedTabGroup`, with its tabs stored as `Tab`.
+    public struct ClosedTabGroup: Codable, Sendable, Equatable {
+        public var id: UUID
+        public var name: String?
+        /// 0 is grey, 1–8 a lane color, as `SavedTabGroup.color`.
+        public var color: Int
+        public var tabs: [Tab]
+
+        public init(id: UUID, name: String? = nil, color: Int, tabs: [Tab]) {
+            self.id = id
+            self.name = name
+            self.color = color
             self.tabs = tabs
         }
     }
@@ -96,11 +115,15 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
         public var tabGroups: [TabGroup]?
         /// The tabs with absolute repo paths (`tabGroup` is the tab's `group`).
         public var tabs: [SavedTab]
+        /// The closed groups, their tabs with absolute repo paths.
+        public var closedTabGroups: [SavedClosedTabGroup]?
 
-        public init(id: UUID, tabGroups: [TabGroup]? = nil, tabs: [SavedTab]) {
+        public init(id: UUID, tabGroups: [TabGroup]? = nil, tabs: [SavedTab],
+                    closedTabGroups: [SavedClosedTabGroup]? = nil) {
             self.id = id
             self.tabGroups = tabGroups
             self.tabs = tabs
+            self.closedTabGroups = closedTabGroups
         }
     }
 
@@ -188,7 +211,7 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
     }
 
     /// The file with untrusted duplicates removed: the first profile of an id, a fresh id for a window whose id an
-    /// earlier window has, the first tab group of an id within a window.
+    /// earlier window has, the first tab group and the first closed group of an id within a window.
     private func normalized() -> WorkspaceFile {
         var copy = self
         var profileIDs = Set<UUID>()
@@ -201,6 +224,10 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
             }
             var groupIDs = Set<UUID>()
             copy.windows[index].tabGroups = copy.windows[index].tabGroups?.filter { groupIDs.insert($0.id).inserted }
+            var closedIDs = Set<UUID>()
+            copy.windows[index].closedTabGroups = copy.windows[index].closedTabGroups?.filter {
+                closedIDs.insert($0.id).inserted
+            }
         }
         return copy
     }
@@ -255,14 +282,19 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
             return key
         }
 
+        func live(_ tab: Tab) -> SavedTab {
+            let key = resolve(path: tab.path, home: tab.home)
+            if let key, !key.found { missing.insert(key.key) }
+            return SavedTab(path: key?.key, profile: tab.profile, alias: tab.alias, emoji: tab.emoji,
+                            pinned: tab.pinned, iconColor: tab.iconColor, archived: tab.archived, tabGroup: tab.group)
+        }
+
         let windows = file.windows.map { window in
-            LiveWindow(id: window.id, tabGroups: window.tabGroups, tabs: window.tabs.map { tab in
-                let key = resolve(path: tab.path, home: tab.home)
-                if let key, !key.found { missing.insert(key.key) }
-                return SavedTab(path: key?.key, profile: tab.profile, alias: tab.alias, emoji: tab.emoji,
-                                pinned: tab.pinned, iconColor: tab.iconColor, archived: tab.archived,
-                                tabGroup: tab.group)
-            })
+            LiveWindow(id: window.id, tabGroups: window.tabGroups, tabs: window.tabs.map(live),
+                       closedTabGroups: window.closedTabGroups?.map { group in
+                           SavedClosedTabGroup(id: group.id, name: group.name, color: group.color,
+                                               tabs: group.tabs.map(live))
+                       })
         }
 
         var views: [String: RepoViewState] = [:]
@@ -298,14 +330,22 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
             originals[Self.standardized(absolute)] ?? base.fresh(Self.standardized(absolute))
         }
 
+        func fileTab(_ tab: SavedTab) -> Tab {
+            let strings = tab.path.map(stored)
+            return Tab(path: strings?.path, home: strings?.home, profile: tab.profile, alias: tab.alias,
+                       emoji: tab.emoji, pinned: tab.pinned, iconColor: tab.iconColor, archived: tab.archived,
+                       group: tab.tabGroup)
+        }
+
         let windows = windows.map { window in
             Window(id: window.id, tabGroups: window.tabGroups?.isEmpty == false ? window.tabGroups : nil,
-                   tabs: window.tabs.map { tab in
-                       let strings = tab.path.map(stored)
-                       return Tab(path: strings?.path, home: strings?.home, profile: tab.profile, alias: tab.alias,
-                                  emoji: tab.emoji, pinned: tab.pinned, iconColor: tab.iconColor,
-                                  archived: tab.archived, group: tab.tabGroup)
-                   })
+                   tabs: window.tabs.map(fileTab),
+                   closedTabGroups: window.closedTabGroups?.isEmpty == false
+                       ? window.closedTabGroups?.map { group in
+                           ClosedTabGroup(id: group.id, name: group.name, color: group.color,
+                                          tabs: group.tabs.map(fileTab))
+                       }
+                       : nil)
         }
 
         var repos: [String: Repo] = [:]

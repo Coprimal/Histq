@@ -234,6 +234,35 @@ struct WorkspaceFileTests {
         #expect(encoded == (try Self.jsonObject(Data(try Self.teamFile().utf8))))
     }
 
+    @Test("a closed group's tabs resolve like open tabs and the file reads lossless and comes back unchanged")
+    func closedGroupRoundTrips() throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        try sandbox.makeRepo("ws/repos/app")
+        let fileURL = try sandbox.writeFile("ws/team.histqws", """
+            { "version": 1, "repos": [], "profiles": [],
+              "windows": [ { "id": "\(Self.windowA.uuidString)", "tabs": [ {} ],
+                "closedTabGroups": [ { "id": "\(Self.groupID.uuidString)", "name": "Later", "color": 2,
+                  "tabs": [ { "path": "repos/app", "home": "~/git/app", "emoji": "🧪" },
+                            { "path": "repos/gone", "home": "~/git/gone" } ] } ] } ] }
+            """)
+
+        let read = try WorkspaceFile.read(fileURL)
+        #expect(read.isLossless)
+        let resolved = read.file.resolved(fileURL: fileURL, homeURL: sandbox.home,
+                                          isRepository: SavedSession.isRepository)
+        let closed = try #require(resolved.windows.first?.closedTabGroups?.first)
+        #expect(closed.id == Self.groupID && closed.name == "Later" && closed.color == 2)
+        #expect(closed.tabs.map(\.path) == [sandbox.key("ws/repos/app"), sandbox.key("home/git/gone")])
+        #expect(closed.tabs.first?.emoji == "🧪")
+
+        let rebuilt = WorkspaceFile(windows: resolved.windows, views: resolved.views, profiles: [],
+                                    carried: resolved.carried, originals: resolved.originals,
+                                    repoOrder: resolved.repoOrder, profileOrder: resolved.profileOrder,
+                                    fileURL: fileURL, homeURL: sandbox.home)
+        #expect(rebuilt == read.file)
+    }
+
     // MARK: - Reading and writing
 
     @Test("an unknown key makes a read lossy; a null-valued optional key does not")

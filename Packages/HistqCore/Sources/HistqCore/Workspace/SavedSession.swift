@@ -71,10 +71,13 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     public var selectedTab: Int?
     /// The window's manual tab groups, in order; nil when it has none. Absent from files of older builds.
     public var manualTabGroups: [SavedTabGroup]?
+    /// The window's closed groups (a group's Close Group), most recently closed first; nil when it has none. Absent
+    /// from files of older builds.
+    public var closedTabGroups: [SavedClosedTabGroup]?
 
     public init(x: Double, y: Double, width: Double, height: Double, group: Int, tabIndex: Int,
                 isSelectedInGroup: Bool, tabs: [SavedTab], selectedTab: Int? = nil,
-                manualTabGroups: [SavedTabGroup]? = nil) {
+                manualTabGroups: [SavedTabGroup]? = nil, closedTabGroups: [SavedClosedTabGroup]? = nil) {
         self.x = x
         self.y = y
         self.width = width
@@ -85,6 +88,7 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         self.tabs = tabs
         self.selectedTab = selectedTab
         self.manualTabGroups = manualTabGroups
+        self.closedTabGroups = closedTabGroups
     }
 }
 
@@ -146,6 +150,25 @@ public struct SavedTabGroup: Codable, Equatable, Sendable {
         self.name = name
         self.color = color
         self.collapsed = collapsed
+    }
+}
+
+/// A manual tab group stowed by its Close Group, with its tabs, until it opens again. Absent from files of older
+/// builds.
+public struct SavedClosedTabGroup: Codable, Equatable, Sendable {
+    public var id: UUID
+    /// The name the user gave it; nil for none.
+    public var name: String?
+    /// Its swatch, as `SavedTabGroup.color`; clamped to 0...8 on restore.
+    public var color: Int
+    /// Its tabs in order, each with `tabGroup`, `pinned` and `archived` nil.
+    public var tabs: [SavedTab]
+
+    public init(id: UUID, name: String? = nil, color: Int, tabs: [SavedTab]) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.tabs = tabs
     }
 }
 
