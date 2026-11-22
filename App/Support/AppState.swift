@@ -121,6 +121,9 @@ enum PrefKey: String, CaseIterable {
     case textSize
     /// Commit avatars: "real" (Gravatar / GitHub), "generated" or "initials".
     case avatarMode
+    /// The emoji shown as an author's avatar, by identity (the trimmed, lowercased email), in every mode and every
+    /// repository on this Mac (`AvatarStore.setEmoji`); a missing one = the mode's avatar.
+    case authorEmojis
     /// Pull button: a `GitOperations.PullMode` case name, "fastForward" (merge if needed), "fastForwardOnly" or "rebase".
     case pullMode
     /// A checkout or pull with local changes: "ask" (the dialog), "always" (stash them first and put them back) or
@@ -263,6 +266,7 @@ enum PrefKey: String, CaseIterable {
         case .laneColors: "vivid"
         case .textSize: "regular"
         case .avatarMode: "generated"
+        case .authorEmojis: [String: String]()
         case .pullMode: "fastForward"
         case .autoStash: "ask"
         case .autoFetchMinutes: 3

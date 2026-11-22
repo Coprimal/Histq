@@ -1,7 +1,7 @@
 // Settings › Appearance: where the tabs show and their default icon, the panels' layout preset, the commit graph's
-// avatars, date format, row height, text size, commit order and the other worktrees' fading, the sidebar's sections
-// (shown, and their order in each tab), the graph's text columns, the file lists' layout and file sizes, the WIP
-// panel's order, and the diffs' default view and whitespace.
+// avatars and the authors' emojis, date format, row height, text size, commit order and the other worktrees' fading,
+// the sidebar's sections (shown, and their order in each tab), the graph's text columns, the file lists' layout and
+// file sizes, the WIP panel's order, and the diffs' default view and whitespace.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
 import SwiftUI
 
@@ -135,6 +135,8 @@ struct AppearanceSettings: View {
                     Image(systemName: avatarMode == "real" ? "exclamationmark.triangle" : "info.circle")
                 }
                 .foregroundStyle(.secondary)
+                SettingsDivider()
+                AuthorEmojiList()
             }
             SettingsGroup("Commit list") {
                 LabeledContent {
@@ -386,5 +388,121 @@ struct AppearanceSettings: View {
         let formatter = DateFormatter()
         formatter.dateFormat = format
         return formatter.string(from: .now)
+    }
+}
+
+/// Settings › Appearance › Avatars' "Author emojis": one row per emoji `AvatarStore` keeps (by email, sorted), then a
+/// row to add one. Its own view, so a real avatar's arrival (`AvatarStore.didChange`) reloads only this list.
+private struct AuthorEmojiList: View {
+    @State private var emojis: [String: String] = [:]
+    @State private var newEmail = ""
+    @State private var newEmoji = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            LabeledContent {
+                EmptyView()
+            } label: {
+                Text("Author emojis")
+                SettingsHint("Shown instead of an author's avatar in every repository on this Mac. They stay on this "
+                    + "Mac.")
+                if emojis.isEmpty { SettingsHint("Right-click a commit › Set Author Emoji…") }
+            }
+            .settingsSearchAnchor("Author emojis")
+            ForEach(emojis.keys.sorted(), id: \.self) { identity in
+                SettingsDivider()
+                AuthorEmojiRow(identity: identity, emoji: emojis[identity] ?? "")
+            }
+            SettingsDivider()
+            LabeledContent {
+                HStack(spacing: 8) {
+                    TextField("Email", text: $newEmail, prompt: Text(verbatim: "name@example.com"))
+                        .textFieldStyle(.settings)
+                        .frame(maxWidth: 200)
+                        .labelsHidden()
+                        .autocorrectionDisabled()
+                        .onSubmit(add)
+                    AuthorEmojiField(text: $newEmoji)
+                        .onSubmit(add)
+                    Button("Add", action: add)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                        .disabled(!canAdd)
+                }
+            } label: {
+                Text("Add an author")
+            }
+        }
+        .onAppear { emojis = AvatarStore.shared.emojis }
+        .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { _ in
+            emojis = AvatarStore.shared.emojis
+        }
+    }
+
+    private var canAdd: Bool {
+        !newEmail.isEmpty && !newEmoji.isEmpty && AvatarStore.shared.canSetEmoji(email: newEmail, name: "")
+    }
+
+    private func add() {
+        guard canAdd else { return }
+        AvatarStore.shared.setEmoji(newEmoji, email: newEmail, name: "")
+        newEmail = ""
+        newEmoji = ""
+    }
+}
+
+/// One author's emoji: the email, the emoji (saved on Return or when the field loses focus; left empty, it goes back
+/// to the stored one) and Remove, which deletes the key whatever it is.
+private struct AuthorEmojiRow: View {
+    let identity: String
+    let emoji: String
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                AuthorEmojiField(text: $draft)
+                    .focused($focused)
+                    .onSubmit(commit)
+                Button("Remove") { AvatarStore.shared.removeEmoji(identity: identity) }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+            }
+        } label: {
+            Text(verbatim: identity)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .onChange(of: emoji, initial: true) { _, new in
+            if !focused { draft = new }
+        }
+        .onChange(of: focused) { _, isFocused in
+            if !isFocused { commit() }
+        }
+    }
+
+    /// Saves a changed, non-empty emoji, then shows what the store holds: an empty field gets the stored emoji back,
+    /// a key `setEmoji` refuses keeps its emoji, and a row just removed writes nothing.
+    private func commit() {
+        if let stored = AvatarStore.shared.emojis[identity], !draft.isEmpty, draft != stored {
+            AvatarStore.shared.setEmoji(draft, email: identity, name: "")
+        }
+        draft = AvatarStore.shared.emojis[identity] ?? ""
+    }
+}
+
+/// The author emoji rows' field: one emoji, kept by `TabEmoji.normalized` as it is typed.
+private struct AuthorEmojiField: View {
+    @Binding var text: String
+
+    var body: some View {
+        TextField("Emoji", text: $text, prompt: Text("Emoji"))
+            .textFieldStyle(.settings)
+            .frame(width: 64)
+            .labelsHidden()
+            .autocorrectionDisabled()
+            .onChange(of: text) { _, new in
+                let kept = TabEmoji.normalized(new) ?? ""
+                if kept != new { text = kept }
+            }
     }
 }

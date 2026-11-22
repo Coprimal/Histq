@@ -453,6 +453,7 @@ private struct SelectedRow: View {
         case .commit:
             if let commit {
                 AvatarImage(email: commit.authorEmail, name: commit.authorName, size: InfoMetrics.avatar)
+                    .authorEmojiMenu(email: commit.authorEmail, name: commit.authorName, session)
             } else {
                 symbol("smallcircle.filled.circle")
             }
@@ -544,11 +545,11 @@ private struct CommitInfoCard: View {
                     .modifier(MessageBox())
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    PersonRow(role: "Author", name: commit.authorName, email: commit.authorEmail,
+                    PersonRow(session: session, role: "Author", name: commit.authorName, email: commit.authorEmail,
                               date: format(commit.authorDate))
                     if commit.committerName != commit.authorName || commit.committerEmail != commit.authorEmail {
-                        PersonRow(role: "Committer", name: commit.committerName, email: commit.committerEmail,
-                                  date: format(commit.committerDate))
+                        PersonRow(session: session, role: "Committer", name: commit.committerName,
+                                  email: commit.committerEmail, date: format(commit.committerDate))
                     }
                     ShaRow(hash: commit.hash)
                     parentsRow
@@ -869,6 +870,7 @@ private enum InfoMetrics {
 
 /// An avatar, the name, then the email and the date under it.
 private struct PersonRow: View {
+    let session: RepoSession
     let role: String
     let name: String
     let email: String
@@ -876,7 +878,9 @@ private struct PersonRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // On the avatar: the text beside it is selectable and shows the text menu.
             AvatarImage(email: email, name: name, size: InfoMetrics.avatar)
+                .authorEmojiMenu(email: email, name: name, session)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(name)
@@ -935,6 +939,40 @@ private struct ShaRow: View {
                 copied = false
             }
             Spacer(minLength: 0)
+        }
+    }
+}
+
+private extension View {
+    /// Set / Remove Author Emoji on right-click; no menu for an author that cannot have one.
+    func authorEmojiMenu(email: String, name: String, _ session: RepoSession) -> some View {
+        modifier(AuthorEmojiMenu(email: email, name: name, session: session))
+    }
+}
+
+/// Rebuilds the menu when this author's emoji changes, so Remove Author Emoji shows only while there is one.
+private struct AuthorEmojiMenu: ViewModifier {
+    let email: String
+    let name: String
+    let session: RepoSession
+    @State private var revision = 0
+
+    func body(content: Content) -> some View {
+        Group {
+            if AvatarStore.shared.canSetEmoji(email: email, name: name) {
+                content.contextMenu {
+                    let _ = revision
+                    MenuEntriesView(entries: RepoMenus.authorEmoji(email: email, name: name, session))
+                }
+            } else {
+                content
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
+            guard let changed = note.userInfo?[AvatarStore.emailKey] as? String else { return revision &+= 1 }
+            if AvatarStore.matches(email: email, name: name, changed: changed) {
+                revision &+= 1
+            }
         }
     }
 }

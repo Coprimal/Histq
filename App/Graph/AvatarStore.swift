@@ -2,6 +2,8 @@
 // "real" (Gravatar by the SHA-256 of the email, the GitHub avatar for `@users.noreply.github.com`), "generated" (a
 // deterministic pattern and color from the email's hash) or "initials" (monochrome initials). In every mode, a provider's
 // no-reply address (GitHub's web-flow committer, ...) shows the provider's bundled logo and GitHub's bots their real avatar.
+// An author's emoji (`setEmoji`, stored app-wide in `PrefKey.authorEmojis`, so the same in every repository on this Mac)
+// wins over every mode; provider, bot, `owner:` and email-less identities never get one.
 // `avatar(email:name:pixels:)` never waits: in real mode it returns the generated avatar until the real one is loaded
 // (memory, then the disk cache under `StatePaths`, then the network, off the main thread), then posts `didChange` so
 // the graphs redraw the rows of that email. A 404 is remembered on disk for 7 days; an offline or failed load keeps
@@ -25,12 +27,15 @@ final class AvatarStore {
         case real, generated, initials
     }
 
-    /// Posted on the main thread when avatars change: `userInfo[emailKey]` is the email whose real avatar arrived, or
-    /// absent when the mode changed (every node redraws).
+    /// Posted on the main thread when avatars change: `userInfo[emailKey]` is the email whose real avatar arrived or
+    /// whose emoji was set or removed, or absent when the mode or the emoji dictionary changed elsewhere (another
+    /// window, a `defaults write`: every node redraws).
     static let didChange = Notification.Name("AvatarStore.didChange")
     static let emailKey = "email"
 
     private(set) var mode: Mode
+    /// The authors' emojis by identity: a mirror of `PrefKey.authorEmojis`, read while drawing rows.
+    private(set) var emojis: [String: String]
     /// Loaded real avatars, by `cacheKey`.
     private let images = NSCache<NSString, NSImage>()
     /// Generated and initials avatars, by kind and identity: resolution-independent drawings.
@@ -42,7 +47,8 @@ final class AvatarStore {
 
     private init() {
         mode = Self.resolveMode()
-        // Posted for every key, possibly off the main thread; only a change of the resolved mode redraws.
+        emojis = Self.storedEmojis()
+        // Posted for every key, possibly off the main thread; only a change of the resolved mode or the emojis redraws.
         NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: Preferences.defaults, queue: .main
         ) { _ in
@@ -59,7 +65,17 @@ final class AvatarStore {
         return value.flatMap(Mode.init(rawValue:)) ?? .generated
     }
 
+    private static func storedEmojis() -> [String: String] {
+        Preferences.defaults.dictionary(forKey: PrefKey.authorEmojis.rawValue) as? [String: String] ?? [:]
+    }
+
     private func preferencesChanged() {
+        // `setEmoji` updates the mirror before writing, so its own write finds nothing new here.
+        let stored = Self.storedEmojis()
+        if stored != emojis {
+            emojis = stored
+            NotificationCenter.default.post(name: Self.didChange, object: self)
+        }
         let resolved = Self.resolveMode()
         guard resolved != mode else { return }
         mode = resolved
@@ -69,10 +85,11 @@ final class AvatarStore {
     /// The avatar to draw now for an author: `pixels` is the node's diameter in device pixels (the size real avatars
     /// are fetched at). Never blocks; in real mode a missing avatar starts its load and the generated one stands in.
     /// A hosting provider's own address (GitHub's web-flow committer, ...) shows its bundled logo, and GitHub's bots
-    /// (`dependabot[bot]`, ...) their real avatar, in every mode.
+    /// (`dependabot[bot]`, ...) their real avatar, in every mode. An author's emoji wins over the mode.
     func avatar(email: String, name: String, pixels: Int) -> NSImage? {
         let identity = Self.identity(email: email, name: name)
         if let provider = Self.provider(of: identity) { return providerAvatar(provider) }
+        if Self.allowsEmoji(identity), let emoji = emojis[identity] { return emojiAvatar(emoji) }
         let fallback = mode == .initials ? initialsAvatar(name: name) : generatedAvatar(identity: identity)
         // An author email can spell an owner identity (`owner:<host>/<x>`): never a remote owner's logo or load.
         if identity.hasPrefix("owner:") { return fallback }
@@ -88,6 +105,47 @@ final class AvatarStore {
     private static func identity(email: String, name: String) -> String {
         let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return trimmed.isEmpty ? "name:" + name : trimmed
+    }
+
+    // MARK: Author emojis
+
+    /// The emoji set for the author, nil when none is or the author cannot have one.
+    func emoji(email: String, name: String) -> String? {
+        let identity = Self.identity(email: email, name: name)
+        return Self.allowsEmoji(identity) ? emojis[identity] : nil
+    }
+
+    /// Whether the author can get an emoji: not without an email, nor a provider's no-reply address, a GitHub bot or
+    /// an owner identity (they keep their logo or avatar).
+    func canSetEmoji(email: String, name: String) -> Bool {
+        Self.allowsEmoji(Self.identity(email: email, name: name))
+    }
+
+    private static func allowsEmoji(_ identity: String) -> Bool {
+        !identity.hasPrefix("name:") && !identity.hasPrefix("owner:") && provider(of: identity) == nil
+            && !identity.hasSuffix("[bot]@users.noreply.github.com")
+    }
+
+    /// Sets the author's emoji (the last emoji of `emoji`, `TabEmoji.normalized`), or removes it for nil or text
+    /// without one, in every repository on this Mac, and redraws that author. Does nothing when `canSetEmoji` fails.
+    func setEmoji(_ emoji: String?, email: String, name: String) {
+        let identity = Self.identity(email: email, name: name)
+        guard Self.allowsEmoji(identity) else { return }
+        emojis[identity] = emoji.flatMap(TabEmoji.normalized)
+        storeEmojis(changed: identity)
+    }
+
+    /// Removes the emoji stored under `identity` whatever it is (Settings' list, which may hold a key a
+    /// `defaults write` stored and `setEmoji` would refuse).
+    func removeEmoji(identity: String) {
+        emojis[identity] = nil
+        storeEmojis(changed: identity)
+    }
+
+    /// Writes the mirror (already updated, so the defaults' notification finds nothing new) and redraws `identity`.
+    private func storeEmojis(changed identity: String) {
+        Preferences.defaults.set(emojis, forKey: PrefKey.authorEmojis.rawValue)
+        NotificationCenter.default.post(name: Self.didChange, object: self, userInfo: [Self.emailKey: identity])
     }
 
     // MARK: Real avatars
@@ -292,6 +350,30 @@ final class AvatarStore {
                     }
                 }
             }
+            return true
+        }
+        drawn.setObject(image, forKey: cacheKey)
+        return image
+    }
+
+    /// The emoji centered on the generated avatar's dark disc.
+    private func emojiAvatar(_ emoji: String) -> NSImage {
+        let cacheKey = "e|\(emoji)" as NSString
+        if let image = drawn.object(forKey: cacheKey) { return image }
+        let background = Self.background
+        let image = NSImage(size: NSSize(width: 20, height: 20), flipped: true) { rect in
+            background.setFill()
+            rect.fill()
+            let side = rect.width * 0.62
+            var text = NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: side)])
+            // The emoji's glyph box is larger than its font size: shrink the font until it fits `side`.
+            let measured = text.size()
+            let scale = min(1, side / max(measured.width, measured.height, 1))
+            if scale < 1 {
+                text = NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: side * scale)])
+            }
+            let size = text.size()
+            text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
             return true
         }
         drawn.setObject(image, forKey: cacheKey)

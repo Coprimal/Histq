@@ -393,7 +393,22 @@ enum RepoMenus {
                 session.savePatch(patch)
             },
         ]
-        return [.submenu("Copy", copies), .separator] + entries
+        let emoji = commit.map { authorEmoji(email: $0.authorEmail, name: $0.authorName, session) } ?? []
+        return [.submenu("Copy", copies)] + emoji + [.separator] + entries
+    }
+
+    /// An author's "Set Author Emoji…" (the emoji sheet) and, once one is set, "Remove Author Emoji" (the commit menu,
+    /// the detail's author menu); nothing for an author who cannot have one (`AvatarStore.canSetEmoji`).
+    static func authorEmoji(email: String, name: String, _ session: RepoSession) -> [MenuEntry] {
+        let store = AvatarStore.shared
+        guard store.canSetEmoji(email: email, name: name) else { return [] }
+        var entries: [MenuEntry] = [
+            .action("Set Author Emoji…") { session.dialog = .authorEmoji(email: email, name: name) },
+        ]
+        if store.emoji(email: email, name: name) != nil {
+            entries.append(.action("Remove Author Emoji") { store.setEmoji(nil, email: email, name: name) })
+        }
+        return entries
     }
 
     private static let mergeHasNoPatch = "A merge commit has no single patch."
