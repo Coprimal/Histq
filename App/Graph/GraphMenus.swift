@@ -655,16 +655,33 @@ enum RepoMenus {
     /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current` (each merge mode), fast-forward
     /// `current` to it (git refuses when they diverged), rebase `current` onto it (plain or interactive), compare with it.
     /// `twoWay` (a local branch) also offers the other direction next to each: merge `current` into `name` (checked
-    /// out first) and fast-forward `name` to `current` (no checkout), e.g. a branch `current` was started from.
+    /// out first) and fast-forward `name` to `current` (no checkout), e.g. a branch `current` was started from. When
+    /// another worktree has `name` checked out, both run inside that worktree instead.
     private static func integrate(_ name: String, ref: String, commit: String?, into current: String,
                                   twoWay: Bool = false, _ session: RepoSession) -> [MenuEntry] {
         let rebaseReason = commit == nil ? "\(name) has no commit." : session.rebaseOntoUnavailableReason()
         let currentRef = "refs/heads/\(current)"
-        let mergeBack = mergeSubmenu("Merge \(current) into \(name)") { mode in
-            session.run(.merge(currentRef, checkoutFirst: name, mode: mode), title: "Merge \(current) into \(name)")
+        let other = otherWorktree(holding: name, session)
+        let otherReason = other.flatMap(mergeInWorktreeUnavailableReason)
+        let otherTip = other.map { otherReason ?? "Runs in worktree \($0.name)" }
+        let mergeBack = mergeSubmenu("Merge \(current) into \(name)", enabled: otherReason == nil,
+                                     toolTip: otherTip) { mode in
+            if let other {
+                session.run(.mergeInWorktree(path: other.path, branch: name, revision: currentRef, mode: mode),
+                            title: "Merge \(current) into \(name) (in worktree \(other.name))")
+            } else {
+                session.run(.merge(currentRef, checkoutFirst: name, mode: mode), title: "Merge \(current) into \(name)")
+            }
         }
-        let fastForwardBack = MenuEntry.action("Fast-forward \(name) to \(current)") {
-            session.run(.fastForward(name, to: currentRef), title: "Fast-forward \(name) to \(current)")
+        let fastForwardBack = MenuEntry.action("Fast-forward \(name) to \(current)", enabled: otherReason == nil,
+                                               toolTip: otherTip) {
+            if let other {
+                session.run(.mergeInWorktree(path: other.path, branch: name, revision: currentRef,
+                                             mode: .fastForwardOnly),
+                            title: "Fast-forward \(name) to \(current) (in worktree \(other.name))")
+            } else {
+                session.run(.fastForward(name, to: currentRef), title: "Fast-forward \(name) to \(current)")
+            }
         }
         return [
             mergeSubmenu("Merge \(name) into \(current)") { mode in
@@ -700,9 +717,17 @@ enum RepoMenus {
         title.hasPrefix("Merge ") && title.contains(" into ")
     }
 
-    private static func mergeSubmenu(_ title: String,
+    /// `enabled`/`toolTip` go on each choice: a submenu has neither, and the palette reads its choices'.
+    private static func mergeSubmenu(_ title: String, enabled: Bool = true, toolTip: String? = nil,
                                      merge: @escaping @MainActor (GitOperations.MergeMode) -> Void) -> MenuEntry {
-        .submenu(title, mergeChoices.map { choice in .action(choice.title) { merge(choice.mode) } })
+        .submenu(title, mergeChoices.map { choice in
+            .action(choice.title, enabled: enabled, toolTip: toolTip) { merge(choice.mode) }
+        })
+    }
+
+    /// The other worktree that has the local branch `name` checked out; nil when none (or the list is not read yet).
+    private static func otherWorktree(holding name: String, _ session: RepoSession) -> WorktreeInfo? {
+        session.worktrees.value?.first { !$0.isCurrent && $0.worktree.branch == "refs/heads/\(name)" }
     }
 
     /// The web page at `path` (`tree/<branch>`, `commit/<sha>`) of the repository `remote`'s URL names, in GitHub's
@@ -1032,6 +1057,13 @@ enum RepoMenus {
         return nil
     }
 
+    /// Why a merge cannot run inside another worktree; nil when it can. A lock only blocks prune/move/remove.
+    private static func mergeInWorktreeUnavailableReason(_ info: WorktreeInfo) -> String? {
+        if info.worktree.isPrunable { return "Its worktree \(info.name) is gone: Prune Worktrees removes its record." }
+        if !FileManager.default.fileExists(atPath: info.path) { return "The folder of worktree \(info.name) is missing." }
+        return nil
+    }
+
     /// The forced removal, which deletes the worktree's changes with its folder.
     static func confirmForceRemove(_ path: String, name: String, changes: String?, _ session: RepoSession) {
         let what = changes.map { "Its uncommitted changes (\($0)), its untracked files" } ?? "Its uncommitted changes"
@@ -1045,15 +1077,25 @@ enum RepoMenus {
     // MARK: Drag and drop
 
     /// A branch badge dropped on another: merge `source` into `target`, rebase `source` onto `target`, fast-forward
-    /// `target` to `source`. A branch that is not checked out is checked out first (merge into it, rebase it).
+    /// `target` to `source`. A branch that is not checked out is checked out first (merge into it, rebase it); one
+    /// another worktree has checked out is merged and fast-forwarded inside that worktree.
     static func drop(_ source: SidebarItem, onto target: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
         guard source != target, let sourceName = source.branchName, let targetName = target.branchName,
               let sourceRef = source.refName, let targetRef = target.refName
         else { return [] }
         let current = session.currentBranch
+        let other = targetName == current ? nil : otherWorktree(holding: targetName, session)
+        let otherReason = other.flatMap(mergeInWorktreeUnavailableReason)
+        let otherTip = other.map { otherReason ?? "Runs in worktree \($0.name)" }
         var entries: [MenuEntry] = []
         if case .local = target {
-            entries.append(mergeSubmenu("Merge \(sourceName) into \(targetName)") { mode in
+            entries.append(mergeSubmenu("Merge \(sourceName) into \(targetName)", enabled: otherReason == nil,
+                                        toolTip: otherTip) { mode in
+                if let other {
+                    return session.run(.mergeInWorktree(path: other.path, branch: targetName, revision: sourceRef,
+                                                        mode: mode),
+                                       title: "Merge \(sourceName) into \(targetName) (in worktree \(other.name))")
+                }
                 session.run(.merge(sourceRef, checkoutFirst: targetName == current ? nil : targetName, mode: mode),
                             title: "Merge \(sourceName) into \(targetName)")
             })
@@ -1067,10 +1109,17 @@ enum RepoMenus {
         }
         if case .local = target {
             // The checked-out branch moves with a journaled fast-forward-only merge, so it can be undone.
-            entries.append(.action("Fast-forward \(targetName) to \(sourceName)") {
+            entries.append(.action("Fast-forward \(targetName) to \(sourceName)", enabled: otherReason == nil,
+                                   toolTip: otherTip) {
+                let title = "Fast-forward \(targetName) to \(sourceName)"
+                if let other {
+                    return session.run(.mergeInWorktree(path: other.path, branch: targetName, revision: sourceRef,
+                                                        mode: .fastForwardOnly),
+                                       title: "\(title) (in worktree \(other.name))")
+                }
                 let write: RepoSession.Write = targetName == current
                     ? .merge(sourceRef, checkoutFirst: nil, mode: .fastForwardOnly) : .fastForward(targetName, to: sourceRef)
-                session.run(write, title: "Fast-forward \(targetName) to \(sourceName)")
+                session.run(write, title: title)
             })
         }
         let pullReason = createPullRequestUnavailableReason(head: source, base: target, session)

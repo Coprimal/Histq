@@ -718,6 +718,10 @@ final class RepoSession: Identifiable {
         /// git's config decide. A fast-forward-only merge into `checkoutFirst` that has diverged from `revision` is
         /// refused before the checkout.
         case merge(String, checkoutFirst: String?, mode: GitOperations.MergeMode?)
+        /// Merges `revision` into `branch` inside the other worktree at `path`, which has it checked out: run there
+        /// with that worktree's profile and undo journal, never checking anything out here. Refused when that worktree
+        /// no longer holds `branch`, is gone, is in the middle of an operation or has unresolved conflicts.
+        case mergeInWorktree(path: String, branch: String, revision: String, mode: GitOperations.MergeMode?)
         /// Rebases the current branch onto `upstream`; `checkoutFirst` switches to that branch first. `autostash`:
         /// the local changes are stashed and put back, and any conflict leaves everything as it was (see
         /// `GitOperations.rebase(onto:autostash:)`).
@@ -804,8 +808,8 @@ final class RepoSession: Identifiable {
         /// (`perform`), so it never acts with the user's own identity instead.
         var needsProfile: Bool {
             switch self {
-            case .commit, .amend, .editMessage, .applyPatchCommits, .merge, .rebase, .interactiveRebase, .cherryPick,
-                 .revert, .stashPush, .stashPaths, .continueOperation, .skipOperation, .createTag, .pull, .pullBranch,
+            case .commit, .amend, .editMessage, .applyPatchCommits, .merge, .mergeInWorktree, .rebase,
+                 .interactiveRebase, .cherryPick, .revert, .stashPush, .stashPaths, .continueOperation, .skipOperation, .createTag, .pull, .pullBranch,
                  .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteBranchAndRemote, .deleteRemoteTag,
                  .checkoutPullRequest, .addSubmodule, .updateSubmodules:
                 true
@@ -952,6 +956,10 @@ final class RepoSession: Identifiable {
     /// Closes the tabs of a worktree this tab just removed (its folder is gone). Set by `WindowModel` when it makes the
     /// session.
     @ObservationIgnored var worktreeRemoved: @MainActor (String) -> Void = { _ in }
+    /// Rereads the refs of this window's tab on another worktree (by its path) after a write ran there
+    /// (`Write.mergeInWorktree`), so its Undo reads the entry the write journaled. Set by `WindowModel` when it makes
+    /// the session.
+    @ObservationIgnored var refreshWorktreeTab: @MainActor (String) -> Void = { _ in }
 
     /// The repo's remotes and their fetch URLs (`git remote -v`), read with the refs: a remote with no fetched branch
     /// shows too.
@@ -5281,6 +5289,13 @@ final class RepoSession: Identifiable {
         if write.needsProfile, let missing = missingProfile {
             throw ProfileError.profileMissing(missing.name)
         }
+        // A merge run in another worktree commits with the profile that worktree's tab would use: the one remembered
+        // for its path, or this workspace's (never the personal default in a workspace).
+        var worktreeProfile: Profile?
+        if case .mergeInWorktree(let path, _, _, _) = write {
+            worktreeProfile = profileScope == .workspace
+                ? profile : await ProfileLibrary.shared.loaded()?.profile(forRepo: URL(filePath: path))
+        }
         let isRebase = if case .interactiveRebase = write { true } else { false }
         if isRebase {
             rebaseStarts += 1
@@ -5297,7 +5312,8 @@ final class RepoSession: Identifiable {
         }
         let outcome: WriteOutcome
         do {
-            outcome = try await Self.run(write, profile: profile, backend: backend, cwd: url)
+            outcome = try await Self.run(
+                write, profile: profile, worktreeProfile: worktreeProfile, backend: backend, cwd: url)
             UITiming.opEnd(id, ok: true)
         } catch GitError.autostashKept(let hash) where { if case .commit = write { true } else { false } }() {
             UITiming.opEnd(id, ok: false)
@@ -5316,6 +5332,8 @@ final class RepoSession: Identifiable {
         }
         if case .optimizeRepository = write {
             // Outside the write lane, it may end after later writes; it changes nothing undo covers.
+        } else if case .mergeInWorktree = write {
+            // It changed the other worktree, whose journal took it: this tab's Undo stays as it was.
         } else if lastNotUndoable != write.notUndoable {
             lastNotUndoable = write.notUndoable
         }
@@ -5335,9 +5353,10 @@ final class RepoSession: Identifiable {
     }
 
     /// Returns the pull's, the interactive rebase's or the stash apply's outcome (`.done` for every other write).
+    /// `worktreeProfile`: the other worktree's profile, for `.mergeInWorktree`.
     @concurrent
-    private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws
-        -> WriteOutcome
+    private nonisolated static func run(_ write: Write, profile: Profile?, worktreeProfile: Profile? = nil,
+                                        backend: Backend, cwd: URL) async throws -> WriteOutcome
     {
         var outcome = WriteOutcome.done
         let base = await GitToolchain.writeBase()
@@ -5433,6 +5452,9 @@ final class RepoSession: Identifiable {
                 try await ops.checkout(branch: checkoutFirst)
             }
             try await ops.merge(revision, mode: mode)
+        case .mergeInWorktree(let path, let branch, let revision, let mode):
+            try await mergeInWorktree(path: path, branch: branch, revision: revision, mode: mode,
+                                      profile: worktreeProfile, base: base, backend: backend, cwd: cwd)
         case .rebase(let upstream, let checkoutFirst, let autostash):
             if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
             try await ops.rebase(onto: upstream, autostash: autostash)
@@ -5480,6 +5502,52 @@ final class RepoSession: Identifiable {
             if try await ops.interactiveRebase(todo, files: folder) { outcome = .autostashPending }
         }
         return outcome
+    }
+
+    /// `Write.mergeInWorktree`: checks again that the worktree at `path` still holds `branch` and can take a merge (the
+    /// menu's list may be stale), then merges there with its own profile and undo journal, on this tab's runner.
+    @concurrent
+    private nonisolated static func mergeInWorktree(
+        path: String, branch: String, revision: String, mode: GitOperations.MergeMode?, profile: Profile?,
+        base: [String: String], backend: Backend, cwd: URL
+    ) async throws {
+        let target = URL(filePath: path, directoryHint: .isDirectory)
+        let name = target.lastPathComponent
+        func refuse(_ reason: String) -> GitError { GitError.other(exit: 1, stderrTail: reason) }
+        // The folder first: git cannot even start in a missing one. The list is read here, the same from any worktree.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw refuse("The folder of worktree \(name) is missing.")
+        }
+        let worktrees = try await StashWorktreeReader.worktrees(
+            runner: backend.runner, cwd: cwd, env: try await backend.readEnvironment(cwd: cwd))
+        let key = ProfileStore.repoKey(target)
+        guard let worktree = worktrees.first(where: { ProfileStore.repoKey(URL(filePath: $0.path)) == key }),
+              worktree.branch == "refs/heads/\(branch)"
+        else { throw refuse("Worktree \(name) no longer has \(branch) checked out.") }
+        if worktree.isPrunable { throw refuse("Worktree \(name) is gone: Prune Worktrees removes its record.") }
+        let env = try await backend.readEnvironment(cwd: target)
+        let state = try await RepoState.read(runner: backend.runner, cwd: target, env: env)
+        let operation: String? = switch state.operation {
+        case .none: nil
+        case .merge: "merge"
+        case .rebase: "rebase"
+        case .cherryPick: "cherry-pick"
+        case .revert: "revert"
+        case .am: "patch series"
+        }
+        if let operation {
+            throw refuse("\(name) is in the middle of a \(operation): finish or abort it in its tab first.")
+        }
+        if !state.conflictedPaths.isEmpty {
+            throw refuse("\(name) has unresolved conflicts: resolve them in its tab first.")
+        }
+        // The journal file the worktree's own tab uses (`backend()`). Not locked against that tab writing it at the
+        // same moment: one entry could be lost then.
+        let journal = UndoJournal(file: StatePaths.directory("undo").appending(
+            path: "\(RepoSession.stateKey(target)).json", directoryHint: .notDirectory))
+        let ops = GitOperations(runner: backend.runner, cwd: target, profile: profile, base: base, journal: journal)
+        try await ops.merge(revision, mode: mode)
     }
 
     // MARK: Operations
@@ -5531,6 +5599,18 @@ final class RepoSession: Identifiable {
                 } else if case .optimizeRepository = write {
                     // Before `stopped`: a merge or rebase may stop on conflicts while it runs (it is outside the lane).
                     postToast(.success(title, detail: "Repository optimized: history and the graph load faster."))
+                } else if case .mergeInWorktree(let path, let branch, _, _) = write {
+                    // Before `stopped`: it ran in the other worktree, whose state is not this tab's. The branch is
+                    // shared, so this tab's refs (reread by `perform`) have its new tip.
+                    let name = URL(filePath: path).lastPathComponent
+                    let tip = refs.value?.localBranches.first { $0.name == branch }?.commit
+                    if let tip, tip == refsBefore?.localBranches.first(where: { $0.name == branch })?.commit {
+                        postToast(.success(title, detail: "\(branch) is already up to date."))
+                    } else {
+                        let moved = tip.map { "\(branch) is now at \($0.prefix(7)). " } ?? ""
+                        postToast(.success(title, detail: moved + "Undo it from \(name)'s tab."))
+                    }
+                    refreshWorktreeTab(path)
                 } else if stopped {
                     postToast(.stopped(title))
                 } else if case .applyPatch = write {
@@ -5554,7 +5634,13 @@ final class RepoSession: Identifiable {
                 // A warning, not a failure, and before any cancellation check: the changes may be only in that stash.
                 postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))
             } catch {
-                if !(error is CancellationError) {
+                if case GitError.conflict = error, case .mergeInWorktree(let path, _, _, _) = write {
+                    // The conflicts are in the other worktree, not in this tab's WIP panel: its tab opens on them.
+                    let name = URL(filePath: path).lastPathComponent
+                    postToast(.warning("\(title) stopped on conflicts",
+                                       detail: "Resolve them in \(name)'s tab, then commit."))
+                    openWorktree(path)
+                } else if !(error is CancellationError) {
                     // `ignore` refuses to write through a symlink or into something that is not a plain file.
                     let message = if case .ignore = write, case UndoError.unsafePath = error {
                         "The ignore file or its folder is a symlink or not a plain file; Histq won't write through it."

@@ -2,7 +2,8 @@
 // linked worktree `graph-wt` is on `wt` with an unstaged CHANGELOG.md edit): a worktree added from a branch checks
 // that branch out (a short name, never detached), from a commit it is detached, an option-looking folder name stays a
 // folder; remove refuses the main worktree, the caller's own and a dirty one unless forced; prune drops a worktree
-// whose folder is gone.
+// whose folder is gone. A journaled merge run in a linked worktree records into that worktree's journal and undoes
+// there, without touching the main worktree.
 import Foundation
 import HistqCore
 import Testing
@@ -120,5 +121,36 @@ struct WorktreeOperationsTests {
         #expect(try await fx.worktrees().last?.isPrunable == true)
         try await fx.ops.pruneWorktrees()
         #expect(try await fx.worktrees().count == 1)
+    }
+
+    @Test("a journaled merge run in a linked worktree records and undoes there, the main worktree untouched")
+    func mergeInLinkedWorktree() async throws {
+        let fx = try await Repo()
+        defer { fx.copy.remove() }
+        let linked = fx.copy.repo("graph-wt")
+        let changelog = try Data(contentsOf: linked.appending(path: "CHANGELOG.md"))
+        let status = try await fx.copy.git(["status", "--porcelain"], in: fx.repo)
+
+        // wt-next: a child of wt with the same tree, so graph-wt's unstaged CHANGELOG.md edit never overlaps.
+        let wt = try await fx.copy.git(["rev-parse", "wt"], in: fx.repo)
+        let next = try await fx.copy.git(["commit-tree", "-p", "wt", "-m", "next", "wt^{tree}"], in: fx.repo)
+        try await fx.copy.git(["update-ref", "refs/heads/wt-next", next], in: fx.repo)
+
+        let journal = UndoJournal(file: fx.copy.folder.appending(path: "state/undo/graph-wt.json"))
+        let ops = GitOperations(
+            runner: fx.copy.runner, cwd: linked, env: GitInvocation.environment(profile: nil, base: fx.copy.base),
+            journal: journal)
+        try await ops.merge("refs/heads/wt-next", mode: .fastForwardOnly)
+
+        #expect(try await fx.copy.git(["rev-parse", "wt"], in: fx.repo) == next)
+        #expect(try await fx.copy.git(["rev-parse", "--abbrev-ref", "HEAD"], in: fx.repo) == "main")
+        #expect(try await fx.copy.git(["status", "--porcelain"], in: fx.repo) == status)
+        let undo = try journal.load().undo
+        #expect(undo.count == 1 && undo.first?.kind == .merge)
+
+        #expect(try await ops.undo().kind == .merge)
+        #expect(try await fx.copy.git(["rev-parse", "wt"], in: fx.repo) == wt)
+        #expect(try Data(contentsOf: linked.appending(path: "CHANGELOG.md")) == changelog)
+        #expect(try await fx.copy.git(["rev-parse", "--abbrev-ref", "HEAD"], in: fx.repo) == "main")
     }
 }

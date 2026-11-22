@@ -208,7 +208,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let model = target()?.model else { return }
             let session = model.selectedSession
             let isRepoTab = model.selectedIndex.map { model.tabs[$0].repoURL != nil && !model.tabs[$0].isMissing } ?? false
-            if !isRepoTab || (session?.refs.value != nil && session?.status.value != nil && session?.log.value != nil) {
+            // The worktree list too: worktree rows (merge in another worktree) read it.
+            if !isRepoTab || (session?.refs.value != nil && session?.status.value != nil && session?.log.value != nil
+                && session?.worktrees.value != nil) {
                 break
             }
             try? await Task.sleep(for: .milliseconds(50))
