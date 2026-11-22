@@ -544,6 +544,7 @@ private struct IssueSkeleton: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
                                     .fill(Palette.skeletonFill)
+                                    .skeletonPulse()
                                     .frame(height: 64)
                                 HStack {
                                     Spacer(minLength: 0)

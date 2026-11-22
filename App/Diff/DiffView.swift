@@ -895,6 +895,7 @@ private struct ImageDiffPlaceholder: View {
                     SkeletonLine(width: 120, height: 10)
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Palette.skeletonFill)
+                        .skeletonPulse()
                         .frame(maxWidth: .infinity, maxHeight: 240)
                 }
             }

@@ -62,7 +62,35 @@ struct SkeletonLine: View {
     }
 
     private var bar: some View {
-        Capsule().fill(Palette.skeletonFill)
+        Capsule().fill(Palette.skeletonFill).skeletonPulse()
+    }
+}
+
+extension View {
+    /// Pulses a loading placeholder's opacity so it reads as loading: every `SkeletonLine`, and any other shape filled
+    /// with `Palette.skeletonFill`.
+    func skeletonPulse() -> some View {
+        modifier(SkeletonPulse())
+    }
+}
+
+/// A slow opacity pulse, still under Reduce Motion and in a kept-alive tab that is not shown.
+private struct SkeletonPulse: ViewModifier {
+    @State private var dimmed = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.tabIsShown) private var tabIsShown
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(dimmed ? 0.45 : 1)
+            .task(id: tabIsShown && !reduceMotion) {
+                guard tabIsShown, !reduceMotion else {
+                    // A non-repeating change replaces the repeating animation, which stops it.
+                    withAnimation(nil) { dimmed = false }
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { dimmed = true }
+            }
     }
 }
 
