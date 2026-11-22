@@ -11,6 +11,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ### Changed
 - Fade Other Worktrees is off by default. When it is on, selecting a row of another worktree lights only that worktree: every other one fades, the current tab's own commits and WIP row too.
+- A branch checked out in another worktree shows the worktree icon on its graph badge, and keeps it when the badge is cut short. Worktrees use a folder-with-branch icon in the graph, the sidebar and the WIP panel.
 - A group's menu has Delete Group, which asks first, then closes the group and its tabs as Close Group used to (⇧⌘T brings them back).
 
 ## [0.3.0] - 2026-11-21

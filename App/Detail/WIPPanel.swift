@@ -613,7 +613,7 @@ private struct WorktreeHeaderCard: View {
     let branch: String?
 
     var body: some View {
-        SectionCard(URL(filePath: path).lastPathComponent, systemImage: "folder") {
+        SectionCard(URL(filePath: path).lastPathComponent, systemImage: SidebarMetrics.worktreeImage) {
             VStack(alignment: .leading, spacing: 4) {
                 if let branch {
                     Label { Text(branch) } icon: { IconImage("lucide-git-branch") }

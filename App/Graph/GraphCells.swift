@@ -41,6 +41,8 @@ struct RefBadge: Hashable {
     /// The remote the cloud icon stands for (`origin`): its owner's logo replaces the cloud once loaded
     /// (`RefBadgeCellView.remoteAvatars`).
     var remote: String?
+    /// A local branch checked out in another worktree: the worktree icon in front, always shown.
+    var isOtherWorktree = false
 
     /// The name drawn in the badge.
     var shownName: String { label ?? name }
@@ -57,9 +59,10 @@ struct RefBadge: Hashable {
     /// The badges of every labeled commit, in row order: HEAD's branch (or a detached HEAD) first, then local
     /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read (and per
     /// change of `pullRequests`, the store's `branchPullRequests`: a remote branch's pull request by its name, which a
-    /// local branch gets through its upstream; and per change of `remotes`, the repo's remote names).
-    static func badges(for refs: Refs, pullRequests: [String: PullRequest] = [:], remotes: [String] = [])
-        -> [String: [RefBadge]]
+    /// local branch gets through its upstream; per change of `remotes`, the repo's remote names; and per change of
+    /// `otherWorktreeBranches`, the full refs (`refs/heads/wt`) checked out in the other worktrees).
+    static func badges(for refs: Refs, pullRequests: [String: PullRequest] = [:], remotes: [String] = [],
+                       otherWorktreeBranches: Set<String> = []) -> [String: [RefBadge]]
     {
         var byCommit: [String: [RefBadge]] = [:]
         let single = singleRemote(refs, remotes: remotes)
@@ -77,7 +80,7 @@ struct RefBadge: Hashable {
             byCommit[branch.commit, default: []].append(RefBadge(
                 kind: .branch(isLocal: true, isRemote: tracked != nil, isHead: branch.isHead), name: branch.name,
                 ahead: branch.ahead, behind: branch.behind, pullRequest: branch.upstream.flatMap { pullRequests[$0] },
-                remote: tracked?.remote))
+                remote: tracked?.remote, isOtherWorktree: otherWorktreeBranches.contains(branch.refName)))
         }
         for remote in refs.remoteBranches where !mergedRemotes.contains(remote.name) {
             byCommit[remote.commit, default: []].append(RefBadge(
@@ -111,11 +114,11 @@ struct RefBadge: Hashable {
 
 /// The BRANCH / TAG column's cell: the row's badges from the left, as many as fit whole, then "+N" for the rest. When
 /// even the first does not fit whole it steps down (`Level`) in the room "+N" leaves: its name without ↑↓ and the pull
-/// request chip, cut with "…" (at least 3 characters), then its icons alone (HEAD's check, the laptop and
-/// the cloud always stay); "+N" always stays. Nothing is drawn outside a badge, or past the cell. A line in the lane
-/// color runs from the last badge to the column's right edge, where the graph cell continues it to the node. With
-/// `stack` set it is the hover overlay instead (`GraphTableController`): every badge whole, one under the other; the
-/// table routes its clicks, menus, drags and drops to them.
+/// request chip, cut with "…" (at least 3 characters), then its icons alone (HEAD's check, the laptop, the cloud
+/// and the worktree icon always stay); "+N" always stays. Nothing is drawn outside a badge, or past the cell. A line
+/// in the lane color runs from the last badge to the column's right edge, where the graph cell continues it to the
+/// node. With `stack` set it is the hover overlay instead (`GraphTableController`): every badge whole, one under the
+/// other; the table routes its clicks, menus, drags and drops to them.
 final class RefBadgeCellView: NSView {
     var badges: [RefBadge] = []
     /// The row's lane color (`GraphRow.color`).
@@ -251,13 +254,16 @@ final class RefBadgeCellView: NSView {
     private static func icons(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
         switch badge.kind {
         case .branch(let isLocal, let isRemote, let isHead):
-            return (isHead ? [headIcon] : [],
+            return ((isHead ? [headIcon] : []) + (badge.isOtherWorktree ? [worktreeIcon] : []),
                     (isLocal ? ["lucide-laptop-minimal"] : []) + (isRemote ? ["cloud"] : []))
         case .tag: return (["tag"], [])
         case .head: return ([headIcon], [])
-        case .worktree: return (["folder"], [])
+        case .worktree: return ([worktreeIcon], [])
         }
     }
+
+    /// A worktree: another worktree's WIP badge, and a branch checked out there (the sidebar's worktree icon).
+    private static let worktreeIcon = SidebarMetrics.worktreeImage
 
     private static func aheadBehind(_ badge: RefBadge) -> String? {
         var parts: [String] = []

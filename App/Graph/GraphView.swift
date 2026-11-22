@@ -145,6 +145,9 @@ struct GraphView: NSViewRepresentable {
     /// The repo's remote names (`RepoSession.remotes`): with one remote, a remote branch's badge drops the remote
     /// from its name (`RefBadge.remoteLabel`).
     var remotes: [String] = []
+    /// The branches checked out in the other worktrees, as full refs (`refs/heads/wt`): their badges show the worktree
+    /// icon.
+    var otherWorktreeBranches: Set<String> = []
     /// The repo's remotes' URLs by name (`RepoSession.remotes`): the cloud on a remote's badges gives way to its
     /// owner's logo (`AvatarStore.ownerAvatar`).
     var remoteURLs: [String: String] = [:]
@@ -490,6 +493,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var refs: Refs?
     private var pullRequests: [String: RefBadge.PullRequest] = [:]
     private var remotes: [String] = []
+    private var otherWorktreeBranches: Set<String> = []
     private var remoteURLs: [String: String] = [:]
     /// The logos of the remotes' owners loaded so far, by remote name (`RefBadgeCellView.remoteAvatars`).
     private var remoteAvatars: [String: NSImage] = [:]
@@ -778,11 +782,17 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             formatter.dateFormat = view.dateFormat
             reloadVisible = true
         }
-        if view.refs != refs || view.pullRequests != pullRequests || view.remotes != remotes {
+        if view.refs != refs || view.pullRequests != pullRequests || view.remotes != remotes
+            || view.otherWorktreeBranches != otherWorktreeBranches
+        {
             refs = view.refs
             pullRequests = view.pullRequests
             remotes = view.remotes
-            badges = view.refs.map { RefBadge.badges(for: $0, pullRequests: pullRequests, remotes: remotes) } ?? [:]
+            otherWorktreeBranches = view.otherWorktreeBranches
+            badges = view.refs.map {
+                RefBadge.badges(for: $0, pullRequests: pullRequests, remotes: remotes,
+                                otherWorktreeBranches: otherWorktreeBranches)
+            } ?? [:]
             reloadVisible = true
         }
         if view.remoteURLs != remoteURLs {
@@ -1402,7 +1412,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         return Ghost(row: row, hash: hash, badge: RefBadge(
             kind: .branch(isLocal: isLocal, isRemote: !isLocal, isHead: false), name: name, label: label,
-            isGhost: true, remote: remoteName))
+            isGhost: true, remote: remoteName,
+            isOtherWorktree: isLocal && otherWorktreeBranches.contains("refs/heads/" + name)))
     }
 
     /// Moves the ghost to the selection's: reloads only the refs and graph cells of the row it leaves and the row it

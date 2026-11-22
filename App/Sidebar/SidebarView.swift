@@ -103,8 +103,8 @@ enum SidebarMetrics {
     /// The checked-out branch and the current worktree: a filled check in place of their own glyph.
     static let currentImage = "checkmark.circle.fill"
     static let branchImage = "lucide-git-branch"
-    /// The Worktrees card and each worktree's row: a folder.
-    static let worktreeImage = "folder"
+    /// The Worktrees card and each worktree's row: a folder with a branch.
+    static let worktreeImage = "lucide-folder-git-2"
     /// The Submodules card and each submodule's row: a box.
     static let submoduleImage = "shippingbox"
     /// The Stashes card and each stash's row: the tray of the graph's stash node.
@@ -441,7 +441,7 @@ private struct WorktreeRow: View {
 
     var body: some View {
         HStack(spacing: SidebarMetrics.iconGap) {
-            Image(systemName: info.isCurrent ? SidebarMetrics.currentImage : SidebarMetrics.worktreeImage)
+            IconImage(info.isCurrent ? SidebarMetrics.currentImage : SidebarMetrics.worktreeImage)
                 .imageScale(info.isCurrent ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
                 .foregroundStyle(nameColor)
