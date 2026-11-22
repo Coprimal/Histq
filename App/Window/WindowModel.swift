@@ -37,6 +37,9 @@ final class WindowModel {
         var archived = false
         /// The manual group it is in (`groups`); nil for none.
         var groupID: UUID?
+        /// The onboarding tour's demo repository (`openDemoTab`). Never saved, never on the ⇧⌘T stack or in the
+        /// archive, never moved to another window or put in a group; its close goes through `closeDemoTab`.
+        var isDemo = false
 
         /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { alias ?? repoURL?.lastPathComponent ?? "New Tab" }
@@ -169,6 +172,11 @@ final class WindowModel {
     private(set) var palette: CommandPaletteModel?
     /// The window's modal that is not a repo operation's (those live on `RepoSession`); nil while closed.
     private(set) var modal: WindowModal?
+    /// The first-run onboarding running over this window (`startOnboarding`); nil when none runs. Not a
+    /// `WindowModal`: `ModalHost` closes those on a tab switch, and the tour opens its demo tab.
+    private(set) var onboarding: OnboardingModel?
+    /// The tab selected when the demo tab opened (`openDemoTab`), selected again when it closes.
+    @ObservationIgnored private var selectedBeforeDemo: Tab.ID?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
     /// Called by `closeTab` / `closeTabs` before they remove the tab(s) whose close then closes the window, while the
@@ -819,7 +827,28 @@ final class WindowModel {
     /// change it depends on (tabs, their sessions' selection and profile, the archive). The stowed archived tabs come
     /// after every tab, so the normal tabs keep their indices.
     var savedTabs: [SavedTab] {
-        tabs.map(saved) + archivedTabs
+        tabs.filter { !$0.isDemo }.map(saved) + archivedTabs
+    }
+
+    /// The selected tab's index in `savedTabs`: a selected demo tab saves the nearest tab that is not one (the one
+    /// before on a tie); nil when no such tab is selected or left.
+    var savedSelectedIndex: Int? {
+        savedSelection?.offset
+    }
+
+    /// The repo path of the tab `savedSelectedIndex` names; nil for a Welcome tab or none.
+    var savedSelectedPath: String? {
+        savedSelection.flatMap { tabs[$0.index].repoURL?.path }
+    }
+
+    /// The tab the session saves as selected: its index in `tabs` and its offset among the tabs that are not demo tabs.
+    private var savedSelection: (index: Int, offset: Int)? {
+        guard let selected = selectedIndex else { return nil }
+        let kept = tabs.indices.filter { !tabs[$0].isDemo }
+        guard let nearest = kept.min(by: { abs($0 - selected) < abs($1 - selected) }),
+              let offset = kept.firstIndex(of: nearest)
+        else { return nil }
+        return (nearest, offset)
     }
 
     /// The manual groups as the session saves them, those with a tab only; nil when there is none. Observable, as
@@ -944,6 +973,11 @@ final class WindowModel {
     /// asked first, `RepoSession.asksBeforeRemovingWorktree`).
     private func closeTabNow(id: Tab.ID, archiving: Bool) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
+        // The demo tab (its close button, ⌘W) never reaches ⇧⌘T or the archive, and never closes the window.
+        if tabs[index].isDemo {
+            closeDemoTab()
+            return true
+        }
         let wasWelcome = tabs[index].repoURL == nil
         // The window closes when this is its last tab and no archive is left (the tab itself may go to it) for a
         // Welcome tab to keep reachable.
@@ -1082,8 +1116,8 @@ final class WindowModel {
     /// nowhere. A manual group left with no tab is dropped. The tab leaves the multi-selection.
     private func remove(at index: Int, archiving: Bool = false, batch: UUID? = nil, remembering: Bool = true) {
         let tab = tabs[index]
-        if !remembering {
-            // Saved by the caller: it opens again in another window.
+        if !remembering || tab.isDemo {
+            // Saved by the caller: it opens again in another window. The demo tab is never remembered.
         } else if tab.archived || archiving {
             var entry = saved(tab)
             entry.archived = true
@@ -1188,7 +1222,9 @@ final class WindowModel {
     /// gives way to a Welcome tab when the archive is not empty, else no tab is left (the caller closes the window).
     /// nil for the popped-out archived tab, or an unknown id.
     func detachTab(_ id: Tab.ID) -> MovedTab? {
-        guard let index = tabs.firstIndex(where: { $0.id == id }), !tabs[index].archived else { return nil }
+        guard let index = tabs.firstIndex(where: { $0.id == id }), !tabs[index].archived, !tabs[index].isDemo else {
+            return nil
+        }
         // Read while the tab is still here: both look at its session or restored state.
         let missing = missingProfile(of: id)
         let session = sessions.removeValue(forKey: id)
@@ -1558,7 +1594,7 @@ final class WindowModel {
     /// archived tab are skipped.
     private func groupable(_ ids: some Sequence<Tab.ID>) -> Set<Tab.ID> {
         let picked = Set(ids)
-        let eligible = tabs.filter { !$0.pinned && !$0.archived }
+        let eligible = tabs.filter { !$0.pinned && !$0.archived && !$0.isDemo }
         let keys = Set(eligible.filter { picked.contains($0.id) }.compactMap(\.repoKey))
         return Set(eligible.filter { picked.contains($0.id) || $0.repoKey.map(keys.contains) == true }.map(\.id))
     }
@@ -1722,7 +1758,7 @@ final class WindowModel {
         guard let openWindow, let group = groups.first(where: { $0.id == id }), !groupHoldsAllNormalTabs(id) else {
             return
         }
-        let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }
+        let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived && !$0.isDemo }
         guard !members.isEmpty else { return }
         if asksBeforeClosing(Set(members.map(\.id)), retry: { $0.moveGroupToNewWindow(id); return true }) { return }
         // Saved before the removals: `saved(_:)` reads the sessions and the restored state.
@@ -1751,7 +1787,7 @@ final class WindowModel {
     /// one of its tabs back) adds its tabs to that entry, which moves to the front.
     func closeGroup(_ id: UUID) {
         guard let group = groups.first(where: { $0.id == id }) else { return }
-        let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }
+        let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived && !$0.isDemo }
         guard !members.isEmpty else { return }
         if asksBeforeClosing(Set(members.map(\.id)), retry: { $0.closeGroup(id); return true }) { return }
         // Saved before the removals: `saved(_:)` reads the sessions and the restored state.
@@ -1957,15 +1993,86 @@ final class WindowModel {
     /// Opens the command palette on the window's rows now (`PaletteCommands`), `query` typed; the card shows in this
     /// frame, its rows once ranked off the main actor.
     func openPalette(query: String = "") {
-        // ⌘K and the toolbar's Search stay live over a modal: the palette waits until it closes.
-        guard modal == nil, !isSettingsOpen, actionSession?.hasModal != true else { return }
+        // ⌘K and the toolbar's Search stay live over a modal: the palette waits until it closes. Never during the
+        // onboarding, its tour included (where `isShowingModal` is false).
+        guard modal == nil, !isSettingsOpen, actionSession?.hasModal != true, !isOnboarding else { return }
         UITiming.select("palette")
         palette = CommandPaletteModel(snapshot: PaletteCommands.snapshot(for: self), query: query)
     }
 
-    /// The palette, Settings or a modal shows: `MainView` blurs and disables the content behind it.
+    /// The palette, Settings, a modal or an onboarding card shows: `MainView` blurs and disables the content behind it.
+    /// Not during the onboarding's tour: its spotlit content stays sharp (`isOnboarding` gates the rest).
     var isShowingModal: Bool {
         palette != nil || isSettingsOpen || modal != nil || actionSession?.hasModal == true
+            || onboarding?.showsCard == true
+    }
+
+    // MARK: Onboarding
+
+    /// The onboarding runs over this window, its cards or its tour: the palette, the window's main-menu actions, the
+    /// tab strip's middle-click and the group chip's right-click are refused, and the toolbar cannot be customized.
+    var isOnboarding: Bool { onboarding != nil }
+
+    /// Starts the onboarding over this window at `step`, its window actions wired to this model: the tour's demo tab
+    /// (`openDemoTab`, `closeDemoTab`), a repo cloned meanwhile (`openTab`) and its end (`endOnboarding`). What was
+    /// open over the page closes first. Nothing when it runs already.
+    func startOnboarding(at step: OnboardingModel.Step = .welcome) {
+        guard onboarding == nil else { return }
+        palette = nil
+        closeSettings()
+        modal = nil
+        if let session = selectedSession, session.hasModal { session.closeModals() }
+        let onboarding = OnboardingModel(
+            openDemo: { [weak self] url in self?.openDemoTab(url) },
+            closeDemo: { [weak self] in self?.closeDemoTab() },
+            openRepo: { [weak self] url in self?.openTab(url) },
+            end: { [weak self] in self?.endOnboarding() })
+        self.onboarding = onboarding
+        onboarding.start(at: step)
+    }
+
+    /// Ends the onboarding without marking it done (its Finish and Skip mark it first, then call this): the demo tab
+    /// closes and its repository is removed.
+    func endOnboarding() {
+        guard let onboarding else { return }
+        onboarding.discardDemo()
+        self.onboarding = nil
+    }
+
+    /// Opens the tour's demo repository in a new tab and selects it: never the Welcome tab, never in the recent repos,
+    /// in no worktree box or group. Replaces a demo tab already open.
+    func openDemoTab(_ url: URL) {
+        closeDemoTab()
+        navigation.page = .home
+        selectedBeforeDemo = selectedTabID
+        let tab = Tab(repoURL: url.standardizedFileURL, isDemo: true)
+        tabs.insert(tab, at: normalEnd)
+        selectedTabID = tab.id
+        activateSelectedTab()
+    }
+
+    /// Closes the demo tab with its session (watcher, terminal, kept layout), not onto the ⇧⌘T stack or the archive.
+    /// When it was selected, the tab selected before it opened shows again, else its neighbor; when it was the last
+    /// tab a Welcome tab takes its place (the window stays). Nothing when no demo tab is open.
+    func closeDemoTab() {
+        guard let index = tabs.firstIndex(where: \.isDemo) else { return }
+        let id = tabs[index].id
+        let before = selectedBeforeDemo
+        selectedBeforeDemo = nil
+        remove(at: index, remembering: false)
+        if tabs.isEmpty {
+            let welcome = Tab()
+            tabs = [welcome]
+            selectedTabID = welcome.id
+            return
+        }
+        guard selectedTabID == id else { return }
+        if let before, tabs.contains(where: { $0.id == before }) {
+            selectedTabID = before
+            activateSelectedTab()
+        } else {
+            selectNeighbor(ofRemoved: index)
+        }
     }
 
     // MARK: Modals

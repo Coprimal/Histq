@@ -79,6 +79,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var settledFiles: [String: (file: WorkspaceFile, isReadOnly: Bool)] = [:]
     /// Workspace files opened while the launch restores the last session, opened after it; nil once it has.
     private var launchWorkspaces: [URL]? = []
+    /// Folders or workspace files arrived while the launch restored the last session (`open -a Histq <path>`, Finder):
+    /// the first-run gate never shows the onboarding for such a launch.
+    private var launchedWithPaths = false
     /// Quit has begun: closing windows keep no close-burst snapshot.
     private var isTerminating = false
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "session")
@@ -125,8 +128,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // capture starts only once the saved session is read, so its workspace layouts are kept.
         Task { @MainActor in
             await self.restoreLastSession()
+            // Demo repositories an earlier run left behind (a quit or crash during the tour), removed off the main
+            // actor; the onboarding starts only once they are gone, so its tour never races the cleanup.
+            let cleanup = Task.detached(priority: .utility) {
+                Self.removeLeftoverDemos(in: StatePaths.onboardingDemoParent)
+            }
             self.finishLaunching()
+            await cleanup.value
+            await self.startLaunchOnboarding()
         }
+    }
+
+    /// Removes every `demo-*` folder in `parent` that `DemoRepository.remove` accepts (marked, directly inside
+    /// `parent`); a missing `parent` is nothing to clean.
+    private nonisolated static func removeLeftoverDemos(in parent: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: parent.path(percentEncoded: false))) ?? []
+        for name in names where name.hasPrefix("demo-") {
+            let base = parent.appending(path: name, directoryHint: .isDirectory)
+            do {
+                try DemoRepository.remove(base: base, parent: parent)
+            } catch {
+                Logger(subsystem: "com.math2it.histq", category: "onboarding")
+                    .error("Leftover demo not removed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    /// The DEBUG `-HistqOnboarding` request of this launch: a step or the tour opens there, `auto` runs the first-run
+    /// gate (as if no state dir were set) and `off`, an unknown step or no flag do nothing. The real auto-show comes
+    /// later. It starts on the target window, and never when a window runs one already.
+    private func startLaunchOnboarding() async {
+        let step: OnboardingModel.Step
+        switch AppState.launchOnboarding {
+        case nil, .off:
+            return
+        case .step(let id):
+            guard let named = OnboardingModel.Step(launch: id) else { return }
+            step = named
+        case .tour:
+            // A stop id waits for the tour's stops (Phase 2): the tour opens at its first one.
+            step = .tour
+        case .auto:
+            let decision = OnboardingGate.decide(
+                done: Preferences.defaults.bool(forKey: PrefKey.onboardingDone.rawValue),
+                recentRepos: RecentRepos.shared.urls.count, recentWorkspaces: RecentRepos.workspaces.urls.count,
+                session: await SessionStore.loaded()?.session, stateDirMode: false,
+                launchedWithPaths: launchedWithPaths, forced: false)
+            switch decision {
+            case .show: step = .welcome
+            case .markDone: return Preferences.defaults.set(true, forKey: PrefKey.onboardingDone.rawValue)
+            case .stay: return
+            }
+        }
+        guard !entries.contains(where: { $0.model.isOnboarding }), let entry = target() else { return }
+        entry.model.startOnboarding(at: step)
     }
 
     /// The launch's windows are open: capture starts (saving them now, so a launch with folders is restorable too),
@@ -296,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func application(_ application: NSApplication, open urls: [URL]) {
         let files = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == Self.workspaceExtension }
         if launchWorkspaces != nil {
+            if !urls.isEmpty { launchedWithPaths = true }
             launchWorkspaces?.append(contentsOf: files)
         } else {
             for file in files { openWorkspace(file) }
@@ -576,14 +632,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                         id: model.windowID, x: window.frame.minX, y: window.frame.minY, width: window.frame.width,
                         height: window.frame.height, group: group, tabIndex: tabIndex,
                         isSelectedInGroup: isSelectedInGroup,
-                        selectedPath: model.selectedIndex.flatMap { model.tabs[$0].repoURL?.path },
+                        selectedPath: model.savedSelectedPath,
                         collapsedGroups: collapsed.isEmpty ? nil : collapsed)
                     continue
                 }
                 windows.append(SavedWindow(
                     x: window.frame.minX, y: window.frame.minY, width: window.frame.width, height: window.frame.height,
                     group: group, tabIndex: tabIndex, isSelectedInGroup: isSelectedInGroup,
-                    tabs: model.savedTabs, selectedTab: model.selectedIndex, manualTabGroups: model.savedTabGroups,
+                    tabs: model.savedTabs, selectedTab: model.savedSelectedIndex, manualTabGroups: model.savedTabGroups,
                     closedTabGroups: model.savedClosedGroups))
             }
         }
@@ -705,6 +761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Its stored path belongs to the source file.
         if tab.isMissing { return "Locate the repo first" }
         if tab.archived { return "Unarchive the tab to move it." }
+        if tab.isDemo { return "The demo tab stays in its window." }
         // `adopt` would close the tab's session and select the destination's own tab of the repo.
         if let url = tab.repoURL, destination.hasRepo(atPath: url.path) {
             return "\(url.lastPathComponent) is already open in that window"
@@ -842,6 +899,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model?.sessions.values.forEach { $0.closeAI() }
         // Closing a window never calls the sessions' `close()`: their shells end here.
         model?.sessions.values.forEach { $0.endTerminal() }
+        // Its onboarding ends, not done (it shows again by itself when nothing else changed): the demo tab closes and
+        // its repository is removed.
+        model?.endOnboarding()
         // Before it leaves `entries`: the first window of a workspace closed by hand keeps the file as it was.
         if let workspace = model?.workspace { keepPreCloseSnapshot(of: workspace) }
         entries.removeAll { $0.window === window }
@@ -888,16 +948,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// New Window (⇧⌘N): in the target window's workspace.
     @objc func newWindowAction(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(newWindowAction(_:))) else { return }
         show(newWindow(workspace: target()?.model.workspace))
     }
 
     @objc func newTab(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(newTab(_:))) else { return }
         guard let entry = target() else { return show(newWindow()) }
         entry.model.openTab(nil)
         show(entry)
     }
 
     @objc func openDocument(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(openDocument(_:))) else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -912,16 +975,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Opens a Welcome tab, where the clone form lives.
     @objc func cloneRepository(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(cloneRepository(_:))) else { return }
         newTab(sender)
     }
 
     /// Asks for a patch file and opens the Apply Patch preview on it, in the key window's repo tab.
     @objc func applyPatch(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(applyPatch(_:))) else { return }
         patchSession()?.chooseAndPreviewPatch()
     }
 
     /// Opens the Apply Patch preview on the clipboard's text, in the key window's repo tab.
     @objc func applyClipboardPatch(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(applyClipboardPatch(_:))) else { return }
         patchSession()?.previewClipboardPatch()
     }
 
@@ -951,6 +1017,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Closes the key window's selected tab, and the window with its last tab.
     @objc func closeTab(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(closeTab(_:))) else { return }
         guard let entry = entry(for: NSApp.keyWindow) else {
             NSApp.keyWindow?.performClose(sender)
             return
@@ -970,6 +1037,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// ⇧⌘T: reopens the key window's last closed tab; again for the one closed before it.
     @objc func reopenClosedTab(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(reopenClosedTab(_:))) else { return }
         guard let entry = entry(for: NSApp.keyWindow) else { return }
         entry.model.reopenClosedTab()
     }
@@ -977,12 +1045,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// ⌘K: opens the key window's command palette, or closes it. A main menu item, so it works wherever the focus is
     /// (the AppKit toolbar, a table, the palette's own field).
     @objc func toggleCommandPalette(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(toggleCommandPalette(_:))) else { return }
         guard let entry = target() else { return }
         entry.model.togglePalette()
     }
 
     /// Opens the Settings modal in the key window (⌘,); it stays open when it already shows.
     @objc func showSettings() {
+        guard !isOnboarding(for: #selector(showSettings)) else { return }
         let entry = target() ?? newWindow()
         entry.model.openSettings()
         show(entry)
@@ -1013,12 +1083,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// ⌃`: shows or hides the selected repo tab's terminal drawer. A main menu item, so it works with the focus in the
     /// terminal too.
     @objc func toggleTerminal(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(toggleTerminal(_:))) else { return }
         target()?.model.toggleTerminal()
     }
 
     /// View › Move Tabs to the Left/Top: writes General › Tab position, as the palette command does; the windows
     /// follow it live.
     @objc func toggleTabPosition(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(toggleTabPosition(_:))) else { return }
         let next: TabPosition = TabPosition.current == .left ? .top : .left
         Preferences.defaults.set(next.rawValue, forKey: PrefKey.tabPosition.rawValue)
     }
@@ -1026,12 +1098,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// View › Classic / Stacked / Columns / Focus (the item's `representedObject`): Focus again (⌥⌘F) leaves Focus.
     /// The windows follow it live, and their minimum size (Columns' is wider).
     @objc func chooseLayout(_ sender: NSMenuItem) {
+        guard !isOnboarding(for: #selector(chooseLayout(_:))) else { return }
         guard let preset = (sender.representedObject as? String).flatMap(LayoutPreset.init(rawValue:)) else { return }
         LayoutPreset.choose(preset)
     }
 
     /// View › Reset Layout: default panel widths and Stacked split; the layout preset stays.
     @objc func resetLayout(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(resetLayout(_:))) else { return }
         LayoutPreset.reset()
     }
 
@@ -1052,6 +1126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// File › New Workspace: asks where to save it, writes a workspace with one window and a Welcome tab, then opens
     /// that window.
     @objc func newWorkspace(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(newWorkspace(_:))) else { return }
         let panel = workspaceSavePanel(name: "Untitled", folder: nil)
         Task { @MainActor in
             guard await panel.begin() == .OK, let url = panel.url else { return }
@@ -1061,6 +1136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// File › Open Workspace…: asks for a workspace file and opens it.
     @objc func openWorkspaceDocument(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(openWorkspaceDocument(_:))) else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -1075,12 +1151,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Recent Workspaces › a file (the item's `representedObject`, its URL).
     @objc func openRecentWorkspace(_ sender: NSMenuItem) {
+        guard !isOnboarding(for: #selector(openRecentWorkspace(_:))) else { return }
         guard let url = sender.representedObject as? URL else { return }
         openWorkspace(url)
     }
 
     /// Recent Workspaces › Clear Menu.
     @objc func clearRecentWorkspaces(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(clearRecentWorkspaces(_:))) else { return }
         RecentRepos.workspaces.clear()
     }
 
@@ -1104,6 +1182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// File › Save Workspace As…: asks for the new file, then saves the target window's workspace there (from an
     /// Untitled window, every Untitled window), `saveWorkspace(to:from:)`.
     @objc func saveWorkspaceAs(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(saveWorkspaceAs(_:))) else { return }
         guard let entry = target() else { return }
         let workspace = entry.model.workspace
         let panel = workspaceSavePanel(name: workspace?.name ?? "Untitled",
@@ -1116,6 +1195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// File › Close Workspace: closes the target window's workspace with all its windows.
     @objc func closeWorkspace(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(closeWorkspace(_:))) else { return }
         guard let workspace = target()?.model.workspace else { return }
         close(workspace)
     }
@@ -1353,6 +1433,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
+    // MARK: Onboarding
+
+    /// The main-menu actions a window's onboarding refuses, its cards and its tour alike: every window-scoped one (tabs,
+    /// Open…, Clone…, Apply Patch…, the palette, new window, the workspace items, Settings…, Find, Show Terminal, Move
+    /// Tabs, the layout presets, Reset Layout), in `validateMenuItem` and in each action (a key equivalent the menu
+    /// missed). Quit, Hide, About, Check for Updates, the Edit text commands, Close Window (which ends the onboarding),
+    /// Minimize and Zoom stay live. Customize Toolbar is off through the toolbar (`HeaderToolbar`), Undo / Redo
+    /// through the graph table that answers them (`GraphTableView`, via `isOnboarding(in:)`).
+    private static let refusedWhileOnboarding: Set<Selector> = [
+        #selector(newWindowAction(_:)), #selector(newTab(_:)), #selector(openDocument(_:)),
+        #selector(cloneRepository(_:)), #selector(applyPatch(_:)), #selector(applyClipboardPatch(_:)),
+        #selector(closeTab(_:)), #selector(reopenClosedTab(_:)), #selector(toggleCommandPalette(_:)),
+        #selector(showSettings), #selector(toggleTerminal(_:)), #selector(toggleTabPosition(_:)),
+        #selector(chooseLayout(_:)), #selector(resetLayout(_:)), #selector(newWorkspace(_:)),
+        #selector(openWorkspaceDocument(_:)), #selector(openRecentWorkspace(_:)), #selector(clearRecentWorkspaces(_:)),
+        #selector(saveWorkspaceAs(_:)), #selector(closeWorkspace(_:)), #selector(findCommits(_:)),
+    ]
+
+    /// Whether `action` is refused now: it is one of `refusedWhileOnboarding` and the window it acts on runs the
+    /// onboarding (the key window for ⌘W and ⇧⌘T, as they act on it; `target()` for the others). Settings opened from
+    /// a card covers it: ⌘W and ⌘F then act on Settings as they always do (close it, search it), never on the tabs.
+    private func isOnboarding(for action: Selector?) -> Bool {
+        guard let action, Self.refusedWhileOnboarding.contains(action) else { return false }
+        let actsOnKey = action == #selector(closeTab(_:)) || action == #selector(reopenClosedTab(_:))
+        guard let model = actsOnKey ? entry(for: NSApp.keyWindow)?.model : target()?.model, model.isOnboarding else {
+            return false
+        }
+        let actsOnSettings = action == #selector(closeTab(_:)) || action == #selector(findCommits(_:))
+        return !(actsOnSettings && model.isSettingsOpen)
+    }
+
+    /// Whether the onboarding runs over `window`: for the views that validate nil-targeted menu items themselves
+    /// (`GraphTableView`'s Undo / Redo), which reach it through `NSApp.delegate`.
+    func isOnboarding(in window: NSWindow?) -> Bool {
+        entry(for: window)?.model.isOnboarding == true
+    }
+
     // MARK: Find
 
     /// `performFindPanelAction(_:)` with `showFindPanel`, as the focused view gets it: the Find item's stand-in when it
@@ -1368,6 +1485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// a text view without a find bar answers `performFindPanelAction(_:)` with a disabled item, which would end the
     /// responder chain there, so this asks the chain itself and only hands the action to a view that takes it.
     @objc func findCommits(_ sender: Any?) {
+        guard !isOnboarding(for: #selector(findCommits(_:))) else { return }
         // Settings (with no modal over it) searches its own rows.
         if let model = target()?.model, model.canFindInSettings {
             model.findInSettings()
@@ -1409,6 +1527,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        // Titles and checkmarks first: the onboarding's steps write these preferences while the items are refused.
+        if menuItem.action == #selector(toggleTabPosition(_:)) {
+            menuItem.title = TabPosition.current == .left ? "Move Tabs to the Top" : "Move Tabs to the Left"
+        }
+        if menuItem.action == #selector(chooseLayout(_:)) {
+            menuItem.state = menuItem.representedObject as? String == LayoutPreset.current.rawValue ? .on : .off
+        }
+        if isOnboarding(for: menuItem.action) { return false }
         if menuItem.action == #selector(closeTab(_:)) { return NSApp.keyWindow != nil }
         if menuItem.action == #selector(saveEditedFile(_:)) { return editorSession() != nil }
         // Close Workspace only on a workspace window; Save Workspace As… on any window (an Untitled one saves every
@@ -1439,12 +1565,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let hides = session?.isTerminalOpen == true && session?.isTerminalPending == false
             menuItem.title = hides ? "Hide Terminal" : "Show Terminal"
             return session != nil
-        }
-        if menuItem.action == #selector(toggleTabPosition(_:)) {
-            menuItem.title = TabPosition.current == .left ? "Move Tabs to the Top" : "Move Tabs to the Left"
-        }
-        if menuItem.action == #selector(chooseLayout(_:)) {
-            menuItem.state = menuItem.representedObject as? String == LayoutPreset.current.rawValue ? .on : .off
         }
         return true
     }

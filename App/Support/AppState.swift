@@ -62,6 +62,11 @@ enum AppState {
     /// DEBUG `-HistqCloseWorkspace <name>`: once the launch's windows are open, Close Workspace runs on the open
     /// workspace with that name.
     static let launchCloseWorkspace: String? = launchFlag("-HistqCloseWorkspace")
+
+    /// DEBUG `-HistqOnboarding off|auto|<step>|tour|tour:<stopID>`: how this launch starts the onboarding, or nil
+    /// when the flag is absent or its value unknown (the normal first-run gate then decides).
+    static let launchOnboarding: OnboardingLaunch? = launchFlag("-HistqOnboarding")
+        .flatMap(OnboardingLaunch.init(parsing:))
 }
 
 /// Where the app keeps its files: `~/Library/Application Support/Histq`, or the DEBUG state dir.
@@ -75,6 +80,10 @@ enum StatePaths {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    /// `root/Onboarding`: the parent of the onboarding tour's demo repos (`DemoRepository.create` makes each one in a
+    /// `demo-<id>` folder). Only a path, never created here, so it is cheap and callable from any thread.
+    static let onboardingDemoParent: URL = root.appending(path: "Onboarding", directoryHint: .isDirectory)
 
     /// Creates the root folder; called once at launch.
     static func prepare() {
@@ -256,6 +265,10 @@ enum PrefKey: String, CaseIterable {
     /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
     /// its `RepoViewState` (`RepoSession.migrateHiddenRefs`).
     case hiddenRefs
+    /// Whether the first-run onboarding was finished or skipped, or this is an existing user's install (written
+    /// silently when `OnboardingGate` says `.markDone`): true stops it from showing by itself (a manual start still
+    /// opens it).
+    case onboardingDone
 
     /// The value a key has until the user sets it.
     var defaultValue: Any {
@@ -318,6 +331,7 @@ enum PrefKey: String, CaseIterable {
         case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
         case .toastLevel: "all"
         case .hiddenRefs: [String: [String]]()
+        case .onboardingDone: false
         }
     }
 }
@@ -388,6 +402,35 @@ struct SelectRequest: Equatable, Sendable {
         }
         self.kind = kind
         value = parts.count > 1 && !parts[1].isEmpty ? String(parts[1]) : nil
+    }
+}
+
+/// A DEBUG `-HistqOnboarding <value>` request (`AppState.launchOnboarding`). Step and stop ids stay raw strings here:
+/// the onboarding model maps them to its steps and tour stops, and ignores an id it does not know.
+enum OnboardingLaunch: Equatable, Sendable {
+    /// `off`: the onboarding never shows by itself, not even on a truly empty state.
+    case off
+    /// `auto`: the real first-run gate decides, even in state-dir mode.
+    case auto
+    /// `<step>`: the onboarding opens at that step (`welcome`, `git`, `rowHeight`, `finish`…).
+    case step(String)
+    /// `tour` or `tour:<stopID>`: the onboarding opens on the tour, at its first stop or at `stopID`.
+    case tour(stop: String?)
+
+    /// Parses the flag's value; an empty or malformed one is logged and gives nil.
+    init?(parsing text: String) {
+        switch text {
+        case "off": self = .off
+        case "auto": self = .auto
+        case "tour": self = .tour(stop: nil)
+        case _ where text.hasPrefix("tour:") && text.count > 5: self = .tour(stop: String(text.dropFirst(5)))
+        case _ where !text.isEmpty && text.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }):
+            self = .step(text)
+        default:
+            Logger(subsystem: "com.math2it.histq", category: "launch")
+                .error("-HistqOnboarding: unknown value \(text, privacy: .public), ignored")
+            return nil
+        }
     }
 }
 

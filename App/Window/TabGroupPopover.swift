@@ -115,9 +115,9 @@ struct TabGroupPopoverAnchor: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // Not under the palette, Settings or a modal: the click is theirs.
+            // Not under the palette, Settings, a modal or the onboarding (its tour too): the click is theirs.
             .background(RightClickCatcher {
-                guard !model.isShowingModal else { return false }
+                guard !(model.isShowingModal || model.isOnboarding) else { return false }
                 model.groupPopoverID = groupID
                 return true
             })

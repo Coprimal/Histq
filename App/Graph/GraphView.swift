@@ -340,20 +340,31 @@ final class GraphTableView: NSTableView {
         super.keyDown(with: event)
     }
 
-    // Edit › Undo / Redo (⌘Z / ⇧⌘Z) reach the table only while it is the first responder.
+    // Edit › Undo / Redo (⌘Z / ⇧⌘Z) reach the table only while it is the first responder. Refused while the
+    // onboarding runs over the window: nil-targeted, so the app delegate's menu gate never sees them; the table asks it
+    // through `NSApp.delegate` (`AppDelegate.isOnboarding(in:)`, its window's entry), as the tab strip asks for moves.
 
     @objc func undo(_ sender: Any?) {
+        guard !isOnboarding else { return }
         (delegate as? GraphTableController)?.history(redo: false)
     }
 
     @objc func redo(_ sender: Any?) {
+        guard !isOnboarding else { return }
         (delegate as? GraphTableController)?.history(redo: true)
+    }
+
+    /// The onboarding runs over this table's window.
+    private var isOnboarding: Bool {
+        (NSApp.delegate as? AppDelegate)?.isOnboarding(in: window) == true
     }
 
     override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
-        case #selector(undo(_:)): (delegate as? GraphTableController)?.canHistory(redo: false) ?? false
-        case #selector(redo(_:)): (delegate as? GraphTableController)?.canHistory(redo: true) ?? false
+        case #selector(undo(_:)):
+            !isOnboarding && (delegate as? GraphTableController)?.canHistory(redo: false) ?? false
+        case #selector(redo(_:)):
+            !isOnboarding && (delegate as? GraphTableController)?.canHistory(redo: true) ?? false
         default: super.validateUserInterfaceItem(item)
         }
     }

@@ -378,8 +378,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
     /// window's workspace (name, path, read-only and write state), the selected tab's repo, its session's refs,
     /// running operations, status, stashes, remotes, profile, undo status, operation in progress and terminal drawer,
-    /// the profile store, the page, the Settings modal and whether Sparkle has an update are read, so other tabs and
-    /// the content's own state never wake the toolbar.
+    /// the profile store, the page, the Settings modal, whether the onboarding runs and whether Sparkle has an update
+    /// are read, so other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -391,6 +391,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     private func apply() {
         applyWorkspace()
+        // No Customize Toolbar (its menu items, View's) while the onboarding runs over the window; back after.
+        let customizable = !model.isOnboarding
+        if toolbar.allowsUserCustomization != customizable { toolbar.allowsUserCustomization = customizable }
         let selected = model.selectedIndex.map { model.tabs[$0] }
         let session = model.actionSession
         // The folder's name, never the tab's alias: the alias only shortens the tab itself.
