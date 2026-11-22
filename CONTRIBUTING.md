@@ -287,6 +287,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows (dimmed), as their header's eye button does. |
 | `-HistqSaveWorkspace <path>` | Once the launch's windows are open, Save Workspace As… to `<path>` from the front window, without a panel. |
 | `-HistqCloseWorkspace <name>` | Once the launch's windows are open, Close Workspace on the open workspace with that name. |
+| `-HistqMoveTab <from>:<tab>:<to>` | Once the launch's windows are restored and the profiles read, Move Tab to Window: tab `<tab>` (offset in that window's tabs) of window `<from>` to window `<to>` (window offsets in the app's window list: after a restore, the Untitled windows first, then each workspace's), without selecting it first. `operations.txt` gets `move-tab <spec>: moved`, `refused <reason>` or `bad indices`. |
 | `-HistqImportProfiles YES` | When a workspace opens with the offer to import its missing profiles, presses Import about 1 s after the sheet shows. |
 | `-HistqTerminalProbe <repo>` / `-HistqTerminalSettingsProbe <spec>` | Probes a repo's terminal (its shell, identity and environment) or the Settings › Terminal preferences. |
 | `-HistqHTMLProbe YES` | Snapshots every GitHub HTML view (`html-<n>.png`) and logs its size. |

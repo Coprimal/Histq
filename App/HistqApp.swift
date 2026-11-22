@@ -39,6 +39,12 @@ final class WindowState {
     var isVisible = true
 }
 
+/// What `AppDelegate.moveTab` did: the tab moved, or why it stayed (shown by the menu, the palette and the drag).
+enum MoveResult: Equatable {
+    case moved
+    case refused(String)
+}
+
 /// Owns the windows, one `WindowModel` each, and the main menu for the app lifetime.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate {
@@ -168,6 +174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard let workspace = self.workspaces.first(where: { $0.name == name }) else { return }
                 self.close(workspace)
             }
+        }
+        if let spec = AppState.launchFlag("-HistqMoveTab") {
+            Task { @MainActor in await self.debugMoveTab(spec) }
         }
         // `-HistqTabWalk <rounds>[,<ms>]`: at window level, once per launch (a session's flag would run in every tab).
         if let spec = AppState.launchFlag("-HistqTabWalk") {
@@ -654,6 +663,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                              originals: originals, repoOrder: workspace.repoOrder, profileOrder: workspace.profileOrder,
                              fileURL: fileURL, homeURL: Workspace.homeURL)
     }
+
+    // MARK: Move a tab to another window
+
+    /// The windows a tab of `model` can move to: every other open window, in `entries` order.
+    func moveDestinations(for model: WindowModel) -> [WindowModel] {
+        entries.map(\.model).filter { $0 !== model }
+    }
+
+    /// Why the tab `id` cannot move from `source` to `destination` now; nil when it can (`moveTab`). No I/O: a menu
+    /// builds its entries with it.
+    func moveRefusal(_ id: WindowModel.Tab.ID, from source: WindowModel, to destination: WindowModel) -> String? {
+        guard let tab = source.tabs.first(where: { $0.id == id }), source !== destination,
+              entries.contains(where: { $0.model === source }), entries.contains(where: { $0.model === destination })
+        else { return "The tab or the window is gone." }
+        // Its profile's definition lives in its workspace file: an Untitled window could not keep it.
+        if destination.workspace == nil, source.missingProfile(of: id) != nil { return "Import or pick a profile first" }
+        if let workspace = destination.workspace {
+            if workspace.isReadOnly { return "\(workspace.name) is read-only" }
+            if workspace.writeFailed { return "\(workspace.name) is not being saved" }
+        }
+        // The tab would stay in the source's unwritten file and come back on its next open.
+        if let workspace = source.workspace {
+            if workspace.isReadOnly { return "\(workspace.name) is read-only" }
+            if workspace.writeFailed { return "\(workspace.name) is not being saved" }
+        }
+        // A move never empties a workspace (its close burst would write it as it was, with the tab).
+        if let workspace = source.workspace, source.tabs.count == 1, source.archivedTabs.isEmpty,
+           windows(of: workspace).count == 1 {
+            return "Last tab of \(workspace.name) — use Close Workspace"
+        }
+        // Its stored path belongs to the source file.
+        if tab.isMissing { return "Locate the repo first" }
+        if tab.archived { return "Unarchive the tab to move it." }
+        // `adopt` would close the tab's session and select the destination's own tab of the repo.
+        if let url = tab.repoURL, destination.hasRepo(atPath: url.path) {
+            return "\(url.lastPathComponent) is already open in that window"
+        }
+        return nil
+    }
+
+    /// Moves the tab `id` from `source` to `destination` (Move Tab to Window ›, the palette, the drag, the
+    /// `-HistqMoveTab` seam), refused before anything changes (`moveRefusal`). The tab goes alone, the source's
+    /// multi-selection ends, its session (terminal, AI run) moves along, and it is selected in `destination`. The source
+    /// window closes once it is left with no tab, after the tab left it, so its close ends nothing that moved.
+    @discardableResult
+    func moveTab(_ id: WindowModel.Tab.ID, from source: WindowModel, to destination: WindowModel) -> MoveResult {
+        // A close burst still pending is settled first, so its snapshot never writes the tab to the wrong file.
+        settleCloseBursts()
+        if let reason = moveRefusal(id, from: source, to: destination) { return .refused(reason) }
+        source.clearSelection()
+        guard let moved = source.detachTab(id) else { return .refused("The tab or the window is gone.") }
+        destination.adopt(moved)
+        if source.tabs.isEmpty, let entry = entries.first(where: { $0.model === source }) {
+            entry.window.close()
+            // The source's workspace still has windows (`moveRefusal`): the snapshot its close kept is dropped, and the
+            // next pass writes the windows left.
+            settleCloseBursts()
+        }
+        if let window = destination.window { present(window) }
+        SessionStore.schedule()
+        return .moved
+    }
+
+    #if DEBUG
+    /// DEBUG `-HistqMoveTab <fromWindow>:<tab>:<toWindow>` (QA of Move Tab to Window): once the launch's windows are
+    /// restored and the profiles read, moves tab `<tab>` (an offset in that window's `tabs`) of window `<fromWindow>`
+    /// to window `<toWindow>` (offsets in `entries`), without selecting it first, and logs the result to
+    /// `operations.txt`.
+    private func debugMoveTab(_ spec: String) async {
+        _ = await ProfileLibrary.shared.loaded()
+        // The restored tabs' repo keys are read off the main thread.
+        try? await Task.sleep(for: .milliseconds(500))
+        let parts = spec.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 3, entries.indices.contains(parts[0]), entries.indices.contains(parts[2]),
+              entries[parts[0]].model.tabs.indices.contains(parts[1])
+        else { return RepoMenus.debugLog("move-tab \(spec): bad indices") }
+        let source = entries[parts[0]].model
+        switch moveTab(source.tabs[parts[1]].id, from: source, to: entries[parts[2]].model) {
+        case .moved: RepoMenus.debugLog("move-tab \(spec): moved")
+        case .refused(let reason): RepoMenus.debugLog("move-tab \(spec): refused \(reason)")
+        }
+    }
+    #endif
 
     private func show(_ entry: Entry) {
         present(entry.window)

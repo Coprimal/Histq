@@ -401,19 +401,27 @@ private struct VerticalTabList: View {
         if next != drag { drag = next }
     }
 
-    /// Ends a drag: back into its place with the lifted look when it would land where it stands, else moved there.
+    /// Ends a drag: out of the window, to another window or back (`TabDragOut`); else back into its place with the
+    /// lifted look when it would land where it stands, else moved there.
     private func drop() {
         guard dragging, let drag else { return }
-        if drag.index == drag.range.lowerBound, drag.group == drag.origin {
-            withAnimation(animation) {
-                dragOffset = 0
-                dragging = false
-            }
-        } else {
+        // Out of the window: never a reorder (`TabDragOut`).
+        switch TabDragOut.outcome(of: drag.unit, in: model) {
+        case .move(let id, let destination):
+            // Reset without animation: the tab leaves this window.
+            dragging = false
+            dragOffset = 0
+            TabDragOut.move(id, from: model, to: destination)
+        case .inside where drag.index != drag.range.lowerBound || drag.group != drag.origin:
             // Reset without animation before the move, so the rows render at their new places directly.
             dragging = false
             dragOffset = 0
             model.moveUnit(drag.unit, to: drag.index, group: drag.group)
+        case .inside, .snapBack:
+            withAnimation(animation) {
+                dragOffset = 0
+                dragging = false
+            }
         }
     }
 

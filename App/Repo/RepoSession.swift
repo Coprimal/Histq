@@ -2615,6 +2615,15 @@ final class RepoSession: Identifiable {
         refresh(scope: .log)
     }
 
+    /// A tab moved to another window (`WindowModel.adopt`): `view` is the graph's view as the destination has it,
+    /// shown at once (the setup's hand-off then leaves it as it is). Not saved: it is already where `viewRoute` reads.
+    func replaceView(_ view: RepoViewState) {
+        self.view = view
+        viewLoaded = true
+        updateVisibility()
+        refresh(scope: .log)
+    }
+
     private func updateVisibility() {
         let new = view == .empty ? LogFilter() : refs.value.map { Self.logFilter(view: view, refs: $0) } ?? LogFilter()
         if new != visibility { visibility = new }
@@ -2667,6 +2676,23 @@ final class RepoSession: Identifiable {
     @concurrent
     nonisolated static func globalViews(_ cwds: [URL]) async -> [(URL, RepoViewState)] {
         cwds.map { ($0, RepoViewState.load(key: stateKey($0))) }
+    }
+
+    /// A tab moved from a workspace into an Untitled window (`WindowModel.adopt`): the folder's global saved view
+    /// (`repo-view/<stateKey>.json`) when it has one, never overwritten; else `view`, the tab's, is saved there and
+    /// returned. Read and written off the main actor.
+    @concurrent
+    nonisolated static func claimGlobalView(_ view: RepoViewState, cwd: URL) async -> RepoViewState {
+        let key = stateKey(cwd)
+        let global = RepoViewState.load(key: key)
+        guard global == .empty, view != .empty else { return global }
+        do {
+            try view.save(key: key)
+        } catch {
+            Logger(subsystem: "com.math2it.histq", category: "repo")
+                .error("view save failed: \(error, privacy: .public)")
+        }
+        return view
     }
 
     /// `view` against `refs`. Hidden: the hidden branches and tags that exist but the current branch, each hidden local one's

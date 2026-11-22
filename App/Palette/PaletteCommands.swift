@@ -54,7 +54,7 @@ struct PaletteSnapshot {
     /// A menu's actions as rows: separators dropped, a submenu's items titled "Submenu › Item" (or left out when
     /// `submenus` rejects its title), a "Merge X into Y" submenu's as "Merge X into Y (fast-forward only)", entries whose
     /// title `skip` accepts left out (with their submenus).
-    mutating func add(_ entries: [MenuEntry], detail: String, section: PaletteSection = .operations,
+    @MainActor mutating func add(_ entries: [MenuEntry], detail: String, section: PaletteSection = .operations,
                       systemImage: String, submenus: (String) -> Bool = { _ in true }, prefix: String = "",
                       skip: (String) -> Bool = { _ in false })
     {
@@ -65,8 +65,9 @@ struct PaletteSnapshot {
             case .action(let perform):
                 add(prefix + entry.title, detail: detail, section: section, systemImage: systemImage,
                     enabled: entry.isEnabled, perform: perform)
-            case .submenu(let children):
+            case .submenu, .lazySubmenu:
                 guard submenus(entry.title) else { continue }
+                let children = entry.children
                 guard RepoMenus.isMergeSubmenu(entry.title) else {
                     add(children, detail: detail, section: section, systemImage: systemImage,
                         prefix: prefix + entry.title + " › ", skip: skip)
@@ -169,7 +170,8 @@ enum PaletteCommands {
         }
     }
 
-    /// The window's other tabs (selected as a click on them), then New Tab. Rows hold the model weakly: the model
+    /// The window's other tabs (selected as a click on them), New Tab, then Move Tab to Window: … for the current tab
+    /// and each other window (`AppDelegate.moveTab`). Rows hold the model weakly: the model
     /// holds the palette, so a strong capture would keep a closed window's model and sessions alive.
     private static func tabs(_ model: WindowModel, into snapshot: inout PaletteSnapshot) {
         for tab in model.tabs where tab.id != model.selectedTabID || model.navigation.page != .home {
@@ -181,6 +183,20 @@ enum PaletteCommands {
         }
         snapshot.add("New Tab", detail: "⌘T", section: .tabs, systemImage: "plus") { [weak model] in
             model?.openTab(nil)
+        }
+        // The current tab alone, even in a multi-selection; a refused row shows why and never runs, a late refusal
+        // shows as a toast (`TabDragOut.move`).
+        guard let id = model.selectedTabID, let tab = model.tabs.first(where: { $0.id == id }),
+              let app = NSApp.delegate as? AppDelegate else { return }
+        for destination in app.moveDestinations(for: model) {
+            let refusal = app.moveRefusal(id, from: model, to: destination)
+            snapshot.add("Move Tab to Window: \(TabMenu.windowTitle(destination))",
+                         detail: refusal ?? "Tab \(tab.title)", section: .tabs,
+                         systemImage: "macwindow", enabled: refusal == nil) {
+                [weak model, weak destination] in
+                guard let model, let destination else { return }
+                TabDragOut.move(id, from: model, to: destination)
+            }
         }
     }
 

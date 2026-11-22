@@ -87,7 +87,8 @@ final class WelcomeModel {
     /// The repository picked in the GitHub list; its URL is in `cloneURL`.
     private(set) var selectedRepoID: Int?
 
-    @ObservationIgnored private let open: (URL) -> Void
+    /// Opens the repo in the tab: set by its window, again when the tab moves to another window.
+    @ObservationIgnored var open: (URL) -> Void
     /// Shows a toast in the window, from this tab: why a clone's submodules were not all cloned.
     @ObservationIgnored var postToast: (OperationToast) -> Void = { _ in }
     @ObservationIgnored private var checkTask: Task<Void, Never>?

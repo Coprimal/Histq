@@ -42,6 +42,25 @@ final class WindowModel {
         var title: String { alias ?? repoURL?.lastPathComponent ?? "New Tab" }
     }
 
+    /// A tab on its way to another window (`detachTab`, `adopt`): what the source window hands over, decided there.
+    struct MovedTab {
+        /// The tab, in no manual group.
+        let tab: Tab
+        /// Its session, live (terminal, AI run): never closed by the move. nil for a tab never selected since restore.
+        let session: RepoSession?
+        /// What a tab with no session was restored with (its profile, commit): its session starts from it.
+        let restored: SavedTab?
+        /// A Welcome tab's state (a clone in flight).
+        let welcome: WelcomeModel?
+        /// The tab's graph view in the source: its session's once read, else the source workspace's; nil for the
+        /// global `repo-view/` file (an Untitled source, or a repo its workspace has no view of yet).
+        let view: RepoViewState?
+        /// The source window is a workspace window.
+        let fromWorkspace: Bool
+        /// Its profile is missing in the source (`missingProfile(of:)`), with the source file's definition of it.
+        let missingProfile: RepoSession.MissingProfile?
+    }
+
     /// A closed repo tab that ⇧⌘T reopens: as the session saves it, its worktree box's key, its manual group, and its
     /// index when it closed.
     private struct ClosedTab {
@@ -389,10 +408,17 @@ final class WindowModel {
     /// The Welcome tab `id`'s state, created on first use. Its Open, Clone and Init open the repo in that tab.
     func welcome(for id: Tab.ID) -> WelcomeModel {
         if let welcome = welcomes[id] { return welcome }
-        let welcome = WelcomeModel { [weak self] url in self?.open(url, fromWelcome: id) }
-        welcome.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
+        let welcome = WelcomeModel { _ in }
+        wire(welcome, id: id)
         welcomes[id] = welcome
         return welcome
+    }
+
+    /// Points a Welcome tab's state at this window and its tab `id`: when it is made, and when it moves in from
+    /// another window (`adopt`).
+    private func wire(_ welcome: WelcomeModel, id: Tab.ID) {
+        welcome.open = { [weak self] url in self?.open(url, fromWelcome: id) }
+        welcome.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
     }
 
     /// Opens a repo from the Welcome tab `id`: in that tab while it is selected (as `openTab`). A clone that ends
@@ -488,17 +514,7 @@ final class WindowModel {
         let session = RepoSession(url: url)
         session.profileScope = profileScope
         session.viewRoute = viewRoute
-        // A worktree's "Open in New Tab" and a double-click on its sidebar row open it in this window, beside this
-        // tab's group. The worktree's tab shows its changes, else its HEAD commit, even when it was open on another
-        // row.
-        session.openInTab = { [weak self] url in
-            self?.openTab(url, opener: id)
-            self?.selectedSession?.showWorkingState()
-        }
-        // A submodule's "Open in New Tab" opens its own repo: a tab outside this tab's group.
-        session.openRepoInTab = { [weak self] url in self?.openTab(url) }
-        session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
-        session.worktreeRemoved = { [weak self] path in self?.closeRemovedWorktreeTabs(path) }
+        wire(session, id: id)
         let saved = restored.removeValue(forKey: id)
         if let profile = saved?.profile { session.restoreProfile(profile.profileID) }
         // Settings › Terminal "Open terminal with each new tab": a repo the user opens now (Open, a recent repo, a clone
@@ -518,6 +534,22 @@ final class WindowModel {
         }
         #endif
         return session
+    }
+
+    /// Points a session's callbacks at this window and its tab `id`: when it is made, and when it moves in from
+    /// another window (`adopt`).
+    private func wire(_ session: RepoSession, id: Tab.ID) {
+        // A worktree's "Open in New Tab" and a double-click on its sidebar row open it in this window, beside this
+        // tab's group. The worktree's tab shows its changes, else its HEAD commit, even when it was open on another
+        // row.
+        session.openInTab = { [weak self] url in
+            self?.openTab(url, opener: id)
+            self?.selectedSession?.showWorkingState()
+        }
+        // A submodule's "Open in New Tab" opens its own repo: a tab outside this tab's group.
+        session.openRepoInTab = { [weak self] url in self?.openTab(url) }
+        session.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
+        session.worktreeRemoved = { [weak self] path in self?.closeRemovedWorktreeTabs(path) }
     }
 
     /// The toolbar's Terminal button and View › Show Terminal (⌃`): the selected repo tab's drawer.
@@ -854,16 +886,19 @@ final class WindowModel {
             selectedTabID = welcome.id
             return true
         }
-        if selectedTabID == id {
-            // The next shown normal tab, else the one before: a collapsed group stays collapsed unless nothing else is
-            // left. The popped-out archived tab only when no normal tab is left.
-            let next = min(index, normalEnd - 1)
-            let shown = (0..<normalEnd).filter { !isHidden($0) }
-            let fallback = normalEnd > 0 ? next : tabs.count - 1
-            selectedTabID = tabs.isEmpty ? nil : tabs[shown.first { $0 >= next } ?? shown.last ?? fallback].id
-            activateSelectedTab()
-        }
+        if selectedTabID == id { selectNeighbor(ofRemoved: index) }
         return !tabs.isEmpty
+    }
+
+    /// After the selected tab at `index` left (closed, or moved to another window): selects the next shown normal tab,
+    /// else the one before: a collapsed group stays collapsed unless nothing else is left. The popped-out archived tab
+    /// only when no normal tab is left; nil when no tab is.
+    private func selectNeighbor(ofRemoved index: Int) {
+        let next = min(index, normalEnd - 1)
+        let shown = (0..<normalEnd).filter { !isHidden($0) }
+        let fallback = normalEnd > 0 ? next : tabs.count - 1
+        selectedTabID = tabs.isEmpty ? nil : tabs[shown.first { $0 >= next } ?? shown.last ?? fallback].id
+        activateSelectedTab()
     }
 
     /// A tab's menu › Close Other Tabs: every tab but `id`, which is selected. The popped-out archived tab stays.
@@ -1060,6 +1095,128 @@ final class WindowModel {
         return tab
     }
 
+    // MARK: Move to another window
+
+    /// Takes the tab `id` out of this window to move it to another one (`adopt`), without closing its session (its
+    /// terminal and AI run go with it) and without ⇧⌘T remembering it. It leaves its manual group (dropped when left
+    /// empty) and moves alone out of its worktree box. The selection moves as when it closes; the window's last tab
+    /// gives way to a Welcome tab when the archive is not empty, else no tab is left (the caller closes the window).
+    /// nil for the popped-out archived tab, or an unknown id.
+    func detachTab(_ id: Tab.ID) -> MovedTab? {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), !tabs[index].archived else { return nil }
+        // Read while the tab is still here: both look at its session or restored state.
+        let missing = missingProfile(of: id)
+        let session = sessions.removeValue(forKey: id)
+        let view: RepoViewState? = if let session, session.viewLoaded {
+            session.view
+        } else {
+            tabs[index].repoURL.flatMap { workspace?.view(for: $0) }
+        }
+        var tab = tabs[index]
+        tab.groupID = nil
+        let moved = MovedTab(tab: tab, session: session, restored: restored.removeValue(forKey: id),
+                             welcome: welcomes.removeValue(forKey: id), view: view, fromWorkspace: workspace != nil,
+                             missingProfile: missing)
+        // Its session, restored state and Welcome state are out already: nothing is closed or cancelled.
+        remove(at: index, remembering: false)
+        if tabs.isEmpty, !archivedTabs.isEmpty {
+            // Even for a Welcome tab: a move never loses the archive with a closed window.
+            let welcome = Tab()
+            tabs = [welcome]
+            selectedTabID = welcome.id
+        } else if selectedTabID == id {
+            selectNeighbor(ofRemoved: index)
+        }
+        normalize()
+        return moved
+    }
+
+    /// Takes in a tab detached from another window (`detachTab`) and selects it. When this window has its repo open
+    /// already (or in its archive), that tab is selected (popped out) instead and the moved session closes: a safety
+    /// net, `moveRefusal` refuses such a move first (`hasRepo`). Otherwise
+    /// the tab goes where `openTab` puts a new tab, its session is wired to this window and follows its membership
+    /// (profile scope, view route), and it joins the worktree box of its repo here, taking the box's pin (else it keeps
+    /// its own). Its graph view comes along (`carryView`). A profile missing in the source stays missing: the session
+    /// carries it, and a workspace embeds its definition.
+    func adopt(_ moved: MovedTab) {
+        navigation.page = .home
+        closeSettings()
+        var tab = moved.tab
+        if let path = tab.repoURL?.path {
+            if let existing = tabs.first(where: { $0.repoURL?.path == path }) {
+                moved.session?.close()
+                return selectTab(id: existing.id)
+            }
+            if let archived = archivedIndex(of: path) {
+                moved.session?.close()
+                return openArchived(at: archived)
+            }
+        }
+        tab.groupID = nil
+        // A box is pinned whole (`normalize`): the tab never pins or unpins the box it joins.
+        if let key = tab.repoKey, let peer = tabs.first(where: { $0.repoKey == key && !$0.archived }) {
+            tab.pinned = peer.pinned
+        }
+        tabs.insert(tab, at: normalEnd)
+        if let entry = moved.restored { restored[tab.id] = entry }
+        if let welcome = moved.welcome {
+            wire(welcome, id: tab.id)
+            welcomes[tab.id] = welcome
+        }
+        if let session = moved.session {
+            wire(session, id: tab.id)
+            session.profileScope = profileScope
+            if let embedded = moved.missingProfile?.embedded { session.carriedMissingProfile = embedded }
+            sessions[tab.id] = session
+        }
+        if let embedded = moved.missingProfile?.embedded { workspace?.adoptProfile(embedded) }
+        normalize()
+        if tab.repoURL != nil, !tab.isMissing, tab.repoKey == nil { resolveRepoKeys([tab.id]) }
+        UITiming.select("moved tab")
+        selectedTabID = tab.id
+        activateSelectedTab()
+        // After the select: a tab with no session has one now. Its setup's view hand-off comes later, off this turn.
+        carryView(moved)
+    }
+
+    /// Routes a moved tab's view (`adopt`). Into a workspace, the tab's view becomes the workspace's view of the repo
+    /// (the global file's, read off the main thread, when the source had none). Into an Untitled window from a
+    /// workspace, the repo's global view wins when it has one, else the tab's is written there (`claimGlobalView`);
+    /// the session saves nowhere until that is decided, so it never overwrites the global file. From one Untitled
+    /// window to another, the global file is already the tab's view.
+    private func carryView(_ moved: MovedTab) {
+        let id = moved.tab.id
+        let session = sessions[id]
+        guard let url = moved.tab.repoURL, !moved.tab.isMissing else {
+            session?.viewRoute = viewRoute
+            return
+        }
+        if let workspace {
+            session?.viewRoute = viewRoute
+            if let view = moved.view { return workspace.setView(view, for: url) }
+            Task { [weak self, weak workspace] in
+                guard let view = await RepoSession.globalViews([url]).first?.1 else { return }
+                guard let self, let workspace, self.workspace === workspace, tabs.contains(where: { $0.id == id })
+                else { return }
+                workspace.setView(view, for: url)
+                if let session = sessions[id], session.viewLoaded, session.view != view { session.replaceView(view) }
+            }
+            return
+        }
+        guard moved.fromWorkspace, let carried = moved.view else {
+            session?.viewRoute = viewRoute
+            return
+        }
+        session?.viewRoute = .dropped
+        Task { [weak self] in
+            let view = await RepoSession.claimGlobalView(carried, cwd: url)
+            // A window that joined a workspace meanwhile routed its sessions there (`join`).
+            guard let self, workspace == nil, let session = sessions[id] else { return }
+            session.viewRoute = viewRoute
+            if !session.viewLoaded || session.view != view { session.replaceView(view) }
+        }
+    }
+
     // MARK: Archive
 
     /// A repo tab's menu › Archive This Tab: the tab goes to the archive's front (its profile, commit, alias, emoji
@@ -1117,6 +1274,12 @@ final class WindowModel {
     /// The index in `archivedTabs` of the entry for the repo folder `path`; nil when the archive has none.
     private func archivedIndex(of path: String) -> Int? {
         archivedTabs.firstIndex { $0.path == path }
+    }
+
+    /// Whether this window has the repo folder `path` (a `repoURL.path`) as a tab or in its archive, as `adopt` looks
+    /// for it: `moveRefusal` refuses moving a tab of it here. No I/O.
+    func hasRepo(atPath path: String) -> Bool {
+        tabs.contains { $0.repoURL?.path == path } || archivedIndex(of: path) != nil
     }
 
     /// A tab's menu › Set Alias…: `alias` names the tab; empty (or only spaces) gives it back its folder's name.

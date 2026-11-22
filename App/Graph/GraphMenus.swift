@@ -19,6 +19,9 @@ struct MenuEntry {
     enum Kind {
         case action(@MainActor () -> Void)
         case submenu([MenuEntry])
+        /// A submenu whose entries are built only when it is shown, so a SwiftUI menu reads them in its own view, never in
+        /// the body that holds the menu (Move Tab to Window ›, which reads the other windows).
+        case lazySubmenu(@MainActor () -> [MenuEntry])
         case separator
     }
 
@@ -44,7 +47,20 @@ struct MenuEntry {
         MenuEntry(title: title, kind: .submenu(entries), isEnabled: !entries.isEmpty)
     }
 
+    static func lazySubmenu(_ title: String, _ entries: @escaping @MainActor () -> [MenuEntry]) -> MenuEntry {
+        MenuEntry(title: title, kind: .lazySubmenu(entries))
+    }
+
     static var separator: MenuEntry { MenuEntry(kind: .separator) }
+
+    /// A submenu's entries (a lazy one's built now); none for an action or a separator.
+    @MainActor var children: [MenuEntry] {
+        switch kind {
+        case .submenu(let entries): entries
+        case .lazySubmenu(let build): build()
+        case .action, .separator: []
+        }
+    }
 
     var isSeparator: Bool {
         if case .separator = kind { true } else { false }
@@ -82,9 +98,9 @@ enum MenuBuilder {
                 // macOS 27 hides menu item images unless told not to.
                 if #available(macOS 27, *), entry.image != nil { item.preferredImageVisibility = .visible }
                 menu.addItem(item)
-            case .submenu(let children):
+            case .submenu, .lazySubmenu:
                 let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
-                item.submenu = Self.menu(children)
+                item.submenu = Self.menu(entry.children)
                 item.isEnabled = entry.isEnabled
                 menu.addItem(item)
             }
@@ -142,8 +158,20 @@ struct MenuEntriesView: View {
             case .submenu(let children):
                 Menu(entry.title) { AnyView(MenuEntriesView(entries: children)) }
                     .disabled(!entry.isEnabled)
+            case .lazySubmenu(let build):
+                Menu(entry.title) { LazyMenuEntriesView(build: build) }
+                    .disabled(!entry.isEnabled)
             }
         }
+    }
+}
+
+/// A lazy submenu's entries, built in this view's own body: what they read never redraws the view holding the menu.
+private struct LazyMenuEntriesView: View {
+    let build: @MainActor () -> [MenuEntry]
+
+    var body: some View {
+        MenuEntriesView(entries: build())
     }
 }
 
@@ -461,7 +489,7 @@ enum RepoMenus {
         let commitEntries = commit(hash, session).filter { entry in
             switch entry.kind {
             case .action: !actionTitles.contains(entry.title)
-            case .submenu: entry.title != ref.menuTitle
+            case .submenu, .lazySubmenu: entry.title != ref.menuTitle
             case .separator: true
             }
         }

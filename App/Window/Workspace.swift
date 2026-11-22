@@ -132,6 +132,14 @@ final class Workspace {
         }
     }
 
+    /// A tab moved in from another workspace with a profile this Mac does not have (`WindowModel.adopt`): the file
+    /// embeds `profile`'s definition too, so the tab's picker keeps its Import entry. An id embedded already stays.
+    func adoptProfile(_ profile: Profile) {
+        guard !profiles.contains(where: { $0.id == profile.id }) else { return }
+        profiles.append(profile)
+        if !profileOrder.contains(profile.id) { profileOrder.append(profile.id) }
+    }
+
     /// The graph view the workspace has for the repo at `url` (keyed by its standardized absolute path); nil when it
     /// has none.
     func view(for url: URL) -> RepoViewState? {

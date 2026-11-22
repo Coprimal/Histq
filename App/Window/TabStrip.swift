@@ -549,19 +549,27 @@ private struct TabTrack: View {
         if next != drag { drag = next }
     }
 
-    /// Ends a drag: back into its place with the lifted look when it would land where it stands, else moved there.
+    /// Ends a drag: out of the window, to another window or back (`TabDragOut`); else back into its place with the
+    /// lifted look when it would land where it stands, else moved there.
     private func drop() {
         guard dragging, let drag else { return }
-        if drag.index == drag.range.lowerBound, drag.group == drag.origin {
-            withAnimation(animation) {
-                dragOffset = 0
-                dragging = false
-            }
-        } else {
+        // Out of the window: never a reorder (`TabDragOut`).
+        switch TabDragOut.outcome(of: drag.unit, in: model) {
+        case .move(let id, let destination):
+            // Reset without animation: the tab leaves this window.
+            dragging = false
+            dragOffset = 0
+            TabDragOut.move(id, from: model, to: destination)
+        case .inside where drag.index != drag.range.lowerBound || drag.group != drag.origin:
             // Reset without animation before the move, so the tabs render at their new places directly.
             dragging = false
             dragOffset = 0
             model.moveUnit(drag.unit, to: drag.index, group: drag.group)
+        case .inside, .snapBack:
+            withAnimation(animation) {
+                dragOffset = 0
+                dragging = false
+            }
         }
     }
 
@@ -580,6 +588,47 @@ struct TabDrag: Equatable {
     var index: Int
     var group: UUID?
     let origin: UUID?
+}
+
+/// A tab drag that ends with the pointer outside its window (in screen coordinates) never reorders: a lone tab moves to
+/// the Histq window under the pointer (`AppDelegate.moveTab`); a worktree box or a group, a refused move (its reason
+/// as a toast in the source window) or no Histq window there snaps back. Shared by the tab strip and the vertical tabs;
+/// Move Tab to Window › and the palette move through `move` too.
+@MainActor
+enum TabDragOut {
+    /// What the end of a drag of `unit` out of `model`'s window does.
+    enum Outcome {
+        /// The pointer is inside the window: an in-window drop.
+        case inside
+        /// The tab may move to `destination` (no refusal): the drag's state resets before `move`.
+        case move(WindowModel.Tab.ID, to: WindowModel)
+        /// Back into place, the order, pins and groups as before the drag.
+        case snapBack
+    }
+
+    static func outcome(of unit: TabArrangement.Unit, in model: WindowModel) -> Outcome {
+        let point = NSEvent.mouseLocation
+        guard let window = model.window, !window.frame.contains(point) else { return .inside }
+        guard case .tab(let id) = unit, let app = NSApp.delegate as? AppDelegate else { return .snapBack }
+        let number = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+        guard let destination = app.moveDestinations(for: model).first(where: { $0.window?.windowNumber == number })
+        else { return .snapBack }
+        if let reason = app.moveRefusal(id, from: model, to: destination) {
+            refused(reason, in: model)
+            return .snapBack
+        }
+        return .move(id, to: destination)
+    }
+
+    /// Moves the tab (`AppDelegate.moveTab`); a late refusal shows as a toast in the source window.
+    static func move(_ id: WindowModel.Tab.ID, from model: WindowModel, to destination: WindowModel) {
+        guard let app = NSApp.delegate as? AppDelegate else { return }
+        if case .refused(let reason) = app.moveTab(id, from: model, to: destination) { refused(reason, in: model) }
+    }
+
+    private static func refused(_ reason: String, in model: WindowModel) {
+        model.showToast(.warning("Move Tab to Window", detail: reason))
+    }
 }
 
 /// Whether a scrolled row has more to show before (`leading`) and after (`trailing`) its visible part.
@@ -747,7 +796,7 @@ enum TabPress {
 /// Copy Path (off for a Welcome tab), Reveal in Finder (the tab's repo or worktree folder; off for a Welcome tab or a
 /// missing folder), Set Alias…, Set Emoji…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Worktree Tabs / Unpin
 /// Worktree Tabs for a tab of a worktree box, which pins with it) and Archive This Tab, these five off for a Welcome
-/// tab. On the popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the
+/// tab, then Move Tab to Window › (`moveToWindow`). On the popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the
 /// Right (Below) are off. Every item but Close Tabs and the group items acts on the right-clicked tab alone, even in a
 /// multi-selection.
 @MainActor
@@ -796,6 +845,7 @@ enum TabMenu {
                 model.setPinned(!tab.pinned, for: id)
             },
             archive(id, tab, isRepo, model),
+            moveToWindow(id, tab, model),
         ] + profile(id, tab, revealable, model)
     }
 
@@ -851,6 +901,37 @@ enum TabMenu {
                        toolTip: isRepo ? nil : "A new tab has no repository to archive.") {
             [weak model] in model?.archiveTab(id)
         }
+    }
+
+    /// Move Tab to Window ›: each other window (`windowTitle`), off with the reason as its tooltip when the move would
+    /// be refused (`AppDelegate.moveRefusal`, no I/O). The right-clicked tab moves alone, even in a multi-selection. Its
+    /// entries are built when it opens (`lazySubmenu`): the tab strip's body never reads the other windows, so a tab
+    /// switch in one window redraws no tab in another, and the list is current when shown.
+    private static func moveToWindow(_ id: WindowModel.Tab.ID, _ tab: WindowModel.Tab, _ model: WindowModel)
+        -> MenuEntry
+    {
+        let title = "Move Tab to Window"
+        guard let app = NSApp.delegate as? AppDelegate else { return .action(title, enabled: false) {} }
+        let blocked = tab.archived ? "Unarchive the tab to move it." : tab.isMissing ? "Locate the repo first" : nil
+        if let blocked { return .action(title, enabled: false, toolTip: blocked) {} }
+        return .lazySubmenu(title) {
+            let destinations = app.moveDestinations(for: model)
+            if destinations.isEmpty { return [.action("No other window is open.", enabled: false) {}] }
+            return destinations.map { destination in
+                let refusal = app.moveRefusal(id, from: model, to: destination)
+                return .action(windowTitle(destination), enabled: refusal == nil, toolTip: refusal) {
+                    [weak model, weak destination] in
+                    guard let model, let destination else { return }
+                    TabDragOut.move(id, from: model, to: destination)
+                }
+            }
+        }
+    }
+
+    /// A window as Move Tab to Window lists it: its selected tab's title, then its workspace's name or "Untitled".
+    static func windowTitle(_ model: WindowModel) -> String {
+        let tab = model.selectedIndex.map { model.tabs[$0].title } ?? "New Tab"
+        return "\(tab) — \(model.workspace?.name ?? "Untitled")"
     }
 
     /// The Icon Color menu: Default (Settings › Appearance's default tab icon), then each lane color with its dot; the

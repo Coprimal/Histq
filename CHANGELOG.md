@@ -6,6 +6,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ### Added
 - Workspaces: a `.histqworkspace` file keeps a set of windows and their tabs, manual tab groups, each repository's graph view (hidden, solo and pinned branches) and the profiles they use (without secrets), with repository paths stored relative to the file and from `~`, so the file and its repositories can be moved or shared together. Several workspaces can be open at once and each one saves itself as you change it. The File menu and the command palette have New Workspace, Open Workspace…, Save Workspace As…, Recent Workspaces and Close Workspace, and a workspace window shows its name in the toolbar. Window frames and collapsed groups stay on this Mac. A workspace tab whose profile is missing shows a badge and cannot commit or push until you import the profile from the file (after a sheet that lists its keys and accounts) or pick another one. A file with settings this version does not know opens read-only, and one from a newer format version is refused.
+- Move Tab to Window: move a tab to another window from the tab's menu, the command palette or by dragging it onto another window. It keeps its terminal, AI run and graph view. One tab moves at a time, and not into a window where its repository is already open; a worktree box or a tab group dropped outside its window snaps back.
 
 ## [0.3.0] - 2026-11-21
 
