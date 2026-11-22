@@ -305,27 +305,50 @@ enum HostingTokens {
     }
 
     /// Histq's GitLab OAuth application ID (`HistqGitLabClientID`, gitlab.com); nil when the build has none.
-    private static let gitLabClientID: String? = {
-        let value = (Bundle.main.object(forInfoDictionaryKey: "HistqGitLabClientID") as? String ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        // An unexpanded `$(…)` would mean the build setting is missing, not a client ID.
-        return value.isEmpty || value.hasPrefix("$(") ? nil : value
+    private static let gitLabClientID = infoPlistValue("HistqGitLabClientID")
+    /// Histq's Bitbucket OAuth client (`HistqBitbucketClientID`, `HistqBitbucketClientSecret`); nil when the build
+    /// lacks either. The secret stays in memory: it goes only into `OAuthCodeFlow`.
+    private static let bitbucketClient: (id: String, secret: String)? = {
+        guard let id = infoPlistValue("HistqBitbucketClientID"), let secret = infoPlistValue("HistqBitbucketClientSecret")
+        else { return nil }
+        return (id, secret)
     }()
 
-    /// The token request of the refresher key `key`. The account's own OAuth application (`oauthClientID`, the one its
-    /// token came from) comes first, else Histq's. Without a client ID, for an account this process never handed out
-    /// or for GitHub (whose OAuth App tokens never expire), the grant cannot be renewed: a rejection, so the account
-    /// shows "reconnect".
+    /// The Info.plist value `key`, trimmed; nil when empty or an unexpanded `$(…)` (the build setting is missing).
+    private static func infoPlistValue(_ key: String) -> String? {
+        let value = (Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty || value.hasPrefix("$(") ? nil : value
+    }
+
+    /// The token request of the refresher key `key`. GitLab: the account's own OAuth application (`oauthClientID`,
+    /// the one its token came from) comes first, else Histq's; Bitbucket: Histq's client with its secret. Without a
+    /// client, for an account this process never handed out or for GitHub (whose OAuth App tokens never expire), the
+    /// grant cannot be renewed: a rejection, so the account shows "reconnect".
     @concurrent
     private static func renew(_ key: String, _ refreshToken: String) async throws -> DeviceFlow.Token {
         let ownID = { (id: String) in id.trimmingCharacters(in: .whitespaces).isEmpty ? nil : id }
-        guard let account = oauthAccounts.withLock({ $0[key] }), account.kind == .gitlab,
-              let clientID = account.oauthClientID.flatMap(ownID) ?? gitLabClientID
-        else { throw HostingError.unauthorized }
-        let flow = try DeviceFlow(kind: .gitlab, host: account.host, basePath: account.basePath, clientID: clientID)
+        guard let account = oauthAccounts.withLock({ $0[key] }) else { throw HostingError.unauthorized }
+        let refresh: @Sendable (String) async throws -> DeviceFlow.Token
+        switch account.kind {
+        case .gitlab:
+            guard let clientID = account.oauthClientID.flatMap(ownID) ?? gitLabClientID else {
+                throw HostingError.unauthorized
+            }
+            let flow = try DeviceFlow(kind: .gitlab, host: account.host, basePath: account.basePath, clientID: clientID)
+            refresh = { try await flow.refresh($0) }
+        case .bitbucketCloud:
+            guard account.host.lowercased() == BitbucketCloudClient.host, let client = bitbucketClient else {
+                throw HostingError.unauthorized
+            }
+            let flow = try OAuthCodeFlow.bitbucketCloud(clientID: client.id, clientSecret: client.secret)
+            refresh = { try await flow.refresh($0) }
+        case .github:
+            throw HostingError.unauthorized
+        }
         UITiming.hosting("refresh \(account.host) start")
         do {
-            let token = try await flow.refresh(refreshToken)
+            let token = try await refresh(refreshToken)
             UITiming.hosting("refresh \(account.host) ok")
             return token
         } catch {

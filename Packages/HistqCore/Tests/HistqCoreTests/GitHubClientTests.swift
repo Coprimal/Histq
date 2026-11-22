@@ -130,9 +130,32 @@ struct GitHubClientTests {
 
         if isFollowed {
             #expect(try await client.currentUser().login == "moved", "positive control: the stub redirects")
+            #expect(stub.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
         } else {
             await #expect(throws: HostingError.self) { try await client.currentUser() }
             #expect(stub.requests.allSatisfy { $0.url?.host() == "api.github.com" })
+        }
+    }
+
+    @Test("on Enterprise a same-host redirect is followed with the token only under /api", arguments: [
+        ("https://ghe.example.com/api/v3/moved", true), ("https://ghe.example.com/api/graphql", true),
+        ("https://ghe.example.com/login", false), ("https://ghe.example.com/api/v3/../../login", false),
+    ])
+    func enterpriseRedirectStaysUnderAPI(target: String, isFollowed: Bool) async throws {
+        let stub = StubServer { request in
+            if request.url?.path() == "/api/v3/user" {
+                return .init(status: 302, headers: ["Location": target], body: "", redirect: URL(string: target))
+            }
+            return .init(body: #"{"id": 9, "login": "moved"}"#)
+        }
+        let client = try GitHubClient(host: "ghe.example.com", token: Self.token, session: stub.session)
+
+        if isFollowed {
+            #expect(try await client.currentUser().login == "moved", "positive control: the stub redirects")
+            #expect(stub.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        } else {
+            await #expect(throws: HostingError.self) { try await client.currentUser() }
+            #expect(stub.requests.map { $0.url?.path() } == ["/api/v3/user"], "nothing reaches the target")
         }
     }
 
@@ -774,7 +797,8 @@ final class StubServer: Sendable {
         var status = 200
         var headers: [String: String] = [:]
         var body: String
-        /// Answer with a redirect to this URL instead (the new request keeps the original's headers).
+        /// Answer with a redirect to this URL instead (the new request keeps the original's headers but
+        /// `Authorization`, as URLSession does).
         var redirect: URL?
     }
 
@@ -821,10 +845,11 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         let reply = server.handler(request)
         let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
         if let redirect = reply.redirect {
-            // With the original headers, as URLSession builds the new request before its delegate decides: a test
-            // can see whether a followed redirect carries the `Authorization` header.
+            // With the original headers but `Authorization`, as URLSession builds the new request before its
+            // delegate decides (it drops that one): a test sees whether the delegate put it back.
             var next = URLRequest(url: redirect)
             next.allHTTPHeaderFields = request.allHTTPHeaderFields
+            next.setValue(nil, forHTTPHeaderField: "Authorization")
             client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

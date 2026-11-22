@@ -401,33 +401,36 @@ final class HostingStore {
         return try? client(for: account, profileID: profileID, token: token)
     }
 
-    /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab asks
+    /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab and Bitbucket ask
     /// `HostingTokens.accessToken` on each request (off the main actor; an OAuth sign-in through the refresher, else
     /// cached, read again after a 401), so a token saved again in Settings or renewed is used at once. A sign-in that
     /// cannot be renewed reads as a refused token, so every list and the detail offer Reconnect. Throws `HostingError`
-    /// for a bad host or token.
+    /// for a bad host or token (a Bitbucket account on another host than bitbucket.org).
     nonisolated static func client(
         for account: HostingAccount, profileID: UUID, token: String
     ) throws -> any HostingProvider {
+        let accessToken: @Sendable (_ rejected: String?) async throws -> String = { rejected in
+            do {
+                guard let token = try await HostingTokens.accessToken(
+                    for: account, profileID: profileID, rejecting: rejected)
+                else { throw HostingError.unauthorized }
+                return token
+            } catch OAuthRefresher.RefresherError.reconnectNeeded {
+                throw HostingError.unauthorized
+            } catch OAuthRefresher.RefresherError.refreshFailed(let error) {
+                throw error
+            }
+        }
         switch account.kind {
         case .github:
             return try GitHubClient(host: account.host, token: token)
-        // Not connected in the app yet (Phase 12): Settings cannot add such an account.
         case .bitbucketCloud:
-            throw HostingError.validationFailed(message: "Bitbucket is not supported in this version")
-        case .gitlab:
-            return try GitLabClient(host: account.host, basePath: account.basePath) { rejected in
-                do {
-                    guard let token = try await HostingTokens.accessToken(
-                        for: account, profileID: profileID, rejecting: rejected)
-                    else { throw HostingError.unauthorized }
-                    return token
-                } catch OAuthRefresher.RefresherError.reconnectNeeded {
-                    throw HostingError.unauthorized
-                } catch OAuthRefresher.RefresherError.refreshFailed(let error) {
-                    throw error
-                }
+            guard account.host.lowercased() == BitbucketCloudClient.host else {
+                throw HostingError.invalidHost(account.host)
             }
+            return BitbucketCloudClient(token: accessToken)
+        case .gitlab:
+            return try GitLabClient(host: account.host, basePath: account.basePath, token: accessToken)
         }
     }
 

@@ -40,20 +40,36 @@ CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=
 
 ## OAuth apps
 
-"Sign in with GitHub" and "Sign in with GitLab" use the OAuth device flow with Histq's own registered apps. Their IDs
-are public values, set as build settings in `project.yml` and read from Info.plist. With an empty GitHub ID, Settings ›
-Integrations shows how to set it; with an empty GitLab ID, gitlab.com has no sign-in. A personal access token works
-either way.
+"Sign in with GitHub" and "Sign in with GitLab" use the OAuth device flow with Histq's own registered apps; "Sign in
+with Bitbucket" uses the authorization code flow in the browser, back to Histq at `http://127.0.0.1:47823/callback`.
+Their IDs are public values, set as build settings in `project.yml` and read from Info.plist. With an empty GitHub ID,
+Settings › Integrations shows how to set it; with an empty GitLab ID, gitlab.com has no sign-in. A personal access token
+(an API token on Bitbucket) works either way.
 
 | Provider | What to register | Build setting (Info.plist key) |
 | -------- | ---------------- | ------------------------------ |
 | GitHub | An OAuth App with "Enable Device Flow" checked. | `HISTQ_GITHUB_CLIENT_ID` (`HistqGitHubClientID`) |
 | GitLab (gitlab.com) | An application with Confidential off (a public client), scopes `api`, `read_user`, `read_repository` and `write_repository`, and the device authorization grant enabled. | `HISTQ_GITLAB_CLIENT_ID` (`HistqGitLabClientID`) |
+| Bitbucket (bitbucket.org) | An OAuth client (Workspace settings › OAuth clients) with the grant types Authorization code and Refresh token, the callback URL `http://127.0.0.1:47823/callback`, and the scopes Account read, Workspace membership read, Repositories read and write, Pull requests read and write, Pipelines read. | `HISTQ_BITBUCKET_CLIENT_ID` (`HistqBitbucketClientID`), and the secret below |
 
 A GitLab Self-Managed account can use its own application (registered the same way on that instance): its Application
 ID goes in the Add Account form and is kept with the account in the profile.
 
 Only public client IDs are committed. Never commit a client secret.
+
+Bitbucket requires its client secret for the token requests. It lives only in `Config/Secrets.xcconfig`, which is
+gitignored and never committed (there is no placeholder in the repository either): create it yourself with one line,
+
+```
+HISTQ_BITBUCKET_CLIENT_SECRET = <the OAuth client's secret>
+```
+
+The tracked `Config/Base.xcconfig` (the app target's `configFiles`) includes it when it exists, and Info.plist gets it as
+`HistqBitbucketClientSecret`. Without the file the value is empty and "Sign in with Bitbucket" is hidden; Bitbucket API
+tokens still work. Do not paste the secret into chats, logs or issues, and check with `git status` that the file stays
+untracked. `scripts/check-build-parity.sh` compares only whether the secret is set in both builds, never its value.
+Once the file exists, `xcodebuild -showBuildSettings` (and Xcode's build log) prints the secret: pipe it through
+`grep -v SECRET`, and never paste unfiltered build settings anywhere.
 
 ## Fixtures
 
@@ -330,6 +346,7 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqSpotlight <target>` | Shows the onboarding's spotlight over every window on one target (`sync`, `repoMenu`, `branchMenu`, `profile`, `workspaceMenu`, `history`, `branchActions`, `terminal`, `search`, or a content target such as `graph`), with a sample popover and without the onboarding: the rest of the window is dimmed, the toolbar dims its other items and blocks clicks. Return or Esc ends it. A toolbar target without a view (before macOS 26, or with `--force-fallbacks`) anchors the popover to the toolbar band, no ring. |
 | `-HistqGitHubStub YES` / `-HistqGitHubFakeLogin <login>` | Canned pull request and issue data, without GitHub; a fake connected account (with `-HistqKeychain memory`). |
 | `-HistqHostingStubKind gitlab` | With `-HistqGitHubStub YES`: the PRs tab and the details get the same canned data in GitLab's shapes through the GitLab client (`stub/stub` on gitlab.com: merge request !1, issue #2), so the GitLab wording and mapping show without GitLab. `-HistqPRAction` and `-HistqPRMergeable` work with it. Stub only. |
+| `-HistqHostingStubKind bitbucket` | With `-HistqGitHubStub YES`: the PRs tab and the details get Bitbucket's 2.0 shapes through the Bitbucket client (`stub/stub` on bitbucket.org: pull request #1 from the same repository, #2 from a fork, whose Checkout Locally is unavailable). Reads only: actions answer 404. Stub only. |
 | `-HistqGitHubFakeTokens YES` | With `-HistqKeychain memory`: a fake token for every account of every profile in `profiles.json`, on its own host, so Settings › Integrations shows each one connected. |
 | `-HistqDisconnectHost <host>` | With `-HistqGitHubFakeTokens YES`: then disconnects the accounts on `<host>` as Disconnect does. |
 | `-HistqAIStubAnswer <file.json>` | With `-HistqAIStub YES`: every AI answer is `{"answer": "…", "reason": "…"}` from the file (reason optional) instead of the canned text; for website screenshots. |

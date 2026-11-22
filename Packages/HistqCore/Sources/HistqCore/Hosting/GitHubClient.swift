@@ -4,8 +4,8 @@
 // (`https://api.github.com/graphql`, `https://<host>/api/graphql`), the only API that has them.
 //
 // The token is a secret: it only ever goes in the `Authorization` header of a request to the client's own API
-// host. A `Link: rel="next"` URL on another origin is refused and a redirect to another origin is not followed (a
-// redirected request would carry the header along), no error or description holds it, and `print`, `dump` and
+// host. A `Link: rel="next"` URL on another origin is refused, a redirect is followed only on the same origin (on
+// Enterprise also only under `/api`, which holds REST and GraphQL), no error or description holds it, and `print`, `dump` and
 // `String(reflecting:)` of a client show only its host.
 import Foundation
 
@@ -561,7 +561,9 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     }
 
     private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await HostingHTTP.load(request, session: session)
+        // Enterprise serves its web pages on the API's origin: a redirect keeps the token only under `/api`.
+        let prefix = apiBase.path(percentEncoded: true).hasPrefix("/api/") ? "/api" : nil
+        let (data, response) = try await HostingHTTP.load(request, session: session, allowedPathPrefix: prefix)
         guard (200..<300).contains(response.statusCode) else { throw HostingHTTP.error(for: response, data: data) }
         return (data, response)
     }

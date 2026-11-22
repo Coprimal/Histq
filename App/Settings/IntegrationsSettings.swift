@@ -2,9 +2,11 @@
 // (github.com) or a GitHub Enterprise Server host by signing in with GitHub (OAuth device flow, github.com only), by
 // pasting a personal access token, or by importing the GitHub CLI's token; GitLab (gitlab.com) or a GitLab
 // Self-Managed host (with an optional base path) by pasting a personal access token, or by signing in with GitLab
-// (device flow) with Histq's application on gitlab.com or the account's own Application ID on Self-Managed. Each token
-// is checked with `GET /user` before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the
-// host (and base path), the login and a Self-Managed sign-in's Application ID.
+// (device flow) with Histq's application on gitlab.com or the account's own Application ID on Self-Managed; Bitbucket
+// (bitbucket.org) by pasting an Atlassian API token, or by signing in with Bitbucket (authorization code in the browser,
+// back through `LoopbackRedirect`) when the build has Histq's client ID and secret. Each token is checked with
+// `GET /user` before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the host (and base
+// path), the login and a Self-Managed sign-in's Application ID.
 // A sign-in that returns a refresh token or an expiry also saves the account's `.oauth` record, and an account whose
 // sign-in can no longer be renewed says so. Disconnect deletes that account's Keychain items. Tokens are never logged,
 // shown or kept in the page's state longer than the check.
@@ -49,7 +51,7 @@ struct IntegrationsSettings: View {
         func title(_ kind: HostingKind) -> String {
             switch self {
             case .signIn: "Sign in with \(kind.name)"
-            case .token: "Personal access token"
+            case .token: kind == .bitbucketCloud ? "API token" : "Personal access token"
             case .cli: "GitHub CLI"
             }
         }
@@ -57,7 +59,7 @@ struct IntegrationsSettings: View {
 
     /// The entries of the Add Account menu.
     private enum AddKind: CaseIterable {
-        case github, enterprise, gitlab, gitlabSelfManaged
+        case github, enterprise, gitlab, gitlabSelfManaged, bitbucket
 
         var title: String {
             switch self {
@@ -65,6 +67,7 @@ struct IntegrationsSettings: View {
             case .enterprise: "GitHub Enterprise Server"
             case .gitlab: "GitLab"
             case .gitlabSelfManaged: "GitLab Self-Managed"
+            case .bitbucket: "Bitbucket"
             }
         }
 
@@ -72,6 +75,7 @@ struct IntegrationsSettings: View {
             switch self {
             case .github, .enterprise: .github
             case .gitlab, .gitlabSelfManaged: .gitlab
+            case .bitbucket: .bitbucketCloud
             }
         }
     }
@@ -92,6 +96,13 @@ struct IntegrationsSettings: View {
     /// `HistqGitLabClientID` from Info.plist (build setting `HISTQ_GITLAB_CLIENT_ID`): Histq's GitLab application on
     /// gitlab.com; empty until one is registered, and then gitlab.com has no "Sign in with GitLab".
     static let gitLabClientID = infoPlistID("HistqGitLabClientID")
+
+    /// `HistqBitbucketClientID` and `HistqBitbucketClientSecret` from Info.plist (build settings
+    /// `HISTQ_BITBUCKET_CLIENT_ID`, and `HISTQ_BITBUCKET_CLIENT_SECRET` from the untracked `Config/Secrets.xcconfig`):
+    /// Histq's Bitbucket OAuth client. Without either, Bitbucket connects with an API token only. The secret is never
+    /// shown or logged.
+    static let bitbucketClientID = infoPlistID("HistqBitbucketClientID")
+    private static let bitbucketClientSecret = infoPlistID("HistqBitbucketClientSecret")
 
     private static func infoPlistID(_ key: String) -> String {
         let value = (Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "")
@@ -239,7 +250,7 @@ struct IntegrationsSettings: View {
                 .buttonStyle(RowTextButtonStyle(formRow: true))
         } label: {
             HStack(spacing: 8) {
-                Image(account.kind == .gitlab ? "logo-gitlab" : "logo-github")
+                Image(account.kind.logo)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 16, height: 16)
@@ -275,8 +286,8 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// The Add Account menu: GitHub (github.com), a GitHub Enterprise Server host, GitLab (gitlab.com) or a GitLab
-    /// Self-Managed host.
+    /// The Add Account menu: GitHub (github.com), a GitHub Enterprise Server host, GitLab (gitlab.com), a GitLab
+    /// Self-Managed host or Bitbucket (bitbucket.org).
     private func addAccountRow(_ profile: Profile) -> some View {
         LabeledContent {
             Menu {
@@ -296,7 +307,7 @@ struct IntegrationsSettings: View {
             .disabled(isBusy)
         } label: {
             Text(profile.accounts.isEmpty ? "No accounts yet" : "Add account")
-            SettingsHint("GitHub or GitLab, on their own sites or on your own host: one account per host.")
+            SettingsHint("GitHub, GitLab or Bitbucket, on their own sites or on your own host: one account per host.")
         }
     }
 
@@ -354,13 +365,14 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// The host of the account being added, lowercased: github.com for GitHub, gitlab.com for GitLab, the typed host
-    /// for GitHub Enterprise Server and GitLab Self-Managed; nil when nothing is added or the typed text is empty or
-    /// not a host name.
+    /// The host of the account being added, lowercased: github.com for GitHub, gitlab.com for GitLab, bitbucket.org
+    /// for Bitbucket, the typed host for GitHub Enterprise Server and GitLab Self-Managed; nil when nothing is added or
+    /// the typed text is empty or not a host name.
     private var draftHost: String? {
         switch adding {
         case .github: return "github.com"
         case .gitlab: return "gitlab.com"
+        case .bitbucket: return BitbucketCloudClient.host
         case .enterprise, .gitlabSelfManaged:
             return HostingHTTP.validatedHost(hostDraft.trimmingCharacters(in: .whitespacesAndNewlines))
         case nil: return nil
@@ -388,13 +400,15 @@ struct IntegrationsSettings: View {
         return text.isEmpty ? nil : text
     }
 
-    /// The OAuth client ID "Sign in with" uses for `kind`: Histq's on github.com and gitlab.com, the typed Application
-    /// ID on GitLab Self-Managed; nil when there is none (always on GitHub Enterprise Server).
+    /// The OAuth client ID "Sign in with" uses for `kind`: Histq's on github.com, gitlab.com and bitbucket.org (there
+    /// only with its secret), the typed Application ID on GitLab Self-Managed; nil when there is none (always on GitHub
+    /// Enterprise Server).
     private func signInClientID(_ kind: AddKind) -> String? {
         let id = switch kind {
         case .github: Self.clientID
         case .gitlab: Self.gitLabClientID
         case .gitlabSelfManaged: draftApplicationID ?? ""
+        case .bitbucket: Self.bitbucketClientSecret.isEmpty ? "" : Self.bitbucketClientID
         case .enterprise: ""
         }
         return id.isEmpty ? nil : id
@@ -402,12 +416,13 @@ struct IntegrationsSettings: View {
 
     /// Histq's OAuth App exists on github.com only (without a client ID its row says how to set one); Enterprise hosts
     /// connect with a token or the GitHub CLI. GitLab hosts connect with a token, or sign in when there is an
-    /// application ID (Histq's on gitlab.com, the typed one on Self-Managed).
+    /// application ID (Histq's on gitlab.com, the typed one on Self-Managed). Bitbucket connects with an API token, or
+    /// signs in when the build has Histq's client.
     private func methods(_ kind: AddKind) -> [ConnectMethod] {
         switch kind {
         case .github: ConnectMethod.allCases
         case .enterprise: [.token, .cli]
-        case .gitlab, .gitlabSelfManaged: signInClientID(kind) == nil ? [.token] : [.signIn, .token]
+        case .gitlab, .gitlabSelfManaged, .bitbucket: signInClientID(kind) == nil ? [.token] : [.signIn, .token]
         }
     }
 
@@ -532,8 +547,7 @@ struct IntegrationsSettings: View {
     private func tokenRow(_ profile: Profile, kind: AddKind) -> some View {
         LabeledContent {
             HStack(spacing: 8) {
-                SecureField("Token", text: $pastedToken,
-                            prompt: Text(verbatim: kind.kind == .gitlab ? "glpat-…" : "ghp_…"))
+                SecureField("Token", text: $pastedToken, prompt: tokenPrompt(kind.kind))
                     .textFieldStyle(.settings)
                     .frame(maxWidth: 240)
                     .labelsHidden()
@@ -545,14 +559,27 @@ struct IntegrationsSettings: View {
             }
             .disabled(isBusy)
         } label: {
-            Text("Personal access token")
-            if kind.kind == .gitlab {
+            Text(ConnectMethod.token.title(kind.kind))
+            switch kind.kind {
+            case .gitlab:
                 SettingsHint("Scopes api, read_user, read_repository and write_repository. A fine-grained token with "
                     + "the same access works too.")
-            } else {
+            case .bitbucketCloud:
+                SettingsHint("An Atlassian API token for Bitbucket with the scopes read:user, read:workspace, "
+                    + "read:repository, write:repository, read:pullrequest and write:pullrequest (each :bitbucket).")
+            case .github:
                 SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
                     + "read and write.")
             }
+        }
+    }
+
+    /// The token field's placeholder: the token's prefix on GitHub and GitLab.
+    private func tokenPrompt(_ kind: HostingKind) -> Text {
+        switch kind {
+        case .github: Text(verbatim: "ghp_…")
+        case .gitlab: Text(verbatim: "glpat-…")
+        case .bitbucketCloud: Text("API token")
         }
     }
 
@@ -610,13 +637,19 @@ struct IntegrationsSettings: View {
     }
 
     /// "Sign in with GitHub" or "Sign in with GitLab": the device flow's button, or the hint when this build has no
-    /// GitHub OAuth App client ID (GitLab offers the method only with an application ID).
+    /// GitHub OAuth App client ID (GitLab offers the method only with an application ID); "Sign in with Bitbucket":
+    /// the authorization code flow's button (offered only with Histq's client).
     private func signInRow(profile: Profile?, kind: AddKind = .github, host: String?) -> some View {
         let clientID = signInClientID(kind)
         return LabeledContent {
             if clientID != nil {
                 Button("Sign In…") {
-                    if let profile, let host { startDeviceFlow(profile, kind: kind, host: host) }
+                    guard let profile, let host else { return }
+                    if kind == .bitbucket {
+                        startCodeFlow(profile, host: host)
+                    } else {
+                        startDeviceFlow(profile, kind: kind, host: host)
+                    }
                 }
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
                 .disabled(profile == nil || host == nil || isBusy)
@@ -625,6 +658,8 @@ struct IntegrationsSettings: View {
             Text("Sign in with \(kind.kind.name)")
             if clientID == nil {
                 SettingsHint("Register a GitHub OAuth App and set HISTQ_GITHUB_CLIENT_ID")
+            } else if kind == .bitbucket {
+                SettingsHint("Opens Bitbucket in your browser, where you grant Histq access.")
             } else {
                 SettingsHint("Opens \(kind.kind.name) in your browser, where you enter a one-time code.")
             }
@@ -786,6 +821,54 @@ struct IntegrationsSettings: View {
         }
     }
 
+    /// "Sign in with Bitbucket": Bitbucket's authorize page in the browser, which sends the code back to Histq through
+    /// the loopback redirect; the code is then exchanged with Histq's client secret. The account keeps no client ID
+    /// (Histq's renews its token).
+    private func startCodeFlow(_ profile: Profile, host: String) {
+        guard !isBusy, profile.account(forHost: host) == nil, let clientID = signInClientID(.bitbucket) else { return }
+        connectTask?.cancel()
+        let waiting = "Waiting for you to grant access on Bitbucket in your browser…"
+        activity = .working(waiting)
+        let id = profile.id
+        let secret = Self.bitbucketClientSecret
+        connectTask = Task {
+            do {
+                let flow = try OAuthCodeFlow.bitbucketCloud(clientID: clientID, clientSecret: secret)
+                let attempt = flow.start()
+                // A request without this sign-in's state (another page probing the port) is ignored, not fatal.
+                let port = UInt16(flow.redirectURI.port ?? 0)
+                let target = try await LoopbackRedirect.callback(
+                    port: port, path: flow.redirectURI.path(), opening: attempt.url,
+                    portBusy: {
+                        activity = .working("Port \(port) is busy (the last sign-in may still hold it): waiting for "
+                            + "it to free up…")
+                    },
+                    listening: { activity = .working(waiting) }
+                ) { target in
+                    do {
+                        _ = try flow.code(fromCallback: target, for: attempt)
+                        return true
+                    } catch OAuthCodeFlow.CodeFlowError.invalidCallback {
+                        return false
+                    } catch {
+                        return true
+                    }
+                }
+                try Task.checkCancellation()
+                let code = try flow.code(fromCallback: target, for: attempt)
+                activity = .working("Getting the token from Bitbucket…")
+                let token = try await flow.exchange(code, for: attempt)
+                try Task.checkCancellation()
+                activity = .working("Checking the token with Bitbucket…")
+                try await finishConnect(
+                    id, kind: .bitbucketCloud, host: host, token: token.accessToken, refreshToken: token.refreshToken,
+                    expiresIn: token.expiresIn)
+            } catch {
+                fail(error, kind: .bitbucketCloud)
+            }
+        }
+    }
+
     /// A GitLab whose device-code request fails because it has no device authorization grant.
     private struct NoDeviceGrant: Error {}
 
@@ -859,9 +942,11 @@ struct IntegrationsSettings: View {
             // GitHubClient checks this itself; GitLabClient takes a provider, so the pasted text is checked here.
             guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
             return try await GitLabClient(host: host, basePath: basePath) { _ in token }.currentUser().login
-        // Not offered in Add Account yet (Phase 12).
         case .bitbucketCloud:
-            throw HostingError.validationFailed(message: "Bitbucket is not supported in this version")
+            // As GitLab's: the client takes a provider, so the pasted text is checked here.
+            guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
+            guard host.lowercased() == BitbucketCloudClient.host else { throw HostingError.invalidHost(host) }
+            return try await BitbucketCloudClient { _ in token }.currentUser().login
         }
     }
 
@@ -932,7 +1017,7 @@ struct IntegrationsSettings: View {
     }
 
     private static func message(for error: Error, kind: HostingKind) -> String {
-        if kind == .gitlab, let error = error as? HostingError, let message = gitLabMessage(for: error) {
+        if let error = error as? HostingError, let message = hostMessage(for: error, kind: kind) {
             return message
         }
         return switch error {
@@ -941,6 +1026,8 @@ struct IntegrationsSettings: View {
         case GitError.timeout: "gh did not answer within a minute."
         case let error as HostingError: String(describing: error)
         case let error as DeviceFlow.DeviceFlowError: error.message(provider: kind.name)
+        case let error as OAuthCodeFlow.CodeFlowError: error.message(provider: kind.name)
+        case let error as LoopbackRedirect.Failure: error.description
         case is NoDeviceGrant: "This GitLab does not support device sign-in; use a token."
         case let error as CLIError: error.description
         case let error as KeychainError: "The token could not be saved: \(error)"
@@ -948,19 +1035,25 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// GitLab's wording of the errors a token check can get (`HostingError`'s own copy names GitHub); nil for the
-    /// others. A 403 shows the server's text: a group or instance that requires fine-grained tokens says so there.
-    private static func gitLabMessage(for error: HostingError) -> String? {
-        switch error {
-        case .unauthorized: "GitLab refused the token: it is wrong, expired or revoked."
+    /// GitLab's and Bitbucket's wording of the errors a token check can get (`HostingError`'s own copy names GitHub);
+    /// nil for GitHub. A 403 shows the server's text: a GitLab group or instance that requires fine-grained tokens
+    /// says so there (Bitbucket's text for a token without a scope is still to be seen on a real account).
+    private static func hostMessage(for error: HostingError, kind: HostingKind) -> String? {
+        guard kind != .github else { return nil }
+        let name = kind.name
+        return switch error {
+        case .unauthorized: "\(name) refused the token: it is wrong, expired or revoked."
         case .forbidden(let message):
-            "GitLab refused the token: " + (message.isEmpty ? "access denied (403)." : message)
-        case .notFound: "GitLab's API was not found there: check the host and the base path."
-        case .rateLimited, .secondaryRateLimited: "GitLab asks to slow down: try again in a minute."
-        case .http(let status, let message): "GitLab answered \(status)" + (message.isEmpty ? "." : ": \(message)")
-        case .invalidResponse(let detail): "Unexpected answer from GitLab: \(detail)"
-        case .transport(let detail): "Could not reach GitLab: \(detail)"
-        case .invalidHost(let host): "Not a valid GitLab host or base path: \(host)"
+            "\(name) refused the token: " + (message.isEmpty ? "access denied (403)." : message)
+        case .notFound:
+            kind == .gitlab ? "GitLab's API was not found there: check the host and the base path."
+                : "\(name)'s API was not found."
+        case .rateLimited, .secondaryRateLimited: "\(name) asks to slow down: try again in a minute."
+        case .http(let status, let message): "\(name) answered \(status)" + (message.isEmpty ? "." : ": \(message)")
+        case .invalidResponse(let detail): "Unexpected answer from \(name): \(detail)"
+        case .transport(let detail): "Could not reach \(name): \(detail)"
+        case .invalidHost(let host):
+            kind == .gitlab ? "Not a valid GitLab host or base path: \(host)" : "Not a \(name) host: \(host)"
         default: nil
         }
     }
@@ -1027,6 +1120,15 @@ extension HostingKind {
         case .github: "GitHub"
         case .gitlab: "GitLab"
         case .bitbucketCloud: "Bitbucket"
+        }
+    }
+
+    /// The host's logo asset (a template image).
+    var logo: String {
+        switch self {
+        case .github: "logo-github"
+        case .gitlab: "logo-gitlab"
+        case .bitbucketCloud: "logo-bitbucket"
         }
     }
 }

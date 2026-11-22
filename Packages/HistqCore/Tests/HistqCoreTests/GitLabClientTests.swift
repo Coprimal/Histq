@@ -139,7 +139,7 @@ struct GitLabClientTests {
             #expect(try await client.currentUser().login == "moved", "positive control: the stub redirects")
             #expect(stub.requests.map { $0.url?.path() } == ["/gitlab/api/v4/user", "/gitlab/api/v4/moved"])
             let carriesToken = stub.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)"
-            #expect(carriesToken, "a followed redirect keeps the header, which is why only some are followed")
+            #expect(carriesToken, "URLSession drops the header on a redirect: the guard puts it back on one it follows")
         } else {
             await #expect(throws: HostingError.self) { try await client.currentUser() }
             #expect(stub.requests.map { $0.url?.absoluteString } == ["https://git.example.com/gitlab/api/v4/user"])
@@ -411,8 +411,8 @@ struct GitLabClientTests {
         #expect(GitLabClient.repository(fromRemoteURL: "https://gitlab.com/proj.git") == nil)
     }
 
-    /// The stub's redirect keeps the original headers, as URLSession's does: the followed one (the positive control)
-    /// carries the token, so a refused one must reach nothing.
+    /// The stub's redirect drops `Authorization`, as URLSession's does: the followed one (the positive control) has
+    /// it back from the guard, and a refused one must reach nothing.
     @Test("a same-origin redirect outside the API's base path is not followed; one under it is", arguments: [
         ("https://git.example.com/gitlab/api/v4/moved", true),
         ("https://git.example.com/other/user", false),
@@ -435,7 +435,7 @@ struct GitLabClientTests {
             #expect(try await client.currentUser().login == "moved", "positive control: the stub redirects")
             #expect(stub.requests.map { $0.url?.path() } == ["/gitlab/api/v4/user", "/gitlab/api/v4/moved"])
             let carriesToken = stub.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)"
-            #expect(carriesToken, "a followed redirect keeps the header")
+            #expect(carriesToken, "the guard puts the header back on a redirect it follows")
         } else {
             await #expect(throws: HostingError.self) { try await client.currentUser() }
             #expect(stub.requests.map { $0.url?.path() } == ["/gitlab/api/v4/user"], "nothing reaches the target")

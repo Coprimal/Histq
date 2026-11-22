@@ -5,6 +5,8 @@ import Foundation
 public enum HostingHTTP {
     /// `allowedPathPrefix` (a percent-encoded path such as `/gitlab/api/v4`) also refuses a same-origin redirect
     /// whose path is not under it, so a host under a relative root never sends the token elsewhere on its origin.
+    /// Without it, a followed same-origin redirect gets the request's `Authorization` back on any path: pass one for
+    /// a host whose origin serves more than the API.
     static func load(_ request: URLRequest, session: URLSession, allowedPathPrefix: String? = nil) async throws
         -> (Data, HTTPURLResponse)
     {
@@ -142,8 +144,9 @@ public enum HostingHTTP {
     }
 }
 
-/// Refuses a redirect to another origin, or with `allowedPathPrefix` to a path outside it: URLSession would copy the
-/// `Authorization` header to the new request. The 3xx answer then fails as an HTTP error.
+/// Refuses a redirect to another origin, or with `allowedPathPrefix` to a path outside it: the 3xx answer then fails
+/// as an HTTP error. URLSession drops the `Authorization` header from the new request, so a redirect that is followed
+/// gets the original's back (a private repository answers 404 without it).
 private final class SameOriginRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     let allowedPathPrefix: String?
 
@@ -159,6 +162,10 @@ private final class SameOriginRedirects: NSObject, URLSessionTaskDelegate, Senda
             return nil
         }
         if let allowedPathPrefix, !HostingHTTP.isPath(of: to, under: allowedPathPrefix) { return nil }
+        var request = request
+        if let authorization = task.originalRequest?.value(forHTTPHeaderField: "Authorization") {
+            request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        }
         return request
     }
 }

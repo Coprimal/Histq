@@ -7,6 +7,11 @@
 	<string>$(HISTQ_GITHUB_CLIENT_ID)</string>
 	<key>HistqGitLabClientID</key>
 	<string>$(HISTQ_GITLAB_CLIENT_ID)</string>
+	<key>HistqBitbucketClientID</key>
+	<string>$(HISTQ_BITBUCKET_CLIENT_ID)</string>
+	<!-- From the untracked Config/Secrets.xcconfig; empty without it (then no "Sign in with Bitbucket"). -->
+	<key>HistqBitbucketClientSecret</key>
+	<string>$(HISTQ_BITBUCKET_CLIENT_SECRET)</string>
 	<key>SUFeedURL</key>
 	<string>https://histq.coprimal.dev/appcast.xml</string>
 	<key>SUPublicEDKey</key>

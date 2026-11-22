@@ -15,8 +15,9 @@
 //
 // DEBUG `-HistqHostingStubKind gitlab` (with `-HistqGitHubStub YES`): the PRs tab and the details talk to `GitLabStub`
 // instead, the same data in GitLab's v4 shapes through `GitLabClient` (the repository `stub/stub` on gitlab.com), on
-// the same session (`GitHubStubProtocol` answers gitlab.com from `GitLabStub`). The Welcome clone picker stays
-// GitHub's.
+// the same session (`GitHubStubProtocol` answers gitlab.com from `GitLabStub`). `-HistqHostingStubKind bitbucket`
+// does the same with `BitbucketStub` (Bitbucket's 2.0 shapes through `BitbucketCloudClient`, the repository `stub/stub`
+// on bitbucket.org, answered on api.bitbucket.org). The Welcome clone picker stays GitHub's.
 import Foundation
 import HistqCore
 
@@ -42,12 +43,22 @@ enum GitHubStub {
         try? GitHubClient(host: repository.host, token: token, session: session)
     }
 
-    /// DEBUG `-HistqHostingStubKind gitlab`: the PRs tab's stub serves GitLab's JSON (`GitLabStub`), not GitHub's.
-    static let kind: HostingKind = AppState.launchFlag("-HistqHostingStubKind") == "gitlab" ? .gitlab : .github
+    /// DEBUG `-HistqHostingStubKind gitlab|bitbucket`: the PRs tab's stub serves GitLab's JSON (`GitLabStub`) or
+    /// Bitbucket's (`BitbucketStub`), not GitHub's.
+    static let kind: HostingKind = switch AppState.launchFlag("-HistqHostingStubKind") {
+    case "gitlab": .gitlab
+    case "bitbucket": .bitbucketCloud
+    default: .github
+    }
 
-    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's with `-HistqHostingStubKind gitlab`.
+    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's or Bitbucket's as `-HistqHostingStubKind`
+    /// says.
     static func hosting() -> (client: (any HostingProvider)?, repository: HostedRepository) {
-        kind == .gitlab ? (GitLabStub.client(), GitLabStub.repository) : (client(), repository)
+        switch kind {
+        case .github: (client(), repository)
+        case .gitlab: (GitLabStub.client(), GitLabStub.repository)
+        case .bitbucketCloud: (BitbucketStub.client(), BitbucketStub.repository)
+        }
     }
 
     /// The status and JSON body for a request of the stub session (`body`: the request's).
@@ -589,6 +600,175 @@ enum GitLabStub {
         """
 }
 
+/// `GitHubStub`'s data in Bitbucket Cloud's 2.0 shapes, for `BitbucketCloudClient` (`-HistqHostingStubKind bitbucket`):
+/// user `stub`, open pull request #1 "Add feature" (`feature` into `main` of the same repository, 2 commits, 1 changed
+/// file, a comment, approved by `reviewer`, 1 commit status) with two inline threads on `feature.txt` (A on lines 4-6
+/// with `stub`'s reply, unresolved; B on line 10, resolved), and open pull request #2 "Fix typo" by `reviewer` from the
+/// fork `reviewer/stub` with `stub` as its reviewer (Checkout Locally is unavailable for it). Heads are abbreviated to
+/// 12 hex digits, as Bitbucket gives them. Reads only: any write, and anything else, is 404.
+enum BitbucketStub {
+    static let repository = HostedRepository(host: "bitbucket.org", owner: "stub", name: "stub")
+    /// The host the client's requests go to.
+    static let apiHost = "api.bitbucket.org"
+
+    static func client() -> BitbucketCloudClient {
+        BitbucketCloudClient(session: GitHubStub.session) { _ in GitHubStub.token }
+    }
+
+    /// The status and JSON (or, for a diff, text) body for a GET of the stub session to api.bitbucket.org.
+    static func reply(method: String, url: URL) -> (status: Int, body: String) {
+        let repo = "/2.0/repositories/stub/stub", pr1 = "\(repo)/pullrequests/1", pr2 = "\(repo)/pullrequests/2"
+        let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value
+        guard method == "GET" else { return notFound }
+        switch url.path(percentEncoded: false) {
+        case "/2.0/user": return (200, user)
+        case repo:
+            return (200, #"{"uuid": "{r-0001}", "full_name": "stub/stub", "name": "stub", "is_private": true, "#
+                + #""mainbranch": {"name": "main"}}"#)
+        case "/2.0/workspaces/stub/members": return page(#"{"user": \#(user)}"#, #"{"user": \#(reviewer)}"#)
+        // All open has #1 and #2; `stub` opened #1 and is asked to review #2.
+        case "\(repo)/pullrequests":
+            if q?.hasPrefix("author.uuid") == true { return page(pullRequest(1)) }
+            if q?.hasPrefix("reviewers.uuid") == true { return page(pullRequest(2)) }
+            return page(pullRequest(1), pullRequest(2))
+        case pr1: return (200, pullRequest(1))
+        case pr2: return (200, pullRequest(2))
+        case "\(pr1)/comments":
+            return page(
+                comment(801, by: reviewer, body: "Nice work.", at: "14:00"),
+                comment(811, by: reviewer, body: "Could the three steps be one sentence?", at: "14:55",
+                        inline: #"{"path": "feature.txt", "from": null, "to": 6, "start_from": null, "start_to": 4}"#),
+                comment(812, by: user, body: "I kept the list: it reads better.", at: "16:00", parent: 811,
+                        inline: #"{"path": "feature.txt", "from": null, "to": 6}"#),
+                comment(813, by: reviewer, body: "Show the output flag in the usage too.", at: "14:57",
+                        inline: #"{"path": "feature.txt", "from": null, "to": 10}"#, resolved: true))
+        // Bitbucket lists a pull request's commits newest first.
+        case "\(pr1)/commits":
+            return page(commit(GitHubStub.headSHA, "Finish the feature", "2026-11-12T16:20:00", parent: startSHA),
+                        commit(startSHA, "Start the feature", "2026-11-10T08:50:00", parent: GitHubStub.baseSHA))
+        case "\(pr1)/diff": return (200, diff)
+        case "\(pr2)/comments": return page()
+        case "\(pr2)/commits":
+            return page(commit(forkSHA, "Fix a typo", "2026-11-13T09:00:00", parent: GitHubStub.baseSHA))
+        case "\(pr2)/diff": return (200, "")
+        case "\(repo)/commit/\(GitHubStub.headSHA.prefix(12))/statuses":
+            return page("""
+                {"key": "build", "name": "build", "state": "SUCCESSFUL",
+                 "url": "https://bitbucket.org/stub/stub/pipelines/results/901",
+                 "created_on": "2026-11-12T16:31:00.000000+00:00", "updated_on": "2026-11-12T16:35:00.000000+00:00"}
+                """)
+        case let path where path.hasPrefix("\(repo)/commit/") && path.hasSuffix("/statuses"): return page()
+        default: return notFound
+        }
+    }
+
+    private static let notFound = (404, #"{"type": "error", "error": {"message": "Resource not found"}}"#)
+
+    /// A list page without a `next`.
+    private static func page(_ values: String...) -> (status: Int, body: String) {
+        (200, #"{"pagelen": 50, "values": [\#(values.joined(separator: ", "))]}"#)
+    }
+
+    private static func account(_ uuid: String, _ nickname: String, _ name: String) -> String {
+        """
+        {"type": "user", "uuid": "{\(uuid)}", "nickname": "\(nickname)", "display_name": "\(name)",
+         "links": {"html": {"href": "https://bitbucket.org/\(uuid)/"},
+                   "avatar": {"href": "https://bitbucket.org/account/\(nickname)/avatar/"}}}
+        """
+    }
+
+    private static let user = account("u-1001", "stub", "Stub User")
+    private static let reviewer = account("u-1002", "reviewer", "Reviewer")
+
+    private static func repository(_ uuid: String, _ fullName: String) -> String {
+        #"{"type": "repository", "uuid": "{\#(uuid)}", "full_name": "\#(fullName)", "name": "stub"}"#
+    }
+
+    /// The second commit of #1, and #2's head.
+    private static let startSHA = "3333333333333333333333333333333333333333"
+    private static let forkSHA = "7777777777777777777777777777777777777777"
+
+    /// #1 (from `feature` of this repository, by `stub`, approved by `reviewer`) or #2 (from `typo` of the fork
+    /// `reviewer/stub`, by `reviewer`, `stub` asked to review).
+    private static func pullRequest(_ id: Int) -> String {
+        let fork = id == 2
+        let title = fork ? "Fix typo" : "Add feature"
+        let body = fork ? "Fixes a typo in the readme." : "Adds the feature branch's work."
+        let head = String((fork ? forkSHA : GitHubStub.headSHA).prefix(12))
+        let source = fork ? repository("r-0002", "reviewer/stub") : repository("r-0001", "stub/stub")
+        let participants = fork ? "" : """
+            {"type": "participant", "user": \(reviewer), "role": "REVIEWER", "approved": true, "state": "approved",
+             "participated_on": "2026-11-12T15:00:00.000000+00:00"}
+            """
+        return """
+            {"type": "pullrequest", "id": \(id), "title": "\(title)", "state": "OPEN", "draft": false,
+             "author": \(fork ? reviewer : user),
+             "summary": {"raw": "\(body)", "markup": "markdown", "html": "<p>\(body)</p>"},
+             "rendered": {"description": {"raw": "\(body)", "markup": "markdown", "html": "<p>\(body)</p>"}},
+             "source": {"branch": {"name": "\(fork ? "typo" : "feature")"}, "commit": {"hash": "\(head)"},
+                        "repository": \(source)},
+             "destination": {"branch": {"name": "main", "merge_strategies": ["merge_commit", "squash", "fast_forward"]},
+                             "commit": {"hash": "\(GitHubStub.baseSHA.prefix(12))"},
+                             "repository": \(repository("r-0001", "stub/stub"))},
+             "reviewers": [\(fork ? user : reviewer)], "participants": [\(participants)],
+             "comment_count": \(fork ? 0 : 4), "created_on": "2026-11-1\(fork ? 3 : 0)T09:00:00.000000+00:00",
+             "updated_on": "2026-11-1\(fork ? 3 : 2)T16:30:00.000000+00:00",
+             "links": {"html": {"href": "https://bitbucket.org/stub/stub/pull-requests/\(id)"}}}
+            """
+    }
+
+    /// A comment at `time` on 2026-11-12: global, inline (`inline`), a reply (`parent`), or a resolved thread's root.
+    private static func comment(
+        _ id: Int, by author: String, body: String, at time: String, parent: Int? = nil, inline: String? = nil,
+        resolved: Bool = false
+    ) -> String {
+        let extra = (parent.map { #", "parent": {"id": \#($0)}"# } ?? "")
+            + (inline.map { #", "inline": \#($0)"# } ?? "")
+            + (resolved ? #", "resolution": {"user": \#(user), "created_on": "2026-11-12T16:10:00.000000+00:00"}"# : "")
+        return """
+            {"type": "pullrequest_comment", "id": \(id), "content": {"raw": "\(body)", "markup": "markdown",
+             "html": "<p>\(body)</p>"}, "user": \(author), "deleted": false, "pending": false,
+             "created_on": "2026-11-12T\(time):00.000000+00:00",
+             "links": {"html": {"href": "https://bitbucket.org/stub/stub/pull-requests/1#comment-\(id)"}}\(extra)}
+            """
+    }
+
+    private static func commit(_ sha: String, _ message: String, _ date: String, parent: String) -> String {
+        """
+        {"type": "commit", "hash": "\(sha)", "message": "\(message)", "date": "\(date)+00:00",
+         "author": {"raw": "Stub User <stub@histq.invalid>", "user": \(user)}, "parents": [{"hash": "\(parent)"}],
+         "links": {"html": {"href": "https://bitbucket.org/stub/stub/commits/\(sha)"}}}
+        """
+    }
+
+    /// `feature.txt`'s diff, the same patch as `GitHubStub`'s `files`, as the git diff Bitbucket serves.
+    private static let diff = """
+        diff --git a/feature.txt b/feature.txt
+        index 2222222..4444444 100644
+        --- a/feature.txt
+        +++ b/feature.txt
+        @@ -1,5 +1,14 @@
+         # Feature
+        -TODO: write the feature
+        -old line
+        -another old line
+        +The feature does three things:
+        +
+        +1. reads the input
+        +2. checks it
+        +3. writes the output
+        +
+        +Usage:
+        +
+        +    feature --input file
+        +
+        +See the docs for details.
+        +Done.
+         End.
+
+        """
+}
+
 /// Answers every request of `GitHubStub.session` itself: never passes one on to the network.
 final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -618,9 +798,11 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
         let reply = request.url.map { url in
             let method = request.httpMethod ?? "GET"
             let body = request.httpBody ?? request.httpBodyStream.map(Self.read)
-            return url.host() == GitLabStub.repository.host
-                ? GitLabStub.reply(method: method, url: url, body: body)
-                : GitHubStub.reply(method: method, url: url, body: body)
+            return switch url.host() {
+            case GitLabStub.repository.host: GitLabStub.reply(method: method, url: url, body: body)
+            case BitbucketStub.apiHost: BitbucketStub.reply(method: method, url: url)
+            default: GitHubStub.reply(method: method, url: url, body: body)
+            }
         }
         guard let url = request.url, let reply,
               let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1",

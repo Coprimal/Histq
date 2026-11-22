@@ -1091,8 +1091,7 @@ private struct RepositoryPicker: View {
             Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
                 .font(.settingsCaption)
                 .foregroundStyle(.secondary)
-            Text(kind == .gitlab ? "Projects of your groups appear here."
-                : "Organization repositories appear when the organization allows Histq's GitHub access.")
+            Text(accessHint)
                 .font(.settingsCaption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1117,6 +1116,15 @@ private struct RepositoryPicker: View {
                 highlighted = selected.flatMap { ids.contains($0) ? $0 : nil } ?? ids.first
             }
             if !query.isEmpty { UITiming.content("welcome repos filter \(ids.count)") }
+        }
+    }
+
+    /// Which repositories the list holds, in the host's words (Bitbucket's are grouped by workspace).
+    private var accessHint: String {
+        switch kind {
+        case .github: "Organization repositories appear when the organization allows Histq's GitHub access."
+        case .gitlab: "Projects of your groups appear here."
+        case .bitbucketCloud: "Repositories of your workspaces appear here."
         }
     }
 

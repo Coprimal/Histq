@@ -208,7 +208,7 @@ struct BitbucketCloudClientTests {
             #expect(files[3].patch == nil, "a binary file has no patch")
             #expect(stub.requests.map { $0.url?.absoluteString } == ["https://api.bitbucket.org" + Self.prPath + "/diff", target])
             let carriesToken = stub.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)"
-            #expect(carriesToken, "a followed redirect keeps the header, which is why only some are followed")
+            #expect(carriesToken, "URLSession drops the header on a redirect: the guard puts it back on one it follows")
             #expect(stub.requests.first?.value(forHTTPHeaderField: "Accept") == "text/plain")
         } else {
             await #expect(throws: HostingError.self) { try await client.pullRequestFiles(5, in: Self.repo) }

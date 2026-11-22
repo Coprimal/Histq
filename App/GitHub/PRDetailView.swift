@@ -361,7 +361,10 @@ final class PullRequestDetailModel {
                 #endif
                 let names = detail.files.value?.map(\.id) ?? []
                 if selectedFile.map({ !names.contains($0) }) ?? true { selectedFile = names.first }
-                await pollMergeable(api.client, api.repository, number: number, generation: generation)
+                // A host that never says whether a branch merges (Bitbucket) is not asked again.
+                if api.client.kind.reportsMergeability {
+                    await pollMergeable(api.client, api.repository, number: number, generation: generation)
+                }
             case .failure(let error):
                 let kind = api.client.kind
                 if quiet, state.value != nil {
@@ -649,6 +652,15 @@ extension HostedPullRequest {
     var isFromSameRepository: Bool {
         head.label != nil && head.label?.split(separator: ":").first == base.label?.split(separator: ":").first
     }
+
+    /// Whether the local commit `sha` (a full hash) is the head. Bitbucket gives an abbreviated head (12 hex digits),
+    /// which matches as a prefix of at least 7 hex digits; a full head (GitHub, GitLab) only matches itself.
+    func headIs(_ sha: String) -> Bool {
+        let head = head.sha.lowercased()
+        if head == sha.lowercased() { return !head.isEmpty }
+        return head.count >= 7 && head.count < sha.count && head.allSatisfy(\.isHexDigit)
+            && sha.lowercased().hasPrefix(head)
+    }
 }
 
 // MARK: - Views
@@ -838,10 +850,10 @@ private struct PRHeaderCard: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// The head as the sentence names it: GitHub's `owner:branch`; on GitLab the branch alone when it is in the same
-    /// project (its label's owner is the base's), as GitLab writes it.
+    /// The head as the sentence names it: GitHub's `owner:branch`; on GitLab and Bitbucket the branch alone when it is
+    /// in the same repository (its label's owner is the base's), as they write it.
     private func headName(_ pull: HostedPullRequest) -> String {
-        session.github.kind == .gitlab && pull.isFromSameRepository ? pull.head.ref : pull.head.label ?? pull.head.ref
+        session.github.kind != .github && pull.isFromSameRepository ? pull.head.ref : pull.head.label ?? pull.head.ref
     }
 
     /// A branch of the sentence: monospaced in a brand blue capsule, at most `maxWidth` wide and cut in the middle, so
@@ -1284,6 +1296,11 @@ private struct PRActionsCard: View {
             return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill", "No conflicts with \(base)",
                     "This branch can be merged.")
         }
+        let kind = session.github.kind
+        guard kind.reportsMergeability else {
+            return (nil, "info.circle", "\(kind.name) checks for conflicts when you merge",
+                    "It refuses the merge if this branch conflicts with \(base).")
+        }
         return (nil, "clock", "Checking whether this branch can be merged…", nil)
     }
 
@@ -1559,7 +1576,7 @@ private struct PRActionsCard: View {
         let way = checkoutWay
         if case .unavailable = way { return }
         if let local = session.refs.value?.localBranches.first(where: { $0.name == branch }) {
-            if local.commit == pull.head.sha {
+            if pull.headIs(local.commit) {
                 session.run(.checkoutBranch(branch), title: "Checkout \(branch)")
                 return
             }
@@ -1667,7 +1684,8 @@ enum HostAvatars: Equatable {
         switch store.kind {
         case .github: return repository.host == "github.com" ? .github : .drawn
         case .gitlab: return .gitlab(host: repository.host)
-        // Loaded avatars come with the app support (Phase 12).
+        // `AvatarStore.hostedIdentity` loads only from the repository's own host, and Bitbucket's `links.avatar.href`
+        // is expected on another one (Atlassian's avatar service or Gravatar; not yet seen on a real account).
         case .bitbucketCloud: return .drawn
         }
     }
@@ -2161,6 +2179,15 @@ private struct PRSkeleton: View {
 }
 
 private extension HostingKind {
+    /// Whether the host says if a pull request's branch merges cleanly (GitHub's `mergeable`, GitLab's merge status).
+    /// Bitbucket Cloud's API has no such field: it only refuses a merge that conflicts.
+    var reportsMergeability: Bool {
+        switch self {
+        case .github, .gitlab: true
+        case .bitbucketCloud: false
+        }
+    }
+
     /// What follows a pull request's web URL for its changed files: GitHub's `/files`, GitLab's `/diffs`, Bitbucket's
     /// `/diff`.
     var filesPagePath: String {
