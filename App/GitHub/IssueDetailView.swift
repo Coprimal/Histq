@@ -37,6 +37,8 @@ struct IssueDetail: Sendable {
     /// otherwise or when their read failed (no menu).
     var candidates: [HostedUser] = []
     var labelChoices: [HostedLabel] = []
+    /// The commenters' member roles by user id (`PullRequestDetail.memberRoles`).
+    var memberRoles: [Int: String]? = nil
 
     var isOpen: Bool { issue.state == "open" }
 }
@@ -368,15 +370,17 @@ final class IssueDetailModel {
         _ detail: IssueDetail, comments: [HostedComment], general: PRGeneralOptions, activity: PRActivityView
     ) async -> PRTimelineHTML {
         timeline(detail.issue, comments: comments, general: general, now: detail.now,
-                 activity: activityPage(detail.layout, events: detail.events, view: activity))
+                 activity: activityPage(detail.layout, events: detail.events, view: activity,
+                                        roles: detail.memberRoles))
     }
 
-    /// The Activity of an issue page with `layout` (nil without one), its `events` and `view`.
+    /// The Activity of an issue page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
     private nonisolated static func activityPage(
-        _ layout: PRPageLayout, events: [HostedTimelineEvent]?, view: PRActivityView
+        _ layout: PRPageLayout, events: [HostedTimelineEvent]?, view: PRActivityView, roles: [Int: String]?
     ) -> PRActivityPage? {
         layout.issueActivity.map {
-            PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies)
+            PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies,
+                           headerEdit: layout.headerEdit, roles: layout.roleBadges ? roles ?? [:] : nil)
         }
     }
 
@@ -442,17 +446,23 @@ final class IssueDetailModel {
             : await part(client.kind) { try await client.labels(in: repository) }
         do {
             let (issue, comments) = try await (issue, comments)
+            let viewer = await viewer
+            // The badges' roles, once the commenters are known (`PullRequestDetailModel.fetch`'s rule).
+            let users = [issue.user, viewer] + comments.map(\.user)
+            let roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
+                try await client.memberRoles(of: users.compactMap { $0?.id }, in: repository)
+            }.value
             let events = await events.value
             let timeline = timeline(issue, comments: comments, general: general, now: now,
-                                    activity: activityPage(layout, events: events, view: activityView))
+                                    activity: activityPage(layout, events: events, view: activityView, roles: roles))
             let reactions = await itemReactions.value
             var shown = issue
             if let reactions { shown.reactions = reactions }
             return .success(IssueDetail(loadID: loadID, now: now, layout: layout, issue: shown,
                                         commentCount: comments.count, timeline: timeline, comments: comments,
-                                        viewer: await viewer, reactionKinds: reactions == nil ? [] : barKinds,
+                                        viewer: viewer, reactionKinds: reactions == nil ? [] : barKinds,
                                         events: events, candidates: await candidates.value ?? [],
-                                        labelChoices: await labelChoices.value ?? []))
+                                        labelChoices: await labelChoices.value ?? [], memberRoles: roles))
         } catch {
             return .failure(error)
         }

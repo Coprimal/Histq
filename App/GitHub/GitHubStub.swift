@@ -781,6 +781,11 @@ enum GitLabStub {
                 + #""visibility": "private", "http_url_to_repo": "https://gitlab.com/stub/stub.git"\#(rules)}"#)
         case "\(project)/labels": return (200, "[\(labels)]")
         case "\(project)/users": return (200, "[\(user), \(reviewer)]")
+        // The badges' roles (`-HistqStubPageSeed YES` only): `stub` owns the project, `reviewer` is a developer.
+        case "\(project)/members/all":
+            return (200, !GitHubStub.seedsPage ? "[]"
+                : #"[{"id": 1001, "username": "stub", "access_level": 50}, "#
+                    + #"{"id": 1002, "username": "reviewer", "access_level": 30}]"#)
         // The open list and My MRs (`author_id`) have !1; no merge request asks `stub` for a review.
         case "\(project)/merge_requests":
             let open = query.contains("state=opened") && !query.contains("reviewer_id=")

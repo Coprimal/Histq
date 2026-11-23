@@ -132,6 +132,9 @@ struct PullRequestDetail: Sendable {
     /// The Activity's history entries (`PRPageLayout.activity`): nil without an Activity, or when their read failed
     /// (the page then shows the comments alone).
     var events: [HostedTimelineEvent]? = nil
+    /// The commenters' member roles by user id (`PRPageLayout.roleBadges`): nil without badges; empty when their read
+    /// failed (only "Author" shows).
+    var memberRoles: [Int: String]? = nil
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -1008,15 +1011,17 @@ final class PullRequestDetailModel {
     ) async -> PRTimelineHTML {
         timeline(detail.pull, noun: noun, comments: comments, reviews: detail.reviews, threads: threads,
                  expanded: expanded, general: general, now: detail.now,
-                 activity: activityPage(detail.layout, events: detail.events, view: activity))
+                 activity: activityPage(detail.layout, events: detail.events, view: activity,
+                                        roles: detail.memberRoles))
     }
 
-    /// The Activity of a page with `layout` (nil without one), its `events` and `view`.
+    /// The Activity of a page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
     private nonisolated static func activityPage(
-        _ layout: PRPageLayout, events: [HostedTimelineEvent]?, view: PRActivityView
+        _ layout: PRPageLayout, events: [HostedTimelineEvent]?, view: PRActivityView, roles: [Int: String]?
     ) -> PRActivityPage? {
         layout.activity.map {
-            PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies)
+            PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies,
+                           headerEdit: layout.headerEdit, roles: layout.roleBadges ? roles ?? [:] : nil)
         }
     }
 
@@ -1116,13 +1121,19 @@ final class PullRequestDetailModel {
             let pull = try await pullRequest
             let (comments, reviews) = try await (comments, reviews)
             let threads = Self.threads(await reviewComments, await threadStates, hostName: client.kind.name)
+            let viewer = await viewer
+            // The badges' roles: read once the commenters are known (the author, the viewer for an optimistic reply,
+            // every general and diff comment's author). A failure only leaves the roles out.
+            let users = [pull.user, viewer] + comments.map(\.user) + (threads.value?.all ?? []).flatMap(\.comments).map(\.user)
+            let roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
+                try await client.memberRoles(of: users.compactMap { $0?.id }, in: repository)
+            }.value
             let events = await events.value
             let timeline = timeline(
                 pull, noun: client.kind.pullRequestNoun, comments: comments, reviews: reviews, threads: threads,
                 expanded: expanded, general: general, now: now,
-                activity: activityPage(layout, events: events, view: activityView))
+                activity: activityPage(layout, events: events, view: activityView, roles: roles))
             let reviewers = reviewers(pull, reviews)
-            let viewer = await viewer
             let viewerApproved = viewer.map { viewer in
                 client.capabilities.contains(.unapprove)
                     && reviewers.contains { $0.userID == viewer.id && $0.state == "APPROVED" }
@@ -1137,7 +1148,7 @@ final class PullRequestDetailModel {
                 viewerApproved: viewerApproved, reactionKinds: reactions == nil ? [] : barKinds,
                 approvals: await approvals.value, repositoryInfo: await repositoryInfo.value,
                 reviewerCandidates: await candidates.value ?? [], labelChoices: await labelChoices.value ?? [],
-                events: events))
+                events: events, memberRoles: roles))
         } catch {
             return .failure(error)
         }
@@ -1769,7 +1780,8 @@ private struct PRContent: View {
             PRConversationTab(session: session, detail: detail)
                 .onAppear { UITiming.content("pr \(number) conversation \(detail.timelineCount)") }
         case .commits:
-            PRCommitsTab(commits: detail.commits, now: detail.now, github: session.github)
+            PRCommitsTab(commits: detail.commits, now: detail.now, github: session.github,
+                         byDay: detail.layout.commitsByDay)
                 .onAppear { UITiming.content("pr \(number) commits \(Self.count(detail.commits))") }
         case .files:
             PRFilesTab(session: session, detail: detail)
@@ -2745,7 +2757,7 @@ private struct PRActionsCard: View {
     /// The status in a box tinted with its tone (neutral without one), so whether the branch merges reads at a glance
     /// (user, 2026-11-17). The red one holds the Resolve buttons under its text. `expanded`: GitLab's merge box, whose
     /// chevron shows or hides its details.
-    private func statusBox(_ status: Status, expanded: Binding<Bool>? = nil) -> some View {
+    private func statusBox(_ status: Status, expanded: Binding<Bool>? = nil, details: AnyView? = nil) -> some View {
         let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
         return HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: status.symbol)
@@ -2766,6 +2778,7 @@ private struct PRActionsCard: View {
                 // The text reads as one element; the buttons under it stay buttons.
                 .accessibilityElement(children: .combine)
                 if hasConflicts { resolveControls }
+                if let details { details }
             }
             if let expanded {
                 Spacer(minLength: 8)
@@ -2803,11 +2816,22 @@ private struct PRActionsCard: View {
                 if detail.isMerged {
                     mergedBox
                 } else if detail.isOpen {
-                    statusBox(gitLabStatus(busy: busy), expanded: $pullDetail.mergeDetailsExpanded)
-                    if pullDetail.mergeDetailsExpanded { gitLabDetails(busy: busy) }
-                    gitLabMergeRow(busy: busy)
+                    // The details open inside the status box, under its headline, as on GitLab.
+                    statusBox(gitLabStatus(busy: busy), expanded: $pullDetail.mergeDetailsExpanded,
+                              details: pullDetail.mergeDetailsExpanded ? AnyView(gitLabDetails(busy: busy)) : nil)
+                    gitLabOptions(busy: busy)
                 }
-                HStack(spacing: 8) { otherButtons(busy: busy) }
+                // Merge first, on the row of Checkout Locally and Close; narrower, Merge above the other buttons.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        gitLabMergeButton(busy: busy)
+                        otherButtons(busy: busy)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        gitLabMergeButton(busy: busy)
+                        HStack(spacing: 8) { otherButtons(busy: busy) }
+                    }
+                }
                 if case .unavailable(let reason) = checkoutWay {
                     Text(reason)
                         .font(.settingsCaption)
@@ -2972,17 +2996,20 @@ private struct PRActionsCard: View {
         session.pullDetail.deleteSourceBranchChoice ?? detail.pull.mergeDetails?.deletesSourceBranch ?? false
     }
 
-    /// The options and Merge: Delete source branch (where the provider takes it), Squash commits (unless the project
-    /// never squashes; locked on when it always does), then Merge, which only members who may merge get (GitLab's
-    /// `can_merge`): green with the green headline, off with conflicts, for a draft or while an action runs.
+    /// Whether the provider takes GitLab's delete-source-branch option with a merge.
+    private var supportsDeleteSourceBranch: Bool {
+        session.github.api?.client.supportedMergeOptions.contains(.deleteSourceBranch) ?? false
+    }
+
+    /// The merge options: Delete source branch (where the provider takes it) and Squash commits (unless the project
+    /// never squashes; locked on when it always does).
     @ViewBuilder
-    private func gitLabMergeRow(busy: PullRequestAction?) -> some View {
-        let pull = detail.pull
+    private func gitLabOptions(busy: PullRequestAction?) -> some View {
         let model = session.pullDetail
-        let supportsDelete = session.github.api?.client.supportedMergeOptions.contains(.deleteSourceBranch) ?? false
+        let supportsDelete = supportsDeleteSourceBranch
         let squashOption = detail.repositoryInfo?.squashOption
         let showsSquash = session.github.mergeMethods.contains(.squash) && squashOption != .never
-        let options = HStack(spacing: 14) {
+        HStack(spacing: 14) {
             if supportsDelete {
                 Toggle("Delete source branch", isOn: Binding(
                     get: { deletesSourceBranch }, set: { model.deleteSourceBranchChoice = $0 }))
@@ -2997,25 +3024,22 @@ private struct PRActionsCard: View {
             }
         }
         .fixedSize()
-        let merge = Button("Merge") {
-            confirmMerge(isSquashing ? .squash : .merge,
-                         options: HostedMergeOptions(deleteSourceBranch: supportsDelete ? deletesSourceBranch : nil))
-        }
-        .buttonStyle(RowTextButtonStyle(
-            formRow: true, fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
-        .disabled(busy != nil || pull.draft == true || hasConflicts)
-        .fixedSize()
-        let mayMerge = pull.mergeDetails?.viewerCanMerge != false
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                options
-                Spacer(minLength: 8)
-                if mayMerge { merge }
+    }
+
+    /// Merge, for an open merge request and only members who may merge (GitLab's `can_merge`): green with the green
+    /// headline, off with conflicts, for a draft or while an action runs.
+    @ViewBuilder
+    private func gitLabMergeButton(busy: PullRequestAction?) -> some View {
+        let pull = detail.pull
+        if detail.isOpen, pull.mergeDetails?.viewerCanMerge != false {
+            Button("Merge") {
+                confirmMerge(isSquashing ? .squash : .merge, options: HostedMergeOptions(
+                    deleteSourceBranch: supportsDeleteSourceBranch ? deletesSourceBranch : nil))
             }
-            VStack(alignment: .leading, spacing: 8) {
-                options
-                if mayMerge { merge }
-            }
+            .buttonStyle(RowTextButtonStyle(
+                formRow: true, fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
+            .disabled(busy != nil || pull.draft == true || hasConflicts)
+            .fixedSize()
         }
     }
 
@@ -3424,6 +3448,8 @@ private struct PRCommitsTab: View {
     /// The detail load's "now" (`PullRequestDetail.now`).
     let now: Date
     let github: HostingStore
+    /// GitLab's list (`PRPageLayout.commitsByDay`): the commits under day headings, each row with a copy button.
+    var byDay = false
 
     var body: some View {
         switch commits {
@@ -3432,9 +3458,13 @@ private struct PRCommitsTab: View {
             SectionCard("Commits", systemImage: PRTab.commits.systemImage, count: commits.count, contentPadding: 6) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(commits) {
-                            PRCommitRow(commit: $0, url: github.webURL(.commit($0.sha)), hostName: github.kind.name,
-                                        dates: dates)
+                        if byDay {
+                            ForEach(Self.days(commits), id: \.id) { day in
+                                PRCommitDayHeading(title: day.title)
+                                ForEach(day.commits) { row($0, dates: dates) }
+                            }
+                        } else {
+                            ForEach(commits) { row($0, dates: dates) }
                         }
                     }
                 }
@@ -3448,6 +3478,52 @@ private struct PRCommitsTab: View {
             DiffNoticeCard(title: "Commits", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
     }
+
+    private func row(_ commit: HostedCommit, dates: PRPageDates) -> some View {
+        PRCommitRow(commit: commit, url: github.webURL(.commit(commit.sha)), hostName: github.kind.name, dates: dates,
+                     gitLabStyle: byDay)
+    }
+
+    /// The day headings' format, GitLab's ("Nov 20, 2026"), in the pages' English.
+    private static let dayFormat: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter
+    }()
+
+    /// `commits` in their order, each run of one day (the author date's, in the Mac's time zone) under its heading
+    /// (`id` its place); a commit without a date goes under the heading before it ("Unknown date" first).
+    static func days(_ commits: [HostedCommit]) -> [(id: Int, title: String, commits: [HostedCommit])] {
+        var days: [(id: Int, title: String, commits: [HostedCommit])] = []
+        for commit in commits {
+            let day = commit.commit.author?.date.map { dayFormat.string(from: $0) } ?? days.last?.title
+                ?? "Unknown date"
+            if days.last?.title == day {
+                days[days.count - 1].commits.append(commit)
+            } else {
+                days.append((days.count, day, [commit]))
+            }
+        }
+        return days
+    }
+}
+
+/// A day heading of GitLab's Commits list: the date, a hairline under it.
+private struct PRCommitDayHeading: View {
+    let title: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+            Divider()
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+        .accessibilityAddTraits(.isHeader)
+    }
 }
 
 /// A commit: its subject, author and date, and its short id, which opens it on GitHub.
@@ -3458,6 +3534,8 @@ private struct PRCommitRow: View {
     /// The host's product name ("GitHub", "GitLab").
     let hostName: String
     let dates: PRPageDates
+    /// GitLab's row: "<author> authored <time>", the 8-character short id with a copy button beside it.
+    var gitLabStyle = false
     @State private var hovered = false
 
     var body: some View {
@@ -3473,7 +3551,7 @@ private struct PRCommitRow: View {
                     .truncationMode(.tail)
                 Group {
                     if let date = commit.commit.author?.date {
-                        Text(verbatim: "\(author) committed \(dates.relative(date))")
+                        Text(verbatim: "\(author) \(gitLabStyle ? "authored" : "committed") \(dates.relative(date))")
                             .help(dates.absolute(date))
                     } else {
                         Text(verbatim: author)
@@ -3487,11 +3565,24 @@ private struct PRCommitRow: View {
             Button {
                 GitHubLinks.open(url)
             } label: {
-                Text(String(commit.sha.prefix(7)))
+                Text(String(commit.sha.prefix(gitLabStyle ? 8 : 7)))
                     .font(.settingsCaption.monospaced())
             }
             .buttonStyle(RowTextButtonStyle())
             .help("Open this commit on \(hostName)")
+            if gitLabStyle {
+                Button {
+                    RepoMenus.copy(commit.sha)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(RowIconButtonStyle())
+                .help("Copy commit SHA")
+                .accessibilityLabel("Copy commit SHA")
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

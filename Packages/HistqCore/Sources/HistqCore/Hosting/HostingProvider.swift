@@ -419,6 +419,9 @@ public protocol HostingProvider: Sendable {
     /// The history entries of `item` that are not comments (system notes, state, label and milestone changes), in
     /// any order (only with `timelineEvents`).
     func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedTimelineEvent]
+    /// The role on the repository of each of `userIDs` who is a member, by user id, in the host's words ("Owner",
+    /// "Developer"), the badge GitLab's page puts on their comments; a user who is not a member is left out.
+    func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String]
 }
 
 extension HostingProvider {
@@ -520,4 +523,7 @@ extension HostingProvider {
     {
         throw HostingError.validationFailed(message: "this host has no history entries")
     }
+
+    /// A host without member roles knows none.
+    public func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String] { [:] }
 }

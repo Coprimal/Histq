@@ -29,6 +29,12 @@ struct GitLabUser: Decodable {
     }
 }
 
+/// A project member (`GET /projects/:id/members/all`): only what the role badge needs.
+struct GitLabMember: Decodable {
+    var id: Int
+    var accessLevel: Int
+}
+
 struct GitLabNamespace: Decodable {
     var id: Int
     var fullPath: String

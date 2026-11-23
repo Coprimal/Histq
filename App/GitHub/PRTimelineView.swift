@@ -40,6 +40,8 @@ struct PRTimelineHTML: Sendable {
     /// The page folds each thread's replies under a summary (`PRPageLayout.collapsesReplies`): the collapse rule of its
     /// review threads (`PRTimeline.isCollapsed(_:expanded:collapsesReplies:)`).
     var collapsesReplies = false
+    /// Each comment's Edit is an icon in its header, out of its "…" menu (`PRPageLayout.headerEdit`).
+    var headerEdit = false
 }
 
 /// What a host's Activity page adds to the timeline (`PRPageLayout.activity`): its history entries (nil when their
@@ -49,6 +51,11 @@ struct PRActivityPage: Sendable {
     var view: PRActivityView
     let events: [HostedTimelineEvent]?
     let collapsesReplies: Bool
+    /// Each comment's Edit is an icon in its header (`cpen-<key>`), and its "…" menu only holds Delete.
+    var headerEdit = false
+    /// The badges of each comment's header (`PRPageLayout.roleBadges`): "Author" on the item author's, and the
+    /// member role (`roles`, by user id: "Owner", "Developer") the host gave; nil draws none.
+    var roles: [Int: String]? = nil
 }
 
 /// The ids an optimistic page gives what the host has not answered yet (a reply, a new inline thread and its comment):
@@ -504,15 +511,31 @@ extension PRTimeline {
                     ?? HostedHTML.escape(action))
             } ?? ""
             let whenHTML = when(date)
+            // An Edit icon in the header (`headerEdit`, GitLab's): the "…" menu is left only for Delete.
+            let pen = named && activity?.headerEdit == true ? menu.flatMap { $0.canEdit ? $0 : nil } : nil
+            let menuTarget = pen == nil ? menu : menu.flatMap { $0.canDelete ? $0 : nil }
             // A key is `g` or `r` and an integer id: the format the measuring script accepts.
-            let menu = menu.map { "<span class=\"slot-menu\" data-slot=\"cmenu-\($0.key)\"></span>" } ?? ""
+            let menu = menuTarget.map { "<span class=\"slot-menu\" data-slot=\"cmenu-\($0.key)\"></span>" } ?? ""
+            let penHTML = pen.map { "<span class=\"slot-menu\" data-slot=\"cpen-\($0.key)\"></span>" } ?? ""
             if let reactions { reactionTargets[reactions.key] = reactions }
             let add = reactions.map { "<span class=\"slot-add\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             let who = named ? Self.named(user) : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
-            return "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>"
-                + "\(who)\(what)\(extra)\(whenHTML)\(add)\(menu)"
+            let start = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)\(whenHTML)"
+            guard named, activity?.headerEdit == true || activity?.roles != nil else { return start + add + menu }
+            // GitLab's right-hand group: the badges, then the reaction, Edit and "…" buttons.
+            let tools = badges(user) + add + penHTML + menu
+            return tools.isEmpty ? start : start + "<span class=\"tools\">\(tools)</span>"
+        }
+
+        /// A comment header's badges (`PRActivityPage.roles`): "Author" when `user` wrote the item, then their role.
+        func badges(_ user: HostedUser?) -> String {
+            guard let roles = activity?.roles, let user else { return "" }
+            var html = ""
+            if let author, author.id == user.id { html += "<span class=\"role\">Author</span>" }
+            if let role = roles[user.id] { html += "<span class=\"role\">\(HostedHTML.escape(role))</span>" }
+            return html
         }
 
         /// A comment in a thread or a reply: its header (avatar slot, login, date, the add-reaction and menu slots),
@@ -811,7 +834,7 @@ extension PRTimeline {
             html: description + list + end, avatars: avatars,
             count: comments.count + (activity?.events == nil ? shown.count : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
-            collapsesReplies: folds)
+            collapsesReplies: folds, headerEdit: activity?.headerEdit ?? false)
     }
 
     /// A general comment's reaction row target, when `options` offer reactions.
@@ -826,6 +849,13 @@ extension PRTimeline {
     private nonisolated static func target(_ comment: HostedComment, _ options: PRGeneralOptions) -> PRCommentTarget? {
         PRCommentTarget(.general, id: comment.id, hostKey: comment.hostKey, body: comment.body, user: comment.user,
                         canEdit: comment.viewerCanEdit, canDelete: comment.viewerCanDelete, options: options)
+    }
+
+    /// A thread's resolve button: "Resolve thread" / "Reopen thread" where the host's layout words it so
+    /// (`PRPageLayout.threadWords`, GitLab's), else "Resolve conversation" / "Unresolve conversation".
+    static func resolveTitle(resolved: Bool, kind: HostingKind) -> String {
+        if PRPageLayout.for(kind).threadWords { return resolved ? "Reopen thread" : "Resolve thread" }
+        return resolved ? "Unresolve conversation" : "Resolve conversation"
     }
 
     /// Whether the general thread `thread` shows collapsed (its header only): only a resolvable one can be, a resolved
@@ -1218,7 +1248,9 @@ struct PRTimelinePage: View {
                      slot: slot)
         } else if let general, let target = Self.comment(of: slot, "cmenu-", in: timeline.comments) {
             PRCommentMenu(session: session, number: number, kind: kind, target: target, model: general,
-                          window: window, busy: busy)
+                          window: window, busy: busy, editsInHeader: timeline.headerEdit)
+        } else if let general, let target = Self.comment(of: slot, "cpen-", in: timeline.comments) {
+            PRCommentEditButton(number: number, kind: kind, target: target, model: general, busy: busy)
         } else if let general, let target = Self.comment(of: slot, "cedit-", in: timeline.comments),
                   general.editingComments.contains(target.key) {
             measured(PRCommentEditor(session: session, number: number, target: target, model: general), slot: slot)
@@ -1238,7 +1270,7 @@ struct PRTimelinePage: View {
         return reactions[String(slot.id.dropFirst(prefix.count))]
     }
 
-    /// The comment of a `cmenu-<key>` or `cedit-<key>` slot.
+    /// The comment of a `cmenu-<key>`, `cpen-<key>` or `cedit-<key>` slot.
     private static func comment(
         of slot: HostedHTMLSlot, _ prefix: String, in comments: [String: PRCommentTarget]
     ) -> PRCommentTarget? {
@@ -1402,7 +1434,7 @@ private struct PRReplyRow: View {
             } label: {
                 HStack(spacing: 6) {
                     if resolving(running) { DelayedSpinner(detail: "pr \(number) resolve") }
-                    Text(state.isResolved ? "Unresolve conversation" : "Resolve conversation")
+                    Text(PRTimeline.resolveTitle(resolved: state.isResolved, kind: session.github.kind))
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -1541,7 +1573,7 @@ private struct PRGeneralReplyRow: View {
                     } label: {
                         HStack(spacing: 6) {
                             if resolving { DelayedSpinner(detail: "\(kind) \(number) gresolve") }
-                            Text(thread.isResolved ? "Unresolve conversation" : "Resolve conversation")
+                            Text(PRTimeline.resolveTitle(resolved: thread.isResolved, kind: session.github.kind))
                         }
                     }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -1570,6 +1602,8 @@ private struct PRCommentMenu: View {
     /// not by each menu.
     let window: WindowModel
     let busy: Bool
+    /// Edit is the header's own icon (`PRCommentEditButton`): the menu holds Delete only.
+    var editsInHeader = false
 
     @State private var hovered = false
 
@@ -1583,7 +1617,7 @@ private struct PRCommentMenu: View {
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
             .onTapGesture { if !busy { open() } }
-            .help("Edit or delete the comment")
+            .help(editsInHeader ? "Delete the comment" : "Edit or delete the comment")
             .accessibilityElement()
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Actions on \(target.author)'s comment")
@@ -1593,7 +1627,7 @@ private struct PRCommentMenu: View {
     /// The menu, under the pointer (the click's place).
     private func open() {
         var entries: [MenuEntry] = []
-        if target.canEdit {
+        if target.canEdit, !editsInHeader {
             entries.append(.action("Edit") { [model, target, kind, number] in
                 model.beginEdit(target)
                 UITiming.content("\(kind) \(number) action edit open")
@@ -1618,6 +1652,42 @@ private struct PRCommentMenu: View {
             message: "The comment is deleted on \(host) for everyone. This cannot be undone.",
             button: "Delete Comment", isDestructive: true,
             perform: { model.perform(.delete(target), on: number, github: github) })
+    }
+}
+
+/// A comment's Edit icon, on the slot in its header after the add-reaction button (GitLab's page, where the "…" menu
+/// holds Delete only): a pencil with `PRCommentMenu`'s hover circle; a click opens the in-place editor at once. Off
+/// while an action runs on the item. A glyph with a tap, not a `Button`, as `PRCommentMenu`: a long page has many.
+private struct PRCommentEditButton: View {
+    let number: Int
+    /// The timing log's word for the item (`pr`, `issue`).
+    let kind: String
+    let target: PRCommentTarget
+    let model: any PRGeneralThreadModel
+    let busy: Bool
+
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: "pencil")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 18, height: 18)
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .contentShape(Rectangle())
+            .opacity(busy ? 0.45 : 1)
+            .onHover { hovered = $0 }
+            .onTapGesture { if !busy { edit() } }
+            .help("Edit the comment")
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Edit \(target.author)'s comment")
+            .accessibilityAction { if !busy { edit() } }
+    }
+
+    private func edit() {
+        model.beginEdit(target)
+        UITiming.content("\(kind) \(number) action edit open")
     }
 }
 

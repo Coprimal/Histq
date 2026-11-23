@@ -920,6 +920,27 @@ struct GitLabClientTests {
         #expect(bodies[3]["body"] as? String == "hi")
     }
 
+    @Test("member roles: one members/all read filtered by the unique user ids, GitLab's words by access level")
+    func memberRoles() async throws {
+        let stub = StubServer { _ in
+            .init(body: #"[{"id": 3, "username": "o", "access_level": 50}, {"id": 4, "username": "d", "access_level": 30}, {"id": 5, "username": "m", "access_level": 5}]"#)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let roles = try await client.memberRoles(of: [4, 3, 4, 5, 9], in: Self.writeRepo)
+        let none = try await client.memberRoles(of: [], in: Self.writeRepo)
+
+        #expect(roles == [3: "Owner", 4: "Developer"], "minimal access (5) has no badge; a non-member is left out")
+        #expect(none.isEmpty)
+        let requests = stub.requests
+        #expect(requests.count == 1, "no request without ids")
+        let url = try #require(requests.first?.url)
+        #expect(url.path(percentEncoded: true) == "/gitlab/api/v4/projects/group%2Fproj/members/all")
+        let ids = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .filter { $0.name == "user_ids[]" }.map(\.value)
+        #expect(ids == ["3", "4", "5", "9"])
+    }
+
     // MARK: - Pages and the token provider
 
     /// The `page` query item of a request, nil on the first page (`per_page=100` holds `page=1` as text).

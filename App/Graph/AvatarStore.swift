@@ -393,7 +393,10 @@ final class AvatarStore {
         if let image = drawn.object(forKey: cacheKey) { return image }
         let hash = Array(SHA256.hash(data: Data(identity.utf8)))
         let lanes = Palette.graphLanes
-        let color = lanes[Int(hash[0]) % lanes.count]
+        let lane = Int(hash[0]) % lanes.count
+        // Lane 0's blue is a touch lighter than the accent for the graph's thin lines; on an avatar it reads as a
+        // second blue, so it takes the app's one blue (the accent, the selected tab's pill) (user, 2026-11-23).
+        let color = lane == 0 ? Self.accent : lanes[lane]
         // Bits 0..<15 of bytes 1...2 pick the cells of the 3 left columns; the right 2 mirror them.
         let bits = UInt32(hash[1]) | UInt32(hash[2]) << 8
         let background = Self.background
@@ -468,6 +471,8 @@ final class AvatarStore {
 
     /// An emoji avatar's glyph box, as a fraction of the disc's diameter: the emoji fills the disc inside the lane ring.
     private static let emojiFill: CGFloat = 0.9
+    /// The accent (`AccentColor`) in sRGB: lane 0's color on a generated avatar. #2F86FB
+    private static let accent = NSColor(srgbRed: 0x2F / 255, green: 0x86 / 255, blue: 0xFB / 255, alpha: 1)
     /// The generated avatar's background: darker than the card so the pattern stands out. #1C1C1E
     private static let background = NSColor(srgbRed: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
     /// The initials avatar's disc and letters. #48484A, white 0.92

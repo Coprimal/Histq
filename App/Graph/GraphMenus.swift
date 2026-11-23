@@ -649,9 +649,15 @@ enum RepoMenus {
         if let current {
             entries += integrate(name, ref: ref, commit: branch?.commit, into: current, session)
         }
-        // Only a branch of the GitHub remote can be a pull request's head.
+        // Only a branch of the GitHub remote can be a pull request's head. As on a local branch, first the checked-out
+        // branch into this one (pushed first when the host lacks its commits), unless it is this branch's own local
+        // branch; then this branch into the default branch.
         if let branch, branch.remote == session.github.api?.remote {
-            entries += [.separator, pullRequestEntry(head: .remote(name), base: nil, session)]
+            entries.append(.separator)
+            if let current, gitHubBranch(of: .local(current), session) != localName(of: branch) {
+                entries.append(pullRequestEntry(head: .local(current), base: .remote(name), session))
+            }
+            entries.append(pullRequestEntry(head: .remote(name), base: nil, session))
         }
         if let branch {
             entries += [.separator, deleteRemote(branch, session)]
@@ -1191,12 +1197,15 @@ enum RepoMenus {
     /// The menu entry that opens the Create Pull Request form for `head` into `base` (else the default branch). A local
     /// head GitHub lacks, or with commits its branch there lacks, is pushed first ("Push X and Create Pull Request…"):
     /// the form opens once the push went through, never after a refused one. The title names the head when it is not
-    /// plain from the menu: with a base, or a local branch that is not checked out.
+    /// plain from the menu: with a base, a local branch that is not checked out, or a remote branch.
     static func pullRequestEntry(head: SidebarItem, base: SidebarItem?, _ session: RepoSession) -> MenuEntry {
         let headName = head.branchName ?? ""
         let into = base?.branchName.map { " into \($0)" } ?? ""
-        let namesHead = if base != nil { true } else if case .local(let name) = head { name != session.currentBranch }
-            else { false }
+        // A remote head is named too: its menu also offers the checked-out branch into it.
+        let namesHead = switch head {
+        case .local(let name): base != nil || name != session.currentBranch
+        case .remote, .tag: true
+        }
         let push: RepoSession.Write? = if case .local(let name) = head { pushBeforePullRequest(name, session) } else { nil }
         let reason = createPullRequestUnavailableReason(head: head, base: base, session, pushing: push != nil)
         let noun = session.github.kind.pullRequestNoun.capitalized
@@ -1488,7 +1497,13 @@ enum RepoMenus {
     /// DEBUG `-HistqShow "<menu>|<title>[|<title>…]"`: picks one menu item as `-HistqRun` does and runs it, but leaves
     /// the confirmation or form it opens on screen (QA shots of the modals; `-HistqFormName` then submits a form).
     static func debugShow(_ step: String, session: RepoSession) {
-        guard let perform = debugAction(step, session) else { return debugLog("missing \(step)") }
+        guard let perform = debugAction(step, session) else {
+            // What the menu has instead: each top-level title, with why it is off.
+            let root = step.components(separatedBy: "|")[0]
+            let titles = debugMenu(root, session).filter { !$0.title.isEmpty }
+                .map { $0.isEnabled ? $0.title : "\($0.title) [off: \($0.toolTip ?? "")]" }
+            return debugLog("missing \(step); has: " + titles.joined(separator: " / "))
+        }
         perform()
     }
 

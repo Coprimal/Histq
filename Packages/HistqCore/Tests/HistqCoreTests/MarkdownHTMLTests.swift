@@ -110,4 +110,31 @@ struct MarkdownHTMLTests {
         let shallow = MarkdownHTML.html(make(20))
         #expect(!shallow.hasPrefix("<p class=\"plain\">"))
     }
+
+    // GitLab's mentions (opt-in): each `@username` of the text links to the user's page; emails, code, links and other
+    // hosts' bodies stay as they are.
+    @Test func mentionsLinkOnlyWhenAsked() {
+        let root = "https://gitlab.com"
+        #expect(MarkdownHTML.html("assigned to @thi_coprimal", mentionsAt: root)
+            == "<p>assigned to <a class=\"mention\" href=\"https://gitlab.com/thi_coprimal\">@thi_coprimal</a></p>\n")
+        #expect(MarkdownHTML.html("assigned to @thi_coprimal") == "<p>assigned to @thi_coprimal</p>\n")
+    }
+
+    @Test func mentionDropsTrailingPunctuation() {
+        let html = MarkdownHTML.html("Thanks @a.b-c. And (@x)!", mentionsAt: "https://gitlab.com")
+        #expect(html.contains("<a class=\"mention\" href=\"https://gitlab.com/a.b-c\">@a.b-c</a>. And"))
+        #expect(html.contains("(<a class=\"mention\" href=\"https://gitlab.com/x\">@x</a>)!"))
+    }
+
+    @Test(arguments: ["mail a@b.com", "`@code`", "[@linked](https://example.com)", "a lone @ sign", "@@double",
+                      "ping @all", "@Here too"])
+    func noMentionWhereThereIsNone(_ markdown: String) {
+        let html = MarkdownHTML.html(markdown, mentionsAt: "https://gitlab.com")
+        #expect(!html.contains("class=\"mention\""))
+    }
+
+    @Test func mentionRootAndNameAreEscaped() {
+        let html = MarkdownHTML.html("say @x", mentionsAt: "https://h\"x")
+        #expect(html == "<p>say <a class=\"mention\" href=\"https://h&quot;x/x\">@x</a></p>\n")
+    }
 }

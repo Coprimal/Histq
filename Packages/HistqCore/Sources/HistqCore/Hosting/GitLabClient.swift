@@ -283,7 +283,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                 memo.resolvableDiscussions.withLock { _ = $0.insert(itemKey + "\u{0}" + discussion.id) }
             }
             for note in notes {
-                var comment = Self.comment(note, page: page)
+                var comment = self.comment(note, page: page)
                 comment.parentID = note.id == root.id ? nil : root.id
                 comment.hostKey = discussion.id
                 if note.id == root.id, resolvable {
@@ -363,7 +363,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                     id: note.id, inReplyToID: note.id == root.id ? nil : root.id, path: place.path,
                     line: current ? place.line : nil, originalLine: place.line,
                     startLine: current ? place.startLine : nil, originalStartLine: place.startLine, side: place.side,
-                    diffHunk: hunk, body: note.body, bodyHTML: note.body.map(MarkdownHTML.html),
+                    diffHunk: hunk, body: note.body, bodyHTML: note.body.map(markdownHTML),
                     user: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
                     htmlURL: Self.noteURL(page, note.id))
                 comment.hostKey = id
@@ -506,6 +506,32 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return users.map(\.hosted)
     }
 
+    /// `GET /projects/:id/members/all?user_ids[]=…`: the role of each of `userIDs` on the project, its groups' members
+    /// included (GitLab returns a user's highest access), by user id, in GitLab's words; at most 100 ids a request.
+    /// A user who is not a member, or has an access level Histq does not know, is left out.
+    public func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String] {
+        let ids = Array(Set(userIDs.filter { $0 > 0 })).sorted()
+        guard !ids.isEmpty else { return [:] }
+        let path = try projectPath(repo) + ["members", "all"]
+        var roles: [Int: String] = [:]
+        for start in stride(from: 0, to: ids.count, by: 100) {
+            var components = URLComponents(url: url(path), resolvingAgainstBaseURL: false)!
+            components.percentEncodedQueryItems = ids[start..<min(start + 100, ids.count)]
+                .map { URLQueryItem(name: "user_ids%5B%5D", value: String($0)) }
+            let members: [GitLabMember] = try await list(components.url!)
+            for member in members {
+                if let role = Self.roleNames[member.accessLevel] { roles[member.id] = role }
+            }
+        }
+        return roles
+    }
+
+    /// GitLab's access levels by name, as its page badges them.
+    private static let roleNames = [
+        10: "Guest", 15: "Planner", 20: "Reporter", 25: "Security Manager", 30: "Developer", 40: "Maintainer",
+        50: "Owner",
+    ]
+
     /// The same users as `assignableUsers(in:)`: any of them can be asked to review.
     public func collaborators(in repo: HostedRepository) async throws -> [HostedUser] {
         try await assignableUsers(in: repo)
@@ -571,7 +597,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         defer { forgetThreads(of: item, in: repo) }
         let note: GitLabNote = try await send(
             "POST", url(try itemPath(item, in: repo) + ["notes"]), body: ["body": body])
-        var comment = Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        var comment = self.comment(note, page: webURL(Self.webTarget(item), in: repo))
         // The token's user wrote it: theirs to edit and delete. `GitLabNote` decodes no discussion id, so `hostKey`
         // stays nil: the reload after the post maps it.
         (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
@@ -597,7 +623,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return HostedReviewComment(
             id: note.id, inReplyToID: thread.rootCommentID, path: place?.path ?? "", line: place?.line,
             originalLine: place?.line, startLine: place?.startLine, originalStartLine: place?.startLine,
-            side: place?.side, body: note.body, bodyHTML: note.body.map(MarkdownHTML.html), user: note.author?.hosted,
+            side: place?.side, body: note.body, bodyHTML: note.body.map(markdownHTML), user: note.author?.hosted,
             createdAt: GitLabDate.parse(note.createdAt),
             htmlURL: Self.noteURL(webURL(.pullRequest(number), in: repo), note.id))
     }
@@ -654,7 +680,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         if let text { _ = try await comment(on: .pullRequest(number), in: repo, body: text) }
         let approver = approvals.approvedBy?.first { $0.user.id == me }
         return HostedReview(
-            id: id, user: approver?.user.hosted, state: "APPROVED", body: text, bodyHTML: text.map(MarkdownHTML.html),
+            id: id, user: approver?.user.hosted, state: "APPROVED", body: text, bodyHTML: text.map(markdownHTML),
             submittedAt: GitLabDate.parse(approver?.approvedAt) ?? Date())
     }
 
@@ -682,7 +708,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         var ids = SyntheticIDs()
         return HostedReview(
             id: ids.id("review", String(me.id)), user: me, state: "CHANGES_REQUESTED", body: text,
-            bodyHTML: text.map(MarkdownHTML.html), submittedAt: Date())
+            bodyHTML: text.map(markdownHTML), submittedAt: Date())
     }
 
     /// `POST .../unapprove`: revokes the token's user's approval. GitLab answers 404 when there is none to revoke (or
@@ -786,7 +812,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         let path = try itemPath(item, in: repo) + ["discussions", discussion, "notes"]
         defer { forgetThreads(of: item, in: repo) }
         let note: GitLabNote = try await send("POST", url(path), body: ["body": body])
-        var reply = Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        var reply = self.comment(note, page: webURL(Self.webTarget(item), in: repo))
         reply.parentID = comment.id
         reply.hostKey = discussion
         (reply.viewerCanEdit, reply.viewerCanDelete) = (true, true)
@@ -963,7 +989,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         var comment = HostedReviewComment(
             id: note.id, path: place?.path ?? position.path, line: place?.line, originalLine: place?.line,
             startLine: place?.startLine, originalStartLine: place?.startLine, side: place?.side, body: note.body,
-            bodyHTML: note.body.map(MarkdownHTML.html), user: note.author?.hosted,
+            bodyHTML: note.body.map(markdownHTML), user: note.author?.hosted,
             createdAt: GitLabDate.parse(note.createdAt),
             htmlURL: Self.noteURL(webURL(.pullRequest(number), in: repo), note.id))
         comment.hostKey = discussion.id
@@ -982,7 +1008,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         guard let note = discussion.notes.first else {
             throw HostingError.invalidResponse("a new thread without its note")
         }
-        var comment = Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        var comment = self.comment(note, page: webURL(Self.webTarget(item), in: repo))
         comment.hostKey = discussion.id
         comment.resolvable = note.resolvable ?? true
         comment.resolved = note.resolved ?? false
@@ -1011,7 +1037,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             let text = note.body ?? ""
             events.append(HostedTimelineEvent(
                 id: "note-\(note.id)", actor: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
-                text: text, textHTML: MarkdownHTML.html(text), action: state?.systemAction, icon: state?.systemIcon))
+                text: text, textHTML: markdownHTML(text), action: state?.systemAction, icon: state?.systemIcon))
         }
         let mergeRequest = Self.isMergeRequest(item)
         for event in await states ?? [] {
@@ -1201,7 +1227,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     private func issue(_ issue: GitLabIssue) -> HostedIssue {
         HostedIssue(
             id: issue.id, number: issue.iid, title: issue.title, state: Self.isOpen(issue.state) ? "open" : "closed",
-            user: issue.author?.hosted, body: issue.description, bodyHTML: issue.description.map(MarkdownHTML.html),
+            user: issue.author?.hosted, body: issue.description, bodyHTML: issue.description.map(markdownHTML),
             htmlURL: issue.webUrl, labels: issue.labels?.map(\.hosted), assignees: issue.assignees?.map(\.hosted),
             comments: issue.userNotesCount, createdAt: GitLabDate.parse(issue.createdAt),
             updatedAt: GitLabDate.parse(issue.updatedAt), closedAt: GitLabDate.parse(issue.closedAt),
@@ -1593,15 +1619,21 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return (old, new)
     }
 
+    /// A note's or description's markdown as HTML, its `@username` mentions linked to their pages on this GitLab, as
+    /// GitLab's page links them.
+    private func markdownHTML(_ text: String) -> String {
+        MarkdownHTML.html(text, mentionsAt: "https://\(host)" + basePath.map { "/" + $0 }.joined())
+    }
+
     private static func noteURL(_ page: URL?, _ id: Int) -> String? {
         page.map { $0.absoluteString + "#note_\(id)" }
     }
 
     /// A plain note as a comment, with HTML from `MarkdownHTML` (REST notes have none).
-    private static func comment(_ note: GitLabNote, page: URL?) -> HostedComment {
+    private func comment(_ note: GitLabNote, page: URL?) -> HostedComment {
         HostedComment(
-            id: note.id, user: note.author?.hosted, body: note.body, bodyHTML: note.body.map(MarkdownHTML.html),
-            htmlURL: noteURL(page, note.id), createdAt: GitLabDate.parse(note.createdAt))
+            id: note.id, user: note.author?.hosted, body: note.body, bodyHTML: note.body.map(markdownHTML),
+            htmlURL: Self.noteURL(page, note.id), createdAt: GitLabDate.parse(note.createdAt))
     }
 
     private static func webTarget(_ item: HostedItem) -> HostedWebTarget {

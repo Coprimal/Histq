@@ -37,6 +37,18 @@ struct PRPageLayout: Sendable, Equatable {
     var collapsesReplies = false
     /// The bottom composer's "Comment" / "Start thread" choice, where the provider starts threads.
     var startThread = false
+    /// Each Activity comment's Edit is a pencil in its header, beside the reaction button, its "…" menu left with
+    /// Delete (GitLab's).
+    var headerEdit = false
+    /// Each Activity comment's header shows "Author" on the item author's comments and the commenter's member role
+    /// ("Owner", "Developer") the provider reads (`memberRoles`), as GitLab's badges.
+    var roleBadges = false
+    /// The Commits tab groups the commits under day headings ("Nov 20, 2026"), each "<author> authored <time>" with a
+    /// copy button beside its short id (GitLab's).
+    var commitsByDay = false
+    /// A thread's resolve button says "Resolve thread" / "Reopen thread" (GitLab's) instead of "Resolve conversation"
+    /// / "Unresolve conversation".
+    var threadWords = false
 
     static let `default` = PRPageLayout(name: "default")
     static let gitlab = PRPageLayout(
@@ -44,7 +56,7 @@ struct PRPageLayout: Sendable, Equatable {
         tabTitles: [.conversation: "Overview", .checks: "Pipelines", .files: "Changes"],
         mergeSentence: .requestedToMerge, reactionBar: true, mergeBoxes: true, activity: .gitLabMergeRequest,
         issueActivity: .gitLabIssue, issueSentence: .created, sidebar: true, collapsesReplies: true,
-        startThread: true)
+        startThread: true, headerEdit: true, roleBadges: true, commitsByDay: true, threadWords: true)
 
     func title(of tab: PRTab) -> String { tabTitles[tab] ?? tab.title }
 

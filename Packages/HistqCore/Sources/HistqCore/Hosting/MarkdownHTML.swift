@@ -13,9 +13,14 @@ import Markdown
 
 public enum MarkdownHTML {
     /// `markdown` as an HTML body fragment (no document, style or script).
-    public static func html(_ markdown: String) -> String {
+    public static func html(_ markdown: String) -> String { html(markdown, mentionsAt: nil) }
+
+    /// `markdown` as an HTML body fragment (no document, style or script). `mentionsAt`: a web root
+    /// (`https://gitlab.com`) under which each `@username` of the text (not in code or a link) links to that user's
+    /// page, as GitLab's own page does; nil links none (another host's bodies).
+    public static func html(_ markdown: String, mentionsAt mentionRoot: String?) -> String {
         if nestsDeeper(markdown, than: maxDepth) { return "<p class=\"plain\">\(escape(markdown))</p>\n" }
-        var renderer = Renderer()
+        var renderer = Renderer(mentionRoot: mentionRoot)
         renderer.visit(Document(parsing: markdown, options: [.disableSmartOpts]))
         return renderer.result
     }
@@ -81,10 +86,60 @@ public enum MarkdownHTML {
         return url
     }
 
+    /// `text` escaped, each `@username` in it a link to `root`/username (`class="mention"`). A mention starts the text
+    /// or follows a character that cannot be in a username or an email's local part, so `a@b.com` stays text; a
+    /// username is GitLab's letters, digits, `_`, `.` and `-`, without the trailing `.` or `-` that end a sentence;
+    /// `@all` and `@here` stay text.
+    static func linkingMentions(_ text: String, root: String) -> String {
+        let characters = Array(text)
+        func inName(_ character: Character) -> Bool {
+            character.isASCII && (character.isLetter || character.isNumber || "_.-".contains(character))
+        }
+        var result = ""
+        var plain = ""
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            let starts = character == "@" && (index == 0 || !(inName(characters[index - 1])
+                || "@/+".contains(characters[index - 1])))
+            if starts {
+                var end = index + 1
+                while end < characters.count, inName(characters[end]) { end += 1 }
+                while end > index + 1, ".-".contains(characters[end - 1]) { end -= 1 }
+                let name = String(characters[(index + 1)..<end])
+                // `@all` and `@here` notify everyone and are nobody's page.
+                if end > index + 1, !["all", "here"].contains(name.lowercased()) {
+                    result += escape(plain)
+                    plain = ""
+                    result += "<a class=\"mention\" href=\"\(escape(root))/\(escape(name))\">@\(escape(name))</a>"
+                    index = end
+                    continue
+                }
+            }
+            plain.append(character)
+            index += 1
+        }
+        return result + escape(plain)
+    }
+
     private struct Renderer: MarkupWalker {
+        let mentionRoot: String?
         var result = ""
 
-        mutating func visitText(_ text: Text) { result += escape(text.string) }
+        mutating func visitText(_ text: Text) {
+            guard let mentionRoot, !Self.isInLink(text) else { return result += escape(text.string) }
+            result += linkingMentions(text.string, root: mentionRoot)
+        }
+
+        /// Whether `markup` is inside a link: its text stays the link's.
+        private static func isInLink(_ markup: Markup) -> Bool {
+            var node = markup.parent
+            while let current = node {
+                if current is Link { return true }
+                node = current.parent
+            }
+            return false
+        }
         mutating func visitSoftBreak(_ softBreak: SoftBreak) { result += "\n" }
         mutating func visitLineBreak(_ lineBreak: LineBreak) { result += "<br>\n" }
         mutating func visitInlineCode(_ inlineCode: InlineCode) { result += "<code>\(escape(inlineCode.code))</code>" }
