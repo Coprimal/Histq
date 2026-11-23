@@ -783,7 +783,8 @@ public struct GitOperations: Sendable {
         case .noFastForward: ["--no-ff"]
         }
         try await journaled(.merge, "Merge \(Self.shortRevision(revision))", mode: .carry) { ops in
-            try await ops.exec(["merge", "--no-edit"] + flags + ["--end-of-options", revision])
+            // An empty `merge.suppressDest` keeps "into <branch>" in the message for every branch (git drops it for main).
+            try await ops.exec(["-c", "merge.suppressDest=", "merge", "--no-edit"] + flags + ["--end-of-options", revision])
         }
     }
 

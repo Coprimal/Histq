@@ -268,6 +268,7 @@ struct GitOperationsTests {
         try await sandbox.git(["reset", "-q", "--hard", base], in: repo)
         try await ops.merge("ahead", mode: .noFastForward)
         #expect(try await sandbox.git(["rev-parse", "HEAD^1", "HEAD^2"], in: repo) == "\(base)\n\(ahead)")
+        #expect(try await sandbox.git(["log", "-1", "--format=%s"], in: repo) == "Merge branch 'ahead' into main")
 
         // --ff-only on a diverged branch: refused, HEAD unchanged.
         try await sandbox.git(["reset", "-q", "--hard", base], in: repo)
