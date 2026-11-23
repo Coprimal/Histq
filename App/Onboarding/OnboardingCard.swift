@@ -186,25 +186,25 @@ struct OnboardingCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// The tour's demo state until the spotlight exists: why it can't run, a spinner while git makes the demo, or
-    /// git's error.
+    /// The tour's intro until the spotlight starts: why it can't run, a spinner while git makes the demo and its tab
+    /// opens, or git's error (Next then goes to the finish step).
     private var tourBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let note = model.tourNote {
                 warning(note, systemImage: "exclamationmark.triangle")
             } else {
                 switch model.demo {
-                case .idle, .creating:
+                case .idle, .creating, .ready:
+                    Text("We made a small demo repository to show you around: the tour points at each part of the "
+                        + "window in turn. Nothing in it touches your own repositories.")
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {
                         DelayedSpinner(detail: "onboarding demo") { model.current == .tour }
-                        Text("Making a demo repository…")
+                        Text(demoIsReady ? "Opening the demo…" : "Making the demo repository…")
                             .foregroundStyle(.secondary)
                     }
-                case .ready:
-                    Text("The demo repository is open in a new tab. The tour over it comes in a later build.")
-                        .foregroundStyle(.secondary)
                 case .failed(let message):
-                    warning("The demo repository could not be made. Skip this step to go on.",
+                    warning("The demo repository could not be made, so the tour can't run. Next goes on.",
                          systemImage: "exclamationmark.triangle")
                     // git's own words, as plain text.
                     Text(verbatim: message)
@@ -217,6 +217,11 @@ struct OnboardingCard: View {
         }
         .padding(SettingsMetrics.cardPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The demo is made and its tab opens under the card.
+    private var demoIsReady: Bool {
+        if case .ready = model.demo { true } else { false }
     }
 
     private func comingBody(_ step: OnboardingModel.Step) -> some View {

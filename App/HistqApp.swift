@@ -159,15 +159,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// later. It starts on the target window, and never when a window runs one already.
     private func startLaunchOnboarding() async {
         let step: OnboardingModel.Step
+        var stop: String?
         switch AppState.launchOnboarding {
         case nil, .off:
             return
         case .step(let id):
             guard let named = OnboardingModel.Step(launch: id) else { return }
             step = named
-        case .tour:
-            // A stop id waits for the tour's stops (Phase 2): the tour opens at its first one.
+        case .tour(let id):
+            // At the stop `id` names (or the next one the window has); an unknown id, at the first one.
             step = .tour
+            stop = id
         case .auto:
             let decision = OnboardingGate.decide(
                 done: Preferences.defaults.bool(forKey: PrefKey.onboardingDone.rawValue),
@@ -181,7 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         guard !entries.contains(where: { $0.model.isOnboarding }), let entry = target() else { return }
-        entry.model.startOnboarding(at: step)
+        entry.model.startOnboarding(at: step, stop: stop)
     }
 
     /// The launch's windows are open: capture starts (saving them now, so a launch with folders is restorable too),
@@ -852,7 +854,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         #endif
         let entry = target() ?? newWindow()
-        for folder in folders { entry.model.openTab(folder) }
+        // Never under the onboarding (its tour's demo tab keeps the selection): the folders open once it ends.
+        if entry.model.isOnboarding {
+            entry.model.openAfterOnboarding(folders)
+        } else {
+            for folder in folders { entry.model.openTab(folder) }
+        }
         show(entry)
     }
 
@@ -900,8 +907,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Closing a window never calls the sessions' `close()`: their shells end here.
         model?.sessions.values.forEach { $0.endTerminal() }
         // Its onboarding ends, not done (it shows again by itself when nothing else changed): the demo tab closes and
-        // its repository is removed.
-        model?.endOnboarding()
+        // its repository is removed. Folders opened meanwhile are dropped with the window.
+        model?.endOnboarding(openingQueued: false)
         // Before it leaves `entries`: the first window of a workspace closed by hand keeps the file as it was.
         if let workspace = model?.workspace { keepPreCloseSnapshot(of: workspace) }
         entries.removeAll { $0.window === window }

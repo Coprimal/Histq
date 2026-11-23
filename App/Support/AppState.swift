@@ -67,6 +67,11 @@ enum AppState {
     /// when the flag is absent or its value unknown (the normal first-run gate then decides).
     static let launchOnboarding: OnboardingLaunch? = launchFlag("-HistqOnboarding")
         .flatMap(OnboardingLaunch.init(parsing:))
+
+    /// DEBUG `-HistqSpotlight <target>` (a `SpotlightTarget` raw value: `sync`, `repoMenu`, `graph`…): every window
+    /// shows the spotlight on that target with a sample popover, without the onboarding. nil when absent or unknown.
+    static let launchSpotlight: SpotlightTarget? = launchFlag("-HistqSpotlight")
+        .flatMap(SpotlightTarget.init(rawValue:))
 }
 
 /// Where the app keeps its files: `~/Library/Application Support/Histq`, or the DEBUG state dir.
@@ -564,6 +569,9 @@ enum UITiming {
     }
     /// DEBUG `-HistqToolbarFrames`: `toolbar repo=<x>,<w> branch=<x>,<w>`, the dropdowns' frames in the window.
     static func toolbar(_ detail: String) { record("toolbar", detail) }
+    /// The active spotlight's target got a new frame (`SpotlightRegistry`): `spotlight <target> frame=<x>,<y>,<w>,<h>`
+    /// in window top-left coordinates, or `frame=nil`.
+    static func spotlight(_ detail: String) { record("spotlight", detail) }
     /// The graph search (⌘F) landed on a result or moved to a match: `find <query> matches=<m> current=<n>
     /// commit=<sha>` (`GraphSearch`).
     static func find(_ detail: String) { record("find", detail) }

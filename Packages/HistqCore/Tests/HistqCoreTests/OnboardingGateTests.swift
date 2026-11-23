@@ -34,6 +34,7 @@ struct OnboardingGateTests {
                  WorkspaceLayout(path: "/tmp/work.histqws", open: true, windows: []),
              ]), expected: .markDone),
         Case(name: "state-dir mode stays", stateDirMode: true, expected: .stay),
+        Case(name: "done and not forced stays", done: true, expected: .stay),
         Case(name: "forced shows even when done with a recent repo", done: true, recentRepos: 1, forced: true,
              expected: .show),
     ]

@@ -176,6 +176,8 @@ public enum DemoRepository {
 
             try write("src/app.swift", Content.app(count: 8))
             try write("notes.txt", "Ideas for the next release.\n")
+            // One staged file, so the tour's WIP panel shows both cards and the commit box.
+            try await git(["add", "src/app.swift"], as: ada, dated: false)
         }
 
         // MARK: Steps

@@ -1,6 +1,7 @@
 // The first-run onboarding of one window: the current step with Back / Next / skip, the tour's demo repository
 // (made with git off the main actor only when the tour step is entered, removed when the tour is left or the
-// onboarding ends) and the window actions it needs, injected as closures so it never depends on WindowModel.
+// onboarding ends), the tour's stops over its tab (the spotlight's target, one stop at a time) and the window actions
+// it needs, injected so it never depends on WindowModel.
 import Foundation
 import HistqCore
 import os
@@ -33,9 +34,15 @@ final class OnboardingModel {
     var index: Int { Step.allCases.firstIndex(of: current) ?? 0 }
     private(set) var demo: Demo = .idle
 
-    /// Whether the tour's spotlight runs over the demo tab (set by the tour; nothing sets it before the spotlight
-    /// exists, so the card stays up on the tour step).
-    var spotlightRunning = false
+    /// Whether the tour's spotlight runs over the demo tab: set with the first stop's target, so the card stays up on
+    /// the tour step while the demo is made and opens.
+    private(set) var spotlightRunning = false
+    /// The tour's stops for the window as it was when the demo opened; empty before.
+    private(set) var tourStops: [TourStop] = []
+    /// The stop the spotlight frames, an index in `tourStops`.
+    private(set) var stopIndex = 0
+    /// The stop the spotlight frames; nil while it does not run.
+    var currentStop: TourStop? { spotlightRunning && tourStops.indices.contains(stopIndex) ? tourStops[stopIndex] : nil }
     /// Whether the card shows: on every step except the tour while its spotlight runs.
     var showsCard: Bool { !(current == .tour && spotlightRunning) }
 
@@ -53,27 +60,42 @@ final class OnboardingModel {
     /// onboarding finishes or is skipped.
     var pendingClone: URL?
 
-    @ObservationIgnored private let openDemo: (URL) -> Void
+    @ObservationIgnored private let openDemo: (URL) -> RepoSession?
     @ObservationIgnored private let closeDemo: () -> Void
+    /// The window's spotlight, which the tour points at each stop's target.
+    @ObservationIgnored private let spotlight: SpotlightRegistry?
+    /// The window's stops (`TourStops.stops` for its `TourContext`), read when the demo opens.
+    @ObservationIgnored private let makeStops: () -> [TourStop]
     @ObservationIgnored private let openRepo: (URL) -> Void
     @ObservationIgnored private let end: () -> Void
     @ObservationIgnored private var demoTask: Task<Void, Never>?
+    /// The demo tab's session, while it is open.
+    @ObservationIgnored private weak var demoSession: RepoSession?
+    /// Opening the tour or moving it to another stop; one at a time, so repeated keys never overlap.
+    @ObservationIgnored private var tourTask: Task<Void, Never>?
+    /// The `-HistqOnboarding tour:<id>` stop the next tour starts at (once); nil: the first stop.
+    @ObservationIgnored private var startStop: String?
     @ObservationIgnored private var ended = false
 
     private nonisolated static let logger = Logger(subsystem: "com.math2it.histq", category: "onboarding")
 
-    init(openDemo: @escaping (URL) -> Void = { _ in }, closeDemo: @escaping () -> Void = {},
-         openRepo: @escaping (URL) -> Void = { _ in }, end: @escaping () -> Void = {}) {
+    init(openDemo: @escaping (URL) -> RepoSession? = { _ in nil }, closeDemo: @escaping () -> Void = {},
+         openRepo: @escaping (URL) -> Void = { _ in }, end: @escaping () -> Void = {},
+         spotlight: SpotlightRegistry? = nil, stops: @escaping () -> [TourStop] = { [] }) {
         self.openDemo = openDemo
         self.closeDemo = closeDemo
+        self.spotlight = spotlight
+        self.makeStops = stops
         self.openRepo = openRepo
         self.end = end
     }
 
     // MARK: Navigation
 
-    /// Opens the onboarding at `step` (the welcome step by default).
-    func start(at step: Step = .welcome) {
+    /// Opens the onboarding at `step` (the welcome step by default); on the tour, at the stop `stop` names (or the
+    /// next one the window has), else its first.
+    func start(at step: Step = .welcome, stop: String? = nil) {
+        startStop = stop
         go(to: step)
     }
 
@@ -105,17 +127,42 @@ final class OnboardingModel {
         close()
     }
 
-    /// Closes the demo tab and removes the demo repository (a creation in flight is cancelled and cleans up after
-    /// itself). Also for ending the onboarding without marking it done, e.g. when its window closes.
+    /// Ends the spotlight, closes the demo tab and removes the demo repository (a creation in flight is cancelled and
+    /// cleans up after itself). Also for ending the onboarding without marking it done, e.g. when its window closes.
     func discardDemo() {
         demoTask?.cancel()
         demoTask = nil
+        tourTask?.cancel()
+        tourTask = nil
+        // First, so the content may take the keyboard again once the demo tab closes.
+        if spotlightRunning { spotlight?.activeTarget = nil }
+        spotlightRunning = false
+        tourStops = []
+        stopIndex = 0
+        demoSession = nil
         if case .ready(let repo) = demo {
             closeDemo()
             Self.remove(base: repo.deletingLastPathComponent(), parent: StatePaths.onboardingDemoParent)
         }
         demo = .idle
-        spotlightRunning = false
+    }
+
+    // MARK: Tour
+
+    /// The next stop the window shows; after the last one, the finish step.
+    func nextStop() {
+        move(by: 1)
+    }
+
+    /// The previous stop the window shows; before the first one, the step before the tour.
+    func previousStop() {
+        move(by: -1)
+    }
+
+    /// Leaves the tour for the finish step.
+    func skipTour() {
+        guard current == .tour else { return }
+        next()
     }
 
     private func go(to step: Step) {
@@ -155,7 +202,8 @@ final class OnboardingModel {
             switch outcome {
             case .made(let repo):
                 self.demo = .ready(repo)
-                self.openDemo(repo)
+                self.demoSession = self.openDemo(repo)
+                self.startTour()
             case .noGit:
                 self.gitMissing = true
                 self.demo = .idle
@@ -163,6 +211,91 @@ final class OnboardingModel {
                 self.demo = .failed(message)
             }
         }
+    }
+
+    /// Once the demo tab shows its graph: the window's stops, then the spotlight on the launch's stop (or the first)
+    /// or, when none of them shows, the finish step.
+    private func startTour() {
+        tourTask = Task { [weak self] in
+            guard let self, await self.waitForDemo() else { return }
+            let stops = self.makeStops()
+            self.tourStops = stops
+            let start = self.startStop.flatMap { TourStops.index(of: $0, in: stops) } ?? 0
+            self.startStop = nil
+            guard let index = await self.firstShown(from: start, by: 1) else {
+                if self.isTouring { self.next() }
+                return
+            }
+            self.tourTask = nil
+            self.stopIndex = index
+            self.spotlightRunning = true
+            self.spotlight?.activeTarget = stops[index].target
+        }
+    }
+
+    /// Moves the spotlight `step` stops on, skipping those the window does not show; past either end, leaves the tour.
+    /// Nothing while a move or the opening runs.
+    private func move(by step: Int) {
+        guard isTouring, spotlightRunning, tourTask == nil else { return }
+        let from = stopIndex + step
+        tourTask = Task { [weak self] in
+            guard let self else { return }
+            let index = await self.firstShown(from: from, by: step)
+            guard self.isTouring else { return }
+            self.tourTask = nil
+            guard let index else { return step > 0 ? self.next() : self.back() }
+            self.stopIndex = index
+            self.spotlight?.activeTarget = self.tourStops[index].target
+        }
+    }
+
+    /// Still on this tour: not left, not ended, not cancelled.
+    private var isTouring: Bool { !Task.isCancelled && !ended && current == .tour && demoSession != nil }
+
+    /// Waits until the demo tab's refs and graph have loaded and its graph has laid out (at most a few seconds: a
+    /// slow load starts the tour anyway, and stops without a frame are skipped). False when the tour was left meanwhile.
+    private func waitForDemo() async -> Bool {
+        _ = await waitUntil(.seconds(6)) { [weak self] in
+            guard let self, let session = self.demoSession else { return true }
+            return session.refs.value != nil && session.log.value != nil && self.spotlight?.frame(of: .graph) != nil
+        }
+        await Self.settle()
+        return isTouring
+    }
+
+    /// The first stop from `index` on, going `step` at a time, whose target the window shows once its `prepare` ran
+    /// on the demo tab; nil past either end or when the tour was left. A stop gets a short while to lay out (a panel
+    /// shows once its selection loads) before it is skipped.
+    private func firstShown(from index: Int, by step: Int) async -> Int? {
+        var index = index
+        while tourStops.indices.contains(index) {
+            guard isTouring, let session = demoSession else { return nil }
+            let stop = tourStops[index]
+            stop.prepare?(session)
+            await Self.settle()
+            let shown = await waitUntil(.seconds(1)) { [weak self] in
+                stop.resolves(frame: self?.spotlight?.frame(of: stop.target))
+            }
+            guard isTouring else { return nil }
+            if shown { return index }
+            index += step
+        }
+        return nil
+    }
+
+    /// Polls `condition` every 50 ms until it holds, the tour is left or `timeout` passes; whether it held.
+    private func waitUntil(_ timeout: Duration, _ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard isTouring, ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return true
+    }
+
+    /// A few frames, for SwiftUI and AppKit to lay out a selection's change and report the frames.
+    private static func settle() async {
+        try? await Task.sleep(for: .milliseconds(80))
     }
 
     private enum Outcome: Sendable {

@@ -175,8 +175,14 @@ final class WindowModel {
     /// The first-run onboarding running over this window (`startOnboarding`); nil when none runs. Not a
     /// `WindowModal`: `ModalHost` closes those on a tab switch, and the tour opens its demo tab.
     private(set) var onboarding: OnboardingModel?
+    /// The window's spotlight targets and the spotlight showing over it (`SpotlightLayer`): the tour, or DEBUG
+    /// `-HistqSpotlight`. Its own observable, so a frame report never touches this model's observers.
+    let spotlight = SpotlightRegistry()
     /// The tab selected when the demo tab opened (`openDemoTab`), selected again when it closes.
     @ObservationIgnored private var selectedBeforeDemo: Tab.ID?
+    /// Folders opened from Finder or the Dock while the onboarding runs (`openAfterOnboarding`): they open as tabs once
+    /// it ends, so they never move the selection off the tour's demo tab.
+    @ObservationIgnored private var openAfterOnboardingURLs: [URL] = []
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
     /// Called by `closeTab` / `closeTabs` before they remove the tab(s) whose close then closes the window, while the
@@ -206,6 +212,7 @@ final class WindowModel {
         selectedTabID = tabs.first?.id
         // `didSet` does not run in `init`: a repo opened in this first tab must be kept when another tab shows.
         recentlyShown = tabs.first.map { [$0.id] } ?? []
+        spotlight.activeTarget = AppState.launchSpotlight
     }
 
     var selectedIndex: Int? { tabs.firstIndex { $0.id == selectedTabID } }
@@ -484,7 +491,9 @@ final class WindowModel {
     /// nothing (the window). A target not in the window or not shown yet gets one main-queue hop, the window holding
     /// the focus meanwhile. Logs `focus <repo> <kind>` once.
     func focusShownTab(repo: String) {
-        guard let window else { return }
+        // A spotlight (`SpotlightLayer`) or an onboarding card keeps the keyboard: nothing in the content takes it
+        // meanwhile (`endOnboarding` hands it back).
+        guard let window, spotlight.activeTarget == nil, onboarding?.showsCard != true else { return }
         let targets = focusTargets()
         if let first = targets.first, take(first.view, in: window) { return UITiming.focus(repo, first.kind) }
         let resigned = window.makeFirstResponder(nil)
@@ -492,7 +501,8 @@ final class WindowModel {
         let id = selectedTabID
         DispatchQueue.main.async { [weak self, weak window] in
             // A newer switch moves the focus itself.
-            guard let self, let window, selectedTabID == id else { return }
+            guard let self, let window, selectedTabID == id, spotlight.activeTarget == nil,
+                  onboarding?.showsCard != true else { return }
             // The old responder refused to resign: ask again before taking the target.
             if !resigned { window.makeFirstResponder(nil) }
             for target in focusTargets() where take(target.view, in: window) {
@@ -537,8 +547,9 @@ final class WindowModel {
         if let profile = saved?.profile { session.restoreProfile(profile.profileID) }
         // Settings › Terminal "Open terminal with each new tab": a repo the user opens now (Open, a recent repo, a clone
         // or init filling a Welcome tab, a restored Welcome tab too), not a restored repo tab. Only the drawer: its
-        // shell starts when the user clicks into it (`showTerminalDrawer`).
-        if saved?.path == nil, Preferences.defaults.bool(forKey: PrefKey.terminalOpenWithNewTab.rawValue) {
+        // shell starts when the user clicks into it (`showTerminalDrawer`). Never the tour's demo tab.
+        let isDemo = tabs.first { $0.id == id }?.isDemo == true
+        if saved?.path == nil, !isDemo, Preferences.defaults.bool(forKey: PrefKey.terminalOpenWithNewTab.rawValue) {
             session.showTerminalDrawer()
         }
         #if DEBUG
@@ -2013,10 +2024,11 @@ final class WindowModel {
     /// tab strip's middle-click and the group chip's right-click are refused, and the toolbar cannot be customized.
     var isOnboarding: Bool { onboarding != nil }
 
-    /// Starts the onboarding over this window at `step`, its window actions wired to this model: the tour's demo tab
-    /// (`openDemoTab`, `closeDemoTab`), a repo cloned meanwhile (`openTab`) and its end (`endOnboarding`). What was
-    /// open over the page closes first. Nothing when it runs already.
-    func startOnboarding(at step: OnboardingModel.Step = .welcome) {
+    /// Starts the onboarding over this window at `step` (on the tour, at the stop `stop` names), its window actions
+    /// wired to this model: the tour's demo tab (`openDemoTab`, `closeDemoTab`), its spotlight and stops, a repo cloned
+    /// meanwhile (`openTab`) and its end (`endOnboarding`). What was open over the page closes first. Nothing when it
+    /// runs already.
+    func startOnboarding(at step: OnboardingModel.Step = .welcome, stop: String? = nil) {
         guard onboarding == nil else { return }
         palette = nil
         closeSettings()
@@ -2026,22 +2038,36 @@ final class WindowModel {
             openDemo: { [weak self] url in self?.openDemoTab(url) },
             closeDemo: { [weak self] in self?.closeDemoTab() },
             openRepo: { [weak self] url in self?.openTab(url) },
-            end: { [weak self] in self?.endOnboarding() })
+            end: { [weak self] in self?.endOnboarding() },
+            spotlight: spotlight,
+            stops: { [weak self] in self.map { TourStops.stops(TourContext.current($0)) } ?? [] })
         self.onboarding = onboarding
-        onboarding.start(at: step)
+        onboarding.start(at: step, stop: stop)
     }
 
-    /// Ends the onboarding without marking it done (its Finish and Skip mark it first, then call this): the demo tab
-    /// closes and its repository is removed.
-    func endOnboarding() {
+    /// Ends the onboarding without marking it done (its Finish and Skip mark it first, then call this): the spotlight
+    /// ends, the demo tab closes and its repository is removed, the folders opened meanwhile open (unless
+    /// `openingQueued` is false: the window is closing) and the shown tab takes the keyboard back.
+    func endOnboarding(openingQueued: Bool = true) {
         guard let onboarding else { return }
         onboarding.discardDemo()
         self.onboarding = nil
+        let queued = openAfterOnboardingURLs
+        openAfterOnboardingURLs = []
+        guard openingQueued else { return }
+        for url in queued { openTab(url) }
+        focusShownTab(repo: selectedIndex.flatMap { tabs[$0].repoURL?.lastPathComponent } ?? "-")
+    }
+
+    /// Keeps folders opened from outside (Finder, the Dock) for when the onboarding ends (`endOnboarding`).
+    func openAfterOnboarding(_ urls: [URL]) {
+        openAfterOnboardingURLs += urls
     }
 
     /// Opens the tour's demo repository in a new tab and selects it: never the Welcome tab, never in the recent repos,
-    /// in no worktree box or group. Replaces a demo tab already open.
-    func openDemoTab(_ url: URL) {
+    /// in no worktree box or group. Replaces a demo tab already open. Returns the tab's session.
+    @discardableResult
+    func openDemoTab(_ url: URL) -> RepoSession? {
         closeDemoTab()
         navigation.page = .home
         selectedBeforeDemo = selectedTabID
@@ -2049,6 +2075,7 @@ final class WindowModel {
         tabs.insert(tab, at: normalEnd)
         selectedTabID = tab.id
         activateSelectedTab()
+        return sessions[tab.id]
     }
 
     /// Closes the demo tab with its session (watcher, terminal, kept layout), not onto the ⇧⌘T stack or the archive.

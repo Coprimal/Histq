@@ -120,6 +120,9 @@ struct MainView: View {
         .overlay { OnboardingOverlay(model: model) }
         // Settings, the forms, confirmations and rebase cards, drawn like the palette (same place in the window).
         .overlay { ModalHost(model: model) }
+        // A spotlight over everything (the tour, DEBUG `-HistqSpotlight`): it dims the window, the toolbar its own
+        // items.
+        .overlay { SpotlightOverlay(model: model) }
         .modifier(HardTopScrollEdge())
     }
 
@@ -156,14 +159,16 @@ private struct WindowBackdrop: ViewModifier {
 }
 
 /// The onboarding's card while it runs over the window (`WindowModel.onboarding`), disabled while Settings or a modal
-/// covers it. Only this view reads that state, so `MainView`'s body never reruns for it.
+/// (the window's or the tab's) covers it. Only this view reads that state, so `MainView`'s body never reruns for it.
 private struct OnboardingOverlay: View {
     let model: WindowModel
 
     var body: some View {
         if let onboarding = model.onboarding {
-            OnboardingCard(model: onboarding, isCovered: model.isSettingsOpen || model.modal != nil,
-                           onOpenSettings: { model.openSettings() })
+            OnboardingCard(
+                model: onboarding,
+                isCovered: model.isSettingsOpen || model.modal != nil || model.actionSession?.hasModal == true,
+                onOpenSettings: { model.openSettings() })
         }
     }
 }

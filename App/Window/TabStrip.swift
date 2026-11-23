@@ -141,6 +141,7 @@ struct TabStrip: View {
             }
             TabStripButtons(model: model, popoverEdge: .bottom, buttonHeight: TabStripMetrics.buttonHeight)
         }
+        .spotlightTarget(.tabStrip)
     }
 
     /// The closed groups button at the strip's start, pulled `archiveShift` left as the archive button is alone. Before

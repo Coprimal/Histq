@@ -302,6 +302,7 @@ struct RepoLayoutView: View {
                         TerminalDrawer(
                             session: session, terminal: session.terminal,
                             available: graphAndDrawerHeight ?? height, stackedPaneOpen: isStackedPaneOpen)
+                        .spotlightTarget(.terminalDrawer)
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
@@ -311,6 +312,7 @@ struct RepoLayoutView: View {
                 divider(.detail, widths: widths, columns: columns, available: available)
                 DetailPanel(session: session)
                     .frame(width: widths.detail)
+                    .spotlightTarget(.detail)
             }
             // Column 4 shows whatever the detail toggle says, so a diff always has its place; an open pull request
             // hides it with the detail.
@@ -586,6 +588,7 @@ private struct CommitListPanel: View {
                 .clipShape(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous))
                 .animation(reduceMotion ? nil : Motion.sheet, value: session.graphSearch.isOpen)
         }
+        .spotlightTarget(.graph)
     }
 
     private var graph: some View {

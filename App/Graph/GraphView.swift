@@ -178,11 +178,14 @@ struct GraphView: NSViewRepresentable {
     var scrollPosition: GraphScrollPosition?
     var onScroll: @MainActor (GraphScrollPosition) -> Void = { _ in }
     @Environment(\.tabIsShown) private var tabIsShown
+    /// The window's model, for its spotlight registry (a constant: reading it observes nothing).
+    @Environment(WindowModel.self) private var windowModel: WindowModel?
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: GraphTableController) {
         coordinator.saveScroll()
+        coordinator.detachSpotlight()
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -242,6 +245,8 @@ struct GraphView: NSViewRepresentable {
         if scroll.isHidden == tabIsShown { scroll.isHidden = !tabIsShown }
         if scroll.contentInsets.bottom != bottomInset { scroll.contentInsets.bottom = bottomInset }
         context.coordinator.update(self)
+        // Only the shown tab's WIP row can be framed.
+        context.coordinator.syncSpotlight(tabIsShown ? windowModel?.spotlight : nil)
     }
 }
 
@@ -995,7 +1000,59 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         #endif
     }
 
-    @objc private func clipResized(_ notification: Notification) { placeInitially() }
+    @objc private func clipResized(_ notification: Notification) {
+        placeInitially()
+        syncSpotlight(spotlightWanted)
+    }
+
+    // MARK: Spotlight
+
+    /// The registry the WIP row's frame is registered with (`SpotlightTarget.wipRow`): the window's while this tab
+    /// shows, nil while it is hidden or the view is gone.
+    private weak var spotlight: SpotlightRegistry?
+    /// The registry the last `update` asked for, applied on the next main-queue turn: registering reads the registry's
+    /// observed target, which must stay out of the view's update.
+    private weak var spotlightWanted: SpotlightRegistry?
+    private var spotlightPending = false
+
+    /// Registers the WIP row with `registry` (nil unregisters), or tells it the row may have moved; coalesced to one
+    /// main-queue hop. Nothing while no registry is wanted or held.
+    func syncSpotlight(_ registry: SpotlightRegistry?) {
+        spotlightWanted = registry
+        guard registry != nil || spotlight != nil, !spotlightPending else { return }
+        spotlightPending = true
+        DispatchQueue.main.async { [weak self] in self?.applySpotlight() }
+    }
+
+    private func applySpotlight() {
+        spotlightPending = false
+        guard spotlightWanted !== spotlight else {
+            spotlight?.frameMayHaveChanged()
+            return
+        }
+        spotlight?.unregister(.wipRow, owner: self)
+        spotlight = spotlightWanted
+        spotlight?.register(.wipRow, owner: self) { [weak self] in self?.wipRowFrame() }
+    }
+
+    /// The view is gone: its WIP row is no target any more.
+    func detachSpotlight() {
+        spotlightWanted = nil
+        spotlight?.unregister(.wipRow, owner: self)
+        spotlight = nil
+    }
+
+    /// The WIP row's visible part in window top-left coordinates (as `HeaderToolbar.frame(of:)`); nil without a WIP
+    /// row, scrolled out of view, or out of a window.
+    private func wipRowFrame() -> CGRect? {
+        guard let table, let window = table.window, let content = window.contentView, let row = row(of: .wip)
+        else { return nil }
+        let rect = table.rect(ofRow: row).intersection(table.visibleRect)
+        guard !rect.isEmpty else { return nil }
+        var frame = content.convert(table.convert(rect, to: nil), from: nil)
+        if !content.isFlipped { frame.origin.y = content.bounds.height - frame.maxY }
+        return frame
+    }
 
     /// Sends where the graph is (`GraphScrollPosition`) to `GraphView.onScroll`; nothing before its first position.
     func saveScroll() {

@@ -44,6 +44,11 @@ enum Palette {
     /// Dims the window behind an open modal or the command palette (`ModalScrim`), over the content's light blur
     /// (`ModalBackdrop`). 0.55: a little darker than the 0.45 before task 9.6, so the card stands out from the blur.
     static let scrim = color(.black.withAlphaComponent(0.55))
+    /// Dims the window around a spotlight's target (`SpotlightLayer`): darker than `scrim`, as the content under it is
+    /// not blurred.
+    static let spotlightScrim = color(.black.withAlphaComponent(0.7))
+    /// A spotlight's ring around its target and the line to its popover: the brand blue.
+    static let spotlightRing = Color.accentColor
     /// Text and glyphs on the blue accent fill: primary buttons, the selected tab (user decision 2026-11-13: white).
     /// The accent (`AccentColor`, the logo's mid blue #2F86FB) holds white at 3.54:1, enough for its pills' labels.
     static let onAccent = color(.white)

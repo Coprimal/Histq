@@ -72,6 +72,7 @@ struct VerticalTabsPanel: View {
         }
         .padding(.top, VerticalTabsMetrics.listTop)
         .frame(width: VerticalTabsMetrics.width)
+        .spotlightTarget(.verticalTabs)
     }
 }
 
