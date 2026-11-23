@@ -2045,9 +2045,12 @@ final class WindowModel {
             end: { [weak self] in self?.endOnboarding() },
             // The window's confirmation, drawn by `ModalHost` above the card (which it disables meanwhile).
             confirmSkipAll: { [weak self] skip in
+                // Skip discards the appearance picks not applied yet, so say so only when there are some.
+                let lost = self?.onboarding?.hasUnappliedAppearance == true
+                    ? " Your appearance choices won't be saved." : ""
                 self?.presentModal(.confirmation(ModalConfirmation(
                     title: "Skip the onboarding?",
-                    message: "You can run it again from Help › Show Onboarding… or Settings › General.",
+                    message: "You can run it again from Help › Show Onboarding… or Settings › General." + lost,
                     button: "Skip", isDestructive: false, perform: skip)))
             },
             postToast: { [weak self] toast in self?.showToast(toast) },
@@ -2059,7 +2062,7 @@ final class WindowModel {
 
     /// Ends the onboarding without marking it done (its Finish and Skip mark it first, then call this): the spotlight
     /// ends, the demo tab closes and its repository is removed, the folders opened meanwhile open, a clone still
-    /// running in its GitHub step goes on in a Welcome tab (`adoptWelcome`), and the shown tab takes the keyboard back.
+    /// running in its clone step goes on in a Welcome tab (`adoptWelcome`), and the shown tab takes the keyboard back.
     /// `openingQueued` false (the window is closing): nothing opens and that clone stops.
     func endOnboarding(openingQueued: Bool = true) {
         guard let onboarding else { return }

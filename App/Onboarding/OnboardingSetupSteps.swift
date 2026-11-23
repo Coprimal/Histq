@@ -232,8 +232,7 @@ final class OnboardingProfileDraft {
 }
 
 /// The GitHub step: the default profile's GitHub account (sign in, a token or the GitHub CLI's, as in Settings ›
-/// Integrations), then the Welcome page's clone form: the account's repositories once connected, a URL otherwise. The
-/// clone opens when the onboarding ends. With no profile yet, a way back to the profile step.
+/// Integrations). With no profile yet, a way back to the profile step. Once connected, the clone step follows.
 struct OnboardingGitHubStep: View {
     let model: OnboardingModel
     private var library: ProfileLibrary { .shared }
@@ -264,6 +263,24 @@ struct OnboardingGitHubStep: View {
                     hint: "A GitHub account belongs to a profile, which keeps your commit name and email.",
                     button: "Create a profile first", action: { model.back() }))
             }
+        }
+        .labeledContentStyle(.settingsRow)
+        .padding(SettingsMetrics.cardPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear { library.loadIfNeeded() }
+    }
+}
+
+/// The clone step, shown only while the GitHub step's profile has a GitHub account: the Welcome page's clone form,
+/// listing the account's repositories (or a URL typed in). The clone opens when the onboarding ends.
+struct OnboardingCloneStep: View {
+    let model: OnboardingModel
+    private var library: ProfileLibrary { .shared }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Clone a repository now if you like. It opens when you finish.")
+                .fixedSize(horizontal: false, vertical: true)
             // Above the form, in view: once a clone ends the form is empty again, and this line says where it went.
             cloneNote
             CloneCard(model: model.welcome)
@@ -271,18 +288,19 @@ struct OnboardingGitHubStep: View {
         .labeledContentStyle(.settingsRow)
         .padding(SettingsMetrics.cardPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // Once the profiles are read, and again when the account is connected or disconnected here.
+        // Once shown, and again when the account changes (e.g. in Settings over the card); disconnected, the step
+        // hides, so the card moves on.
         .onChange(of: library.store.map(Self.account(in:)), initial: true) { _, shown in
             if let shown { useSource(for: shown) }
+            model.leaveIfHidden()
         }
         .onAppear {
-            library.loadIfNeeded()
             // A launch straight on this step skipped the git step: Clone stays off until git is found.
             model.welcome.checkGitIfNeeded()
         }
     }
 
-    /// The clones made here, or that they wait for the end of the onboarding.
+    /// The clones made here, that they wait for the end of the onboarding; nothing before the first.
     @ViewBuilder
     private var cloneNote: some View {
         let names = model.pendingClones.map(\.lastPathComponent)
@@ -296,8 +314,6 @@ struct OnboardingGitHubStep: View {
                 IconImage("checkmark.circle.fill")
             }
             .foregroundStyle(.green)
-        } else {
-            SettingsHint("Clone a repository now if you like. It opens when you finish.")
         }
     }
 
@@ -308,7 +324,7 @@ struct OnboardingGitHubStep: View {
     }
 
     private static func account(in store: ProfileStore) -> ShownAccount {
-        let profile = store.profile(id: store.defaultProfileID ?? UUID()) ?? store.profiles.first
+        let profile = OnboardingModel.gitHubProfile(in: store)
         return ShownAccount(profileID: profile?.id, account: profile?.github)
     }
 

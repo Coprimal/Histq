@@ -1,20 +1,15 @@
 // The onboarding's appearance step bodies, shown in `OnboardingCard`: tab position, layout, commit avatars, row height,
 // lane colors and the other worktrees' fading. Each says what it sets in a line, shows the current pick large (when the
-// window has room for it) and lists its options as tiles; a click selects a tile and writes the preference at once,
-// through Settings › Appearance's keys and write paths, so the window behind follows and a skipped step keeps the pick.
+// window has room for it) and lists its options as tiles; a click selects a tile in the onboarding's draft
+// (`OnboardingModel.appearance`), which the model writes when the tour opens its demo or the onboarding finishes, so
+// the window behind stays as it is while picking.
 import SwiftUI
 
-/// One appearance step's body. The stored preferences are the only selection; the previews draw the other stored
-/// picks too, so each step shows what the window will look like.
+/// One appearance step's body. The draft is the only selection; the previews draw the draft's other picks too, so
+/// each step shows what the window will look like.
 struct OnboardingAppearanceStep: View {
+    let model: OnboardingModel
     let step: OnboardingModel.Step
-
-    @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
-    @AppStorage(PrefKey.layoutPreset.rawValue, store: Preferences.defaults) private var layoutPreset = "classic"
-    @AppStorage(PrefKey.avatarMode.rawValue, store: Preferences.defaults) private var avatarMode = "generated"
-    @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
-    @AppStorage(PrefKey.laneColors.rawValue, store: Preferences.defaults) private var laneColors = LaneColors.vivid
-    @AppStorage(PrefKey.graphFadeOtherWorktrees.rawValue, store: Preferences.defaults) private var fadesWorktrees = false
 
     private static let densities = ["compact", "regular", "comfortable"]
     private static let avatarModes: [AvatarStore.Mode] = [.generated, .real, .initials]
@@ -48,12 +43,13 @@ struct OnboardingAppearanceStep: View {
         return (restHeight + previewHeight + Self.spacing).rounded(.up) <= bodyRoom
     }
 
-    /// The large preview's height: the window sketch's, or the sample graph's at the stored row height.
+    /// The large preview's height: the window sketch's, or the sample graph's at the picked row height.
     private var previewHeight: CGFloat {
         switch step {
         case .tabPosition, .layout: Self.windowHeight
         default:
-            GraphPreviewView.height(rowHeight: GraphMetrics(density: rowDensity, laneColors: laneColors).rowHeight,
+            GraphPreviewView.height(rowHeight: GraphMetrics(density: picks.rowDensity,
+                                                            laneColors: picks.laneColors).rowHeight,
                                     samples: graphSamples)
         }
     }
@@ -91,31 +87,23 @@ struct OnboardingAppearanceStep: View {
         }
     }
 
-    // MARK: Picks (stored values, never the DEBUG launch overrides)
+    // MARK: Picks (the onboarding's draft, seeded from the stored values, never the DEBUG launch overrides)
 
-    private var storedTabPosition: TabPosition { TabPosition(rawValue: tabPosition) ?? .top }
-    private var storedLayout: LayoutPreset { LayoutPreset(rawValue: layoutPreset) ?? .classic }
-    private var storedAvatarMode: AvatarStore.Mode { AvatarStore.Mode(rawValue: avatarMode) ?? .generated }
-
-    /// Through `LayoutPreset.choose`, as Settings and the View menu, and only for another preset: choosing Focus while
-    /// Focus is stored would switch back to the preset before it.
-    private func pickLayout(_ preset: LayoutPreset) {
-        if preset != storedLayout { LayoutPreset.choose(preset) }
-    }
+    private var picks: OnboardingAppearance { model.appearance }
 
     // MARK: Steps
 
     private var tabPositionContent: some View {
         VStack(alignment: .leading, spacing: 14) {
             if showsPreview {
-                MiniWindowPreview(tabPosition: storedTabPosition, layout: storedLayout)
+                MiniWindowPreview(tabPosition: picks.tabPosition, layout: picks.layout)
                     .frame(height: Self.windowHeight)
                     .frame(maxWidth: .infinity)
             }
             HStack(spacing: 10) {
                 ForEach([TabPosition.top, .left], id: \.self) { position in
-                    OptionTile(title: position == .left ? "Left" : "Top", isSelected: position == storedTabPosition,
-                               action: { tabPosition = position.rawValue })
+                    OptionTile(title: position == .left ? "Left" : "Top", isSelected: position == picks.tabPosition,
+                               action: { model.appearance.tabPosition = position })
                 }
             }
         }
@@ -124,15 +112,15 @@ struct OnboardingAppearanceStep: View {
     private var layoutContent: some View {
         VStack(alignment: .leading, spacing: 14) {
             if showsPreview {
-                MiniWindowPreview(tabPosition: storedTabPosition, layout: storedLayout)
+                MiniWindowPreview(tabPosition: picks.tabPosition, layout: picks.layout)
                     .frame(height: Self.windowHeight)
                     .frame(maxWidth: .infinity)
             }
             // Two per row, equal widths.
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 2), spacing: 10) {
                 ForEach([LayoutPreset.classic, .stacked, .columns, .focus], id: \.self) { preset in
-                    OptionTile(title: preset.rawValue.capitalized, isSelected: preset == storedLayout,
-                               action: { pickLayout(preset) })
+                    OptionTile(title: preset.rawValue.capitalized, isSelected: preset == picks.layout,
+                               action: { model.appearance.layout = preset })
                 }
             }
         }
@@ -144,8 +132,8 @@ struct OnboardingAppearanceStep: View {
             HStack(spacing: 10) {
                 ForEach(Self.avatarModes, id: \.self) { mode in
                     OptionTile(title: AppearanceSettings.avatarTitle(mode.rawValue),
-                               isSelected: mode == storedAvatarMode,
-                               action: { avatarMode = mode.rawValue })
+                               isSelected: mode == picks.avatarMode,
+                               action: { model.appearance.avatarMode = mode })
                 }
             }
         }
@@ -156,8 +144,8 @@ struct OnboardingAppearanceStep: View {
             if showsPreview { graph }
             HStack(spacing: 10) {
                 ForEach(Self.densities, id: \.self) { density in
-                    OptionTile(title: density.capitalized, isSelected: density == rowDensity,
-                               action: { rowDensity = density })
+                    OptionTile(title: density.capitalized, isSelected: density == picks.rowDensity,
+                               action: { model.appearance.rowDensity = density })
                 }
             }
         }
@@ -168,8 +156,8 @@ struct OnboardingAppearanceStep: View {
             if showsPreview { graph }
             HStack(spacing: 10) {
                 ForEach(LaneColors.allCases, id: \.self) { colors in
-                    OptionTile(title: colors.title, isSelected: colors == laneColors,
-                               action: { laneColors = colors })
+                    OptionTile(title: colors.title, isSelected: colors == picks.laneColors,
+                               action: { model.appearance.laneColors = colors })
                 }
             }
         }
@@ -180,8 +168,8 @@ struct OnboardingAppearanceStep: View {
             if showsPreview { graph }
             HStack(spacing: 10) {
                 ForEach([false, true], id: \.self) { fades in
-                    OptionTile(title: fades ? "Fade" : "Don't fade", isSelected: fades == fadesWorktrees,
-                               action: { fadesWorktrees = fades })
+                    OptionTile(title: fades ? "Fade" : "Don't fade", isSelected: fades == picks.fadesWorktrees,
+                               action: { model.appearance.fadesWorktrees = fades })
                 }
             }
             SettingsHint("Here feature/search, feature/login and release/1.0 are checked out in other worktrees. "
@@ -189,10 +177,10 @@ struct OnboardingAppearanceStep: View {
         }
     }
 
-    /// The sample graph with the stored picks, the card's full width.
+    /// The sample graph with the draft's picks, the card's full width.
     private var graph: some View {
-        GraphPreview(density: rowDensity, laneColors: laneColors, avatarMode: storedAvatarMode,
-                     fadeOtherWorktrees: fadesWorktrees, samples: graphSamples)
+        GraphPreview(density: picks.rowDensity, laneColors: picks.laneColors, avatarMode: picks.avatarMode,
+                     fadeOtherWorktrees: picks.fadesWorktrees, samples: graphSamples)
     }
 }
 

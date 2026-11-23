@@ -1,7 +1,7 @@
 // The onboarding's card over the window: a scrim, a glass card sized to its step (title, progress dots, the step's body,
 // which scrolls when the window is short) and a footer (Skip onboarding, Skip this step, Back, Next). Return = Next,
-// ← / → = Back / Next and Esc = Skip this step, when no text field has the focus. Welcome, the tour's demo state and
-// finish have their bodies here, the setup steps in `OnboardingSetupSteps`, the appearance steps in
+// ← / → = Back / Next and Esc = Skip this step, when no text field has the focus (Return = Start using on finish).
+// Welcome, the tour's demo state and finish have their bodies here, the setup steps in `OnboardingSetupSteps`, the appearance steps in
 // `OnboardingAppearanceSteps`.
 import AppKit
 import SwiftUI
@@ -49,7 +49,7 @@ struct OnboardingCard: View {
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.body = $0 }
                 .frame(maxWidth: .infinity)
-                .modifier(StepBodyCard(isShown: step != .welcome))
+                .modifier(StepBodyCard(isShown: step != .welcome && step != .finish))
                     .padding(.horizontal, ModalMetrics.bodyInset)
                     // A new body per step, switched in the click's frame and faded in.
                     .id(step)
@@ -67,8 +67,8 @@ struct OnboardingCard: View {
         .focused($focused)
         .onKeyPress(keys: [.return, .leftArrow, .rightArrow], phases: .down) { press in handleKey(press.key) }
         .onExitCommand {
-            // Skip this step; nothing on the last one (Done ends the onboarding there), nor while a text field has
-            // the focus (Esc is its own).
+            // Skip this step; nothing on the last one (Start using ends the onboarding there), nor while a text
+            // field has the focus (Esc is its own).
             guard !isCovered, step != .finish, !(NSApp.keyWindow?.firstResponder is NSText) else { return }
             model.skipStep()
         }
@@ -82,7 +82,7 @@ struct OnboardingCard: View {
     // MARK: Header and footer
 
     private func header(_ step: OnboardingModel.Step) -> some View {
-        let steps = OnboardingModel.Step.allCases
+        let steps = model.steps
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 ForEach(Array(steps.enumerated()), id: \.element) { position, item in
@@ -105,7 +105,7 @@ struct OnboardingCard: View {
 
     private func footer(_ step: OnboardingModel.Step) -> some View {
         // Skips on the left, Back and Next together on the right. Welcome and finish carry their own buttons in the
-        // body (Start and Skip onboarding; Open Settings / Done), so welcome's footer stays empty.
+        // body (Start and Skip onboarding; Back, Open Settings and Start using), so their footers stay empty.
         HStack(spacing: ModalFooterMetrics.spacing) {
             if step != .welcome, step != .finish {
                 Button("Skip onboarding") { model.requestSkipAll() }
@@ -115,7 +115,7 @@ struct OnboardingCard: View {
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
             Spacer(minLength: 0)
-            if model.index > 0 {
+            if model.index > 0, step != .finish {
                 Button("Back") { model.back() }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
@@ -130,7 +130,7 @@ struct OnboardingCard: View {
         .frame(height: ModalFooterMetrics.buttonHeight + 2 * ModalFooterMetrics.verticalPadding)
     }
 
-    /// Next, Start and Done: the modals' primary button, a solid blue capsule with a white label (the footer's size
+    /// Next, Start and Start using: the modals' primary button, a solid blue capsule with a white label (the footer's size
     /// under `isModalFooter`), blue in an inactive window too.
     private static var primary: RowTextButtonStyle { RowTextButtonStyle(formRow: true, prominent: true) }
 
@@ -143,9 +143,10 @@ struct OnboardingCard: View {
         case .git: OnboardingGitStep(model: model)
         case .profile: OnboardingProfileStep(model: model)
         case .github: OnboardingGitHubStep(model: model)
+        case .clone: OnboardingCloneStep(model: model)
         case .ai: OnboardingAIStep(model: model)
         case .tabPosition, .layout, .avatars, .rowHeight, .laneColors, .fadeWorktrees:
-            OnboardingAppearanceStep(step: step)
+            OnboardingAppearanceStep(model: model, step: step)
         case .tour: tourBody
         case .finish: finishBody
         }
@@ -175,6 +176,7 @@ struct OnboardingCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Bare on the panel like welcome: the two notes, then its buttons under them, the block centered in the card.
     private var finishBody: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label {
@@ -189,19 +191,27 @@ struct OnboardingCard: View {
             } icon: {
                 IconImage("command").foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
             HStack(spacing: ModalFooterMetrics.spacing) {
+                Button("Back") { model.back() }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
                 Spacer(minLength: 0)
+                // While the picks are written and the window lays them out; only after 150 ms, so a fast finish
+                // never flashes it. Before the buttons, where the spacer gives it room without moving them.
+                if model.isFinishing {
+                    DelayedSpinner(detail: "onboarding finish") { model.isFinishing }
+                }
                 Button("Open Settings", action: onOpenSettings)
                     .buttonStyle(RowTextButtonStyle(formRow: true))
-                Button("Done") { model.finish() }
+                Button("Start using") { model.startUsing() }
                     .buttonStyle(Self.primary)
             }
             .environment(\.isModalFooter, true)
+            .disabled(model.isFinishing)
+            .padding(.top, 4)
         }
         .font(.body)
         .padding(SettingsMetrics.cardPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// The tour's intro until the spotlight starts: why it can't run, a spinner while git makes the demo and its tab
@@ -252,12 +262,13 @@ struct OnboardingCard: View {
 
     // MARK: Keys and focus
 
-    /// Return = Next, ← / → = Back / Next; nothing while covered or while a text field has the focus (its own
-    /// Return and arrows), and → does nothing on the last step (Return is Done there).
+    /// Return = Next, ← / → = Back / Next; nothing while covered, finishing or while a text field has the focus (its
+    /// own Return and arrows), and → does nothing on the last step (Return is Start using there).
     private func handleKey(_ key: KeyEquivalent) -> KeyPress.Result {
-        guard !isCovered, !(NSApp.keyWindow?.firstResponder is NSText) else { return .ignored }
+        guard !isCovered, !model.isFinishing, !(NSApp.keyWindow?.firstResponder is NSText) else { return .ignored }
         switch key {
-        case .return: model.next()
+        case .return:
+            if model.current == .finish { model.startUsing() } else { model.next() }
         case .leftArrow: model.back()
         case .rightArrow:
             guard model.current != .finish else { return .ignored }
@@ -275,7 +286,7 @@ struct OnboardingCard: View {
     }
 }
 
-/// The step body's rounded glass card; welcome sits bare on the panel, its logo and text need no frame.
+/// The step body's rounded glass card; welcome and finish sit bare on the panel, their text needs no frame.
 private struct StepBodyCard: ViewModifier {
     let isShown: Bool
 
@@ -336,6 +347,7 @@ private extension OnboardingModel.Step {
         case .git: "Git"
         case .profile: "Your profile"
         case .github: "GitHub"
+        case .clone: "Clone a Repository"
         case .ai: "AI features"
         case .tabPosition: "Tab position"
         case .layout: "Layout"

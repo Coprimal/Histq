@@ -166,6 +166,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         case .step(let id):
             guard let named = OnboardingModel.Step(launch: id) else { return }
+            // The clone step shows only with a connected GitHub account, read from the profiles.
+            if named == .clone { _ = await ProfileLibrary.shared.loaded() }
             step = named
         case .tour(let id):
             // At the stop `id` names (or the next one the window has); an unknown id, at the first one.
