@@ -57,6 +57,7 @@
               <li><a href="#commit">Stage &amp; commit</a></li>
               <li><a href="#rebase">Interactive rebase</a></li>
               <li><a href="#conflicts">Conflicts</a></li>
+              <li><a href="#editor">File editor</a></li>
               <li><a href="#patches">Patches</a></li>
               <li><a href="#undo">Undo &amp; redo</a></li>
               <li><a href="#worktrees">Worktrees</a></li>
@@ -148,6 +149,18 @@
 </ul>
           </section>
 
+          <section id="editor" class="doc">
+            <h2>File editor</h2>
+<ul class="list">
+            <li><strong>Edit:</strong> a modified, staged or untracked text file has an <strong>Edit</strong> tab next to <strong>Diff</strong>, <strong>Split</strong> and <strong>Full file</strong>: a plain text editor with line numbers, syntax colors and Find (<kbd>⌘F</kbd>). Switching to Diff and back keeps unsaved text.</li>
+            <li><strong>Open any file:</strong> <strong>Edit File…</strong> in the command palette opens any tracked or untracked text file, even an unchanged one. The Unstaged and Staged rows' menus have <strong>Edit File</strong>.</li>
+            <li><strong>Save:</strong> <kbd>⌘S</kbd> or the <strong>Save</strong> button writes your text and keeps the file's line endings, BOM and final newline. It never stages the file. A dot on the Edit tab marks unsaved text. <kbd>⌘Z</kbd> in the editor undoes text, never a git operation.</li>
+            <li><strong>Outside changes:</strong> a file changed outside Histq reloads when you have not edited it; with your edits, it asks <strong>Reload</strong> or <strong>Keep Mine</strong>. A file deleted on disk offers <strong>Copy Text</strong> or <strong>Close</strong>. A save never overwrites an outside change without asking.</li>
+            <li><strong>Unsaved changes:</strong> leaving the file, closing its tab, its window or its workspace, or quitting asks <strong>Save</strong>, <strong>Don't Save</strong> or <strong>Cancel</strong>; unsaved choices in the conflict editor ask too. Removing a worktree whose tab has unsaved text asks first.</li>
+            <li><strong>Not editable:</strong> binary, image and non-UTF-8 files, files over 2 MB, symlinks, conflicted files (they open in the <a href="#conflicts">conflict editor</a>), and a commit's or a stash's files.</li>
+</ul>
+          </section>
+
           <section id="patches" class="doc">
             <h2>Patches</h2>
 <ul class="list">
@@ -220,6 +233,7 @@
             <li>Open it with <kbd>⌘K</kbd> or <kbd>⌘P</kbd>. Type to search, <kbd>Up</kbd> / <kbd>Down</kbd> to choose, <kbd>Return</kbd> to run, <kbd>Esc</kbd> to close.</li>
             <li><strong>Sections:</strong> Repository, Checkout, Tabs, Histq and Operations.</li>
             <li>Check out a local or remote branch, switch tabs, open a repository or a Settings page, or move the tabs.</li>
+            <li><strong>Edit File…</strong> opens a text file of the working tree in the <a href="#editor">file editor</a>.</li>
             <li>Repository operations ask the same confirmations as the menus.</li>
 </ul>
           </section>
@@ -273,7 +287,7 @@
 <ul class="list">
             <li><strong>Windows and tabs:</strong> new window <kbd>⇧⌘N</kbd>, new tab <kbd>⌘T</kbd> or <kbd>⌘N</kbd>, close tab <kbd>⌘W</kbd>, reopen closed tab <kbd>⇧⌘T</kbd>, close window <kbd>⇧⌘W</kbd>.</li>
             <li><strong>Repository:</strong> open <kbd>⌘O</kbd>, command palette <kbd>⌘K</kbd> or <kbd>⌘P</kbd>, find commits <kbd>⌘F</kbd>, terminal <kbd>⌃`</kbd>.</li>
-            <li><strong>Edit:</strong> undo <kbd>⌘Z</kbd>, redo <kbd>⇧⌘Z</kbd>. <strong>Commit box:</strong> commit <kbd>⌘↩</kbd>.</li>
+            <li><strong>Edit:</strong> undo <kbd>⌘Z</kbd>, redo <kbd>⇧⌘Z</kbd>. <strong>Commit box:</strong> commit <kbd>⌘↩</kbd>. <strong>File editor:</strong> save <kbd>⌘S</kbd>.</li>
             <li><strong>Settings:</strong> <kbd>⌘,</kbd>. The menus show the window, repository and edit keys next to their commands.</li>
 </ul>
           </section>

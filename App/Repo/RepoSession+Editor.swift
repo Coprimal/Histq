@@ -69,14 +69,17 @@ extension RepoSession {
     /// Whether `target` can open in the file editor: a WIP file that is not conflicted (its target or its status
     /// entry), not deleted (its target or its working tree side), not a submodule, an image or an untracked folder.
     func canEdit(_ target: FileTarget) -> Bool {
+        canEdit(target, entry: status.value?.entries.first { $0.path == target.path })
+    }
+
+    /// `canEdit(_:)` with the status entry of `target`'s path already looked up (nil: none, or no status read yet), as
+    /// Edit File…'s list decides each of its changed files.
+    func canEdit(_ target: FileTarget, entry: StatusEntry?) -> Bool {
         let file = target.file
         guard target.source == .wip, !target.isConflict, file.kind != .conflicted, file.kind != .deleted,
               !file.isSubmodule, !target.isImage, !target.path.hasSuffix("/")
         else { return false }
-        guard let status = self.status.value else { return true }
-        if status.conflicted.contains(where: { $0.path == target.path }) { return false }
-        let entry = status.entries.first { $0.path == target.path }
-        return entry?.worktree != .deleted && entry?.isSubmodule != true
+        return entry?.kind != .unmerged && entry?.worktree != .deleted && entry?.isSubmodule != true
     }
 
     /// `target` is the edited file: the WIP's file at the editor's path, never its conflict (a commit's or a stash's

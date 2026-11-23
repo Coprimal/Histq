@@ -191,7 +191,7 @@ struct SettingsSearchItem: Identifiable {
               keywords: ["split", "side by side", "unified", "file view"]),
         .init(section: .appearance, group: "Diff", title: "Ignore whitespace", keywords: ["whitespace", "spaces"]),
         .init(section: .appearance, group: "Diff", title: "Code font size",
-              keywords: ["font", "monospaced", "blame", "conflict editor"]),
+              keywords: ["font", "monospaced", "blame", "file editor", "conflict editor"]),
         .init(section: .appearance, group: "Diff", title: "Wrap long lines", keywords: ["wrap", "soft wrap"]),
 
         // Profiles

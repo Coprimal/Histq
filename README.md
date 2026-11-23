@@ -21,6 +21,7 @@ work as they are.
 
 - Fast commit graph with search
 - Stage files, hunks or lines; a line-by-line conflict editor
+- Edit a working-tree text file in place (Cmd-S saves it, line endings kept)
 - Interactive rebase, merge (fast-forward only or always a merge commit), and undo/redo for local operations
 - Patch files: copy or save commits, uncommitted changes or a file as a patch, and apply one from a file or the clipboard
 - Worktrees, tabs and a command palette (Cmd-K)

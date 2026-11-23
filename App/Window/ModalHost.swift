@@ -26,8 +26,8 @@ enum WindowModal: Identifiable {
     case tabAlias(tabID: UUID)
     /// A tab's menu › Set Emoji… for the tab `tabID`.
     case tabEmoji(tabID: UUID)
-    /// The palette's File History… (or Blame… when `blame`): a search of the tab `tabID`'s tracked files.
-    case fileSearch(tabID: UUID, blame: Bool)
+    /// The palette's File History…, Blame… or Edit File… (`mode`): a search of the tab `tabID`'s files.
+    case fileSearch(tabID: UUID, mode: FileSearchMode)
     /// The offer to import these profiles of the window's workspace file (`ProfileImportSheet`).
     case importProfiles([Profile])
 
@@ -37,7 +37,7 @@ enum WindowModal: Identifiable {
         case .generateKey(let id): "generate key \(id)"
         case .tabAlias(let id): "tab alias \(id)"
         case .tabEmoji(let id): "tab emoji \(id)"
-        case .fileSearch(let id, let blame): "file search \(id) \(blame)"
+        case .fileSearch(let id, let mode): "file search \(id) \(mode)"
         case .importProfiles(let profiles): "import profiles \(profiles.map(\.id.uuidString).joined(separator: ","))"
         }
     }
@@ -184,9 +184,9 @@ struct ModalHost: View {
             TabAliasModal(model: model, tabID: tabID) { model.closeModal() }
         case .window(.tabEmoji(let tabID)):
             TabEmojiModal(model: model, tabID: tabID) { model.closeModal() }
-        case .window(.fileSearch(let tabID, let blame)):
+        case .window(.fileSearch(let tabID, let mode)):
             if let session = model.sessions[tabID] {
-                FileSearchModal(session: session, blame: blame) { model.closeModal() }
+                FileSearchModal(session: session, mode: mode) { model.closeModal() }
             }
         case .window(.importProfiles(let profiles)):
             ProfileImportSheet(profiles: profiles, workspaceName: model.workspace?.name ?? "") {

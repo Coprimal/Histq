@@ -3388,7 +3388,11 @@ final class RepoSession: Identifiable {
     /// A WIP file by its path, as its row in the WIP panel stands for it (`selectWIPFile`); a clean tracked file is
     /// `.modified` (its diff shows the "no change" card). The file editor's target, followed on each status read.
     func wipFileTarget(_ path: String) -> FileTarget {
-        let entry = status.value?.entries.first { $0.path == path }
+        wipFileTarget(path, entry: status.value?.entries.first { $0.path == path })
+    }
+
+    /// `wipFileTarget(_:)` with the status entry of `path` already looked up (nil: none).
+    func wipFileTarget(_ path: String, entry: StatusEntry?) -> FileTarget {
         let isSubmodule = entry?.isSubmodule ?? false
         let file: FileChange = switch entry {
         case let entry? where entry.kind == .untracked: FileChange(kind: .untracked, path: path)

@@ -272,6 +272,18 @@ enum RepoMenus {
         ] + (untracked ? ignore(file, isFolder: isFolder, session) : [])
     }
 
+    /// "Edit File" of a WIP file row, after a separator: opens it in the file editor (`openEditor(path:)`); none when
+    /// the row can't be edited (`canEdit`: conflicted, deleted, an image, a submodule, an untracked folder).
+    static func editFile(_ file: FileChange, session: RepoSession) -> [MenuEntry] {
+        guard session.canEdit(FileTarget(source: .wip, file: file)) else { return [] }
+        return [
+            .separator,
+            .action("Edit File", image: NSImage.icon("square.and.pencil", accessibilityDescription: nil)) {
+                session.openEditor(path: file.path)
+            },
+        ]
+    }
+
     /// An untracked file's "Ignore <name>", "Ignore All *.<ext>" (when it has one) and "Ignore Folder <dir>" (its
     /// folder, when not at the top level), a folder row's "Ignore Folder <dir>", each adding a line to `.gitignore`;
     /// then the same in an "Exclude Locally" submenu, for `.git/info/exclude` (this clone only).
@@ -1408,7 +1420,7 @@ enum RepoMenus {
     /// DEBUG `-HistqRun "<menu>|<title>[|<title>…][;;<next>…]"`: picks menu items by title and runs them, one step after
     /// the other, as a click would (a confirmation is accepted; forms are not supported). `<menu>` is `wip`,
     /// `commit:<sha>`, `stash:<sha>`, `local:<name>`, `remote:<name>`, `tag:<name>`, `badge:<local|remote|tag>:<name>`
-    /// (a graph badge), `remotes`, `file:<sha>:<path>`, `wipfile:<path>` (a WIP file's `wipExtras`),
+    /// (a graph badge), `remotes`, `file:<sha>:<path>`, `wipfile:<path>` (a WIP file's `editFile` and `wipExtras`),
     /// `stashfile:<sha>:<path>` (a tracked file of a stash), `drop:<local|remote>:<name>><local|remote>:<name>`,
     /// `branches` (the toolbar's branch menu), `repo` (`repository`, the toolbar's repo menu), `reflog:<sha>` (a
     /// reflog entry's menu), `submodule:<path>` (a submodule's menu) or `submodules` (the Submodules card's menu); a
@@ -1497,7 +1509,7 @@ enum RepoMenus {
             let entry = session.status.value?.entries.first { $0.path == value }
             let untracked = entry?.kind == .untracked
             let file = FileChange(kind: untracked ? .untracked : .modified, path: value, originalPath: entry?.originalPath)
-            return wipExtras(file, untracked: untracked, session: session)
+            return editFile(file, session: session) + wipExtras(file, untracked: untracked, session: session)
         case "stashfile":
             let file = value.split(separator: ":", maxSplits: 1).map(String.init)
             guard file.count == 2 else { return [] }

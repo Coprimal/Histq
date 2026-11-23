@@ -153,7 +153,8 @@ struct WIPPanel: View {
                             },
                             menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                        busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
-                        ] + wipExtras(file) + patch(file, staged: false) + fileTools(file) + copyPath(file)
+                        ] + editFile(file) + wipExtras(file) + patch(file, staged: false) + fileTools(file)
+                            + copyPath(file)
                     }
                     .folderMenu { folder, files in
                         [
@@ -200,7 +201,8 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [menuAction("Unstage File", busy: [.unstage(file.path)]) {
                             unstage([file])
-                        }] + wipExtras(file) + patch(file, staged: true) + fileTools(file) + copyPath(file)
+                        }] + editFile(file) + wipExtras(file) + patch(file, staged: true) + fileTools(file)
+                            + copyPath(file)
                     }
                     .folderButtons { _, files in
                         rowButton("minus.circle", help: "Unstage Folder", busy: files.map { .unstage($0.path) }) {
@@ -349,6 +351,12 @@ struct WIPPanel: View {
         guard !isConflicted, file.kind != .conflicted, !file.path.hasSuffix("/") else { return [] }
         let source: PatchFile.FileSource = staged ? .staged : file.kind == .untracked ? .untracked : .unstaged
         return RepoMenus.filePatch(path: file.path, originalPath: file.originalPath, source: source, session: session)
+    }
+
+    /// `RepoMenus.editFile` of an unstaged or staged file row (not the conflicted card's: its file opens the conflict
+    /// editor).
+    private func editFile(_ file: FileChange) -> [MenuEntry] {
+        RepoMenus.editFile(file, session: session)
     }
 
     /// `RepoMenus.wipExtras` of a file row (not the conflicted card's: git cannot stash with unmerged files).
