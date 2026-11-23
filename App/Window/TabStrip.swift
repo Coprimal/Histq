@@ -44,6 +44,10 @@ enum TabStripMetrics {
     static let groupChipPadding: CGFloat = 8
     static let groupChipRadius: CGFloat = 6
     static var groupChipFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
+    /// The closed groups and archive buttons at the strip's start: a rounded square, taller than a group's chip, and
+    /// the gap between the two, wider than `gap` so the two squares read apart.
+    static let stowButtonSize: CGFloat = 26
+    static let stowButtonGap: CGFloat = 8
     /// The archived tab popped out beside the archive button (`ArchiveCluster`): one fixed width, outside the track.
     static let archivedTabWidth: CGFloat = 160
     /// How far the archive button sits left of the strip's start, and the room it adds after itself, so it stands as
@@ -140,16 +144,16 @@ struct TabStrip: View {
     }
 
     /// The closed groups button at the strip's start, pulled `archiveShift` left as the archive button is alone. Before
-    /// the archive, it leaves `gap` to the archive button (whose own pull takes back `archiveShift`), so the archive
+    /// the archive, it leaves `stowButtonGap` to the archive button (whose own pull takes back `archiveShift`), so the archive
     /// button, its line and popped tab keep their place against the tabs. Alone, it ends as the archive button does
     /// alone: flare room and `archiveShift` after it, overlapping the track's first flare room.
     private func closedGroupsButton(beforeArchive: Bool) -> some View {
         let flare = TabStripMetrics.flare
         let shift = TabStripMetrics.archiveShift
-        return ClosedGroupsButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.groupChipHeight)
+        return ClosedGroupsButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.stowButtonSize)
             .frame(height: TabStripMetrics.tabHeight)
             .padding(.leading, -shift)
-            .padding(.trailing, beforeArchive ? TabStripMetrics.gap + shift
+            .padding(.trailing, beforeArchive ? TabStripMetrics.stowButtonGap + shift
                                               : flare + shift + TabStripMetrics.gap - 2 * flare)
             .padding(.top, TabStripMetrics.rowInset)
             .frame(height: TabStripMetrics.tabHeight + TabStripMetrics.rowInset)
@@ -702,12 +706,12 @@ private struct ArchiveCluster: View {
     @State private var pressedID: WindowModel.Tab.ID?
 
     var body: some View {
-        let buttonWidth = ArchiveButton.width(height: TabStripMetrics.groupChipHeight)
+        let buttonWidth = ArchiveButton.width(height: TabStripMetrics.stowButtonSize)
         // The popped tab carries its flares' room on both sides, the button only on its trailing side (none before it,
         // at the strip's start); the two sit `gap` apart, plus `archiveShift`: the button moves that much left of the
         // strip's start and keeps the room after it, so it has as much space on each side.
         HStack(spacing: TabStripMetrics.gap - 2 * TabStripMetrics.flare) {
-            ArchiveButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.groupChipHeight)
+            ArchiveButton(model: model, popoverEdge: .bottom, height: TabStripMetrics.stowButtonSize)
                 .frame(height: TabStripMetrics.tabHeight)
                 .overlay(alignment: .bottomLeading) {
                     if let tab = model.archivedOut {
@@ -1320,16 +1324,52 @@ struct TabSheetShape: Shape {
     }
 }
 
-/// The chevron's popover: a search field and the tabs that match it. A click selects the tab at once and closes the
-/// popover.
+/// The chevron's popover: a search field and the tabs that match it: the window's tabs, then the tabs the strip no
+/// longer shows, the stowed archived tabs (`WindowModel.archivedTabs`) and the closed groups' tabs
+/// (`WindowModel.closedGroups`), each with its button's icon saying where it is (the popped-out archived tab has the
+/// archive's too). A click selects the tab at once and closes the popover; an archived one pops out
+/// (`WindowModel.openArchived(at:)`), a closed group's reopens its whole group with that tab selected
+/// (`WindowModel.openClosedGroup(_:selecting:)`).
 private struct TabListPopover: View {
     let model: WindowModel
     @Binding var isPresented: Bool
     @State private var query = ""
     @FocusState private var searchFocused: Bool
 
+    /// One row: a tab of the window, an archived tab by its index in `archivedTabs`, or a closed group's tab by its
+    /// offset in the group.
+    private enum Row: Identifiable {
+        case open(WindowModel.Tab)
+        case archived(index: Int, SavedTab)
+        case closed(SavedClosedTabGroup, index: Int)
+
+        var id: String {
+            switch self {
+            case .open(let tab): "open-\(tab.id)"
+            case .archived(let index, _): "archived-\(index)"
+            case .closed(let group, let index): "closed-\(group.id)-\(index)"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .open(let tab): tab.title
+            case .archived(_, let entry): entry.title
+            case .closed(let group, let index): group.tabs[index].title
+            }
+        }
+
+        var path: String? {
+            switch self {
+            case .open(let tab): tab.repoURL?.path
+            case .archived(_, let entry): entry.path
+            case .closed(let group, let index): group.tabs[index].path
+            }
+        }
+    }
+
     var body: some View {
-        let matches = matchingTabs
+        let matches = matchingRows
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search", text: $query, prompt: Text("Search tabs"))
                 .textFieldStyle(.settings)
@@ -1345,17 +1385,8 @@ private struct TabListPopover: View {
             } else {
                 ScrollView {
                     VStack(spacing: SidebarItemStyle.spacing) {
-                        ForEach(matches) { tab in
-                            Button {
-                                model.selectTab(id: tab.id)
-                                isPresented = false
-                            } label: {
-                                Label(tab.title, systemImage: tab.repoURL == nil ? "house" : "folder")
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                            .buttonStyle(SidebarItemStyle(selected: tab.id == model.selectedTabID))
-                            .help(tab.repoURL?.path ?? tab.title)
+                        ForEach(matches) { row in
+                            rowView(row)
                         }
                     }
                     .padding(.horizontal, 10)
@@ -1370,17 +1401,85 @@ private struct TabListPopover: View {
         .onAppear { DispatchQueue.main.async { searchFocused = true } }
     }
 
-    /// Tabs whose name or folder contains the query (case- and diacritic-insensitive); all tabs for an empty query.
-    private var matchingTabs: [WindowModel.Tab] {
+    /// A row's button: its icon and title, then its label (never truncated: the title gives way first).
+    private func rowView(_ row: Row) -> some View {
+        let selected = if case .open(let tab) = row { tab.id == model.selectedTabID } else { false }
+        return Button {
+            isPresented = false
+            switch row {
+            case .open(let tab): model.selectTab(id: tab.id)
+            case .archived(let index, _): model.openArchived(at: index)
+            case .closed(let group, let index): model.openClosedGroup(group.id, selecting: index)
+            }
+        } label: {
+            Label {
+                HStack(spacing: 6) {
+                    Text(row.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 0)
+                    badge(row)
+                }
+            } icon: {
+                Image(systemName: row.path == nil ? "house" : "folder")
+            }
+        }
+        .buttonStyle(SidebarItemStyle(selected: selected))
+        .help(help(row))
+    }
+
+    /// The archive button's capsule and icon, or the closed groups button's icon in the group's chip fill; none for a
+    /// shown tab.
+    @ViewBuilder
+    private func badge(_ row: Row) -> some View {
+        switch row {
+        case .open(let tab) where tab.archived: chip("archivebox", "Archived", fill: TabGroupColors.archiveChip)
+        case .open: EmptyView()
+        case .archived: chip("archivebox", "Archived", fill: TabGroupColors.archiveChip)
+        case .closed(let group, _):
+            chip("app.grid.2x2", "In closed group", fill: TabGroupColors.chip(group.color))
+        }
+    }
+
+    /// As the archive and closed groups buttons draw their rounded square, a group chip's height.
+    private func chip(_ icon: String, _ label: String, fill: Color) -> some View {
+        let height = TabStripMetrics.groupChipHeight
+        return Image(systemName: icon)
+            .font(.system(size: height * 0.55, weight: .semibold))
+            .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
+            .frame(width: ArchiveButton.width(height: height), height: height)
+            .background(ArchiveButton.shape(height: height).fill(fill))
+            .accessibilityLabel(label)
+    }
+
+    /// The folder (or title), and where a hidden tab is.
+    private func help(_ row: Row) -> String {
+        let place = row.path ?? row.title
+        switch row {
+        case .open(let tab) where tab.archived: return "\(place)\nArchived"
+        case .open: return place
+        case .archived: return "\(place)\nArchived: opens beside the archive button"
+        case .closed(let group, _):
+            let name = group.name.map { " \"\($0)\"" } ?? ""
+            return "\(place)\nIn closed group\(name): opens the whole group"
+        }
+    }
+
+    /// The window's tabs, then the stowed archived tabs, then the closed groups' tabs, whose name or folder contains
+    /// the query (case- and diacritic-insensitive); all of them for an empty query.
+    private var matchingRows: [Row] {
+        let rows = model.tabs.map(Row.open)
+            + model.archivedTabs.enumerated().map { Row.archived(index: $0.offset, $0.element) }
+            + model.closedGroups.flatMap { group in group.tabs.indices.map { Row.closed(group, index: $0) } }
         let text = query.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return model.tabs }
-        return model.tabs.filter {
-            $0.title.localizedStandardContains(text) || ($0.repoURL?.path.localizedStandardContains(text) ?? false)
+        guard !text.isEmpty else { return rows }
+        return rows.filter {
+            $0.title.localizedStandardContains(text) || ($0.path?.localizedStandardContains(text) ?? false)
         }
     }
 }
 
-/// The archive button: a capsule in the archive's color with its `archivebox` icon, shown once the window has an
+/// The archive button: a rounded square in the archive's color with its `archivebox` icon, shown once the window has an
 /// archive (`WindowModel.archivedTabs`, or a tab popped out). A click opens the archived tabs' list
 /// (`ArchiveListPopover`). The tab strip shows it at its far left (after the closed groups button, when shown), the
 /// vertical tabs in their bottom row.
@@ -1388,17 +1487,24 @@ struct ArchiveButton: View {
     let model: WindowModel
     /// Where the list's popover opens from the button.
     let popoverEdge: Edge
-    /// The capsule's height: a group chip's in the tab strip, a row's in the vertical tabs' bottom row.
+    /// The square's side: `stowButtonSize` in the tab strip, a row's height in the vertical tabs' bottom row.
     let height: CGFloat
     @State private var showingList = false
     @State private var hovered = false
 
-    /// Between the icon's square and the capsule's ends.
-    static let padding: CGFloat = 4
-
-    /// The button's width for its `height`: a short capsule around the icon.
+    /// The button's width for its `height`: a square.
     static func width(height: CGFloat) -> CGFloat {
-        height + 2 * padding
+        height
+    }
+
+    /// The square's corners, as a group chip rounds its own (`groupChipRadius` at its height).
+    static func radius(height: CGFloat) -> CGFloat {
+        (height * TabStripMetrics.groupChipRadius / TabStripMetrics.groupChipHeight).rounded()
+    }
+
+    /// The button's rounded square for its `height`, shared with the closed groups button.
+    static func shape(height: CGFloat) -> RoundedRectangle {
+        RoundedRectangle(cornerRadius: radius(height: height), style: .continuous)
     }
 
     var body: some View {
@@ -1407,9 +1513,9 @@ struct ArchiveButton: View {
                 .font(.system(size: height * 0.55, weight: .semibold))
                 .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
                 .frame(width: Self.width(height: height), height: height)
-                .background(Capsule().fill(TabGroupColors.archiveChip))
-                .overlay(Capsule().fill(hovered ? Palette.hoverFill : .clear))
-                .contentShape(Capsule())
+                .background(Self.shape(height: height).fill(TabGroupColors.archiveChip))
+                .overlay(Self.shape(height: height).fill(hovered ? Palette.hoverFill : .clear))
+                .contentShape(Self.shape(height: height))
         }
         .buttonStyle(.plain)
         .animation(Motion.hover, value: hovered)

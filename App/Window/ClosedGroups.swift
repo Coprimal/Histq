@@ -2,19 +2,19 @@
 import HistqCore
 import SwiftUI
 
-/// The closed groups button: a grey capsule with the `app.grid.2x2` icon, shown while the window has closed groups
+/// The closed groups button: a grey rounded square with the `app.grid.2x2` icon, shown while the window has closed groups
 /// (`WindowModel.closedGroups`). A click opens their list (`ClosedGroupsPopover`). The tab strip shows it at its far
 /// left, before the archive button; the vertical tabs first in their bottom row.
 struct ClosedGroupsButton: View {
     let model: WindowModel
     /// Where the list's popover opens from the button.
     let popoverEdge: Edge
-    /// The capsule's height: a group chip's in the tab strip, a row's in the vertical tabs' bottom row.
+    /// The square's side: `stowButtonSize` in the tab strip, a row's height in the vertical tabs' bottom row.
     let height: CGFloat
     @State private var showingList = false
     @State private var hovered = false
 
-    /// The button's width for its `height`: as wide as the archive button.
+    /// The button's width for its `height`: the archive button's square.
     static func width(height: CGFloat) -> CGFloat {
         ArchiveButton.width(height: height)
     }
@@ -25,9 +25,9 @@ struct ClosedGroupsButton: View {
                 .font(.system(size: height * 0.55, weight: .semibold))
                 .foregroundStyle(Color(nsColor: Palette.graphBadgeText))
                 .frame(width: Self.width(height: height), height: height)
-                .background(Capsule().fill(Color(nsColor: Palette.groupGreyFill)))
-                .overlay(Capsule().fill(hovered ? Palette.hoverFill : .clear))
-                .contentShape(Capsule())
+                .background(ArchiveButton.shape(height: height).fill(Color(nsColor: Palette.groupGreyFill)))
+                .overlay(ArchiveButton.shape(height: height).fill(hovered ? Palette.hoverFill : .clear))
+                .contentShape(ArchiveButton.shape(height: height))
         }
         .buttonStyle(.plain)
         .animation(Motion.hover, value: hovered)

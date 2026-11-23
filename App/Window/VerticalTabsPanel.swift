@@ -521,10 +521,11 @@ private struct VerticalArchiveFooter: View {
     /// button's center lies right of the indent, so the line keeps to the indent as a group's does). The exact x and
     /// end are tuned against a QA shot. Decorative.
     private var line: some View {
-        // The button is a capsule: at the line's x (half the indent in from its leading edge) its top edge lies lower
-        // than its frame's top, by this much, so the line runs on to meet the edge instead of stopping short of it.
-        let radius = SidebarItemStyle.height / 2
-        let dx = radius - VerticalTabsMetrics.groupIndent / 2
+        // The button is a rounded square: at the line's x (half the indent in from its leading edge), inside its
+        // corner, its top edge lies lower than its frame's top, by this much, so the line runs on to meet the edge
+        // instead of stopping short of it.
+        let radius = ArchiveButton.radius(height: SidebarItemStyle.height)
+        let dx = max(radius - VerticalTabsMetrics.groupIndent / 2, 0)
         let dip = radius - (radius * radius - dx * dx).squareRoot()
         return Capsule()
             .fill(TabGroupColors.archiveLine)
