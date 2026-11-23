@@ -48,11 +48,10 @@ struct FileChange: Hashable, Sendable, Identifiable {
     var systemImage: String {
         if isSubmodule { return SidebarMetrics.submoduleImage }
         return switch kind {
-        case .added: "plus"
+        case .added, .untracked: "plus"
         case .modified, .typeChanged: "pencil"
         case .deleted: "minus"
         case .renamed, .copied: "arrow.right"
-        case .untracked: "questionmark"
         case .conflicted: "exclamationmark.triangle"
         case .unchanged: "doc"
         }
