@@ -1,7 +1,8 @@
 // The file editor in panel 2 (column 4 in Columns): the controls card with the Diff / Split / Full file / Edit tabs,
-// Save and close, a disk-change notice, and the file's text in an NSTextView (TextKit 1, line numbers, syntax colours
-// scanned off the main actor, its own undo). The text view outlives this view: it is made once per buffer and kept on
-// the session (`RepoSession.editorScrollView`), so Edit -> Diff -> Edit, a layout switch or another window keep it.
+// Wrap Lines, Save and close, a disk-change notice, and the file's card: its title row, then its text in an NSTextView
+// (TextKit 1, line numbers, wrapped or not, syntax colours scanned off the main actor, its own undo). The text view
+// outlives this view: it is made once per buffer and kept on the session (`RepoSession.editorScrollView`), so Edit ->
+// Diff -> Edit, a layout switch or another window keep it.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -26,8 +27,10 @@ struct FileModeTabs: View {
         // Only the Edit tab has a tooltip (an empty one shows nothing); without it, none, as before.
         let help: ((Mode) -> String)? = editable
             ? { mode in mode != .edit ? "" : dirty ? "Edit the file (unsaved changes)" : "Edit the file" } : nil
+        // Its own track beside the action panel, as tall (`ActionPanelRow.height`), in the callout size of the panel's
+        // buttons, not the compact tabs' caption size (user, 2026-11-22).
         CapsuleTabs(selection: selection, tabs: DiffMode.allCases.map(Mode.diff) + (editable ? [.edit] : []),
-                    title: { title($0, dirty: dirty) }, compact: true, small: true, help: help)
+                    title: { title($0, dirty: dirty).font(.callout) }, compact: true, help: help, cardTrack: true)
     }
 
     private var selection: Binding<Mode> {
@@ -58,8 +61,9 @@ struct FileModeTabs: View {
     }
 }
 
-/// Panel 2 while the Edit tab shows: the controls card at once, a disk-change notice when there is one, then the text
-/// (a skeleton until it is read, a notice when the file can't be edited).
+/// Panel 2 while the Edit tab shows: the controls card at once, a disk-change notice when there is one, then the file's
+/// card: its title row (`EditorFileHeader`, as the diff's file row), then the text (a skeleton until it is read, a
+/// notice when the file can't be edited).
 struct FileEditorView: View {
     let session: RepoSession
     let target: FileTarget
@@ -84,7 +88,7 @@ struct FileEditorView: View {
                 // Only while the editor closes: no placeholder, no timing line.
                 Color.clear
             case .loading?:
-                SectionCard(nil, contentPadding: 0) {
+                EditorCard(target: target) {
                     PlaceholderCard(
                         token: session.fileToken, detail: session.fileDetail,
                         isCurrent: { [model, session] in
@@ -96,12 +100,12 @@ struct FileEditorView: View {
                 }
             case .loaded(.text)?:
                 // `content` is logged by the text view's controller once the text is in it.
-                SectionCard(nil, contentPadding: 0) {
+                EditorCard(target: target) {
                     EditorTextHost(session: session, loadID: session.editor?.loadID ?? 0, findBarShown: $findBarShown)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             case .loaded(.refused(let refusal))?:
-                SectionCard(nil) {
+                EditorCard(target: target, contentPadding: SettingsMetrics.cardPadding) {
                     FileNotice(systemImage: Self.icon(refusal), message: Self.message(refusal)) {
                         Button("Back to Diff") { session.showDiff() }
                             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -109,7 +113,7 @@ struct FileEditorView: View {
                 }
                 .onAppear { UITiming.content("\(session.fileDetail) refused") }
             case .failed(let message)?:
-                SectionCard(nil) {
+                EditorCard(target: target, contentPadding: SettingsMetrics.cardPadding) {
                     FileNotice(systemImage: "exclamationmark.triangle", message: message) {
                         Button("Back to Diff") { session.showDiff() }
                             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -148,49 +152,51 @@ struct FileEditorView: View {
     }
 }
 
-/// The card above the editor: the status icon and "folder / name", the mode tabs with Edit selected, Save and close
-/// (Esc, asking first when the text is unsaved). A failed save shows under the row. As the card narrows, Save turns
-/// into an icon.
-private struct FileEditorControlsCard: View {
-    let session: RepoSession
+/// The file's card under the controls: its title row (`EditorFileHeader`), then `content` (0 `contentPadding` for the
+/// text and its skeleton, which run to the card's edges; a notice gets the card's padding, below the row only).
+private struct EditorCard<Content: View>: View {
     let target: FileTarget
-    let findBarShown: Bool
+    var contentPadding: CGFloat = 0
+    @ViewBuilder let content: () -> Content
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
+
+    var body: some View {
+        SectionCard(nil, contentPadding: 0) {
+            EditorFileHeader(file: target.file)
+            VStack(alignment: .leading, spacing: 0) {
+                content()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, contentPadding == 0 ? 0 : contentPadding + extraPadding)
+            .padding(.bottom, contentPadding == 0 ? 0 : contentPadding + extraVerticalPadding)
+        }
+    }
+}
+
+/// The edited file's row, the header of its card: the status icon, then "folder / name" (the folder secondary,
+/// truncating from its head, else hidden). At the insets and height of the diff's file row (`DiffFileHeader`), so the
+/// title stays in place between Diff and Edit.
+private struct EditorFileHeader: View {
+    let file: FileChange
+    @Environment(\.cardExtraPadding) private var extraPadding
+    @Environment(\.cardExtraVerticalPadding) private var extraVerticalPadding
 
     /// The narrowest truncated folder; narrower, it hides.
     private static let folderMinWidth: CGFloat = 40
 
     var body: some View {
-        SectionCard(nil, contentPadding: 8) {
-            VStack(alignment: .leading, spacing: 4) {
-                ViewThatFits(in: .horizontal) {
-                    row(saveAsIcon: false)
-                    row(saveAsIcon: true)
-                }
-                .frame(height: 26)
-                .padding(.leading, 4)
-                if let error = session.editor?.error {
-                    ErrorText(message: error)
-                        .padding(.horizontal, 4)
-                }
-            }
-        }
-    }
-
-    private func row(saveAsIcon: Bool) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             title
             Spacer(minLength: 8)
-            FileModeTabs(session: session, target: target)
-                .fixedSize()
-            saveButton(asIcon: saveAsIcon)
-            closeButton
         }
+        .padding(.horizontal, SettingsMetrics.cardPadding + extraPadding)
+        .frame(height: SectionCardMetrics.headerHeight)
+        .padding(.top, extraVerticalPadding * 2 / 3)
     }
 
-    /// The status icon, then "folder / name" (the folder secondary, truncating from its head, else hidden).
     private var title: some View {
-        let file = target.file
-        return HStack(spacing: 8) {
+        HStack(spacing: 8) {
             Image(systemName: file.systemImage)
                 .foregroundStyle(file.tint)
                 .accessibilityHidden(true)
@@ -220,6 +226,47 @@ private struct FileEditorControlsCard: View {
         Text(folder.replacing("/", with: " / ") + " /")
             .foregroundStyle(.secondary)
             .lineLimit(1)
+    }
+}
+
+/// The row above the editor, as the diff's: the mode tabs with Edit selected in their own track, then the action panel
+/// (`ActionPanelRow`) with Wrap Lines (the diff's switch and preference), Save and close (Esc, asking first when the
+/// text is unsaved) on its right. A failed save shows under the panel's row. As the panel narrows, Save turns into an
+/// icon.
+private struct FileEditorControlsCard: View {
+    let session: RepoSession
+    let target: FileTarget
+    let findBarShown: Bool
+    @AppStorage(PrefKey.diffWrapLines.rawValue, store: Preferences.defaults) private var wrapLines = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: SectionCardMetrics.spacing) {
+            FileModeTabs(session: session, target: target)
+                .fixedSize()
+            VStack(alignment: .leading, spacing: 4) {
+                ViewThatFits(in: .horizontal) {
+                    row(saveAsIcon: false)
+                    row(saveAsIcon: true)
+                }
+                .frame(height: ActionPanelRow.rowHeight)
+                if let error = session.editor?.error {
+                    ErrorText(message: error)
+                }
+            }
+            .modifier(ActionPanelRow())
+        }
+    }
+
+    private func row(saveAsIcon: Bool) -> some View {
+        HStack(spacing: 12) {
+            Spacer(minLength: 0)
+            DiffControlsCard.iconButton("text.alignleft", help: wrapLines ? "Don't Wrap Lines" : "Wrap Lines",
+                                        isOn: wrapLines) {
+                wrapLines.toggle()
+            }
+            saveButton(asIcon: saveAsIcon)
+            closeButton
+        }
     }
 
     @ViewBuilder private func saveButton(asIcon: Bool) -> some View {
@@ -252,9 +299,9 @@ private struct FileEditorControlsCard: View {
             session.closeFileAsking()
         } label: {
             Image(systemName: "xmark")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: ActionPanelRow.iconFont, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
+                .frame(width: ActionPanelRow.iconSize, height: ActionPanelRow.iconSize)
         }
         .buttonStyle(RowIconButtonStyle())
         .keyboardShortcut(findBarShown ? nil : .cancelAction)
@@ -348,6 +395,7 @@ private struct EditorTextHost: NSViewRepresentable {
     let loadID: Int
     @Binding var findBarShown: Bool
     @AppStorage(PrefKey.codeFontSize.rawValue, store: Preferences.defaults) private var fontSize = 12.0
+    @AppStorage(PrefKey.diffWrapLines.rawValue, store: Preferences.defaults) private var wrapLines = false
     @Environment(\.tabIsShown) private var tabIsShown
 
     func makeNSView(context: Context) -> NSView {
@@ -369,7 +417,7 @@ private struct EditorTextHost: NSViewRepresentable {
     }
 
     /// Puts the buffer's scroll view in `container` (`taking`: from another host too; else only a detached one), drops
-    /// a dropped buffer's, and lets the controller apply the load and the font size.
+    /// a dropped buffer's, and lets the controller apply the load, the font size and Wrap Lines.
     private func attach(to container: NSView, taking: Bool) {
         guard let controller = EditorTextController.make(for: session), let scroll = controller.scrollView else {
             return
@@ -390,27 +438,28 @@ private struct EditorTextHost: NSViewRepresentable {
             // Not during this view update.
             Task { @MainActor in binding.wrappedValue = visible }
         }
-        controller.show(loadID: loadID, fontSize: fontSize)
+        controller.show(loadID: loadID, fontSize: fontSize, wraps: wrapLines)
     }
 }
 
 /// The text view's delegate for its buffer's whole life (kept strongly in `RepoSession.editorTextDelegate`; the text
 /// view's `delegate` is weak): the editor's own undo history, every user edit to `editorDidChange()`, the line
-/// count, the ruler's redraw on scroll, the code font size and the syntax colours. Text set on load and Reload is not
-/// an edit.
+/// count, the ruler's redraw on scroll, the code font size, Wrap Lines and the syntax colours. Text set on load and
+/// Reload is not an edit.
 @MainActor
 final class EditorTextController: NSObject, NSTextViewDelegate {
     private weak var session: RepoSession?
     private(set) weak var scrollView: EditorScrollView?
     private weak var textView: EditorTextView?
-    private weak var ruler: ConflictLineRuler?
+    private weak var ruler: EditorLineRuler?
     let path: String
     private let language: Language?
     /// This editor's undo history: never the window's, which hidden kept-alive tabs and the commit field share.
     private let undoManager = UndoManager()
-    /// The load whose text is in the view, and the font size it shows.
+    /// The load whose text is in the view, the font size it shows, and whether its lines wrap.
     private var shownLoadID: Int?
     private var shownFontSize: Double?
+    private var shownWraps: Bool?
     /// True while the controller sets the text itself (load, font size): not a user edit.
     private var isSyncing = false
     /// The edit between `shouldChangeTextIn` and `textDidChange`, for the line count's change.
@@ -433,6 +482,22 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
     /// How long typing pauses before the text is scanned for colours again.
     private static let colourDelay: Duration = .milliseconds(150)
 
+    private static var styles: [CGFloat: [NSAttributedString.Key: Any]] = [:]
+
+    /// The text's attributes at the current code font size, made once per size: Output's (fixed line height, tabs),
+    /// but lines that wrap at a word. While Wrap Lines is off, the text container is unbounded, so nothing wraps.
+    static var attributes: [NSAttributedString.Key: Any] {
+        let size = DiffLayout.metrics.size
+        if let attributes = styles[size] { return attributes }
+        var attributes = ConflictOutputController.attributes
+        if let style = (attributes[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
+            style.lineBreakMode = .byWordWrapping
+            attributes[.paragraphStyle] = style
+        }
+        styles[size] = attributes
+        return attributes
+    }
+
     private init(session: RepoSession, path: String) {
         self.session = session
         self.path = path
@@ -449,7 +514,8 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
             return controller
         }
         let controller = EditorTextController(session: session, path: editor.path)
-        // TextKit 1: fixed line fragments make every line exactly `lineHeight` tall from the top, as the ruler draws.
+        // TextKit 1: fixed line fragments make every line (every row of a wrapped one) exactly `lineHeight` tall, as
+        // the ruler draws.
         let textView = EditorTextView(usingTextLayoutManager: false)
         textView.isRichText = false
         textView.importsGraphics = false
@@ -470,7 +536,7 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
         textView.insertionPointColor = .white
         textView.textColor = Palette.diffText
         textView.textContainerInset = NSSize(width: 6, height: 0)
-        // No wrap: the text view grows sideways with its longest line.
+        // No wrap to start with (`applyWrap` sets Wrap Lines): the text view grows sideways with its longest line.
         textView.isHorizontallyResizable = true
         textView.isVerticallyResizable = true
         textView.minSize = .zero
@@ -490,7 +556,9 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         // No tints: the ruler only numbers the lines.
-        let ruler = ConflictLineRuler(textView: textView)
+        let ruler = EditorLineRuler(textView: textView)
+        // A row cut by the card's top edge keeps its number inside the ruler, not over the file's title row.
+        ruler.clipsToBounds = true
         scroll.verticalRulerView = ruler
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
@@ -517,10 +585,12 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
         ruler?.needsDisplay = true
     }
 
-    /// The host's update: a new code font size restyles the text; a new load (`loadID`) puts its text in.
-    func show(loadID: Int, fontSize: Double) {
+    /// The host's update: a new code font size restyles the text, Wrap Lines (`wraps`) resizes it; a new load
+    /// (`loadID`) puts its text in.
+    func show(loadID: Int, fontSize: Double, wraps: Bool) {
         DiffLayout.use(fontSize)
         if shownFontSize != fontSize { applyFontSize(fontSize) }
+        if shownWraps != wraps { applyWrap(wraps) }
         guard shownLoadID != loadID, let editor = session?.editor, editor.loadID == loadID,
               case .loaded(.text(let text)) = editor.content
         else { return }
@@ -534,7 +604,7 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
         let caret = textView.selectedRange().location
         isSyncing = true
         storage.beginEditing()
-        storage.setAttributedString(NSAttributedString(string: text, attributes: ConflictOutputController.attributes))
+        storage.setAttributedString(NSAttributedString(string: text, attributes: Self.attributes))
         storage.endEditing()
         isSyncing = false
         textView.setSelectedRange(NSRange(location: min(caret, storage.length), length: 0))
@@ -545,6 +615,7 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
         keyStart = nil
         lastEdit = nil
         shownLoadID = loadID
+        ruler?.textChanged(from: 0)
         ruler?.lineCount = Self.lineBreaks(in: storage.mutableString) + 1
         ruler?.needsDisplay = true
         if let session { UITiming.content(session.fileDetail) }
@@ -555,18 +626,44 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
     private func applyFontSize(_ size: Double) {
         shownFontSize = size
         guard let textView, let storage = textView.textStorage else { return }
-        ConflictOutputController.applyFont(to: textView)
+        let attributes = Self.attributes
+        textView.font = attributes[.font] as? NSFont
+        textView.defaultParagraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle
+        textView.typingAttributes = attributes
         if storage.length > 0 {
             isSyncing = true
             storage.beginEditing()
             let whole = NSRange(location: 0, length: storage.length)
-            storage.setAttributes(ConflictOutputController.attributes, range: whole)
+            storage.setAttributes(attributes, range: whole)
             storage.endEditing()
             isSyncing = false
             scheduleColours(debounced: false)
         }
         ruler?.fitThickness()
         ruler?.needsDisplay = true
+    }
+
+    /// Wrap Lines on: the text view is as wide as the scroll view's visible text (`EditorScrollView.wrapsText` keeps
+    /// it so), its container follows it and the lines wrap there, with no horizontal scroller; the ruler numbers the
+    /// first row of each line. Off: the unbounded container, the view growing sideways with its longest line.
+    private func applyWrap(_ wraps: Bool) {
+        shownWraps = wraps
+        guard let textView, let scroll = scrollView, let container = textView.textContainer else { return }
+        textView.isHorizontallyResizable = !wraps
+        container.widthTracksTextView = wraps
+        scroll.hasHorizontalScroller = !wraps
+        scroll.wrapsText = wraps
+        if wraps {
+            let clip = scroll.contentView
+            clip.scroll(to: NSPoint(x: -clip.contentInsets.left, y: clip.bounds.minY))
+            scroll.reflectScrolledClipView(clip)
+            let width = max(0, textView.frame.width - 2 * textView.textContainerInset.width)
+            container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        } else {
+            container.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+            textView.sizeToFit()
+        }
+        ruler?.wraps = wraps
     }
 
     // MARK: Find bar
@@ -624,8 +721,10 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
             if case .one(let start, let newEnd, let oldBreaks)? = pendingEdit, newEnd <= text.length {
                 let newBreaks = Self.lineBreaks(in: text, range: NSRange(location: start, length: newEnd - start))
                 ruler.lineCount = max(1, ruler.lineCount + newBreaks - oldBreaks)
+                ruler.textChanged(from: start)
             } else {
                 ruler.lineCount = Self.lineBreaks(in: text) + 1
+                ruler.textChanged(from: 0)
             }
             ruler.needsDisplay = true
         }
@@ -697,7 +796,7 @@ final class EditorTextController: NSObject, NSTextViewDelegate {
 
     /// The line breaks in `range` of `text` (all of it by default), as the text view breaks lines: LF, a CR not
     /// followed by an LF (looked up past the range's end too), CRLF once, U+2028, U+2029 and U+0085.
-    private static func lineBreaks(in text: NSString, range: NSRange? = nil) -> Int {
+    static func lineBreaks(in text: NSString, range: NSRange? = nil) -> Int {
         let range = range ?? NSRange(location: 0, length: text.length)
         guard range.length > 0 else { return 0 }
         let peeks = NSMaxRange(range) < text.length
@@ -761,9 +860,14 @@ final class EditorTextView: NSTextView {
 /// to the next view of the window: right away, after SwiftUI applies the change (next turns) and once the bar leaves
 /// the view, unless the user clicked since. A click in the bar (Done) counts as the keyboard in the editor, even when
 /// AppKit already gave it to the next view. Esc in the bar is taken by a local monitor, live while the bar shows: it
-/// hides the bar and puts the keyboard back in the text before AppKit can move it to another view.
+/// hides the bar and puts the keyboard back in the text before AppKit can move it to another view. With Wrap Lines on,
+/// it keeps the text view as wide as the text's visible area.
 final class EditorScrollView: NSScrollView {
     var onFindBarChange: ((Bool) -> Void)?
+    /// Wrap Lines: the text view's width follows the visible area right of the ruler (`tile`).
+    var wrapsText = false {
+        didSet { if wrapsText != oldValue { tile() } }
+    }
     /// When the bar hid with the keyboard in the editor (text, bar, or nowhere); nil when it was in another view.
     private var keyboardHideTime: TimeInterval?
     /// The Esc monitor, while the find bar shows in a window.
@@ -795,6 +899,29 @@ final class EditorScrollView: NSScrollView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateEscapeMonitor()
+    }
+
+    /// The line-number ruler floats over the clip view, which keeps the text clear of it with a left content inset.
+    /// AppKit does not move a clip that sat at its left edge when that inset changes (the first layout, a wider ruler):
+    /// the text's first columns would hide under the numbers. Keep such a clip at its new edge. With Wrap Lines on, the
+    /// text view takes the visible width (a resize or a wider ruler wraps the lines again), and the ruler redraws: a
+    /// resize moves the rows its numbers sit on.
+    override func tile() {
+        let clip = contentView
+        let atLeftEdge = abs(clip.bounds.minX + clip.contentInsets.left) < 0.5
+        super.tile()
+        if wrapsText, let text = documentView {
+            let width = max(0, clip.bounds.width - clip.contentInsets.left - clip.contentInsets.right)
+            if abs(text.frame.width - width) >= 0.5 {
+                text.setFrameSize(NSSize(width: width, height: text.frame.height))
+            }
+            verticalRulerView?.needsDisplay = true
+        }
+        let edge = -clip.contentInsets.left
+        if atLeftEdge, abs(clip.bounds.minX - edge) >= 0.5 {
+            clip.scroll(to: NSPoint(x: edge, y: clip.bounds.minY))
+            reflectScrolledClipView(clip)
+        }
     }
 
     /// The bar leaving the view (after its hide animation) may move the keyboard on: take it back after that.
@@ -888,6 +1015,83 @@ final class EditorScrollView: NSScrollView {
               window.firstResponder !== text
         else { return }
         window.makeFirstResponder(text)
+    }
+}
+
+/// The editor's line numbers: Output's ruler (fixed lines) while Wrap Lines is off. With it on, a line can take more
+/// than one row, so the numbers follow the layout manager's line fragments on screen: one on the first row of each
+/// line, none on the rows it wraps onto, and the last number on the empty row after a final line break. The line of the
+/// first row on screen is counted from a kept anchor (a line start and the line breaks before it), so a redraw counts
+/// only the text between the two, not the file from its top.
+final class EditorLineRuler: ConflictLineRuler {
+    var wraps = false {
+        didSet { if wraps != oldValue { needsDisplay = true } }
+    }
+
+    /// A line start (UTF-16 offset) and the line breaks before it; nil until counted, and after an edit before it.
+    private var anchor: (location: Int, breaks: Int)?
+
+    /// The text changed from `location` on: an anchor at or after it is dropped.
+    func textChanged(from location: Int) {
+        if let anchor, location <= anchor.location { self.anchor = nil }
+    }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard wraps else { return super.drawHashMarksAndLabels(in: rect) }
+        guard let textView, let layoutManager = textView.layoutManager, let container = textView.textContainer,
+              let text = textView.textStorage?.mutableString, lineCount > 0
+        else { return }
+        let origin = textView.textContainerOrigin
+        let visible = textView.visibleRect.offsetBy(dx: -origin.x, dy: -origin.y)
+        let numberHeight = DiffLayout.numberFont.boundingRectForFont.height
+        let attributes = Self.attributes
+        /// Draws `number` level with `row`, a line fragment in the container's coordinates.
+        func draw(_ number: Int, at row: NSRect) {
+            let y = convert(NSPoint(x: 0, y: row.minY + origin.y), from: textView).y
+            NSString(string: "\(number)").draw(
+                in: NSRect(x: 0, y: y + (row.height - numberHeight) / 2, width: ruleThickness - 8, height: row.height),
+                withAttributes: attributes)
+        }
+        let glyphs = layoutManager.glyphRange(forBoundingRect: visible, in: container)
+        var number: Int?
+        if glyphs.length > 0 {
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { row, _, _, rowGlyphs, _ in
+                let start = layoutManager.characterIndexForGlyph(at: rowGlyphs.location)
+                guard start == 0 || Self.isLineBreak(text.character(at: start - 1)) else { return }
+                let line = number.map { $0 + 1 } ?? self.breaks(before: start, in: text) + 1
+                number = line
+                draw(line, at: row)
+            }
+        }
+        // The empty row after a final line break (or of an empty file) is not a line fragment.
+        let extra = layoutManager.extraLineFragmentRect
+        if layoutManager.extraLineFragmentTextContainer != nil, extra.maxY > visible.minY, extra.minY < visible.maxY {
+            draw(lineCount, at: extra)
+        }
+    }
+
+    /// The line breaks before `location` (a line start), counted from the anchor, which then moves there.
+    private func breaks(before location: Int, in text: NSString) -> Int {
+        let breaks = if let anchor, location >= anchor.location {
+            anchor.breaks + EditorTextController.lineBreaks(
+                in: text, range: NSRange(location: anchor.location, length: location - anchor.location))
+        } else if let anchor {
+            anchor.breaks - EditorTextController.lineBreaks(
+                in: text, range: NSRange(location: location, length: anchor.location - location))
+        } else {
+            EditorTextController.lineBreaks(in: text, range: NSRange(location: 0, length: location))
+        }
+        anchor = (location, breaks)
+        return breaks
+    }
+
+    /// A character the text view breaks lines at, as `EditorTextController.lineBreaks` counts them (a CR's LF is
+    /// never the last character before a row).
+    private static func isLineBreak(_ character: unichar) -> Bool {
+        switch character {
+        case 0x0A, 0x0D, 0x2028, 0x2029, 0x85: true
+        default: false
+        }
     }
 }
 

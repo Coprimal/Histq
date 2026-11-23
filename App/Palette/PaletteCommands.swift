@@ -283,7 +283,7 @@ enum PaletteCommands {
         default:
             break
         }
-        // The open diff's file: the header's File History and Blame (`DiffHeaderCard`).
+        // The open file's File History and Blame (no buttons for them on the diff: here and in the file's menus).
         if let target = session.openFile, !target.isConflict, target.file.kind != .untracked, !target.file.isSubmodule {
             let rev: String? = switch target.source {
             case .wip: nil

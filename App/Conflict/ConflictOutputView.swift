@@ -303,8 +303,8 @@ final class ConflictTextView: NSTextView {
 }
 
 /// Output's line numbers, at the same fixed line positions as the text, over the line's band (the text view's) with its
-/// edge bar at the far left.
-final class ConflictLineRuler: NSRulerView {
+/// edge bar at the far left. The file editor's ruler (`EditorLineRuler`) is one too, with a mode for wrapped lines.
+class ConflictLineRuler: NSRulerView {
     var tints: [Int: (fill: NSColor, bar: NSColor?)] = [:]
     var lineCount = 0 {
         didSet { fitThickness() }
@@ -317,7 +317,7 @@ final class ConflictLineRuler: NSRulerView {
         if abs(ruleThickness - thickness) > 0.5 { ruleThickness = thickness }
     }
 
-    private weak var textView: NSTextView?
+    private(set) weak var textView: NSTextView?
 
     init(textView: NSTextView) {
         self.textView = textView
@@ -336,7 +336,7 @@ final class ConflictLineRuler: NSRulerView {
     private static var styles: [CGFloat: [NSAttributedString.Key: Any]] = [:]
 
     /// The numbers' attributes at the current code font size, made once per size.
-    private static var attributes: [NSAttributedString.Key: Any] {
+    static var attributes: [NSAttributedString.Key: Any] {
         let metrics = DiffLayout.metrics
         if let attributes = styles[metrics.size] { return attributes }
         let style = NSMutableParagraphStyle()
