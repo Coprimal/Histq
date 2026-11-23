@@ -839,6 +839,9 @@ struct CapsuleTabs<Tab: Hashable>: View {
     /// With `compact`: the track is filled lighter than the card it sits on (`Palette.inputSurface`), so it reads as a
     /// control on a dark card instead of vanishing into the card's own color (a pull request's tabs, user 2026-11-17).
     var raisedTrack = false
+    /// With `compact`: the track stands alone on the panel beside the cards, filled as one (`cardSurface`), as the
+    /// sidebar's full-width track (the open file's mode tabs beside its action panel, user 2026-11-22).
+    var cardTrack = false
     @Namespace private var namespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -861,7 +864,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
         }
         // Also animates a selection set from code (menus, shortcuts).
         .animation(animation, value: selection)
-        .modifier(SurfaceTrack(compact: compact, small: small, fillsWidth: fillsWidth, raised: raisedTrack))
+        .modifier(SurfaceTrack(compact: compact, small: small, fillsWidth: fillsWidth || cardTrack,
+                               raised: raisedTrack))
     }
 
     /// The gap between a `fillsWidth` (or `compact`) track's edge and its tabs, on every side.

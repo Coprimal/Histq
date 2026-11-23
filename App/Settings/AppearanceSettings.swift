@@ -291,7 +291,7 @@ struct AppearanceSettings: View {
                     }
                 } label: {
                     Text("Code font size")
-                    SettingsHint("The diff, Blame and the conflict editor.")
+                    SettingsHint("The diff, the file editor, Blame and the conflict editor.")
                 }
                 .settingsSearchAnchor("Code font size")
                 SettingsDivider()

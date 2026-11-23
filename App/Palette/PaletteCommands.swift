@@ -92,14 +92,14 @@ enum PaletteCommands {
         let session = model.actionSession
         if let session {
             repository(session, into: &snapshot)
-            // A search of the tab's tracked files; the pick opens its history or blame as File History and Blame do.
+            // A search of the tab's files; the pick opens its history or blame as File History and Blame do, or the
+            // file editor.
             if let tabID = model.selectedTabID {
-                for (blame, title, image) in [(false, "File History…", "clock.arrow.circlepath"),
-                                              (true, "Blame…", "person.text.rectangle")] {
-                    snapshot.add(title, detail: "Search the repo's files", section: .repository,
-                                 systemImage: image) { [weak model] in
+                for mode in [FileSearchMode.history, .blame, .edit] {
+                    snapshot.add("\(mode.title)…", detail: "Search the repo's files", section: .repository,
+                                 systemImage: mode.systemImage) { [weak model] in
                         UITiming.select("file search")
-                        model?.presentModal(.fileSearch(tabID: tabID, blame: blame))
+                        model?.presentModal(.fileSearch(tabID: tabID, mode: mode))
                     }
                 }
             }
@@ -283,7 +283,7 @@ enum PaletteCommands {
         default:
             break
         }
-        // The open diff's file: the header's File History and Blame (`DiffHeaderCard`).
+        // The open file's File History and Blame (no buttons for them on the diff: here and in the file's menus).
         if let target = session.openFile, !target.isConflict, target.file.kind != .untracked, !target.file.isSubmodule {
             let rev: String? = switch target.source {
             case .wip: nil

@@ -1,15 +1,40 @@
-// The palette's File History… and Blame…: a small modal with one field that searches the tab's tracked files (`git ls-files` in
-// its worktree). The card shows in the frame of the palette row; the files are read meanwhile, and a dropdown of the
-// best matches shows under the field as soon as something is typed, ranked like the palette's rows
-// (`CommandPaletteModel`). Up and Down move the highlight, Return or a click opens the file's history or blame, as its
-// File History and Blame menu items do, and closes the modal.
+// The palette's File History…, Blame… and Edit File…: a small modal with one field that searches the tab's tracked files
+// (`git ls-files` in its worktree; Edit File… adds the untracked ones). The card shows in the frame of the palette row; the
+// files are read meanwhile, and a dropdown of the best matches shows under the field as soon as something is typed,
+// ranked like the palette's rows (`CommandPaletteModel`). Up and Down move the highlight, Return or a click opens the
+// file's history or blame, as its File History and Blame menu items do, or the file editor, and closes the modal.
 import AppKit
 import SwiftUI
 
+/// What a pick in `FileSearchModal` opens.
+enum FileSearchMode {
+    /// File History…: the file's history from HEAD.
+    case history
+    /// Blame…: the file's blame at the working tree.
+    case blame
+    /// Edit File…: the file of the working tree in the file editor.
+    case edit
+
+    var title: String {
+        switch self {
+        case .history: "File History"
+        case .blame: "Blame"
+        case .edit: "Edit File"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .history: "clock.arrow.circlepath"
+        case .blame: "person.text.rectangle"
+        case .edit: "square.and.pencil"
+        }
+    }
+}
+
 struct FileSearchModal: View {
     let session: RepoSession
-    /// Blame… (the file's blame at the working tree); else File History… (its history from HEAD).
-    let blame: Bool
+    let mode: FileSearchMode
     let onClose: () -> Void
 
     @State private var query = ""
@@ -22,9 +47,7 @@ struct FileSearchModal: View {
     private static let listHeight: CGFloat = 260
 
     var body: some View {
-        ModalCard(title: blame ? "Blame" : "File History",
-                  subtitle: "Type a file name of \(session.url.lastPathComponent).",
-                  systemImage: blame ? "person.text.rectangle" : "clock.arrow.circlepath", width: 520) {
+        ModalCard(title: mode.title, subtitle: subtitle, systemImage: mode.systemImage, width: 520) {
             VStack(spacing: PanelContainerMetrics.padding) {
                 TextField("File", text: $query, prompt: Text("Search files"))
                     .textFieldStyle(.modal)
@@ -59,6 +82,11 @@ struct FileSearchModal: View {
         .task { await load() }
         .onChange(of: query) { files?.query = query }
         .onChange(of: files?.ranked) { _, ranked in selectedID = ranked?.first?.id }
+    }
+
+    private var subtitle: String {
+        let repo = session.url.lastPathComponent
+        return mode == .edit ? "Type the name of a text file of \(repo) to edit." : "Type a file name of \(repo)."
     }
 
     private var results: some View {
@@ -105,25 +133,73 @@ struct FileSearchModal: View {
     /// Reads the tracked files off the main actor, then ranks them for what is typed by then.
     private func load() async {
         do {
-            let paths = try await session.trackedFiles()
+            let tracked = try await session.trackedFiles()
+            let paths = mode == .edit ? editablePaths(tracked) : tracked
             var snapshot = PaletteSnapshot()
             for path in paths {
                 snapshot.add((path as NSString).lastPathComponent, detail: path, section: .files,
-                             systemImage: "doc.text") { [session, blame, onClose] in
-                    // The modal first: `selectTool` may ask before leaving the conflict editor.
+                             systemImage: "doc.text") { [session, mode, onClose] in
+                    // The modal first: `selectTool` and `openEditor` may ask before leaving an unsaved editor.
                     onClose()
-                    session.selectTool(blame ? .blame(path: path, rev: nil)
-                        : .fileHistory(path: path, rev: nil, follow: false))
+                    switch mode {
+                    case .history: session.selectTool(.fileHistory(path: path, rev: nil, follow: false))
+                    case .blame: session.selectTool(.blame(path: path, rev: nil))
+                    case .edit: session.openEditor(path: path)
+                    }
                 }
             }
             files = CommandPaletteModel(snapshot: snapshot, query: query)
             UITiming.content("file search \(paths.count)")
+            #if DEBUG
+            await debugPick()
+            #endif
         } catch is CancellationError {
             return
         } catch {
             loadError = error.localizedDescription
         }
     }
+
+    /// Edit File…'s files: the tracked ones and the status's untracked ones, less those the editor can never open, told
+    /// from what is at hand (`RepoSession.canEdit`, no read): images, files deleted in the working tree or conflicted,
+    /// submodules, untracked folders. A file its read refuses (binary, not UTF-8, too large, a symlink) stays: the
+    /// editor then says why.
+    private func editablePaths(_ tracked: [String]) -> [String] {
+        let entries = session.status.value?.entries ?? []
+        // Each path's entry, looked up once (the first, as `wipFileTarget` takes it): no scan of the status per file.
+        let changed = Dictionary(entries.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        let submodules = Set(session.submodules.value?.map(\.path) ?? [])
+        let untracked = entries.lazy.filter { $0.kind == .untracked }.map(\.path)
+        // By extension, once each: an unchanged file is an image or not by `FileTarget.isImage`'s rule alone.
+        var images: [String: Bool] = [:]
+        return (tracked + untracked).filter { path in
+            if submodules.contains(path) { return false }
+            if let entry = changed[path] {
+                return session.canEdit(session.wipFileTarget(path, entry: entry), entry: entry)
+            }
+            let ext = (path as NSString).pathExtension
+            if let isImage = images[ext] { return !isImage }
+            let isImage = FileTarget(source: .wip, file: FileChange(kind: .modified, path: path)).isImage
+            images[ext] = isImage
+            return !isImage
+        }
+    }
+
+    #if DEBUG
+    /// QA: `-HistqFileSearchPick YES` picks the first ranked row once the files are read, as Return does, and logs
+    /// `filesearch pick <path>` (or that no row matched) to `operations.txt`.
+    private func debugPick() async {
+        guard AppState.launchFlag("-HistqFileSearchPick") == "YES", !query.isEmpty, let files else { return }
+        // The rank runs off the main actor.
+        for _ in 0..<250 {
+            if files.isRankFresh { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard let item = files.ranked.first else { return RepoMenus.debugLog("filesearch pick: no row for \(query)") }
+        RepoMenus.debugLog("filesearch pick \(item.detail)")
+        activate(item)
+    }
+    #endif
 
     // MARK: Selection
 

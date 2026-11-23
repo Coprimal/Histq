@@ -99,6 +99,8 @@ final class WindowModel {
             guard oldValue != selectedTabID else { return }
             oldValue.flatMap { sessions[$0] }?.isShown = false
             selectedTabID.flatMap { sessions[$0] }?.isShown = true
+            // Leaving a tab ends its close or quit prompt as Cancel does (`revealUnsavedTab` selects before it asks).
+            oldValue.flatMap { sessions[$0] }?.cancelPinnedLeave()
             // Modifier clicks never switch the shown tab: any switch ends the multi-selection.
             clearSelection()
             // The new tab's session may not exist yet (`activateSelectedTab` makes it next): it goes first anyway.
@@ -470,9 +472,9 @@ final class WindowModel {
 
     /// After a tab switch (`TabContent`, in the view update's turn): the shown tab's view takes the keyboard, so no
     /// hidden tab's view keeps it (its arrows, Esc, ⌘Z and typing would act on a repo not shown). The open graph
-    /// search, else panel 2's diff or blame, else the graph while panel 2 shows it, else nothing (the window). A target
-    /// not in the window or not shown yet gets one main-queue hop, the window holding the focus meanwhile. Logs
-    /// `focus <repo> <kind>` once.
+    /// search, else panel 2's diff (or its Edit tab's text) or blame, else the graph while panel 2 shows it, else
+    /// nothing (the window). A target not in the window or not shown yet gets one main-queue hop, the window holding
+    /// the focus meanwhile. Logs `focus <repo> <kind>` once.
     func focusShownTab(repo: String) {
         guard let window else { return }
         let targets = focusTargets()
@@ -500,7 +502,11 @@ final class WindowModel {
         let showsGraph = session.openFile == nil && session.openHosted == nil && session.openTool == nil
         var targets: [(kind: String, view: NSView?)] = []
         if showsGraph, session.graphSearch.isOpen { targets.append(("search", session.graphSearch.field)) }
-        if let file = session.openFile, !file.isConflict { targets.append(("diff", session.diffTable)) }
+        if let file = session.openFile, !file.isConflict {
+            // The Edit tab unmounts the diff: its text view, not a table no longer in the window.
+            let edits = session.editor?.showsEditor == true && session.isEditedFile(file)
+            targets.append(edits ? ("editor", session.editorTextView) : ("diff", session.diffTable))
+        }
         if session.openFile == nil, case .blame? = session.openTool { targets.append(("blame", session.blameTable)) }
         if showsGraph, session.log.value != nil { targets.append(("graph", session.graphSearch.table)) }
         return targets
@@ -558,6 +564,12 @@ final class WindowModel {
         session.refreshWorktreeTab = { [weak self] path in
             let key = ProfileStore.repoKey(URL(filePath: path))
             self?.sessions.values.first { ProfileStore.repoKey($0.url) == key }?.refresh(scope: [.refs])
+        }
+        session.asksBeforeRemovingWorktree = { [weak self] path, retry in
+            guard let self else { return false }
+            let removed = Self.worktreeKey(URL(filePath: path, directoryHint: .isDirectory))
+            let ids = tabs.filter { $0.repoURL.map(Self.worktreeKey) == removed }.map(\.id)
+            return revealUnsavedTab(in: ids, retry: retry)
         }
     }
 
@@ -878,6 +890,35 @@ final class WindowModel {
         selectTab(at: index)
     }
 
+    /// A close or quit of the tabs `ids` (a tab, its window, its workspace, the app) while one of them has unsaved
+    /// edits (`RepoSession.hasUnsavedEdits`): shows the first such tab (Settings closed, the page home, the tab
+    /// selected), closes what would show over its leave prompt (the palette, a window modal, the tab's own modals)
+    /// and raises the prompt, pinned (`RepoSession.askBeforeClosing`): its Save or Don't Save runs `retry`. True when
+    /// it asked (or holds `retry` for a write in flight): the close waits; false when nothing in `ids` is unsaved.
+    func revealUnsavedTab(in ids: [Tab.ID], retry: @escaping @MainActor () -> Void) -> Bool {
+        guard let id = ids.first(where: { sessions[$0]?.hasUnsavedEdits == true }), let session = sessions[id],
+              let index = tabs.firstIndex(where: { $0.id == id })
+        else { return false }
+        selectTab(at: index)
+        closePalette()
+        closeModal()
+        session.closeModals()
+        return session.askBeforeClosing(then: retry)
+    }
+
+    /// The tab close paths' guard: `revealUnsavedTab` for the tabs `ids`, the first unsaved one in the tabs' order.
+    /// Its Save or Don't Save runs `retry` (the close again) and closes the window when that returns false (no tab
+    /// left); a close with no Bool to return gives true. A group's popover (Close Group, Move Group to New Window)
+    /// closes when it asks: its group stays.
+    private func asksBeforeClosing(_ ids: Set<Tab.ID>, retry: @escaping @MainActor (WindowModel) -> Bool) -> Bool {
+        let asked = revealUnsavedTab(in: tabs.map(\.id).filter(ids.contains)) { [weak self] in
+            guard let self else { return }
+            if !retry(self) { closeWindow() }
+        }
+        if asked { groupPopoverID = nil }
+        return asked
+    }
+
     /// Closes the selected tab and selects its neighbor. Returns false when no tab is left (the window closes).
     func closeSelectedTab() -> Bool {
         guard let id = selectedTabID else { return !tabs.isEmpty }
@@ -892,8 +933,16 @@ final class WindowModel {
         closeTab(id: id, archiving: false)
     }
 
-    /// `closeTab(id:)`, or with `archiving` the tab goes to the archive instead of the stack ⇧⌘T reopens.
+    /// `closeTab(id:)`, or with `archiving` the tab goes to the archive instead of the stack ⇧⌘T reopens. Unsaved edits
+    /// in it ask first (true: the close waits for the prompt).
     private func closeTab(id: Tab.ID, archiving: Bool) -> Bool {
+        if asksBeforeClosing([id], retry: { $0.closeTab(id: id, archiving: archiving) }) { return true }
+        return closeTabNow(id: id, archiving: archiving)
+    }
+
+    /// `closeTab(id:archiving:)` with no unsaved-edits prompt: a removed worktree's tabs close as they are (the removal
+    /// asked first, `RepoSession.asksBeforeRemovingWorktree`).
+    private func closeTabNow(id: Tab.ID, archiving: Bool) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
         let wasWelcome = tabs[index].repoURL == nil
         // The window closes when this is its last tab and no archive is left (the tab itself may go to it) for a
@@ -925,7 +974,9 @@ final class WindowModel {
     /// A tab's menu › Close Other Tabs: every tab but `id`, which is selected. The popped-out archived tab stays.
     func closeOtherTabs(_ id: Tab.ID) {
         let popped = archivedOut?.id
-        closeTabs(keeping: id) { $0 != id && $0 != popped }
+        let others = Set(tabs.map(\.id).filter { $0 != id && $0 != popped })
+        if asksBeforeClosing(others, retry: { $0.closeOtherTabs(id); return true }) { return }
+        closeTabs(keeping: id) { others.contains($0) }
     }
 
     /// A tab's menu › Close Tabs to the Right (Below, in the vertical tabs): the tabs after `id`; `id` is selected when
@@ -933,6 +984,7 @@ final class WindowModel {
     func closeTabs(after id: Tab.ID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         let after = Set(tabs[(index + 1)...].filter { !$0.archived }.map(\.id))
+        if asksBeforeClosing(after, retry: { $0.closeTabs(after: id); return true }) { return }
         closeTabs(keeping: id) { after.contains($0) }
     }
 
@@ -950,6 +1002,7 @@ final class WindowModel {
     /// caller closes the window): when they are every tab, a Welcome tab takes their place if the archive or the closed
     /// groups are not empty.
     func closeTabs(_ ids: Set<Tab.ID>) -> Bool {
+        if asksBeforeClosing(ids, retry: { $0.closeTabs(ids) }) { return true }
         let open = closeTabs(ids, batch: nil)
         clearSelection()
         return open
@@ -997,16 +1050,13 @@ final class WindowModel {
 
     /// A worktree removed from another tab (its sidebar or graph menu): its tabs in this window close, and ⇧⌘T forgets
     /// them, as its folder is gone, and so do the archive (a popped-out tab of that worktree included) and the closed
-    /// groups (a group left with no repo tab goes). The window's last tab stays (it shows "Repo not found").
+    /// groups (a group left with no repo tab goes). The window's last tab stays (it shows "Repo not found"). A tab with
+    /// unsaved edits had its leave prompt before the removal ran (`RepoSession.asksBeforeRemovingWorktree`).
     private func closeRemovedWorktreeTabs(_ path: String) {
-        // The folder is gone: its parent's symlinks are resolved (git's `/private/tmp/…` is a tab's `/tmp/…`).
-        func key(_ url: URL) -> String {
-            let url = url.standardizedFileURL
-            return url.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: url.lastPathComponent).path
-        }
+        let key = Self.worktreeKey
         let removed = key(URL(filePath: path, directoryHint: .isDirectory))
         for tab in tabs where tab.repoURL.map(key) == removed && tabs.count > 1 {
-            _ = closeTab(id: tab.id)
+            _ = closeTabNow(id: tab.id, archiving: false)
         }
         // After the loop: a popped-out tab of that worktree was just stowed, and the archive forgets it too.
         archivedTabs.removeAll { $0.path.map { key(URL(filePath: $0)) } == removed }
@@ -1017,6 +1067,13 @@ final class WindowModel {
             return group.tabs.contains { $0.path != nil } ? group : nil
         }
         if kept != closedGroups { closedGroups = kept }
+    }
+
+    /// A worktree folder's path as a removal compares it, the same before and after the folder is gone: its parent's
+    /// symlinks are resolved (git's `/private/tmp/…` is a tab's `/tmp/…`).
+    private static func worktreeKey(_ url: URL) -> String {
+        let url = url.standardizedFileURL
+        return url.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: url.lastPathComponent).path
     }
 
     /// Removes the tab at `index` with its session and state; a repo tab goes on the stack ⇧⌘T reopens, with its
@@ -1261,6 +1318,7 @@ final class WindowModel {
     /// front. The popped tab never joins a group, so its repo is not read.
     func openArchived(at index: Int) {
         guard archivedTabs.indices.contains(index), let path = archivedTabs[index].path else { return }
+        if let out = archivedOut, asksBeforeClosing([out.id], retry: { $0.openArchived(path: path) }) { return }
         // The entry first, then the tab popped out before: stowing it shifts the archive's indices.
         let entry = archivedTabs.remove(at: index)
         navigation.page = .home
@@ -1297,6 +1355,12 @@ final class WindowModel {
         guard entry.path != nil else { return }
         closedTabs.append(ClosedTab(saved: entry, repoKey: nil, group: nil, batch: nil, index: normalEnd))
         if closedTabs.count > Self.closedTabsLimit { closedTabs.removeFirst() }
+    }
+
+    /// `openArchived(at:)` for the entry of the repo folder `path`, wherever it is now (the retry of its prompt); true.
+    private func openArchived(path: String) -> Bool {
+        if let index = archivedIndex(of: path) { openArchived(at: index) }
+        return true
     }
 
     /// The index in `archivedTabs` of the entry for the repo folder `path`; nil when the archive has none.
@@ -1645,6 +1709,7 @@ final class WindowModel {
         guard !groupHoldsAllNormalTabs(id) else { return }
         let ids = Set(tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }.map(\.id))
         guard !ids.isEmpty else { return }
+        if asksBeforeClosing(ids, retry: { $0.deleteGroup(id); return true }) { return }
         _ = closeTabs(ids, batch: UUID())
         normalize()
         clearSelection()
@@ -1659,6 +1724,7 @@ final class WindowModel {
         }
         let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }
         guard !members.isEmpty else { return }
+        if asksBeforeClosing(Set(members.map(\.id)), retry: { $0.moveGroupToNewWindow(id); return true }) { return }
         // Saved before the removals: `saved(_:)` reads the sessions and the restored state.
         let entries = members.map(saved)
         let table = [SavedTabGroup(id: group.id, name: group.name, color: group.colorIndex, collapsed: nil)]
@@ -1687,6 +1753,7 @@ final class WindowModel {
         guard let group = groups.first(where: { $0.id == id }) else { return }
         let members = tabs.filter { $0.groupID == id && !$0.pinned && !$0.archived }
         guard !members.isEmpty else { return }
+        if asksBeforeClosing(Set(members.map(\.id)), retry: { $0.closeGroup(id); return true }) { return }
         // Saved before the removals: `saved(_:)` reads the sessions and the restored state.
         let entries = members.map { tab in
             var entry = saved(tab)
@@ -2101,6 +2168,30 @@ final class WindowModel {
                 }
                 try? await Task.sleep(for: .milliseconds(100))
                 session?.selectConflict(path)
+            }
+        case .edit:
+            guard let session = selectedSession, let path = request.value else {
+                Self.logger.error("-HistqSelect edit: no repo tab or no path")
+                return
+            }
+            // As `conflict:`: the WIP first, then the file opens in the editor (its Edit tab), so the `select file`
+            // line is timed like a user's click. `-HistqEditorRun` then runs once the editor shows its text.
+            session.selectGraph([.wip])
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let session else { return }
+                session.openEditor(path: path)
+                if session.editor?.path != path {
+                    Self.logger.error("-HistqSelect edit: \(path, privacy: .public) can't be edited")
+                }
+                #if DEBUG
+                if let spec = AppState.launchFlag("-HistqEditorRun") { session.runLaunchEditor(spec) }
+                #endif
             }
         case .commitfile:
             // `commitfile:<sha>:<path>`: a click on the commit's row, then on the file in its file list once the

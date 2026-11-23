@@ -1242,6 +1242,22 @@ final class DiffRowView: NSTableRowView {
     }
 }
 
+/// The syntax token colors, shared by the diff lines, the blame view and the file editor.
+@MainActor
+enum SyntaxColors {
+    static func color(_ kind: TokenKind) -> NSColor {
+        switch kind {
+        case .keyword: Palette.syntaxKeyword
+        case .string: Palette.syntaxString
+        case .number: Palette.syntaxNumber
+        case .comment: Palette.syntaxComment
+        case .type: Palette.syntaxType
+        case .punctuation: Palette.syntaxPunctuation
+        case .plain: Palette.diffText
+        }
+    }
+}
+
 /// How a line draws, shared by the unified and the split cells: its band, its numbers, the sign, the changed part's
 /// mark, then the text in syntax colors, on one line (clipped by the cell) or wrapped.
 @MainActor
@@ -1302,18 +1318,6 @@ enum DiffLineDrawing {
 
     /// The attributes of wrapped text (what `DiffLayout.wrappedLines` measures with).
     static var wrappedText: [NSAttributedString.Key: Any] { style.wrappedText }
-
-    private static func color(_ kind: TokenKind) -> NSColor {
-        switch kind {
-        case .keyword: Palette.syntaxKeyword
-        case .string: Palette.syntaxString
-        case .number: Palette.syntaxNumber
-        case .comment: Palette.syntaxComment
-        case .type: Palette.syntaxType
-        case .punctuation: Palette.syntaxPunctuation
-        case .plain: Palette.diffText
-        }
-    }
 
     /// The selected part of a line's text, and whether the selection goes on past its end (to the next line).
     struct Selection: Equatable {
@@ -1414,7 +1418,7 @@ enum DiffLineDrawing {
         let text = NSMutableAttributedString(string: row.text, attributes: wraps ? style.wrappedText : style.text)
         let length = text.length
         for token in row.tokens where NSMaxRange(token.range) <= length {
-            text.addAttribute(.foregroundColor, value: color(token.kind), range: token.range)
+            text.addAttribute(.foregroundColor, value: SyntaxColors.color(token.kind), range: token.range)
         }
         let emphasisFill = row.kind == .added ? Palette.diffAddedEmphasis : Palette.diffRemovedEmphasis
         if let wrapWidth = spots.wrapWidth {

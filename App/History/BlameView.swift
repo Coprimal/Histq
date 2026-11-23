@@ -659,19 +659,6 @@ private final class BlameLineCellView: NSView {
             .font: BlameLayout.authorFont, .foregroundColor: Palette.conflictA,
         ]
         static let separator = NSColor.white.withAlphaComponent(0.08)
-
-        /// `DiffLineCellView`'s token colors.
-        static func color(_ kind: TokenKind) -> NSColor {
-            switch kind {
-            case .keyword: Palette.syntaxKeyword
-            case .string: Palette.syntaxString
-            case .number: Palette.syntaxNumber
-            case .comment: Palette.syntaxComment
-            case .type: Palette.syntaxType
-            case .punctuation: Palette.syntaxPunctuation
-            case .plain: Palette.diffText
-            }
-        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -721,7 +708,7 @@ private final class BlameLineCellView: NSView {
         let text = NSMutableAttributedString(string: row.text, attributes: wrapLines ? style.wrappedText : style.text)
         let length = text.length
         for token in row.tokens where NSMaxRange(token.range) <= length {
-            text.addAttribute(.foregroundColor, value: Style.color(token.kind), range: token.range)
+            text.addAttribute(.foregroundColor, value: SyntaxColors.color(token.kind), range: token.range)
         }
         if wrapLines {
             text.draw(with: NSRect(x: layout.textX, y: 0, width: layout.wrapWidth(column: bounds.width), height: height),

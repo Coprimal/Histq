@@ -367,10 +367,10 @@ enum LayoutPreset: String {
 }
 
 /// A DEBUG `-HistqSelect <kind>[:<value>]` request (`tab:1`, `wip`, `commit:<sha>`, `file:src/app.swift`,
-/// `settings:profiles`). The window routes it through the same `select` path a click takes.
+/// `edit:src/app.swift`, `settings:profiles`). The window routes it through the same `select` path a click takes.
 struct SelectRequest: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
-        case tab, wip, commit, commits, branch, branchclick, worktree, openworktree, file, conflict, commitfile,
+        case tab, wip, commit, commits, branch, branchclick, worktree, openworktree, file, conflict, edit, commitfile,
             history, settings, sidebar, pr, issue, prbadge, archive, submodule, closegroup, closedgroup
     }
 

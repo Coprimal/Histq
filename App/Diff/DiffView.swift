@@ -1,9 +1,9 @@
-// A file's diff in panel2, in place of the graph (Esc or close returns to it): a controls card (Follow renames in a file
-// history, the file's actions, Previous / Next Change, Ignore Whitespace, Wrap Lines, close), then each part in its own
-// card: one card per side of the change (a WIP file's Unstaged and Staged changes, a commit's changes), or a card that
-// says why there are no lines (binary, too large, no change). The first card's header is the file's row (its status,
-// folder / name, +N −M, Diff / Split / Full file). An image whose diff is binary shows its versions before and after
-// the change instead of lines. The diff loads off the main actor; until then the card's body is a skeleton.
+// A file's diff in panel2, in place of the graph (Esc or close returns to it): a controls card (Follow renames in a
+// file history, Diff / Split / Full file / Edit, Checkout This Version, Previous / Next Change, Ignore Whitespace, Wrap
+// Lines, close), then each part in its own card: one card per side of the change (a WIP file's Unstaged and Staged
+// changes, a commit's changes), or a card that says why there are no lines (binary, too large, no change). The first
+// card's header is the file's row (its status, folder / name, +N −M). An image whose diff is binary shows its versions
+// before and after the change instead of lines. The diff loads off the main actor; until then the card's body is a skeleton.
 import HistqCore
 import ImageIO
 import SwiftUI
@@ -159,7 +159,7 @@ struct DiffView: View {
         Group {
             switch session.fileDiff {
             case .idle, .loading:
-                DiffCard(header: DiffFileHeader(session: session, target: target, counts: .loading),
+                DiffCard(header: DiffFileHeader(target: target, counts: .loading),
                          contentPadding: target.isImage || target.file.isSubmodule ? SettingsMetrics.cardPadding : 0) {
                     PlaceholderCard(
                         token: session.fileToken, detail: session.fileDetail,
@@ -177,7 +177,7 @@ struct DiffView: View {
                     // A cached diff replaces the one on screen without a placeholder in between.
                     .onChange(of: session.fileToken) { UITiming.content(session.fileDetail) }
             case .failed(let message):
-                DiffCard(header: DiffFileHeader(session: session, target: target, counts: .none),
+                DiffCard(header: DiffFileHeader(target: target, counts: .none),
                          contentPadding: SettingsMetrics.cardPadding) {
                     FileNotice(systemImage: "exclamationmark.triangle", message: message)
                 }
@@ -189,7 +189,7 @@ struct DiffView: View {
 }
 
 /// A card of the open file. The first one's header is the file's row (`DiffFileHeader`), at a titled `SectionCard`
-/// header's insets and a little taller (`DiffFileHeader.height`), so the mode switch clears its edges; a later one (`header` nil) has its side's title and `accessory` instead. The body keeps
+/// header's insets and height; a later one (`header` nil) has its side's title and `accessory` instead. The body keeps
 /// one place in the view tree either way, so a side that becomes the first card or stops being it (a quiet reload after
 /// a stage or an unstage) keeps its line table and the table's scroll offset.
 private struct DiffCard<Content: View, Accessory: View>: View {
@@ -240,8 +240,8 @@ extension DiffCard where Accessory == EmptyView {
 }
 
 /// The open file's row, the header of its first card: the status icon, "folder / name" (and the card's side, such as
-/// Unstaged, when a second card follows), then the card's line counts and the mode switch. As the row narrows, the
-/// folder truncates (the tooltip has the full path), then hides.
+/// Unstaged, when a second card follows), then the card's line counts (the mode switch is in the controls card). As
+/// the row narrows, the folder truncates (the tooltip has the full path), then hides.
 private struct DiffFileHeader: View {
     enum Counts {
         /// A skeleton until the diff is in.
@@ -250,7 +250,6 @@ private struct DiffFileHeader: View {
         case lines(additions: Int, deletions: Int)
     }
 
-    let session: RepoSession
     let target: FileTarget
     /// The card's side, shown when the file has more than one card.
     var side: String?
@@ -260,32 +259,16 @@ private struct DiffFileHeader: View {
 
     /// The narrowest truncated folder; narrower, it hides.
     private static let folderMinWidth: CGFloat = 40
-    /// Between the counts and the mode switch: wider than the title's gaps.
-    private static let controlSpacing: CGFloat = 12
-    /// Taller than a `SectionCard` header (32), so the small mode switch (30) has room above and below it.
-    static let height: CGFloat = 40
 
     var body: some View {
-        @Bindable var session = session
-        let detail = session.fileDiff.value
-        HStack(spacing: Self.controlSpacing) {
-            HStack(spacing: 8) {
-                title
-                Spacer(minLength: 8)
-            }
+        HStack(spacing: 8) {
+            title
+            Spacer(minLength: 8)
             countsView
                 .fixedSize()
-            // An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
-            if !target.file.isSubmodule,
-               !target.isImage || detail.map({ if case .sections = $0.content { true } else { false } }) == true
-            {
-                CapsuleTabs(selection: $session.diffMode, tabs: DiffMode.allCases, title: { Text($0.title) },
-                            compact: true, small: true)
-                    .fixedSize()
-            }
         }
         .padding(.horizontal, SettingsMetrics.cardPadding + extraPadding)
-        .frame(height: Self.height)
+        .frame(height: SectionCardMetrics.headerHeight)
         .padding(.top, extraVerticalPadding * 2 / 3)
     }
 
@@ -357,10 +340,33 @@ private struct DiffFileHeader: View {
     }
 }
 
-/// The card above the open file's diff: Follow renames (while a file history shows), the file's actions (Checkout This
-/// Version for a commit's file, File History and Blame for a tracked one), then Previous / Next Change, Ignore
-/// Whitespace, Wrap Lines and close (Esc). As the card narrows, Checkout This Version turns into an icon, then the
-/// file's actions fold into a "…" menu. `target` nil (a file history with no diff open yet): Follow renames and close.
+/// The action panel above an open file (`DiffControlsCard`, the editor's controls card), the card beside the mode tabs'
+/// own track (user 2026-11-22): a capsule as tall as the track, its `rowHeight` row of buttons centered in it. The
+/// icon buttons (`iconSize`, a 28 pt hover circle) sit `(height - iconSize) / 2` from the ends, so the last one's circle
+/// is concentric with the capsule's round end and keeps 4 pt clear of its edge (user 2026-11-23).
+struct ActionPanelRow: ViewModifier {
+    /// The panel's height: the mode tabs' compact track beside it (24 + 2 × `CapsuleTabs.fillInset`).
+    static let height: CGFloat = 36
+    /// The buttons' row.
+    static let rowHeight: CGFloat = 26
+    /// An icon button's frame and glyph size.
+    static let iconSize: CGFloat = 18
+    static let iconFont: CGFloat = 12
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, (Self.height - Self.iconSize) / 2)
+            .padding(.vertical, (Self.height - Self.rowHeight) / 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(GlassCard(cornerRadius: Self.height / 2))
+    }
+}
+
+/// The row above the open file's diff: the mode tabs in their own track (Diff / Split / Full file, and Edit for an
+/// editable file; none for a submodule or an image's versions), then the action panel (`ActionPanelRow`) with Follow
+/// renames (while a file history shows), Checkout This Version (a commit's file), then Previous / Next Change, Ignore
+/// Whitespace, Wrap Lines and close (Esc). As the panel narrows, Checkout This Version turns into an icon. File History and Blame are in the file's context menu and the
+/// command palette. `target` nil (a file history with no diff open yet): Follow renames and close, at the same height.
 struct DiffControlsCard: View {
     let session: RepoSession
     let target: FileTarget?
@@ -372,22 +378,25 @@ struct DiffControlsCard: View {
     private static let buttonSpacing: CGFloat = 12
 
     var body: some View {
-        SectionCard(nil, contentPadding: 8) {
-            ViewThatFits(in: .horizontal) {
-                row { actions(checkoutAsIcon: false) }
-                row { actions(checkoutAsIcon: true) }
-                row { actionsMenu }
+        HStack(spacing: SectionCardMetrics.spacing) {
+            if let target, hasModes(target) {
+                FileModeTabs(session: session, target: target)
+                    .fixedSize()
             }
-            .frame(height: 26)
-            .padding(.leading, 4)
+            ViewThatFits(in: .horizontal) {
+                row(checkoutAsIcon: false)
+                row(checkoutAsIcon: true)
+            }
+            .frame(height: ActionPanelRow.rowHeight)
+            .modifier(ActionPanelRow())
         }
     }
 
-    private func row(@ViewBuilder _ actions: () -> some View) -> some View {
+    private func row(checkoutAsIcon: Bool) -> some View {
         HStack(spacing: Self.groupSpacing) {
             followRenames
-            HStack(spacing: Self.buttonSpacing) {
-                actions()
+            if let target {
+                checkout(target, asIcon: checkoutAsIcon)
             }
             Spacer(minLength: 0)
             if target != nil {
@@ -395,6 +404,12 @@ struct DiffControlsCard: View {
             }
             closeButton
         }
+    }
+
+    /// An image's versions have no modes; an image type git diffs as text (XBM, EPS) keeps them.
+    private func hasModes(_ target: FileTarget) -> Bool {
+        !target.file.isSubmodule && (!target.isImage
+            || session.fileDiff.value.map({ if case .sections = $0.content { true } else { false } }) == true)
     }
 
     /// The file history's "Follow renames" switch (reads the history again).
@@ -414,63 +429,19 @@ struct DiffControlsCard: View {
         }
     }
 
-    /// Checkout This Version (a commit's file), as a button or an icon, then File History and Blame (a tracked file; no
-    /// Blame for an image, neither for a submodule).
-    @ViewBuilder private func actions(checkoutAsIcon: Bool) -> some View {
-        if let target {
-            let file = target.file
-            if case .commit = target.source, file.kind != .deleted {
-                if checkoutAsIcon {
-                    iconButton("arrow.down.doc", help: "Checkout This Version") { session.checkoutVersion(of: target) }
-                } else {
-                    Button("Checkout This Version") { session.checkoutVersion(of: target) }
-                        .buttonStyle(RowTextButtonStyle())
-                        .lineLimit(1)
-                        .fixedSize()
-                        .help("Replace the file in the working tree with this commit's version")
+    /// Checkout This Version (a commit's file that the commit did not delete), as a button or an icon.
+    @ViewBuilder private func checkout(_ target: FileTarget, asIcon: Bool) -> some View {
+        if case .commit = target.source, target.file.kind != .deleted {
+            if asIcon {
+                Self.iconButton("arrow.down.doc", help: "Checkout This Version") {
+                    session.checkoutVersion(of: target)
                 }
-            }
-            if file.kind != .untracked, !file.isSubmodule {
-                iconButton("clock.arrow.circlepath", help: "File History") {
-                    session.selectTool(.fileHistory(path: file.path, rev: rev(of: target), follow: false))
-                }
-                if file.kind != .deleted, !target.isImage {
-                    iconButton("person.text.rectangle", help: "Blame") {
-                        session.selectTool(.blame(path: file.path, rev: rev(of: target)))
-                    }
-                }
-            }
-        }
-    }
-
-    /// The same actions in a "…" menu, for a narrow card.
-    @ViewBuilder private var actionsMenu: some View {
-        if let target {
-            let file = target.file
-            let checkout: [MenuEntry] = if case .commit = target.source, file.kind != .deleted {
-                [.action("Checkout This Version") { [session, target] in session.checkoutVersion(of: target) }]
             } else {
-                []
-            }
-            let tools = file.kind == .untracked || file.isSubmodule ? []
-                : RepoMenus.fileTools(path: file.path, rev: rev(of: target),
-                                      blame: file.kind != .deleted && !target.isImage, session: session)
-            let entries = checkout + tools
-            if !entries.isEmpty {
-                Menu {
-                    MenuEntriesView(entries: entries)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                }
-                .menuStyle(.button)
-                .buttonStyle(RowIconButtonStyle())
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("More Actions")
-                .accessibilityLabel("More file actions")
+                Button("Checkout This Version") { session.checkoutVersion(of: target) }
+                    .buttonStyle(RowTextButtonStyle())
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("Replace the file in the working tree with this commit's version")
             }
         }
     }
@@ -480,18 +451,19 @@ struct DiffControlsCard: View {
         let hasLines = session.fileDiff.value.map { if case .sections = $0.content { true } else { false } } ?? false
         return HStack(spacing: Self.groupSpacing) {
             HStack(spacing: Self.buttonSpacing) {
-                iconButton("arrow.up", help: "Previous Change") { session.jumpToChange(.previous) }
-                iconButton("arrow.down", help: "Next Change") { session.jumpToChange(.next) }
+                Self.iconButton("arrow.up", help: "Previous Change") { session.jumpToChange(.previous) }
+                Self.iconButton("arrow.down", help: "Next Change") { session.jumpToChange(.next) }
             }
             .disabled(!hasLines)
             HStack(spacing: Self.buttonSpacing) {
-                iconButton("paragraphsign",
-                           help: session.ignoresWhitespace ? "Show Whitespace Changes"
-                               : "Ignore Whitespace Changes (the hunks can't be staged or reverted then)",
-                           isOn: session.ignoresWhitespace) {
+                Self.iconButton("paragraphsign",
+                                help: session.ignoresWhitespace ? "Show Whitespace Changes"
+                                    : "Ignore Whitespace Changes (the hunks can't be staged or reverted then)",
+                                isOn: session.ignoresWhitespace) {
                     session.setIgnoresWhitespace(!session.ignoresWhitespace)
                 }
-                iconButton("text.alignleft", help: wrapLines ? "Don't Wrap Lines" : "Wrap Lines", isOn: wrapLines) {
+                Self.iconButton("text.alignleft", help: wrapLines ? "Don't Wrap Lines" : "Wrap Lines",
+                                isOn: wrapLines) {
                     wrapLines.toggle()
                 }
             }
@@ -500,12 +472,12 @@ struct DiffControlsCard: View {
 
     private var closeButton: some View {
         Button {
-            session.closeFile()
+            session.closeFileAsking()
         } label: {
             Image(systemName: "xmark")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: ActionPanelRow.iconFont, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
+                .frame(width: ActionPanelRow.iconSize, height: ActionPanelRow.iconSize)
         }
         .buttonStyle(RowIconButtonStyle())
         .keyboardShortcut(.cancelAction)
@@ -516,29 +488,19 @@ struct DiffControlsCard: View {
     }
 
     /// An icon button (a tool, a jump, a switch shown on with the selected fill and the accent color), the close
-    /// button's look.
-    private func iconButton(_ icon: String, help: String, isOn: Bool? = nil,
+    /// button's look. The editor's controls card uses it for its Wrap Lines.
+    static func iconButton(_ icon: String, help: String, isOn: Bool? = nil,
                             _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             IconImage(icon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: ActionPanelRow.iconFont, weight: .semibold))
                 .foregroundStyle(isOn == true ? Color.accentColor : .secondary)
-                .frame(width: 22, height: 22)
+                .frame(width: ActionPanelRow.iconSize, height: ActionPanelRow.iconSize)
         }
         .buttonStyle(RowIconButtonStyle(isOn: isOn == true))
         .help(help)
         .accessibilityLabel(help)
         .accessibilityAddTraits(isOn == true ? .isSelected : [])
-    }
-
-    /// The commit of a commit's or stash's file, a compare's head; nil for a WIP file or a compare with the working
-    /// tree (HEAD's history, the working tree's blame).
-    private func rev(of target: FileTarget) -> String? {
-        switch target.source {
-        case .wip: nil
-        case .commit(let hash): hash
-        case .compare(_, let head): head
-        }
     }
 
     /// Stacked, not opened from a tool: close (and Esc) hides the bottom pane under the graph, which stays in view.
@@ -636,7 +598,7 @@ private struct DiffContent: View {
     }
 
     private func header(side: String?, counts: DiffFileHeader.Counts) -> DiffFileHeader {
-        DiffFileHeader(session: session, target: target, side: side, counts: counts)
+        DiffFileHeader(target: target, side: side, counts: counts)
     }
 
     private func noticeCard(_ notice: some View) -> some View {
@@ -681,7 +643,7 @@ private struct DiffContent: View {
                 jump: session.diffJump, isFirst: isFirst,
                 onTable: { [session] table in if isFirst { session.diffTable = table } },
                 onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
-                onClose: { [session] in session.closeFile() })
+                onClose: { [session] in session.closeFileAsking() })
                 .frame(maxHeight: .infinity)
         }
     }
