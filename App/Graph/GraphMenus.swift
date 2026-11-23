@@ -550,7 +550,6 @@ enum RepoMenus {
             .action("Checkout \(name)", enabled: !isCurrent) { checkout(.local(name), session) },
             .separator,
         ]
-        let pullReason = createPullRequestUnavailableReason(head: .local(name), base: nil, session)
         entries += pull(name, isCurrent: isCurrent, upstream: upstream, session)
         entries += [
             .action("Push \(name)", enabled: session.pushTarget(of: name) != nil) { session.push(branch: name) },
@@ -563,12 +562,14 @@ enum RepoMenus {
             .action("Add Worktree for \(name)…") {
                 session.worktreeForm = WorktreeForm(source: .branch(name), label: name)
             },
-            // In its own group, so it is not lost among Pull / Push.
+            // In its own group, so it is not lost among Pull / Push. On another branch, first the checked-out
+            // branch into it (e.g. a feature branch into main), then this branch into the default branch.
             .separator,
-            .action("Create Pull Request…", enabled: pullReason == nil, toolTip: pullReason) {
-                openCreatePullRequest(head: .local(name), base: nil, session)
-            },
         ]
+        if let current, !isCurrent {
+            entries.append(pullRequestEntry(head: .local(current), base: .local(name), session))
+        }
+        entries.append(pullRequestEntry(head: .local(name), base: nil, session))
         if let current, !isCurrent {
             entries += [.separator] + integrate(name, ref: ref, commit: branch?.commit, into: current,
                                                 twoWay: true, session)
@@ -638,10 +639,7 @@ enum RepoMenus {
         }
         // Only a branch of the GitHub remote can be a pull request's head.
         if let branch, branch.remote == session.github.api?.remote {
-            let reason = createPullRequestUnavailableReason(head: .remote(name), base: nil, session)
-            entries += [.separator, .action("Create Pull Request…", enabled: reason == nil, toolTip: reason) {
-                openCreatePullRequest(head: .remote(name), base: nil, session)
-            }]
+            entries += [.separator, pullRequestEntry(head: .remote(name), base: nil, session)]
         }
         if let branch {
             entries += [.separator, deleteRemote(branch, session)]
@@ -1122,14 +1120,7 @@ enum RepoMenus {
                 session.run(write, title: title)
             })
         }
-        let pullReason = createPullRequestUnavailableReason(head: source, base: target, session)
-        entries += [
-            .separator,
-            .action("Create Pull Request from \(sourceName) into \(targetName)…", enabled: pullReason == nil,
-                    toolTip: pullReason) {
-                openCreatePullRequest(head: source, base: target, session)
-            },
-        ]
+        entries += [.separator, pullRequestEntry(head: source, base: target, session)]
         return entries
     }
 
@@ -1154,10 +1145,49 @@ enum RepoMenus {
         }
     }
 
+    /// The menu entry that opens the Create Pull Request form for `head` into `base` (else the default branch). A local
+    /// head GitHub lacks, or with commits its branch there lacks, is pushed first ("Push X and Create Pull Request…"):
+    /// the form opens once the push went through, never after a refused one. The title names the head when it is not
+    /// plain from the menu: with a base, or a local branch that is not checked out.
+    static func pullRequestEntry(head: SidebarItem, base: SidebarItem?, _ session: RepoSession) -> MenuEntry {
+        let headName = head.branchName ?? ""
+        let into = base?.branchName.map { " into \($0)" } ?? ""
+        let namesHead = if base != nil { true } else if case .local(let name) = head { name != session.currentBranch }
+            else { false }
+        let push: RepoSession.Write? = if case .local(let name) = head { pushBeforePullRequest(name, session) } else { nil }
+        let reason = createPullRequestUnavailableReason(head: head, base: base, session, pushing: push != nil)
+        guard let push, case .push(let branch, let remote, let remoteBranch, _, _) = push else {
+            return .action("Create Pull Request\(namesHead ? " from \(headName)" : "")\(into)…", enabled: reason == nil, toolTip: reason) {
+                openCreatePullRequest(head: head, base: base, session)
+            }
+        }
+        return .action("Push \(headName) and Create Pull Request\(into)…", enabled: reason == nil, toolTip: reason) {
+            session.run(push, title: "Push \(branch) to \(remote)/\(remoteBranch ?? branch)") {
+                openCreatePullRequest(head: head, base: base, session)
+            }
+        }
+    }
+
+    /// The push the local branch `name` needs before it can head a pull request: to the GitHub remote when GitHub has
+    /// no branch for it (setting the upstream when it has none), or to its upstream there when it is ahead of it. Nil
+    /// when GitHub has all its commits, when its branch there has commits it lacks (that push would be refused), when
+    /// its branch there is only a same-name branch that is not its upstream (ahead/behind count against the upstream
+    /// only), or without GitHub.
+    static func pushBeforePullRequest(_ name: String, _ session: RepoSession) -> RepoSession.Write? {
+        guard let remote = session.github.api?.remote,
+              let branch = session.refs.value?.localBranches.first(where: { $0.name == name }) else { return nil }
+        guard let gitHubName = gitHubBranch(of: .local(name), session) else {
+            return .push(branch: name, remote: remote, remoteBranch: nil, setUpstream: branch.upstream == nil,
+                         forceWithLease: nil)
+        }
+        guard branch.upstream == "\(remote)/\(gitHubName)", branch.ahead > 0, branch.behind == 0 else { return nil }
+        return .push(branch: name, remote: remote, remoteBranch: gitHubName, setUpstream: false, forceWithLease: nil)
+    }
+
     /// Why Create Pull Request… is disabled for `head` (into `base`, or the default branch): GitHub not connected, or a
-    /// branch that is not on the GitHub remote (push it first; Histq does not push from this menu). nil when it can run.
-    static func createPullRequestUnavailableReason(head: SidebarItem, base: SidebarItem?, _ session: RepoSession)
-        -> String?
+    /// head that is not on the GitHub remote and is not `pushing` there first. nil when it can run.
+    static func createPullRequestUnavailableReason(head: SidebarItem, base: SidebarItem?, _ session: RepoSession,
+                                                   pushing: Bool = false) -> String?
     {
         guard let remote = session.github.api?.remote else {
             return switch session.github.connection {
@@ -1167,10 +1197,15 @@ enum RepoMenus {
             }
         }
         guard let headName = head.branchName else { return "Only a branch can be a pull request's head." }
-        guard let headBranch = gitHubBranch(of: head, session) else {
+        let headBranch = gitHubBranch(of: head, session)
+        if headBranch == nil, !pushing {
             return "Push \(headName) to \(remote) first: GitHub opens a pull request only from a branch it has."
         }
-        guard let base else { return nil }
+        guard let base else {
+            // The form's base is another branch of the GitHub remote: without one, its Base picker is empty.
+            let others = session.refs.value?.remoteBranches.filter { $0.remote == remote && localName(of: $0) != headBranch }
+            return others?.isEmpty == false ? nil : "\(remote) has no other branch for \(headName) to go into."
+        }
         guard let baseBranch = gitHubBranch(of: base, session) else {
             return "\(base.branchName ?? "The target") is not on \(remote): a pull request goes into a branch GitHub has."
         }

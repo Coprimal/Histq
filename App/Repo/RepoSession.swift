@@ -5554,8 +5554,9 @@ final class RepoSession: Identifiable {
 
     /// Runs a user operation (the action bar, a menu, a dialog) through `perform` without blocking: it is in `running`
     /// when this returns (with `key`, the action bar button that shows it). Its outcome shows as a toast
-    /// (`postToast`); a failure also goes to `failure` (`report`), which a new operation clears.
-    func run(_ write: Write, title: String, key: ActionBarAction? = nil) {
+    /// (`postToast`); a failure also goes to `failure` (`report`), which a new operation clears. `then` runs after a
+    /// write that went through (not stopped), once the status and the refs are read again; never after a failure.
+    func run(_ write: Write, title: String, key: ActionBarAction? = nil, then: (@MainActor () -> Void)? = nil) {
         let timingID = UITiming.nextOpID()
         UITiming.opClick(timingID, write, repo: url.lastPathComponent)
         nextOperationID &+= 1
@@ -5630,6 +5631,7 @@ final class RepoSession: Identifiable {
                 {
                     autoUpdateSubmodules(submodulesBefore.backend, before: submodulesBefore.recorded)
                 }
+                if outcome == .done, !stopped { then?() }
             } catch GitError.autostashKept(let hash) {
                 // A warning, not a failure, and before any cancellation check: the changes may be only in that stash.
                 postToast(.warning(title, detail: "Changes kept in stash \(hash.prefix(7))."))

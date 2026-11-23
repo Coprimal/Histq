@@ -1,7 +1,8 @@
 // The Create Pull Request form, an in-window `ModalCard` (never a sheet), opened from a branch's menu, a remote branch's
 // menu or a branch badge dropped on another (`RepoMenus.openCreatePullRequest`). Head and base are branches of the
-// tab's GitHub remote (GitHub opens a pull request only between branches it has); the head is the clicked branch, the
-// base the dropped-on branch or the repository's default branch. The title starts as the head's name made readable,
+// tab's GitHub remote (GitHub opens a pull request only between branches it has); the head is the clicked branch (or,
+// from another branch's menu, the checked-out branch, pushed first when GitHub lacks it or some of its commits), the
+// base that other branch, the dropped-on branch or the repository's default branch. The title starts as the head's name made readable,
 // then becomes the commit's subject when the head has exactly one commit past the base (read with git from the
 // remote-tracking branches, the commits GitHub compares), while the user has not typed one. The body has Write and a
 // local Preview (inline markdown only, no request: `POST /markdown` would send the draft to GitHub on every switch).
