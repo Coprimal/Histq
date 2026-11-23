@@ -125,10 +125,13 @@ struct AppearanceSettings: View {
                 SettingsDivider()
                 Label {
                     Text("Real avatars send each author's email hash to gravatar.com and GitHub logins to GitHub "
-                        + "to download their pictures. GitHub's bots always show theirs, and your remotes always "
-                        + "show their owners' logos (the owner's name goes to GitHub, GitLab or Bitbucket). GitHub "
-                        + "accounts on the PRs tab and the pull request and issue pages always show their GitHub "
-                        + "avatars (their logins go to GitHub).")
+                        + "to download their pictures. GitHub's bots always show theirs, and your remotes their "
+                        + "owners' logos (the owner's name goes to GitHub, GitLab or Bitbucket). On the PRs tab and "
+                        + "the pull request and issue pages, GitHub accounts always show their avatars, other hosts' "
+                        + "accounts only with real avatars. Avatars come over https only, from gravatar.com and these "
+                        + "hosts: GitHub (github.com, GitHub Enterprise Server), GitLab (gitlab.com, your GitLab "
+                        + "Self-Managed host), Bitbucket (bitbucket.org, your Bitbucket Data Center host) and Azure "
+                        + "DevOps (dev.azure.com).")
                         .font(.settingsCaption)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {

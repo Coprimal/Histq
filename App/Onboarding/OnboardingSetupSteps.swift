@@ -231,7 +231,7 @@ final class OnboardingProfileDraft {
     }
 }
 
-/// The GitHub step: the default profile's GitHub account (sign in, a token or the GitHub CLI's, as in Settings ›
+/// The GitHub step: the default profile's accounts (GitHub, GitLab or Bitbucket, added as in Settings ›
 /// Integrations). With no profile yet, a way back to the profile step. Once connected, the clone step follows.
 struct OnboardingGitHubStep: View {
     let model: OnboardingModel
@@ -258,9 +258,9 @@ struct OnboardingGitHubStep: View {
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                 }
             case .loaded(let store):
-                GitHubConnectSection(profileID: store.defaultProfileID, noProfile: .init(
+                HostingAccountsSection(profileID: store.defaultProfileID, noProfile: .init(
                     title: "No profile yet",
-                    hint: "A GitHub account belongs to a profile, which keeps your commit name and email.",
+                    hint: "An account belongs to a profile, which keeps your commit name and email.",
                     button: "Create a profile first", action: { model.back() }))
             }
         }
@@ -271,7 +271,7 @@ struct OnboardingGitHubStep: View {
     }
 }
 
-/// The clone step, shown only while the GitHub step's profile has a GitHub account: the Welcome page's clone form,
+/// The clone step, shown only while the GitHub step's profile has an account: the Welcome page's clone form,
 /// listing the account's repositories (or a URL typed in). The clone opens when the onboarding ends.
 struct OnboardingCloneStep: View {
     let model: OnboardingModel
@@ -317,15 +317,15 @@ struct OnboardingCloneStep: View {
         }
     }
 
-    /// The profile the section shows (the default one, else the first) and its GitHub account, if any.
+    /// The profile the section shows (the default one, else the first) and its first account, if any.
     private struct ShownAccount: Equatable {
         let profileID: UUID?
-        let account: Profile.GitHubAccount?
+        let account: HostingAccount?
     }
 
     private static func account(in store: ProfileStore) -> ShownAccount {
         let profile = OnboardingModel.gitHubProfile(in: store)
-        return ShownAccount(profileID: profile?.id, account: profile?.github)
+        return ShownAccount(profileID: profile?.id, account: profile?.accounts.first)
     }
 
     /// The clone form follows the account: its repositories once it is connected (unless a URL is typed), the URL
@@ -333,9 +333,9 @@ struct OnboardingCloneStep: View {
     private func useSource(for shown: ShownAccount) {
         let welcome = model.welcome
         guard !welcome.isCloning else { return }
-        if let id = shown.profileID, shown.account != nil {
+        if let id = shown.profileID, let account = shown.account {
             guard welcome.cloneSource != .url || welcome.cloneURL.isEmpty else { return }
-            welcome.cloneSource = .github(profileID: id)
+            welcome.cloneSource = .github(profileID: id, host: account.host)
         } else {
             welcome.cloneSource = .url
         }

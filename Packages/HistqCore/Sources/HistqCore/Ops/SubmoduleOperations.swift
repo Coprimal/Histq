@@ -140,17 +140,17 @@ extension GitOperations {
     }
 
     /// The submodule step of a clone: initializes and clones every submodule of the new repo at `folder`, level by
-    /// level (`updateSubmodules([], initialize: true, recursive: true)`), as `profile` with `token` only where the
-    /// gate lets each one have it. `progress` gets one line when it starts. Without `.gitmodules` it runs no git.
+    /// level (`updateSubmodules([], initialize: true, recursive: true)`), as `profile` with `credentials` only where
+    /// the gate lets each one have them. `progress` gets one line when it starts. Without `.gitmodules` it runs no git.
     /// Returns and throws as `updateSubmodules`.
     @discardableResult
     public static func cloneSubmodules(
-        in folder: URL, runner: GitRunner, profile: Profile?, base: [String: String], token: String?,
+        in folder: URL, runner: GitRunner, profile: Profile?, base: [String: String], credentials: [GitCredential],
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> [SkippedSubmodule] {
         guard hasGitmodules(folder) else { return [] }
         progress("Cloning submodules…")
-        let ops = GitOperations(runner: runner, cwd: folder, profile: profile, base: base, token: token)
+        let ops = GitOperations(runner: runner, cwd: folder, profile: profile, base: base, credentials: credentials)
         return try await ops.updateSubmodules([], initialize: true, recursive: true)
     }
 
@@ -409,7 +409,8 @@ extension GitOperations {
     /// Checks out the recorded `commit` of one submodule of this level, fetching only what is missing.
     private func updateOne(name: String, path: String, commit: String) async throws {
         let decision = await tokenDecision(for: .submodule(path: path))
-        let attach = decision == .attach && credential != nil
+        // The credentials the gate matched for this submodule's URLs; nil = no token.
+        let matched: [GitCredential]? = if case .attach(let set) = decision, credential != nil { set } else { nil }
         guard let repo = try await submoduleRepo(name: name, path: path) else {
             // Not cloned yet: the clone is the network step, so `submodule update` itself runs in the gated
             // environment. The new repo has no config of its own yet and `.network` runs no hook, so nothing the
@@ -417,7 +418,7 @@ extension GitOperations {
             _ = try await withheldExec(decision) {
                 try await exec(
                     ["--literal-pathspecs", "submodule", "update", "--checkout", "--", path], network: true,
-                    environment: attach ? credential.map { tokenEnvironment(.fetch, $0) } : nil)
+                    environment: matched.flatMap { set in credential.map { tokenEnvironment(.fetch, $0, set) } })
             }
             return
         }
@@ -425,7 +426,7 @@ extension GitOperations {
         // the token; the checkout then runs without it and without fetching.
         let sub = submodule(at: repo)
         if await !sub.hasCommit(commit) {
-            let fetchEnv = attach ? sub.credential.map { sub.tokenEnvironment(.fetch, $0) } : nil
+            let fetchEnv = matched.flatMap { set in sub.credential.map { sub.tokenEnvironment(.fetch, $0, set) } }
             // As `git submodule update`: a submodule's URL is not the user's own choice.
             let notFromUser = ["GIT_PROTOCOL_FROM_USER": "0"]
             try await withheldExec(decision) {
@@ -461,7 +462,8 @@ extension GitOperations {
             runner: runner, cwd: folder, env: env.merging(ceiling) { $1 },
             networkEnv: networkEnv.merging(ceiling) { $1 },
             credential: credential.map {
-                NetworkCredential(profile: $0.profile, base: $0.base.merging(ceiling) { $1 }, token: $0.token)
+                NetworkCredential(
+                    profile: $0.profile, base: $0.base.merging(ceiling) { $1 }, credentials: $0.credentials)
             },
             networkTimeout: networkTimeout)
     }

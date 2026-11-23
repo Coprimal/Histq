@@ -12,7 +12,7 @@
 // with `-c core.editor=true`, so git never waits for an editor.
 //
 // Token: with a `credential`, each network operation asks `GitInvocation.networkToken` first (inside its lane, for
-// the remotes it contacts) and gets the GitHub token only when the gate lets it; see `networkExec`.
+// the remotes it contacts) and gets the tokens of the hosts it reaches only when the gate lets it; see `networkExec`.
 //
 // Undo: with a `journal`, the operations the journal can take back (commit, amend, checkout, reset, merge, rebase,
 // cherry-pick, revert, am, local branch create/delete/rename, discard) are snapshotted before and after inside their
@@ -59,6 +59,10 @@ public struct NetworkTokenWithheld: Error, Equatable, Sendable {
         case repoNetworkConfig(keys: [String])
         /// The repository has submodules and these recursion keys are on.
         case submoduleRecursion(keys: [String])
+        /// A fetch of a remote whose URL is `https://<host>/…` for a host the profile has no account for.
+        case noAccount(host: String)
+        /// A fetch of the remote `name`, which a remote group of the same name (`remotes.<name>`) shadows.
+        case remoteGroup(name: String)
     }
 
     public let reason: Reason
@@ -67,6 +71,26 @@ public struct NetworkTokenWithheld: Error, Equatable, Sendable {
     public init(reason: Reason, error: GitError) {
         self.reason = reason
         self.error = error
+    }
+}
+
+/// A fetch of several remotes in which some failed (`fetchAll`): the others were still fetched. Each failure is git's
+/// own (`GitError`), or `NetworkTokenWithheld` when its sign-in failed after the token was kept back.
+public struct RemoteFetchFailure: Error, Sendable {
+    public struct Failure: Sendable {
+        public let remote: String
+        public let error: any Error
+
+        public init(remote: String, error: any Error) {
+            self.remote = remote
+            self.error = error
+        }
+    }
+
+    public let failures: [Failure]
+
+    public init(failures: [Failure]) {
+        self.failures = failures
     }
 }
 
@@ -96,16 +120,16 @@ public struct GitOperations: Sendable {
         case profileDefault, sign, noSign
     }
 
-    /// The profile's GitHub token and what the token gate needs to decide, command by command, whether git gets it.
+    /// The profile's account tokens and what the token gate needs to decide, command by command, which git gets.
     public struct NetworkCredential: Sendable {
         public var profile: Profile?
         public var base: [String: String]
-        public var token: String
+        public var credentials: [GitCredential]
 
-        public init(profile: Profile?, base: [String: String], token: String) {
+        public init(profile: Profile?, base: [String: String], credentials: [GitCredential]) {
             self.profile = profile
             self.base = base
-            self.token = token
+            self.credentials = credentials
         }
     }
 
@@ -117,10 +141,12 @@ public struct GitOperations: Sendable {
     /// The environment of network operations (fetch, pull, push and their compound steps) that do not get the
     /// token. Defaults to `env`.
     public let networkEnv: [String: String]
-    /// The token for network operations that pass the gate (`networkExec`); nil = never a token.
+    /// The tokens for network operations that pass the gate (`networkExec`); nil = never a token.
     public let credential: NetworkCredential?
     /// The time limit of one network command (git is stopped after it).
     public let networkTimeout: Duration
+    /// When set, network commands stop at this instant instead (`withNetworkDeadline`).
+    private var networkDeadline: ContinuousClock.Instant?
     /// Records the undoable operations of this worktree; nil = no undo.
     public let journal: UndoJournal?
 
@@ -137,15 +163,16 @@ public struct GitOperations: Sendable {
         self.journal = journal
     }
 
-    /// The usual setup for `profile`: `env` (and `networkEnv`) is its write environment, and `token` goes only to the
-    /// network operations the gate lets have it.
+    /// The usual setup for `profile`: `env` (and `networkEnv`) is its write environment, and each of `credentials`
+    /// goes only to the network operations the gate lets have it.
     public init(
-        runner: GitRunner, cwd: URL, profile: Profile?, base: [String: String], token: String? = nil,
+        runner: GitRunner, cwd: URL, profile: Profile?, base: [String: String], credentials: [GitCredential] = [],
         networkTimeout: Duration = .seconds(600), journal: UndoJournal? = nil
     ) {
         self.init(
             runner: runner, cwd: cwd, env: GitInvocation.environment(profile: profile, base: base, access: .write),
-            credential: token.map { NetworkCredential(profile: profile, base: base, token: $0) },
+            credential: credentials.isEmpty
+                ? nil : NetworkCredential(profile: profile, base: base, credentials: credentials),
             networkTimeout: networkTimeout, journal: journal)
     }
 
@@ -332,17 +359,151 @@ public struct GitOperations: Sendable {
 
     // MARK: - Fetch, pull, push
 
-    /// `fetch --all`, with the token only when every remote passes the gate (all or nothing: fetching the remotes
-    /// in two groups would mean redoing `skipFetchAll`, remote groups and partial failures); otherwise without it.
+    /// Fetches every remote `fetch --all` goes through (`fetchAllRemotes`), one `fetch [--prune] <remote>` each in
+    /// `git remote` order, so the gate decides for each remote on its own: a remote on an account's host gets that
+    /// host's token, any other runs with the user's own helpers. A remote that fails does not stop the others; then the
+    /// repo's one remote throws its error as is, several throw `RemoteFetchFailure` naming each failed remote. All the
+    /// remotes share one `networkTimeout`, as the single `fetch --all` did: each git fetch gets the time left once its
+    /// remote passed the gate, and a remote reached after it fails with `GitError.timeout`. A remote named like a remote
+    /// group (`remotes.<name>`) runs without the token, as git runs it (the group's members). Git failing to list the
+    /// remotes falls back to one `fetch --all` without the token.
     public func fetchAll(prune: Bool = true) async throws {
         try await lane { ops in
-            // Listed for the gate alone: without a token it has nothing to decide.
-            let remotes = ops.credential == nil
-                ? []
-                : try? await GitInvocation.remoteNames(runner: ops.runner, cwd: ops.cwd, env: ops.env)
-            try await ops.networkExec(
-                ["fetch", "--all"] + (prune ? ["--prune"] : []), target: remotes.map { .fetch(remotes: $0) })
+            let deadline = ContinuousClock.now + ops.networkTimeout
+            guard let remotes = try? await Self.fetchAllRemotes(runner: ops.runner, cwd: ops.cwd, env: ops.env) else {
+                try await ops.networkExec(["fetch", "--all"] + (prune ? ["--prune"] : []), target: nil)
+                return
+            }
+            var failures: [RemoteFetchFailure.Failure] = []
+            for remote in remotes {
+                guard deadline - .now > .zero else {
+                    failures.append(.init(remote: remote, error: GitError.timeout))
+                    continue
+                }
+                do {
+                    try await ops.withNetworkDeadline(deadline).fetchRemote(remote, prune: prune)
+                } catch let error as GitError {
+                    failures.append(.init(remote: remote, error: error))
+                } catch let error as NetworkTokenWithheld {
+                    failures.append(.init(remote: remote, error: error))
+                }
+            }
+            guard let first = failures.first else { return }
+            if remotes.count == 1 { throw first.error }
+            throw RemoteFetchFailure(failures: failures)
         }
+    }
+
+    /// Fetches the existing remote `remote` alone (`fetch [--prune] <remote>`), through the gate like every network
+    /// command. The name must be one `git remote` lists (`team/fork` too) and not start with `-`, else
+    /// `GitOperationError.invalidRemoteName`.
+    public func fetch(remote: String, prune: Bool = true) async throws {
+        let remotes = try await GitInvocation.remoteNames(runner: runner, cwd: cwd, env: env)
+        guard !remote.hasPrefix("-"), remotes.contains(remote) else {
+            throw GitOperationError.invalidRemoteName(remote)
+        }
+        try await lane { ops in try await ops.fetchRemote(remote, prune: prune) }
+    }
+
+    /// After a pull request of `branch` was merged on the host: asks `remote` whether it still has `branch`
+    /// (`ls-remote` of `refs/heads/<branch>`, through the gate like a fetch of that remote) and, when it does not, deletes that branch's
+    /// remote-tracking ref `refs/remotes/<remote>/<branch>` alone, whatever the prune setting. True when it deleted
+    /// it; false when the remote still has the branch or there was no such ref. The names are checked as Fetch and
+    /// `fetchRefspec` check them.
+    public func pruneRemoteBranchIfDeleted(remote: String, branch: String) async throws -> Bool {
+        let remotes = try await GitInvocation.remoteNames(runner: runner, cwd: cwd, env: env)
+        guard !remote.hasPrefix("-"), remotes.contains(remote) else {
+            throw GitOperationError.invalidRemoteName(remote)
+        }
+        try await validateBranchName(branch)
+        return try await lane { ops in
+            let listed = try await ops.networkExec(
+                ["ls-remote", "--end-of-options", remote, "refs/heads/\(branch)"],
+                target: .fetch(remotes: [remote]))
+            // `<oid> TAB refs/heads/<branch>`: only an exact match counts (a pattern would also match `x/<branch>`).
+            let stillThere = listed.text.split(separator: "\n").contains { $0.hasSuffix("\trefs/heads/\(branch)") }
+            let tracking = "refs/remotes/\(remote)/\(branch)"
+            guard !stillThere,
+                  (try? await ops.exec(["rev-parse", "--verify", "--quiet", "--end-of-options", tracking])) != nil
+            else { return false }
+            try await ops.exec(["update-ref", "-d", "--end-of-options", tracking])
+            return true
+        }
+    }
+
+    /// A fetch nobody clicked (auto-fetch) of every remote `fetch --all` goes through (`fetchAllRemotes`), one
+    /// `fetch [--prune] <remote>` each in the runner's write lane, with the background fetch environment and `profile`
+    /// (a fetch is network: its SSH key). The repo may be downloaded, so its config, hooks and credential helpers run
+    /// nothing (see `GitInvocation.Access.backgroundFetch`) and no gc or maintenance runs after it. The gate decides for
+    /// each remote on its own: a remote on the host of one of `credentials` gets that host's token, any other the
+    /// user's own helpers. A remote that fails does not stop the others; then `RemoteFetchFailure` names each failed
+    /// remote with git's error, even in a repo with one remote. Listing the user's credential helpers, the remotes or
+    /// the remote groups throws before anything runs, and so does a repo with its own network config
+    /// (`GitInvocation.BackgroundFetchError.repoSetsNetworkConfig`, see `GitInvocation.credentialHelpers`): it is not
+    /// fetched until the user asks. A remote named like a remote group of any config scope (`remotes.<name>`) is left
+    /// out without a failure, since `git fetch <name>` would fetch the group's members, URLs nobody checked; a click
+    /// on Fetch still fetches it. `timeout` bounds all the remotes together, from the moment the lane is free, so a
+    /// fetch never holds the lane long: each git fetch gets the time left once its remote passed the gate, and a
+    /// remote reached after it fails with `GitError.timeout`.
+    public static func backgroundFetchAll(
+        prune: Bool, profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL,
+        credentials: [GitCredential] = [], timeout: Duration = .seconds(120)
+    ) async throws {
+        // A read environment, so a token helper is never listed and replayed as one of the user's helpers.
+        let listingEnv = GitInvocation.environment(profile: nil, base: base, access: .read(filterDrivers: []))
+        let helpers = try await GitInvocation.credentialHelpers(runner: runner, cwd: cwd, env: listingEnv)
+        let groups = try await GitInvocation.remoteGroups(runner: runner, cwd: cwd, env: listingEnv)
+        let remotes = try await fetchAllRemotes(runner: runner, cwd: cwd, env: listingEnv).filter { !groups.contains($0) }
+        try await runner.mutate {
+            let deadline = ContinuousClock.now + timeout
+            var failures: [RemoteFetchFailure.Failure] = []
+            for remote in remotes {
+                guard deadline - .now > .zero else {
+                    failures.append(.init(remote: remote, error: GitError.timeout))
+                    continue
+                }
+                var matched: [GitCredential] = []
+                if !credentials.isEmpty, case .attach(let gated) = await GitInvocation.networkToken(
+                    for: .fetch(remotes: [remote]), credentials: credentials, base: base, runner: runner, cwd: cwd)
+                {
+                    matched = gated
+                }
+                let environment = GitInvocation.environment(
+                    profile: profile, base: base, access: .backgroundFetch(credentialHelpers: helpers),
+                    credentials: matched)
+                let args = ["fetch"] + (prune ? ["--prune"] : []) + ["--end-of-options", remote]
+                // Measured after the gate, so the remotes together stay within `timeout`.
+                let remaining = deadline - .now
+                guard remaining > .zero else {
+                    failures.append(.init(remote: remote, error: GitError.timeout))
+                    continue
+                }
+                do {
+                    _ = try await runner.run(args, cwd: cwd, env: environment, timeout: remaining)
+                } catch let error as GitError {
+                    failures.append(.init(remote: remote, error: error))
+                }
+            }
+            if !failures.isEmpty { throw RemoteFetchFailure(failures: failures) }
+        }
+    }
+
+    /// The remotes `git fetch --all` goes through: `git remote`, but those whose `remote.<name>.skipFetchAll` (or its
+    /// older name `skipDefaultUpdate`) is true.
+    public static func fetchAllRemotes(runner: GitRunner, cwd: URL, env: [String: String]) async throws -> [String] {
+        let remotes = try await GitInvocation.remoteNames(runner: runner, cwd: cwd, env: env)
+        let result = try await runner.run(
+            ["config", "-z", "--type=bool", "--get-regexp", #"^remote\..*\.(skipfetchall|skipdefaultupdate)$"#],
+            cwd: cwd, env: env, timeout: .seconds(10), allowedExitCodes: [0, 1])
+        var skipped: [String: Bool] = [:]
+        // `remote.<name>.<key>\n<true|false>\0` per entry, in git's order: the last one wins.
+        for entry in result.stdout.split(separator: 0) {
+            let parts = String(decoding: entry, as: UTF8.self).split(separator: "\n", maxSplits: 1)
+            guard parts.count == 2, let dot = parts[0].lastIndex(of: ".") else { continue }
+            let name = parts[0][parts[0].index(parts[0].startIndex, offsetBy: "remote.".count)..<dot]
+            skipped[String(name)] = parts[1] == "true"
+        }
+        return remotes.filter { skipped[$0] != true }
     }
 
     /// Fetches one ref of `remote` into a local branch, never forced: `refspec` is `<ref>:<branch>`, e.g.
@@ -395,12 +556,12 @@ public struct GitOperations: Sendable {
             do {
                 let remote = ops.credential == nil ? nil : try? await ops.upstreamRemote()
                 let decision = await ops.tokenDecision(for: remote.map { .fetch(remotes: [$0]) })
-                if decision == .attach, let remote, let credential = ops.credential {
+                if case .attach(let matched) = decision, let remote, let credential = ops.credential {
                     // As `pull`, before the fetch moves the tracking ref; nil without one or without a fork point.
                     let forkPoint = mode == .rebase ? await ops.forkPoint() : nil
                     try await ops.exec(
                         ["fetch", "--end-of-options", remote], network: true,
-                        environment: ops.tokenEnvironment(.fetch, credential))
+                        environment: ops.tokenEnvironment(.fetch, credential, matched))
                     let candidates = try await ops.mergeCandidates()
                     switch mode {
                     case .fastForward: try await ops.exec(["merge"] + auto + ["--ff", "--no-edit", "FETCH_HEAD"])
@@ -1226,7 +1387,7 @@ public struct GitOperations: Sendable {
 
     /// Clones `url` into `destination` (which must not exist; its parent must), reporting git's
     /// `--progress` lines (stderr, split on `\r` and `\n`) as they arrive. `env` is
-    /// `GitInvocation.cloneEnvironment(url:profile:base:token:runner:)`. Cancelling the task stops git, and so does
+    /// `GitInvocation.cloneEnvironment(url:profile:base:credentials:runner:)`. Cancelling the task stops git, and so does
     /// `timeout` (1 h by default; nil = no limit, for huge repos).
     public static func clone(
         url: String, into destination: URL, runner: GitRunner, env: [String: String],
@@ -1472,9 +1633,14 @@ public struct GitOperations: Sendable {
         _ args: [String], stdin: Data? = nil, network: Bool = false, allowedExitCodes: Set<Int32> = [0],
         extraEnv: [String: String] = [:], environment: [String: String]? = nil
     ) async throws -> GitResult {
-        try await runner.run(
+        var timeout = network ? networkTimeout : nil
+        if network, let networkDeadline {
+            timeout = networkDeadline - .now
+            guard let left = timeout, left > .zero else { throw GitError.timeout }
+        }
+        return try await runner.run(
             args, cwd: cwd, env: (environment ?? (network ? networkEnv : env)).merging(extraEnv) { $1 }, stdin: stdin,
-            timeout: network ? networkTimeout : nil, allowedExitCodes: allowedExitCodes)
+            timeout: timeout, allowedExitCodes: allowedExitCodes)
     }
 
     // MARK: - Token
@@ -1488,35 +1654,40 @@ public struct GitOperations: Sendable {
     @discardableResult
     func networkExec(_ args: [String], target: GitInvocation.NetworkTarget?) async throws -> GitResult {
         let decision = await tokenDecision(for: target)
-        guard decision == .attach, let credential else {
+        guard case .attach(let matched) = decision, let credential else {
             return try await withheldExec(decision) { try await exec(args, network: true) }
         }
         guard case .push = target else {
-            return try await exec(args, network: true, environment: tokenEnvironment(.fetch, credential))
+            return try await exec(args, network: true, environment: tokenEnvironment(.fetch, credential, matched))
         }
         // The write environment of the credential's profile: where git finds the hook, and what the hook sees.
         let hookEnv = GitInvocation.environment(profile: credential.profile, base: credential.base, access: .write)
-        let hooks = try await GitInvocation.prePushHooksFolder(runner: runner, cwd: cwd, env: hookEnv)
+        let hooks = try await GitInvocation.prePushHooksFolder(
+            runner: runner, cwd: cwd, env: hookEnv, credentials: matched)
         defer { try? FileManager.default.removeItem(at: hooks) }
         return try await exec(
-            args, network: true, environment: tokenEnvironment(.push(hooksPath: hooks.path), credential))
+            args, network: true, environment: tokenEnvironment(.push(hooksPath: hooks.path), credential, matched))
     }
 
     func tokenDecision(for target: GitInvocation.NetworkTarget?) async -> GitInvocation.TokenDecision {
         guard let credential else { return .noToken }
         guard let target else { return .lookupFailed }
         return await GitInvocation.networkToken(
-            for: target, profile: credential.profile, token: credential.token, base: credential.base, runner: runner,
-            cwd: cwd)
+            for: target, credentials: credential.credentials, base: credential.base, runner: runner, cwd: cwd)
     }
 
-    func tokenEnvironment(_ kind: GitInvocation.NetworkKind, _ credential: NetworkCredential) -> [String: String] {
+    /// The token-carrying environment of `kind` with `matched` alone: the credentials the gate's `.attach` gave for
+    /// this command, never the whole set of `credential`.
+    func tokenEnvironment(
+        _ kind: GitInvocation.NetworkKind, _ credential: NetworkCredential, _ matched: [GitCredential]
+    ) -> [String: String] {
         GitInvocation.environment(
-            profile: credential.profile, base: credential.base, access: .network(kind), token: credential.token)
+            profile: credential.profile, base: credential.base, access: .network(kind), credentials: matched)
     }
 
-    /// Runs a network command that did not get the token; when the repo's own network config or its submodule
-    /// recursion kept it back and git then could not sign in, throws `NetworkTokenWithheld` so the message can say why.
+    /// Runs a network command that did not get the token; when the repo's own network config, its submodule recursion
+    /// or a remote group named like the fetched remote kept it back and git then could not sign in, throws
+    /// `NetworkTokenWithheld` so the message can say why.
     func withheldExec<T: Sendable>(_ decision: GitInvocation.TokenDecision, _ body: () async throws -> T)
         async throws -> T
     {
@@ -1528,8 +1699,50 @@ public struct GitOperations: Sendable {
             case .repoNetworkConfig(let keys): throw NetworkTokenWithheld(reason: .repoNetworkConfig(keys: keys), error: error)
             case .submoduleRecursion(let keys):
                 throw NetworkTokenWithheld(reason: .submoduleRecursion(keys: keys), error: error)
+            case .remoteGroup(let name): throw NetworkTokenWithheld(reason: .remoteGroup(name: name), error: error)
             case .attach, .noToken, .otherURL, .lookupFailed: throw error
             }
         }
+    }
+
+    /// A copy whose network commands stop at `deadline` (one remote of a Fetch All, within the shared limit): each
+    /// gets the time left when git starts, after the gate, and none starts once it passed (`GitError.timeout`).
+    private func withNetworkDeadline(_ deadline: ContinuousClock.Instant) -> GitOperations {
+        var copy = self
+        copy.networkDeadline = deadline
+        return copy
+    }
+
+    /// `fetch [--prune] <remote>` through the gate (inside the lane). When git could not sign in to a remote whose
+    /// fetch URL is `https://<host>/…` on a host the profile has no account for, throws `NetworkTokenWithheld` with
+    /// `.noAccount`, so the message can say so.
+    func fetchRemote(_ remote: String, prune: Bool) async throws {
+        do {
+            try await networkExec(
+                ["fetch"] + (prune ? ["--prune"] : []) + ["--end-of-options", remote],
+                target: .fetch(remotes: [remote]))
+        } catch let error as GitError {
+            guard case .auth = error, let host = await hostWithoutAccount(remote) else { throw error }
+            throw NetworkTokenWithheld(reason: .noAccount(host: host), error: error)
+        }
+    }
+
+    /// The host of the first fetch URL of `remote` (as git rewrites it) that is https on a host none of the profile's
+    /// accounts has (a usable token or not: an account whose token is unusable is still an account); nil when there
+    /// is none or git cannot list them.
+    private func hostWithoutAccount(_ remote: String) async -> String? {
+        let accountHosts = Set((credential?.credentials ?? []).compactMap { HostingHTTP.validatedHost($0.host) })
+        guard let urls = try? await runner.run(
+            ["remote", "get-url", "--all", "--end-of-options", remote], cwd: cwd, env: env, timeout: .seconds(10)).text
+        else { return nil }
+        for url in urls.split(separator: "\n") where url.hasPrefix("https://") {
+            let authority = url.dropFirst("https://".count).prefix { $0 != "/" }
+            // A userinfo part (`user@`) is not the host.
+            guard let host = authority.split(separator: "@").last.flatMap({ HostingHTTP.validatedHost(String($0)) }),
+                  !accountHosts.contains(host)
+            else { continue }
+            return host
+        }
+        return nil
     }
 }

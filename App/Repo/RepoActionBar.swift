@@ -144,9 +144,36 @@ extension RepoSession {
                 button: "Stash & Rebase", write: write(true), operation: title, isDestructive: false, asksAlways: true)
     }
 
+    /// After a pull request of `branch` (a branch of the tab's hosting remote) merged: when the host deleted the branch,
+    /// its remote-tracking branch goes and a toast says so. Quiet otherwise, a failure too (the merge went through). The
+    /// host may delete the branch a moment after the merge (GitLab in a background job): a branch still there is asked
+    /// about once more, 3 s later.
+    func pruneMergedBranch(_ branch: String) {
+        guard let remote = github.api?.remote else { return }
+        let host = github.kind.name
+        Task { [weak self] in
+            var outcome = try? await self?.perform(.pruneMergedBranch(branch, remote: remote))
+            if outcome == .done {
+                try? await Task.sleep(for: .seconds(3))
+                outcome = try? await self?.perform(.pruneMergedBranch(branch, remote: remote))
+            }
+            guard let self else { return }
+            UITiming.content("pr merged-branch \(outcome == .remoteBranchPruned ? "pruned" : "kept")")
+            guard outcome == .remoteBranchPruned else { return }
+            postToast(.success("\(branch) was deleted on \(host)",
+                               detail: "Its remote-tracking branch \(remote)/\(branch) is removed."))
+        }
+    }
+
     func fetchAll() {
         let prune = Preferences.defaults.bool(forKey: PrefKey.pruneOnFetch.rawValue)
         run(.fetchAll(prune: prune), title: "Fetch", key: .fetch)
+    }
+
+    /// One remote's Fetch (its menu), pruning as Fetch All does.
+    func fetch(remote: String) {
+        let prune = Preferences.defaults.bool(forKey: PrefKey.pruneOnFetch.rawValue)
+        run(.fetchRemote(remote, prune: prune), title: "Fetch \(remote)", key: .fetch)
     }
 
     /// `PrefKey.pullMode` ("fastForward", "fastForwardOnly", "rebase").
@@ -277,15 +304,41 @@ enum FailureHints {
         {
             return Hint(text: authText + " " + submoduleAuthText)
         }
+        // Fetch All with several remotes: one failed remote gets its own hint and action; several get the sign-in hint
+        // once, then each other hint and each host without an account.
+        if let fetch = failure.error as? RemoteFetchFailure {
+            let failures = fetch.failures.map {
+                OperationFailure(title: failure.title, write: failure.write, error: $0.error, message: failure.message)
+            }
+            if failures.count == 1, let only = failures.first { return hint(for: only) }
+            var texts: [String] = []
+            var notes: [String] = []
+            for item in failures {
+                if let withheld = item.error as? NetworkTokenWithheld, case .noAccount(let host) = withheld.reason {
+                    texts.append(authText)
+                    notes.append(noAccountText(host))
+                } else if let text = hint(for: item).text {
+                    texts.append(text)
+                }
+            }
+            let unique = (texts + notes).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+            return Hint(text: unique.isEmpty ? nil : unique.joined(separator: " "))
+        }
         if let withheld = failure.error as? NetworkTokenWithheld {
             switch withheld.reason {
             case .repoNetworkConfig(let keys):
                 return Hint(text: "This repository sets its own network settings (\(keys.joined(separator: ", "))), "
-                    + "so Histq did not send your GitHub token. Remove them from its config, or sign in with a "
+                    + "so Histq did not send your account token. Remove them from its config, or sign in with a "
                     + "credential helper of your own.")
             case .submoduleRecursion(let keys):
                 return Hint(text: "Submodule recursion is on (\(keys.joined(separator: ", "))), so Histq did not send "
-                    + "your GitHub token. Turn it off, or sign in with a credential helper of your own.")
+                    + "your account token. Turn it off, or sign in with a credential helper of your own.")
+            case .noAccount(let host):
+                return Hint(text: authText + " " + noAccountText(host))
+            case .remoteGroup(let name):
+                return Hint(text: "A remote group has the name \(name) (remotes.\(name) in your git config), so git "
+                    + "fetches the group's remotes and Histq did not send your account token. Rename or remove the "
+                    + "group, or sign in with a credential helper of your own.")
             }
         }
         if case GitOperationError.rebaseWouldConflict = failure.error {
@@ -326,8 +379,13 @@ enum FailureHints {
 
     private static let authText = "Git could not sign in to the remote. Check that your SSH key is loaded (ssh-add) or "
         + "that a credential helper knows this host."
+
+    /// Added to `authText` for an https remote on a host the tab's profile has no account for.
+    private static func noAccountText(_ host: String) -> String {
+        "\(host) has no account in this tab's profile: add one in Settings › Integrations, or use SSH."
+    }
     static let submoduleAuthText =
-        "Submodule fetches use your SSH key, or the GitHub account token for https URLs on its host."
+        "Submodule fetches use your SSH key, or the connected account's token for https URLs on its host."
 
     private static func isSubmoduleWrite(_ write: RepoSession.Write) -> Bool {
         switch write {

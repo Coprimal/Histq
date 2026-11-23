@@ -386,7 +386,7 @@ enum RepoMenus {
             },
         ]
         if let remote = linkRemote(session) {
-            let link = webLink(remote: remote, "commit/" + hash, session)
+            let link = webLink(remote: remote, .commit(hash), session)
             copies.append(.action("Link on \(remote)", enabled: link != nil, toolTip: link == nil ? noWebLink(remote) : nil) {
                 if let link { copy(link) }
             })
@@ -657,9 +657,15 @@ enum RepoMenus {
         if let current {
             entries += integrate(name, ref: ref, commit: branch?.commit, into: current, session)
         }
-        // Only a branch of the GitHub remote can be a pull request's head.
+        // Only a branch of the GitHub remote can be a pull request's head. As on a local branch, first the checked-out
+        // branch into this one (pushed first when the host lacks its commits), unless it is this branch's own local
+        // branch; then this branch into the default branch.
         if let branch, branch.remote == session.github.api?.remote {
-            entries += [.separator, pullRequestEntry(head: .remote(name), base: nil, session)]
+            entries.append(.separator)
+            if let current, gitHubBranch(of: .local(current), session) != localName(of: branch) {
+                entries.append(pullRequestEntry(head: .local(current), base: .remote(name), session))
+            }
+            entries.append(pullRequestEntry(head: .remote(name), base: nil, session))
         }
         if let branch {
             entries += [.separator, deleteRemote(branch, session)]
@@ -757,13 +763,44 @@ enum RepoMenus {
         session.worktrees.value?.first { !$0.isCurrent && $0.worktree.branch == "refs/heads/\(name)" }
     }
 
-    /// The web page at `path` (`tree/<branch>`, `commit/<sha>`) of the repository `remote`'s URL names, in GitHub's
-    /// URL layout; nil when the URL names no host/owner/repo.
-    private static func webLink(remote: String, _ path: String, _ session: RepoSession) -> String? {
-        guard let url = session.remotes.first(where: { $0.name == remote })?.url,
-              let repo = GitHubClient.repository(fromRemoteURL: url)
+    /// The web page of `target` (a branch, a commit) of the repository `remote`'s URL names: the connected provider's
+    /// page when `remote` is its remote, else in GitLab's URL layout when the profile has a GitLab account on the
+    /// remote's host, else in GitHub's; nil when the URL names no host/owner/repo.
+    private static func webLink(remote: String, _ target: HostedWebTarget, _ session: RepoSession) -> String? {
+        if let api = session.github.api, api.remote == remote {
+            return api.client.webURL(target, in: api.repository)?.absoluteString
+        }
+        guard let url = session.remotes.first(where: { $0.name == remote })?.url else { return nil }
+        if let host = RemoteURL(url)?.host, let account = session.profile?.account(forHost: host),
+           account.kind == .gitlab
+        {
+            // No request is made: the client only lays out the URL, so it gets no token.
+            guard let repo = account.kind.repository(fromRemoteURL: url, basePath: account.basePath),
+                  let client = try? GitLabClient(host: host, basePath: account.basePath, token: { _ in
+                      throw HostingError.unauthorized
+                  })
+            else { return nil }
+            return client.webURL(target, in: repo)?.absoluteString
+        }
+        guard let repo = RemoteURL(url),
+              repo.segments.count == 2, isSafeSegment(repo.segments[0], extra: "-_"),
+              isSafeSegment(repo.segments[1], extra: "-_.")
         else { return nil }
-        return "https://\(repo.host)/\(repo.owner)/\(repo.name)/\(path)"
+        let path = switch target {
+        case .repository: ""
+        case .branch(let name): "/tree/" + (name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)
+        case .commit(let sha): "/commit/" + sha
+        case .pullRequest(let number): "/pull/\(number)"
+        case .issue(let number): "/issues/\(number)"
+        }
+        return "https://\(repo.host)/\(repo.segments[0])/\(repo.segments[1])\(path)"
+    }
+
+    /// ASCII letters, digits and `extra`: an owner (`-_`) or repository name (`-_.`) put into a link as it is.
+    private static func isSafeSegment(_ text: String, extra: String) -> Bool {
+        !text.isEmpty && text.unicodeScalars.allSatisfy {
+            $0.isASCII && (CharacterSet.alphanumerics.contains($0) || extra.unicodeScalars.contains($0))
+        }
     }
 
     private static func noWebLink(_ remote: String) -> String {
@@ -772,16 +809,14 @@ enum RepoMenus {
 
     /// Copy › "Link to <remote branch>": its page on the remote's host.
     private static func copyLink(to branch: RemoteBranch, _ session: RepoSession) -> MenuEntry {
-        let name = localName(of: branch)
-        let path = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-        let link = webLink(remote: branch.remote, "tree/" + path, session)
+        let link = webLink(remote: branch.remote, .branch(localName(of: branch)), session)
         return .action("Link to \(branch.name)", enabled: link != nil,
                        toolTip: link == nil ? noWebLink(branch.remote) : nil) {
             if let link { copy(link) }
         }
     }
 
-    /// The remote a commit's link points at: the GitHub remote, else `origin`, else the first one.
+    /// The remote a commit's link points at: the connected provider's remote, else `origin`, else the first one.
     private static func linkRemote(_ session: RepoSession) -> String? {
         session.github.api?.remote ?? session.remotes.first { $0.name == "origin" }?.name ?? session.remotes.first?.name
     }
@@ -870,10 +905,12 @@ enum RepoMenus {
         return entries
     }
 
-    /// One remote's actions: rename, set URL, push mirror and remove (both confirmed, naming the remote).
+    /// One remote's actions: fetch it, rename, set URL, push mirror and remove (both confirmed, naming the remote).
     static func remote(named name: String, _ session: RepoSession) -> [MenuEntry] {
         let url = session.remotes.first { $0.name == name }?.url ?? ""
         return [
+            .action("Fetch \(name)") { session.fetch(remote: name) },
+            .separator,
             .action("Rename \(name)…") { session.dialog = .renameRemote(name) },
             .action("Set URL…") { session.dialog = .setRemoteURL(name, url: url) },
             .separator,
@@ -1177,20 +1214,24 @@ enum RepoMenus {
     /// The menu entry that opens the Create Pull Request form for `head` into `base` (else the default branch). A local
     /// head GitHub lacks, or with commits its branch there lacks, is pushed first ("Push X and Create Pull Request…"):
     /// the form opens once the push went through, never after a refused one. The title names the head when it is not
-    /// plain from the menu: with a base, or a local branch that is not checked out.
+    /// plain from the menu: with a base, a local branch that is not checked out, or a remote branch.
     static func pullRequestEntry(head: SidebarItem, base: SidebarItem?, _ session: RepoSession) -> MenuEntry {
         let headName = head.branchName ?? ""
         let into = base?.branchName.map { " into \($0)" } ?? ""
-        let namesHead = if base != nil { true } else if case .local(let name) = head { name != session.currentBranch }
-            else { false }
+        // A remote head is named too: its menu also offers the checked-out branch into it.
+        let namesHead = switch head {
+        case .local(let name): base != nil || name != session.currentBranch
+        case .remote, .tag: true
+        }
         let push: RepoSession.Write? = if case .local(let name) = head { pushBeforePullRequest(name, session) } else { nil }
         let reason = createPullRequestUnavailableReason(head: head, base: base, session, pushing: push != nil)
+        let noun = session.github.kind.pullRequestNoun.capitalized
         guard let push, case .push(let branch, let remote, let remoteBranch, _, _) = push else {
-            return .action("Create Pull Request\(namesHead ? " from \(headName)" : "")\(into)…", enabled: reason == nil, toolTip: reason) {
+            return .action("Create \(noun)\(namesHead ? " from \(headName)" : "")\(into)…", enabled: reason == nil, toolTip: reason) {
                 openCreatePullRequest(head: head, base: base, session)
             }
         }
-        return .action("Push \(headName) and Create Pull Request\(into)…", enabled: reason == nil, toolTip: reason) {
+        return .action("Push \(headName) and Create \(noun)\(into)…", enabled: reason == nil, toolTip: reason) {
             session.run(push, title: "Push \(branch) to \(remote)/\(remoteBranch ?? branch)") {
                 openCreatePullRequest(head: head, base: base, session)
             }
@@ -1220,15 +1261,21 @@ enum RepoMenus {
     {
         guard let remote = session.github.api?.remote else {
             return switch session.github.connection {
-            case .resolving: "GitHub is still connecting."
-            case .noRemote(let host): "No remote of this repository is on \(host)."
-            case .notConnected, .connected: "Connect a GitHub account to this tab's profile in Settings › Integrations."
+            case .resolving: "The account is still connecting."
+            case .noRemote where session.hostedRemoteHost == nil:
+                "No remote of this repository has a connected account."
+            case .notConnected(let account?):
+                "\(account.providerName) is not connected for this tab: connect it in Settings › Integrations."
+            case .notConnected(nil), .noRemote, .connected:
+                "Connect an account" + (session.hostedRemoteHost.map { " for \($0)" } ?? "")
+                    + " to this tab's profile in Settings › Integrations."
             }
         }
-        guard let headName = head.branchName else { return "Only a branch can be a pull request's head." }
+        let noun = session.github.kind.pullRequestNoun.lowercased()
+        guard let headName = head.branchName else { return "Only a branch can be a \(noun)'s head." }
         let headBranch = gitHubBranch(of: head, session)
         if headBranch == nil, !pushing {
-            return "Push \(headName) to \(remote) first: GitHub opens a pull request only from a branch it has."
+            return "Push \(headName) to \(remote) first: the host opens a \(noun) only from a branch it has."
         }
         guard let base else {
             // The form's base is another branch of the GitHub remote: without one, its Base picker is empty.
@@ -1236,13 +1283,14 @@ enum RepoMenus {
             return others?.isEmpty == false ? nil : "\(remote) has no other branch for \(headName) to go into."
         }
         guard let baseBranch = gitHubBranch(of: base, session) else {
-            return "\(base.branchName ?? "The target") is not on \(remote): a pull request goes into a branch GitHub has."
+            return "\(base.branchName ?? "The target") is not on \(remote): "
+                + "a \(noun) goes into a branch the host has."
         }
         return headBranch == baseBranch ? "Both are the same branch on \(remote)." : nil
     }
 
     /// Opens the Create Pull Request form for `head` (and `base`, else the default branch), by their names on the
-    /// GitHub remote.
+    /// hosting remote.
     static func openCreatePullRequest(head: SidebarItem, base: SidebarItem?, _ session: RepoSession) {
         guard let headBranch = gitHubBranch(of: head, session) else { return }
         session.pullRequestForm = PullRequestForm(head: headBranch, base: base.flatMap { gitHubBranch(of: $0, session) })
@@ -1452,7 +1500,8 @@ enum RepoMenus {
             perform()
             if let confirmation = session.confirmation {
                 session.confirmation = nil
-                session.run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+                session.run(confirmation.write, title: confirmation.operation, key: confirmation.key,
+                            then: confirmation.afterSuccess)
             }
             while !session.running.isEmpty { try? await Task.sleep(for: .milliseconds(50)) }
             debugLog(session.failure.map { "fail \(step): \($0.message)" } ?? "ok \(step)")
@@ -1465,7 +1514,13 @@ enum RepoMenus {
     /// DEBUG `-HistqShow "<menu>|<title>[|<title>…]"`: picks one menu item as `-HistqRun` does and runs it, but leaves
     /// the confirmation or form it opens on screen (QA shots of the modals; `-HistqFormName` then submits a form).
     static func debugShow(_ step: String, session: RepoSession) {
-        guard let perform = debugAction(step, session) else { return debugLog("missing \(step)") }
+        guard let perform = debugAction(step, session) else {
+            // What the menu has instead: each top-level title, with why it is off.
+            let root = step.components(separatedBy: "|")[0]
+            let titles = debugMenu(root, session).filter { !$0.title.isEmpty }
+                .map { $0.isEnabled ? $0.title : "\($0.title) [off: \($0.toolTip ?? "")]" }
+            return debugLog("missing \(step); has: " + titles.joined(separator: " / "))
+        }
         perform()
     }
 

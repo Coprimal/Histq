@@ -130,10 +130,11 @@ struct WorkspaceFileTests {
                           "ssh": { "keyFile": { "path": "~/.ssh/id_work" } },
                           "github": { "host": "github.com", "login": "me" } } ] }
         """)
-        #expect(try WorkspaceFile.read(signed).file.profiles == [Profile(
+        var work = Profile(
             id: Self.work.id, name: "Work", color: "#3A8EE5", identity: .init(name: "Me", email: "me@work.invalid"),
-            signing: .gpg(keyID: "ABCD1234"), signByDefault: true, ssh: .keyFile(path: "~/.ssh/id_work"),
-            github: .init(login: "me"))])
+            signing: .gpg(keyID: "ABCD1234"), signByDefault: true, ssh: .keyFile(path: "~/.ssh/id_work"))
+        work.setAccount(HostingAccount(kind: .github, host: "github.com", login: "me"))
+        #expect(try WorkspaceFile.read(signed).file.profiles == [work])
 
         let newer = try sandbox.writeFile("ws/newer.histqws", #"{ "version": 2, "windows": [], "tiles": [] }"#)
         #expect(throws: WorkspaceFile.FileError.unsupportedVersion(2)) { try WorkspaceFile.read(newer) }

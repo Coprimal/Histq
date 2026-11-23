@@ -4,7 +4,7 @@
 // `GitHubDriver`): a first load for the badges, a load when the window shows again and the last one is older than
 // `staleAfter`, and one every `refreshInterval` only while the PRs tab shows; none once the repo tab closes or there is
 // no connected account. Every request runs off the main actor; the token is read there too and only lives inside the
-// `GitHubClient`, never in observable state.
+// provider client (`HostingProvider`), never in observable state.
 import Foundation
 import HistqCore
 import os
@@ -15,6 +15,8 @@ struct HostedRow: Identifiable, Equatable, Sendable {
     let title: String
     let authorLogin: String?
     let authorID: Int?
+    /// The API's avatar URL of the author (`HostAvatars.gitlab` loads it).
+    let authorAvatarURL: String?
     let isDraft: Bool
     /// A pull request's head commit, whose check runs give the row's checks state; nil for an issue, or a search hit
     /// that is not in the All open list.
@@ -25,30 +27,21 @@ struct HostedRow: Identifiable, Equatable, Sendable {
 }
 
 extension HostedRow {
-    init(pull: GitHubPullRequest) {
+    init(pull: HostedPullRequest) {
         self.init(item: .pullRequest(pull.number), title: pull.title, authorLogin: pull.user?.login,
-                  authorID: pull.user?.id, isDraft: pull.draft ?? false, headSHA: pull.head.sha)
+                  authorID: pull.user?.id, authorAvatarURL: pull.user?.avatarURL, isDraft: pull.draft ?? false,
+                  headSHA: pull.head.sha)
     }
 
     /// A search hit (issue-shaped): the pull request, when All open has it, gives the head commit.
-    init(searchHit hit: GitHubIssue, pull: GitHubPullRequest?) {
+    init(searchHit hit: HostedIssue, pull: HostedPullRequest?) {
         self.init(item: hit.isPullRequest ? .pullRequest(hit.number) : .issue(hit.number), title: hit.title,
-                  authorLogin: hit.user?.login, authorID: hit.user?.id,
+                  authorLogin: hit.user?.login, authorID: hit.user?.id, authorAvatarURL: hit.user?.avatarURL,
                   isDraft: hit.draft ?? pull?.draft ?? false, headSHA: pull?.head.sha)
     }
 }
 
-/// What panel2 shows instead of the graph after a click in the PRs tab.
-enum HostedItem: Hashable, Sendable {
-    case pullRequest(Int)
-    case issue(Int)
-
-    var number: Int {
-        switch self {
-        case .pullRequest(let number), .issue(let number): number
-        }
-    }
-
+extension HostedItem {
     /// The timing log's detail: `pr 1`, `issue 2`.
     var timingDetail: String {
         switch self {
@@ -63,7 +56,7 @@ enum ChecksState: Equatable, Sendable {
     case success, failure, pending
 
     /// nil when the commit has no check runs.
-    init?(_ runs: [GitHubCheckRun]) {
+    init?(_ runs: [HostedCheckRun]) {
         guard !runs.isEmpty else { return nil }
         let failed: Set<String> = ["failure", "timed_out", "cancelled", "action_required", "startup_failure"]
         if runs.contains(where: { failed.contains($0.conclusion ?? "") }) {
@@ -78,7 +71,7 @@ enum ChecksState: Equatable, Sendable {
 
 @Observable
 @MainActor
-final class GitHubStore {
+final class HostingStore {
     enum List: String, CaseIterable, Sendable {
         case mine, reviewRequested, allOpen, assigned
 
@@ -113,9 +106,9 @@ final class GitHubStore {
     enum Connection: Equatable {
         /// The profiles, the remotes or the token are still being read.
         case resolving
-        /// No profile, no GitHub account on it, or (`account` set) its token is not in the Keychain: the Connect card.
-        case notConnected(account: Profile.GitHubAccount?)
-        /// Connected, but no remote of the repo is on the account's host.
+        /// No profile, no account on it, or (`account` set) its token is not in the Keychain: the Connect card.
+        case notConnected(account: HostingAccount?)
+        /// Connected, but no remote of the repo is on an account's host (`host`: the profile's first account's).
         case noRemote(host: String)
         case connected(HostedRepository)
     }
@@ -136,7 +129,7 @@ final class GitHubStore {
     struct Source: Equatable, Sendable {
         var profilesLoaded: Bool
         var profileID: UUID?
-        var account: Profile.GitHubAccount?
+        var accounts: [HostingAccount]
         /// The tab's remotes; `remotesKnown` false until the first refs read has listed them.
         var remotes: [RemoteInfo]
         var remotesKnown: Bool
@@ -184,7 +177,7 @@ final class GitHubStore {
     /// tab's lists, naming the number, until dismissed or replaced by the next one.
     var actionNotice: String?
 
-    @ObservationIgnored private var client: GitHubClient?
+    @ObservationIgnored private var client: (any HostingProvider)?
     /// The source `client`'s token was read for, without the polling flags: the same one again keeps the client, so
     /// the window showing or the PRs tab opening does not read the Keychain.
     @ObservationIgnored private var clientSource: Source?
@@ -204,7 +197,7 @@ final class GitHubStore {
 
     private struct Identity: Equatable {
         let profileID: UUID?
-        let account: Profile.GitHubAccount?
+        let account: HostingAccount?
         let repository: HostedRepository
         /// The remote whose URL names `repository`: a pull request's Checkout locally fetches from it.
         let remote: String
@@ -279,16 +272,18 @@ final class GitHubStore {
         let generation = resolveGeneration
         #if DEBUG
         if source.isStub {
-            client = GitHubStub.client()
-            // The fixtures' origin names no GitHub repository; a stub checkout fetches from it (and fails there).
-            return connect(Identity(profileID: nil, account: nil, repository: GitHubStub.repository, remote: "origin"))
+            // GitHub's stub, or GitLab's with `-HistqHostingStubKind gitlab`.
+            let stub = GitHubStub.hosting()
+            client = stub.client
+            // The fixtures' origin names no hosted repository; a stub checkout fetches from it (and fails there).
+            return connect(Identity(profileID: nil, account: nil, repository: stub.repository, remote: "origin"))
         }
         #endif
         guard source.profilesLoaded else { return setConnection(.resolving) }
-        guard let profile, let account = profile.github else { return disconnect(.notConnected(account: nil)) }
+        guard let profile, let first = profile.accounts.first else { return disconnect(.notConnected(account: nil)) }
         guard source.remotesKnown else { return setConnection(.resolving) }
-        guard let (remote, repository) = Self.remote(in: source.remotes, host: account.host) else {
-            return disconnect(.noRemote(host: account.host))
+        guard let (remote, repository, account) = Self.remote(in: source.remotes, profile: profile) else {
+            return disconnect(.noRemote(host: first.host))
         }
         let identity = Identity(profileID: profile.id, account: account, repository: repository, remote: remote)
         // Settings closing (`settingsOpen`) still reads the token again: a reconnect changes nothing else. So does a
@@ -305,7 +300,7 @@ final class GitHubStore {
             forgetLists()
             setConnection(.resolving)
         }
-        let client = await Self.makeClient(profile: profile, host: account.host)
+        let client = await Self.makeClient(profileID: profile.id, account: account)
         guard generation == resolveGeneration, !Task.isCancelled else { return }
         guard let client else { return disconnect(.notConnected(account: account)) }
         self.client = client
@@ -349,19 +344,44 @@ final class GitHubStore {
         actionNotice = nil
     }
 
-    /// `origin` when it names a repository on `host`, else the first remote that does, with that repository.
-    static func remote(in remotes: [RemoteInfo], host: String) -> (name: String, repository: HostedRepository)? {
-        let host = host.lowercased()
+    /// `origin` when it names a repository on the host of one of `profile`'s accounts, else the first remote that
+    /// does, with that repository and account. The account on the remote's host decides how its URL is read (its
+    /// kind, and a GitLab account's base path).
+    static func remote(
+        in remotes: [RemoteInfo], profile: Profile
+    ) -> (name: String, repository: HostedRepository, account: HostingAccount)? {
         let ordered = remotes.filter { $0.name == "origin" } + remotes.filter { $0.name != "origin" }
         return ordered.lazy
-            .compactMap { remote in GitHubClient.repository(fromRemoteURL: remote.url).map { (remote.name, $0) } }
-            .first { $0.1.host == host }
+            .compactMap { remote in
+                RemoteURL(remote.url).flatMap { profile.account(forHost: $0.host) }.flatMap { account in
+                    account.kind.repository(fromRemoteURL: remote.url, basePath: account.basePath)
+                        .map { (remote.name, $0, account) }
+                }
+            }
+            .first
     }
 
     /// The client, the repository and its remote while connected: the PR detail loads and acts through them.
-    var api: (client: GitHubClient, repository: HostedRepository, remote: String)? {
+    var api: (client: any HostingProvider, repository: HostedRepository, remote: String)? {
         guard case .connected = connection, let client, let identity else { return nil }
         return (client, identity.repository, identity.remote)
+    }
+
+    /// Whether the connected provider offers `capability`; true while none is connected, as before providers had
+    /// capabilities (an action then says the tab is not connected).
+    func offers(_ capability: HostingCapabilities) -> Bool {
+        api?.client.capabilities.contains(capability) ?? true
+    }
+
+    /// The connected provider's merge methods in the picker's order; all of them while none is connected.
+    var mergeMethods: [HostedMergeMethod] {
+        HostedMergeMethod.all.filter { api?.client.mergeMethods.contains($0) ?? true }
+    }
+
+    /// The web page of `target` in the connected repository; nil while not connected.
+    func webURL(_ target: HostedWebTarget) -> URL? {
+        guard let api else { return nil }
+        return api.client.webURL(target, in: api.repository)
     }
 
     /// Reloads the lists now (after an action changed a pull request), unless a rate limit holds.
@@ -371,12 +391,47 @@ final class GitHubStore {
         refreshTask = Task { [weak self] in await self?.refresh() }
     }
 
-    /// Reads the profile's token (the Keychain, off the main actor) and builds its client; nil without a usable
-    /// token. The token stays inside the client.
+    /// Reads `account`'s token of the profile `profileID` (the Keychain, off the main actor) and builds the client of
+    /// the account's `kind`; nil without a usable token. The token stays inside the client.
     @concurrent
-    private nonisolated static func makeClient(profile: Profile, host: String) async -> GitHubClient? {
-        guard let token = await GitHubTokens.token(for: profile) else { return nil }
-        return try? GitHubClient(host: host, token: token)
+    private nonisolated static func makeClient(
+        profileID: UUID, account: HostingAccount
+    ) async -> (any HostingProvider)? {
+        guard let token = await HostingTokens.token(for: account, profileID: profileID) else { return nil }
+        return try? client(for: account, profileID: profileID, token: token)
+    }
+
+    /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab and Bitbucket ask
+    /// `HostingTokens.accessToken` on each request (off the main actor; an OAuth sign-in through the refresher, else
+    /// cached, read again after a 401), so a token saved again in Settings or renewed is used at once. A sign-in that
+    /// cannot be renewed reads as a refused token, so every list and the detail offer Reconnect. Throws `HostingError`
+    /// for a bad host or token (a Bitbucket account on another host than bitbucket.org).
+    nonisolated static func client(
+        for account: HostingAccount, profileID: UUID, token: String
+    ) throws -> any HostingProvider {
+        let accessToken: @Sendable (_ rejected: String?) async throws -> String = { rejected in
+            do {
+                guard let token = try await HostingTokens.accessToken(
+                    for: account, profileID: profileID, rejecting: rejected)
+                else { throw HostingError.unauthorized }
+                return token
+            } catch OAuthRefresher.RefresherError.reconnectNeeded {
+                throw HostingError.unauthorized
+            } catch OAuthRefresher.RefresherError.refreshFailed(let error) {
+                throw error
+            }
+        }
+        switch account.kind {
+        case .github:
+            return try GitHubClient(host: account.host, token: token)
+        case .bitbucketCloud:
+            guard account.host.lowercased() == BitbucketCloudClient.host else {
+                throw HostingError.invalidHost(account.host)
+            }
+            return BitbucketCloudClient(token: accessToken)
+        case .gitlab:
+            return try GitLabClient(host: account.host, basePath: account.basePath, token: accessToken)
+        }
     }
 
     // MARK: Loading
@@ -388,7 +443,9 @@ final class GitHubStore {
         if let pausedUntil, pausedUntil > .now { return }
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        let shown = Set(SidebarSections.current.pullRequestLists)
+        var shown = Set(SidebarSections.current.pullRequestLists)
+        // A provider without issues reads no Issues list (the PRs tab leaves its card out too).
+        if !client.capabilities.contains(.issues) { shown.remove(.assigned) }
         let (results, heads) = await Self.fetchLists(client, repository, remote: remote, shown: shown)
         guard generation == refreshGeneration, !Task.isCancelled else { return }
         // A failed All open keeps the badges it last gave.
@@ -415,7 +472,7 @@ final class GitHubStore {
         if generation == refreshGeneration, !Task.isCancelled { lastRefresh = .now }
     }
 
-    private func refreshChecks(_ client: GitHubClient, _ repository: HostedRepository, generation: Int) async {
+    private func refreshChecks(_ client: any HostingProvider, _ repository: HostedRepository, generation: Int) async {
         var commits: [String] = []
         let rows = [List.mine, .reviewRequested, .allOpen].flatMap { lists[$0]?.rows ?? [] }
         for sha in rows.compactMap(\.headSHA) where !commits.contains(sha) && !settledChecks.contains(sha) {
@@ -444,19 +501,26 @@ final class GitHubStore {
             .map { state in "\(state):\(commits.count { checks[$0] == state })" }.joined(separator: " "))
     }
 
+    /// The error's text in the words of this tab's host ("GitLab", "merge request").
+    private func hostText(_ error: HostingError) -> String {
+        error.description(host: kind.name, pullRequest: kind.pullRequestNoun.lowercased())
+    }
+
     /// The card's text for a failed read; a rate limit also pauses the refreshes until it ends.
     private func listError(_ error: any Error) -> ListError {
         switch error {
-        case GitHubError.unauthorized:
-            return ListError(message: "GitHub refused the token (revoked or expired).", reconnect: true)
-        case GitHubError.rateLimited(let resetsAt):
+        case HostingError.unauthorized:
+            let host = identity?.account?.providerName ?? "GitHub"
+            return ListError(message: "\(host) refused the token (revoked or expired).", reconnect: true)
+        case HostingError.rateLimited(let resetsAt):
             pausedUntil = resetsAt ?? Date.now.addingTimeInterval(60)
-            return ListError(message: "\(error) Histq tries again then.", reconnect: false)
-        case GitHubError.secondaryRateLimited(let seconds):
+            return ListError(message: "\(hostText(.rateLimited(resetsAt: resetsAt))) Histq tries again then.",
+                             reconnect: false)
+        case HostingError.secondaryRateLimited(let seconds):
             pausedUntil = Date.now.addingTimeInterval(TimeInterval(seconds ?? 60))
-            return ListError(message: String(describing: error), reconnect: false)
-        case let error as GitHubError:
-            return ListError(message: String(describing: error), reconnect: false)
+            return ListError(message: hostText(.secondaryRateLimited(retryAfterSeconds: seconds)), reconnect: false)
+        case let error as HostingError:
+            return ListError(message: hostText(error), reconnect: false)
         default:
             return ListError(message: error.localizedDescription, reconnect: false)
         }
@@ -467,7 +531,7 @@ final class GitHubStore {
     /// graph's badges by remote branch (`branchPullRequests`, nil when it failed) and the other lists need it.
     @concurrent
     private nonisolated static func fetchLists(
-        _ client: GitHubClient, _ repository: HostedRepository, remote: String, shown: Set<List>
+        _ client: any HostingProvider, _ repository: HostedRepository, remote: String, shown: Set<List>
     ) async -> (lists: [List: Result<[HostedRow], any Error>], heads: [String: RefBadge.PullRequest]?) {
         async let open = capture { try await client.pullRequests(in: repository, state: .open) }
         async let mine = capture(if: shown.contains(.mine)) { try await client.myOpenPullRequests(in: repository) }
@@ -485,13 +549,16 @@ final class GitHubStore {
         lists[.assigned] = issueHits?.map {
             $0.filter { !$0.isPullRequest }.map { HostedRow(searchHit: $0, pull: nil) }
         }
-        return (lists, (try? pulls.get()).map { branchPullRequests($0, repository: repository, remote: remote) })
+        return (lists, (try? pulls.get()).map {
+            branchPullRequests($0, repository: repository, remote: remote, numberPrefix: client.kind.numberPrefix)
+        })
     }
 
     /// The badges of `pulls` by remote branch: only heads whose `owner:branch` label names the repository's owner (a
     /// fork's head is another repository's branch). When two pull requests share a head, the lowest number wins.
+    /// `numberPrefix` goes before each chip's number (`!` on GitLab).
     nonisolated static func branchPullRequests(
-        _ pulls: [GitHubPullRequest], repository: HostedRepository, remote: String
+        _ pulls: [HostedPullRequest], repository: HostedRepository, remote: String, numberPrefix: String
     ) -> [String: RefBadge.PullRequest] {
         var result: [String: RefBadge.PullRequest] = [:]
         for pull in pulls.sorted(by: { $0.number < $1.number }) where pull.state == "open" {
@@ -500,7 +567,8 @@ final class GitHubStore {
             else { continue }
             let branch = "\(remote)/\(pull.head.ref)"
             if result[branch] == nil {
-                result[branch] = RefBadge.PullRequest(number: pull.number, isDraft: pull.draft ?? false)
+                result[branch] = RefBadge.PullRequest(
+                    number: pull.number, isDraft: pull.draft ?? false, numberPrefix: numberPrefix)
             }
         }
         return result
@@ -509,7 +577,7 @@ final class GitHubStore {
     /// The checks state of each commit (nil: no check runs).
     @concurrent
     private nonisolated static func fetchChecks(
-        _ client: GitHubClient, _ repository: HostedRepository, commits: [String]
+        _ client: any HostingProvider, _ repository: HostedRepository, commits: [String]
     ) async -> [String: Result<ChecksState?, any Error>] {
         await withTaskGroup(of: (String, Result<ChecksState?, any Error>).self) { group in
             for sha in commits {

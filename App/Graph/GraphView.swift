@@ -140,7 +140,7 @@ struct GraphView: NSViewRepresentable {
     var dropEntries: @MainActor (RefBadge, RefBadge) -> [MenuEntry] = { _, _ in [] }
     var canUndo: @MainActor (_ redo: Bool) -> Bool = { _ in false }
     var onUndo: @MainActor (_ redo: Bool) -> Void = { _ in }
-    /// The open pull requests by remote branch (`GitHubStore.branchPullRequests`): their chips on the branch badges.
+    /// The open pull requests by remote branch (`HostingStore.branchPullRequests`): their chips on the branch badges.
     var pullRequests: [String: RefBadge.PullRequest] = [:]
     /// The repo's remote names (`RepoSession.remotes`): with one remote, a remote branch's badge drops the remote
     /// from its name (`RefBadge.remoteLabel`).
@@ -1306,11 +1306,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private func ownerAvatars() -> [String: NSImage] {
         let scale = table?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let pixels = Int((16 * scale).rounded(.up))
-        return remoteURLs.compactMapValues { url in
-            GitHubClient.repository(fromRemoteURL: url).flatMap {
-                AvatarStore.shared.ownerAvatar(of: $0, pixels: pixels)
-            }
-        }
+        return remoteURLs.compactMapValues { AvatarStore.shared.ownerAvatar(ofRemoteURL: $0, pixels: pixels) }
     }
 
     /// A remote owner's logo arrived, or the avatar mode changed: the visible badges (and the hover stack) redraw.

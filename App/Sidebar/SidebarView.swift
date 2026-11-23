@@ -38,6 +38,16 @@ enum SidebarTab: String, CaseIterable, Hashable, Sendable {
         }
     }
 
+    /// `title` in the connected host's words ("Merge requests & Issues" on GitLab).
+    func title(_ kind: HostingKind) -> String {
+        self == .prs ? "\(kind.pullRequestsNoun) & Issues" : title
+    }
+
+    /// `shortTitle` in the connected host's words ("MRs" on GitLab).
+    func shortTitle(_ kind: HostingKind) -> String {
+        self == .prs ? "\(kind.shortNoun)s" : shortTitle
+    }
+
     var systemImage: String {
         switch self {
         case .branches: "lucide-git-branch"
@@ -137,9 +147,9 @@ struct SidebarView: View {
             CapsuleTabs(
                 selection: Binding(get: { tab }, set: { session.selectSidebarTab($0) }),
                 tabs: layout.tabs,
-                title: { Text($0.shortTitle) },
+                title: { Text($0.shortTitle(session.github.kind)) },
                 compact: true,
-                help: \.title,
+                help: { $0.title(session.github.kind) },
                 fillsWidth: true,
                 systemImage: \.systemImage)
                 // In the frame of the shown tab's stop: Branches and Tags, or Pull Requests and Issues.
@@ -971,17 +981,13 @@ private struct RemoteRow: View {
         .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
             // No identity: the avatar mode changed.
             let changed = note.userInfo?[AvatarStore.emailKey] as? String
-            if changed == nil || changed == repository.map(AvatarStore.ownerIdentity) { loadAvatar() }
+            if changed == nil || changed == url.flatMap(AvatarStore.ownerIdentity(ofRemoteURL:)) { loadAvatar() }
         }
     }
 
-    private var repository: HostedRepository? {
-        url.flatMap(GitHubClient.repository(fromRemoteURL:))
-    }
-
     private func loadAvatar() {
-        ownerAvatar = repository.flatMap {
-            AvatarStore.shared.ownerAvatar(of: $0, pixels: Int((Self.avatarSide * scale).rounded(.up)))
+        ownerAvatar = url.flatMap {
+            AvatarStore.shared.ownerAvatar(ofRemoteURL: $0, pixels: Int((Self.avatarSide * scale).rounded(.up)))
         }
     }
 }

@@ -468,6 +468,8 @@ enum UITiming {
     /// stashes=<ms> tips=<ms> delta=<ms> concat=<ms> index=<ms> layout=<ms>` when only the new commits were read,
     /// `content log-reload full <ms>` when the whole history was.
     static func logReload(_ detail: String) { record("content", "log-reload \(detail)") }
+    /// A code host token request: `hosting refresh <host> start|ok|failed <reason>` (never a token).
+    static func hosting(_ detail: String) { record("hosting", detail) }
     /// A log load started: `log-start <generation> incremental` when it first tries to read only the new commits,
     /// `log-start <generation> full` when it reads the whole history.
     static func logStart(generation: Int, incremental: Bool) {

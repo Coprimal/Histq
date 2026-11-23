@@ -1,19 +1,30 @@
 // The small surface the app needs from a code host: which repository a remote URL names, its pull requests and
-// issues, and the few actions Histq offers on them. GitHub (and GitHub Enterprise) is the only provider, so the
-// protocol speaks in GitHub's models (`GitHubModels.swift`); another provider would map its JSON into them.
+// issues, and the few actions Histq offers on them. The protocol speaks in GitHub's models (`HostedModels.swift`):
+// GitHub (and GitHub Enterprise) serves them as they are, GitLab (`GitLabClient`) maps its JSON into them.
 import Foundation
 
-/// A repository on a code host: `host` is lowercase and keeps an https port (`ghe.example.com:8443`).
+/// A repository on a code host: `host` is lowercase and keeps an https port (`ghe.example.com:8443`); `path` is
+/// the full path that names it (`owner/repo` on GitHub, `group/sub/repo` with subgroups), relative to the instance's
+/// root: an account's base path (a GitLab under `https://host/gitlab`) is not part of it.
 public struct HostedRepository: Codable, Sendable, Hashable {
     public var host: String
-    public var owner: String
-    public var name: String
+    public var path: [String]
 
-    public init(host: String, owner: String, name: String) {
+    public init(host: String, path: [String]) {
         self.host = host
-        self.owner = owner
-        self.name = name
+        self.path = path
     }
+
+    /// `path` is `owner` split on `/`, then `name` (kept whole).
+    public init(host: String, owner: String, name: String) {
+        let owners = owner.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        self.init(host: host, path: owners + [name])
+    }
+
+    /// All of `path` but the last segment, joined by `/`.
+    public var owner: String { path.dropLast().joined(separator: "/") }
+    /// The last segment of `path`.
+    public var name: String { path.last ?? "" }
 
     /// `owner/name`.
     public var fullName: String { "\(owner)/\(name)" }
@@ -34,6 +45,227 @@ public enum HostedReviewEvent: String, Sendable {
 /// How a pull request is merged (`PUT .../merge` `merge_method`).
 public enum HostedMergeMethod: String, Sendable {
     case merge, squash, rebase
+}
+
+/// A merge option a provider may take beside the method (`HostingProvider.supportedMergeOptions`).
+public enum HostedMergeOption: Sendable, Hashable {
+    /// Deletes the source branch once merged (GitLab's `should_remove_source_branch`).
+    case deleteSourceBranch
+}
+
+/// The options of one merge, each nil to leave it to the host (GitLab: the merge request's own setting). Empty, a
+/// merge is today's `merge(_:in:method:sha:)`.
+public struct HostedMergeOptions: Sendable, Hashable {
+    public var deleteSourceBranch: Bool?
+
+    public init(deleteSourceBranch: Bool? = nil) {
+        self.deleteSourceBranch = deleteSourceBranch
+    }
+
+    public var isEmpty: Bool { deleteSourceBranch == nil }
+}
+
+/// Which code host a provider talks to. The raw value is saved in `profiles.json`: never change it.
+public enum HostingKind: String, Codable, Sendable, Hashable {
+    case github
+    case gitlab
+    /// Bitbucket Cloud (`bitbucket.org`, API 2.0). Bitbucket Data Center is a kind of its own.
+    case bitbucketCloud
+
+    /// The repository a remote URL names on this kind's host: GitHub's `owner/repo` (`basePath` unused), GitLab's
+    /// whole path after the instance's `basePath`, subgroups included. nil when the URL names none.
+    public func repository(fromRemoteURL url: String, basePath: String?) -> HostedRepository? {
+        switch self {
+        case .github: GitHubClient.repository(fromRemoteURL: url)
+        case .gitlab: GitLabClient.repository(fromRemoteURL: url, basePath: basePath)
+        case .bitbucketCloud: BitbucketCloudClient.repository(fromRemoteURL: url)
+        }
+    }
+
+    /// What the host calls a pull request: "Pull request" on GitHub and Bitbucket, "Merge request" on GitLab.
+    public var pullRequestNoun: String {
+        switch self {
+        case .github, .bitbucketCloud: "Pull request"
+        case .gitlab: "Merge request"
+        }
+    }
+
+    /// `pullRequestNoun`'s plural: "Pull requests", "Merge requests".
+    public var pullRequestsNoun: String { pullRequestNoun + "s" }
+
+    /// The short form: "PR" on GitHub, "MR" on GitLab.
+    public var shortNoun: String {
+        switch self {
+        case .github, .bitbucketCloud: "PR"
+        case .gitlab: "MR"
+        }
+    }
+
+    /// What goes before a pull request's number: `#12` on GitHub and Bitbucket, `!12` on GitLab. Issues keep `#`.
+    public var numberPrefix: String {
+        switch self {
+        case .github, .bitbucketCloud: "#"
+        case .gitlab: "!"
+        }
+    }
+}
+
+/// The id rule of `HostedReview` for values a host gives no stable numeric id: a 63-bit FNV-1a hash of the kind and
+/// the key, and on a collision with an id already taken in the same pull request the next free value (linear
+/// probing), so ids stay unique and the same on every load of the same data (assign them in a stable order).
+struct SyntheticIDs {
+    private var used: Set<Int> = []
+
+    /// Takes an id the host gave itself, so no synthetic one lands on it.
+    mutating func reserve(_ id: Int) {
+        used.insert(id)
+    }
+
+    mutating func id(_ kind: String, _ key: String) -> Int {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in kind.utf8 + [0] + key.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x0000_0100_0000_01b3
+        }
+        var id = Int(hash & UInt64(Int.max))
+        while !used.insert(id).inserted { id = id == Int.max ? 0 : id + 1 }
+        return id
+    }
+}
+
+/// What a provider offers beyond lists and comments; the app hides an action its provider lacks.
+public struct HostingCapabilities: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let labels = HostingCapabilities(rawValue: 1 << 0)
+    public static let assignees = HostingCapabilities(rawValue: 1 << 1)
+    public static let issues = HostingCapabilities(rawValue: 1 << 2)
+    public static let requestChanges = HostingCapabilities(rawValue: 1 << 3)
+    public static let resolveThreads = HostingCapabilities(rawValue: 1 << 4)
+    public static let draft = HostingCapabilities(rawValue: 1 << 5)
+    public static let reopen = HostingCapabilities(rawValue: 1 << 6)
+    public static let reviewRequests = HostingCapabilities(rawValue: 1 << 7)
+    /// The token's user can revoke their own approval (`unapprove(_:in:)`); GitHub has no such action.
+    public static let unapprove = HostingCapabilities(rawValue: 1 << 8)
+    /// Replies under a general (conversation) comment (`reply(toGeneral:on:in:body:)`).
+    public static let generalReplies = HostingCapabilities(rawValue: 1 << 9)
+    /// Resolves and reopens a general thread whose root is `resolvable` (`setGeneralThread(_:on:in:resolved:)`).
+    public static let resolveGeneralThreads = HostingCapabilities(rawValue: 1 << 10)
+    /// Edits and deletes a comment the token's user may (`viewerCanEdit`, `viewerCanDelete`).
+    public static let editComments = HostingCapabilities(rawValue: 1 << 11)
+    public static let deleteComments = HostingCapabilities(rawValue: 1 << 12)
+    /// Adds and removes the token's user's reactions, of the provider's `reactionKinds`.
+    public static let reactions = HostingCapabilities(rawValue: 1 << 13)
+    /// Writes a new inline comment on a diff line (`createInlineComment(at:on:in:body:)`), and on a range of lines.
+    public static let newInlineComments = HostingCapabilities(rawValue: 1 << 14)
+    public static let multiLineInlineComments = HostingCapabilities(rawValue: 1 << 15)
+    /// Reads, adds and removes reactions on a pull request or an issue itself, not on its comments
+    /// (`itemReactions(of:in:)`, `addItemReaction(_:to:in:)`), of the provider's `reactionKinds`.
+    public static let itemReactions = HostingCapabilities(rawValue: 1 << 16)
+    /// Rebases the source branch onto the target on the host (`rebaseSourceBranch(_:in:sha:)`).
+    public static let rebaseSourceBranch = HostingCapabilities(rawValue: 1 << 17)
+    /// Starts a new resolvable general thread on a pull request or an issue (`startThread(on:in:body:)`), beside a
+    /// plain comment.
+    public static let startThreads = HostingCapabilities(rawValue: 1 << 18)
+    /// Reads the history entries of a pull request or an issue (`timelineEvents(of:in:)`).
+    public static let timelineEvents = HostingCapabilities(rawValue: 1 << 19)
+}
+
+/// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
+public enum HostedItem: Hashable, Sendable {
+    case pullRequest(Int)
+    case issue(Int)
+
+    public var number: Int {
+        switch self {
+        case .pullRequest(let number), .issue(let number): number
+        }
+    }
+}
+
+/// The review thread a reply goes to: `rootCommentID` is the thread's root comment, `hostKey` the host's own thread
+/// id where replies post to it instead (nil on GitHub, which takes the root comment's).
+public struct HostedThreadRef: Sendable, Hashable {
+    public var rootCommentID: Int
+    public var hostKey: String?
+
+    public init(rootCommentID: Int, hostKey: String? = nil) {
+        self.rootCommentID = rootCommentID
+        self.hostKey = hostKey
+    }
+}
+
+/// A comment a write acts on: a general (conversation) comment or a review (inline) comment, separate id spaces on
+/// some hosts; `hostKey` is the comment's own (`HostedComment.hostKey`, `HostedReviewComment.hostKey`).
+public struct HostedCommentRef: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable {
+        case general, review
+    }
+
+    public var kind: Kind
+    public var id: Int
+    public var hostKey: String?
+
+    public init(kind: Kind, id: Int, hostKey: String? = nil) {
+        self.kind = kind
+        self.id = id
+        self.hostKey = hostKey
+    }
+}
+
+/// The diff line a new inline comment goes on, in the patch `headSHA` was loaded at. An added line has only
+/// `newLine`, a removed line only `oldLine`, a context line both. A multi-line comment ends at this line and starts
+/// at `startOldLine`/`startNewLine`, set by the same rule for the first line (both nil for a single line).
+public struct HostedInlinePosition: Sendable, Hashable {
+    public enum LineKind: Sendable, Hashable {
+        case added, removed, context
+    }
+
+    public var path: String
+    /// The file's path before a rename; nil when it kept its path.
+    public var oldPath: String?
+    public var oldLine: Int?
+    public var newLine: Int?
+    public var lineKind: LineKind
+    public var startOldLine: Int?
+    public var startNewLine: Int?
+    /// The pull request's head commit the shown patch was loaded at.
+    public var headSHA: String
+
+    public init(
+        path: String, oldPath: String? = nil, oldLine: Int?, newLine: Int?, lineKind: LineKind,
+        startOldLine: Int? = nil, startNewLine: Int? = nil, headSHA: String
+    ) {
+        self.path = path
+        self.oldPath = oldPath
+        self.oldLine = oldLine
+        self.newLine = newLine
+        self.lineKind = lineKind
+        self.startOldLine = startOldLine
+        self.startNewLine = startNewLine
+        self.headSHA = headSHA
+    }
+}
+
+/// How a pull request's head is fetched locally: a ref of the base repository (`pull/<n>/head`, fetched under
+/// `refs/`), a branch of a remote, or nothing, with the reason.
+public enum HostedCheckout: Sendable, Equatable {
+    case ref(String)
+    case branch(remote: String, name: String)
+    case unavailable(reason: String)
+}
+
+/// A page of a repository on the host's website.
+public enum HostedWebTarget: Sendable, Equatable {
+    case repository
+    case branch(String)
+    case commit(String)
+    case pullRequest(Int)
+    case issue(Int)
 }
 
 /// A pull request to open: `head` is the branch with the changes (`owner:branch` for a fork), `base` the
@@ -58,53 +290,240 @@ public protocol HostingProvider: Sendable {
     /// The repository a remote URL names, or nil when the URL is not a host/owner/repo URL.
     static func repository(fromRemoteURL url: String) -> HostedRepository?
 
-    /// The account the token belongs to.
-    func currentUser() async throws -> GitHubUser
+    var kind: HostingKind { get }
+    var capabilities: HostingCapabilities { get }
+    /// The ways a pull request can be merged.
+    var mergeMethods: Set<HostedMergeMethod> { get }
+    /// The reaction kinds the token's user can add, in the order the host shows them (host names, as
+    /// `HostedReaction.kind`); empty without the `reactions` capability.
+    var reactionKinds: [String] { get }
+    /// How pull request `pullRequest`'s head is fetched locally.
+    func checkout(of pullRequest: HostedPullRequest) -> HostedCheckout
+    /// The web page of `target` in `repo`; nil when it has none.
+    func webURL(_ target: HostedWebTarget, in repo: HostedRepository) -> URL?
 
-    func pullRequests(in repo: HostedRepository, state: HostedListState) async throws -> [GitHubPullRequest]
-    func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> GitHubPullRequest
+    /// The account the token belongs to.
+    func currentUser() async throws -> HostedUser
+    /// The token's user's repositories, for a clone picker.
+    func userRepositories() async throws -> [HostedCloneRepository]
+
+    func pullRequests(in repo: HostedRepository, state: HostedListState) async throws -> [HostedPullRequest]
+    func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequest
     /// Issues only: the pull requests GitHub also lists as issues are left out.
-    func issues(in repo: HostedRepository, state: HostedListState) async throws -> [GitHubIssue]
-    func issue(_ number: Int, in repo: HostedRepository) async throws -> GitHubIssue
+    func issues(in repo: HostedRepository, state: HostedListState) async throws -> [HostedIssue]
+    func issue(_ number: Int, in repo: HostedRepository) async throws -> HostedIssue
     /// The open pull requests the token's user opened, as issue-shaped search results (no `head`/`base`;
     /// `draft` is set).
-    func myOpenPullRequests(in repo: HostedRepository) async throws -> [GitHubIssue]
+    func myOpenPullRequests(in repo: HostedRepository) async throws -> [HostedIssue]
     /// The open pull requests that ask the token's user (or one of their teams) for a review, as search results.
-    func reviewRequestedPullRequests(in repo: HostedRepository) async throws -> [GitHubIssue]
+    func reviewRequestedPullRequests(in repo: HostedRepository) async throws -> [HostedIssue]
     /// The open issues (no pull requests) assigned to the token's user, as search results.
-    func assignedOpenIssues(in repo: HostedRepository) async throws -> [GitHubIssue]
+    func assignedOpenIssues(in repo: HostedRepository) async throws -> [HostedIssue]
     /// The conversation comments of an issue or a pull request.
-    func comments(on number: Int, in repo: HostedRepository) async throws -> [GitHubComment]
-    func reviews(of number: Int, in repo: HostedRepository) async throws -> [GitHubReview]
+    func comments(on item: HostedItem, in repo: HostedRepository) async throws -> [HostedComment]
+    func reviews(of number: Int, in repo: HostedRepository) async throws -> [HostedReview]
+    /// The inline comments of every review of pull request `number`, roots and replies.
+    func reviewComments(of number: Int, in repo: HostedRepository) async throws -> [HostedReviewComment]
+    /// Whether each review thread of pull request `number` is resolved or outdated and whether the token's user may
+    /// resolve it; `rootCommentID` joins a state to its thread's root in `reviewComments(of:in:)`.
+    func reviewThreadStates(of number: Int, in repo: HostedRepository) async throws -> [HostedReviewThreadState]
     /// A pull request's commits, oldest first (GitHub lists at most 250).
-    func pullRequestCommits(_ number: Int, in repo: HostedRepository) async throws -> [GitHubCommit]
+    func pullRequestCommits(_ number: Int, in repo: HostedRepository) async throws -> [HostedCommit]
     /// The files a pull request changes, with their patches (GitHub lists at most 3000).
-    func pullRequestFiles(_ number: Int, in repo: HostedRepository) async throws -> [GitHubPullRequestFile]
+    func pullRequestFiles(_ number: Int, in repo: HostedRepository) async throws -> [HostedPullRequestFile]
     /// The check runs of a commit (`ref` is a commit id or a branch name).
-    func checkRuns(for ref: String, in repo: HostedRepository) async throws -> [GitHubCheckRun]
+    func checkRuns(for ref: String, in repo: HostedRepository) async throws -> [HostedCheckRun]
 
     /// The repository's own data (its default branch).
-    func repositoryInfo(_ repo: HostedRepository) async throws -> GitHubRepositoryInfo
+    func repositoryInfo(_ repo: HostedRepository) async throws -> HostedRepositoryInfo
     /// The repository's labels, for a new pull request.
-    func labels(in repo: HostedRepository) async throws -> [GitHubLabel]
+    func labels(in repo: HostedRepository) async throws -> [HostedLabel]
     /// The users an issue or a pull request can be assigned to.
-    func assignableUsers(in repo: HostedRepository) async throws -> [GitHubUser]
+    func assignableUsers(in repo: HostedRepository) async throws -> [HostedUser]
     /// The repository's collaborators, the users a review can be requested from (403 without push access).
-    func collaborators(in repo: HostedRepository) async throws -> [GitHubUser]
+    func collaborators(in repo: HostedRepository) async throws -> [HostedUser]
 
     func createPullRequest(_ pullRequest: NewPullRequest, in repo: HostedRepository) async throws
-        -> GitHubPullRequest
-    /// Asks `logins` to review pull request `number`.
-    func requestReviewers(_ logins: [String], on number: Int, in repo: HostedRepository) async throws
+        -> HostedPullRequest
+    /// Asks `users` to review pull request `number` (each by its `reviewerID`, else its login).
+    func requestReviewers(_ users: [HostedUser], on number: Int, in repo: HostedRepository) async throws
     /// Adds labels (by name) to an issue or a pull request.
-    func addLabels(_ names: [String], to number: Int, in repo: HostedRepository) async throws
-    /// Assigns `logins` to an issue or a pull request.
-    func addAssignees(_ logins: [String], to number: Int, in repo: HostedRepository) async throws
-    func comment(on number: Int, in repo: HostedRepository, body: String) async throws -> GitHubComment
+    func addLabels(_ names: [String], to item: HostedItem, in repo: HostedRepository) async throws
+    /// Assigns `users` to an issue or a pull request (each by its `reviewerID`, else its login).
+    func addAssignees(_ users: [HostedUser], to item: HostedItem, in repo: HostedRepository) async throws
+    func comment(on item: HostedItem, in repo: HostedRepository, body: String) async throws -> HostedComment
+    /// Replies to review thread `thread` on pull request `number`.
+    func reply(to thread: HostedThreadRef, on number: Int, in repo: HostedRepository, body: String) async throws
+        -> HostedReviewComment
+    /// Resolves (`resolved` true) or unresolves the review thread `state` is of, and returns whether it is resolved
+    /// as the host answers it.
+    func setReviewThread(_ state: HostedReviewThreadState, resolved: Bool) async throws -> Bool
     func review(_ number: Int, in repo: HostedRepository, event: HostedReviewEvent, body: String?)
-        async throws -> GitHubReview
-    /// Merges only while the head is still `sha` (409 otherwise, `GitHubError.headChanged` for GitHub).
+        async throws -> HostedReview
+    /// Revokes the token's user's approval of pull request `number` (only with the `unapprove` capability).
+    func unapprove(_ number: Int, in repo: HostedRepository) async throws
+    /// Merges only while the head is still `sha` (409 otherwise, `HostingError.headChanged` for GitHub).
     func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws
+    /// The same with `options`, each one the provider lists in `supportedMergeOptions` (a provider without any
+    /// forwards an empty `options` to `merge(_:in:method:sha:)` and refuses others unsent).
+    func merge(
+        _ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String, options: HostedMergeOptions
+    ) async throws
+    /// The merge options the provider takes (the UI shows only these); none by default.
+    var supportedMergeOptions: Set<HostedMergeOption> { get }
     /// Closes (`open` false) or reopens an issue or a pull request.
-    func setOpen(_ open: Bool, number: Int, in repo: HostedRepository) async throws
+    func setOpen(_ open: Bool, item: HostedItem, in repo: HostedRepository) async throws
+
+    /// Replies to the general comment `comment` of `item` (only with the `generalReplies` capability).
+    func reply(toGeneral comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
+        async throws -> HostedComment
+    /// Resolves (`resolved` true) or reopens the general thread whose root is `root` (only with the
+    /// `resolveGeneralThreads` capability), and returns whether it is resolved as the host answers it.
+    func setGeneralThread(_ root: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, resolved: Bool)
+        async throws -> Bool
+    /// Replaces the body of `comment` with `body` (only with the `editComments` capability).
+    func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
+        async throws
+    /// Deletes `comment` (only with the `deleteComments` capability).
+    func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository) async throws
+    /// Adds the token's user's reaction `kind` (one of `reactionKinds`) to `comment` (only with `reactions`).
+    func addReaction(_ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    /// Removes the token's user's reaction `kind` from `comment` (only with `reactions`).
+    func removeReaction(
+        _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws
+    /// Writes a new inline comment at `position` on pull request `number` (only with `newInlineComments`, and
+    /// `multiLineInlineComments` for a start line).
+    func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
+    ) async throws -> HostedReviewComment
+
+    /// The reactions on `item` itself (not on its comments), one per kind in `reactionKinds` order and then any other
+    /// kind given, the token's user's marked (only with `itemReactions`).
+    func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction]
+    /// Adds the token's user's reaction `kind` to `item` itself (only with `itemReactions`).
+    func addItemReaction(_ kind: String, to item: HostedItem, in repo: HostedRepository) async throws
+    /// Removes the token's user's reaction `kind` from `item` itself (only with `itemReactions`).
+    func removeItemReaction(_ kind: String, from item: HostedItem, in repo: HostedRepository) async throws
+
+    /// The approval box's data of pull request `number` (GitLab's approvals); a provider without one throws.
+    func approvals(of number: Int, in repo: HostedRepository) async throws -> HostedApprovals
+    /// Rebases pull request `number`'s source branch onto its target on the host, while its head is still `sha`
+    /// (`HostingError.headChanged` otherwise), and returns once the host has finished it (only with
+    /// `rebaseSourceBranch`); the host's own failure is thrown.
+    func rebaseSourceBranch(_ number: Int, in repo: HostedRepository, sha: String) async throws
+
+    /// Starts a new resolvable general thread on `item` with `body` as its first note (only with `startThreads`).
+    func startThread(on item: HostedItem, in repo: HostedRepository, body: String) async throws -> HostedComment
+    /// The history entries of `item` that are not comments (system notes, state, label and milestone changes), in
+    /// any order (only with `timelineEvents`).
+    func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedTimelineEvent]
+    /// The role on the repository of each of `userIDs` who is a member, by user id, in the host's words ("Owner",
+    /// "Developer"), the badge GitLab's page puts on their comments; a user who is not a member is left out.
+    func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String]
+}
+
+extension HostingProvider {
+    /// A host without the `unapprove` capability refuses it unsent.
+    public func unapprove(_ number: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot revoke an approval")
+    }
+
+    /// None by default.
+    public var reactionKinds: [String] { [] }
+
+    /// A host without the comment capability refuses each comment write unsent.
+    public func reply(
+        toGeneral comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String
+    ) async throws -> HostedComment {
+        throw HostingError.validationFailed(message: "this host cannot reply to a general comment")
+    }
+
+    public func setGeneralThread(
+        _ root: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, resolved: Bool
+    ) async throws -> Bool {
+        throw HostingError.validationFailed(message: "this host cannot resolve a general comment")
+    }
+
+    public func editComment(
+        _ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot edit a comment")
+    }
+
+    public func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    {
+        throw HostingError.validationFailed(message: "this host cannot delete a comment")
+    }
+
+    public func addReaction(
+        _ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot add a reaction")
+    }
+
+    public func removeReaction(
+        _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot remove a reaction")
+    }
+
+    public func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
+    ) async throws -> HostedReviewComment {
+        throw HostingError.validationFailed(message: "this host cannot write a new inline comment")
+    }
+
+    /// A host without the `itemReactions` capability refuses the reads and writes unsent.
+    public func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction] {
+        throw HostingError.validationFailed(message: "this host cannot read the reactions of a pull request")
+    }
+
+    public func addItemReaction(_ kind: String, to item: HostedItem, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot add a reaction to a pull request")
+    }
+
+    public func removeItemReaction(_ kind: String, from item: HostedItem, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot remove a reaction from a pull request")
+    }
+
+    /// No options: an empty `options` is today's merge, any other is refused unsent.
+    public func merge(
+        _ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String, options: HostedMergeOptions
+    ) async throws {
+        guard options.isEmpty else {
+            throw HostingError.validationFailed(message: "this host takes no merge options")
+        }
+        try await merge(number, in: repo, method: method, sha: sha)
+    }
+
+    public var supportedMergeOptions: Set<HostedMergeOption> { [] }
+
+    public func approvals(of number: Int, in repo: HostedRepository) async throws -> HostedApprovals {
+        throw HostingError.validationFailed(message: "this host has no approval box")
+    }
+
+    /// A host without the `rebaseSourceBranch` capability refuses it unsent.
+    public func rebaseSourceBranch(_ number: Int, in repo: HostedRepository, sha: String) async throws {
+        throw HostingError.validationFailed(message: "this host cannot rebase the source branch")
+    }
+
+    /// A host without the `startThreads` capability refuses it unsent.
+    public func startThread(on item: HostedItem, in repo: HostedRepository, body: String) async throws
+        -> HostedComment
+    {
+        throw HostingError.validationFailed(message: "this host cannot start a thread")
+    }
+
+    /// A host without the `timelineEvents` capability refuses it unsent.
+    public func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws
+        -> [HostedTimelineEvent]
+    {
+        throw HostingError.validationFailed(message: "this host has no history entries")
+    }
+
+    /// A host without member roles knows none.
+    public func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String] { [:] }
 }

@@ -24,6 +24,8 @@ struct RefBadge: Hashable {
     struct PullRequest: Hashable, Sendable {
         let number: Int
         let isDraft: Bool
+        /// What goes before the number: the host's (`HostingKind.numberPrefix`, `!` on GitLab).
+        var numberPrefix = "#"
     }
 
     let kind: Kind
@@ -241,10 +243,16 @@ final class RefBadgeCellView: NSView {
 
     @MainActor private static var symbols: [String: NSImage?] = [:]
 
-    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color: it would draw black.
+    /// A template image (Lucide, or a monochrome symbol) filled with the badge text color: it would draw black. Its
+    /// 2 pt strokes, drawn at 15 pt, came out 1.25 pt and greyed by antialiasing on the checked-out branch's bright
+    /// fill (user, 2026-11-20: the laptop looked fainter than the name): drawn again shifted by `bolden` each way, they
+    /// read as heavy as the name.
     private static func tinted(_ template: NSImage) -> NSImage {
-        NSImage(size: template.size, flipped: false) { rect in
-            template.draw(in: rect)
+        let bolden: CGFloat = 0.35
+        return NSImage(size: template.size, flipped: false) { rect in
+            for (dx, dy) in [(0, 0), (-bolden, 0), (bolden, 0), (0, -bolden), (0, bolden)] {
+                template.draw(in: rect.offsetBy(dx: dx, dy: dy))
+            }
             Palette.graphBadgeText.setFill()
             rect.fill(using: .sourceAtop)
             return true
@@ -272,7 +280,7 @@ final class RefBadgeCellView: NSView {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
-    /// The pull request chip's width: its icon and "#N".
+    /// The pull request chip's width: its icon and "#N" ("!N" on GitLab).
     private func pullChipWidth(_ pull: PullRequestChip) -> CGFloat {
         2 * Style.chipPadding + Style.icon + Style.iconGap
             + ceil((pull.text as NSString).size(withAttributes: countAttributes).width)
@@ -712,7 +720,7 @@ private struct PullRequestChip {
     let isDraft: Bool
 
     init(_ pull: RefBadge.PullRequest) {
-        text = "#\(pull.number)"
+        text = "\(pull.numberPrefix)\(pull.number)"
         isDraft = pull.isDraft
     }
 }

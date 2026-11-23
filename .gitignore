@@ -33,3 +33,5 @@ sparkle_private_key*
 
 *.env
 website/.hallmark/
+
+Config/Secrets.xcconfig

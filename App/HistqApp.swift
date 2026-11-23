@@ -288,7 +288,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard model.performPalette(item) else { return RepoMenus.debugLog("palette: \(item.title) cannot run") }
         if let session, let confirmation = session.confirmation {
             session.confirmation = nil
-            session.run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+            session.run(confirmation.write, title: confirmation.operation, key: confirmation.key,
+                        then: confirmation.afterSuccess)
         }
         while session?.running.isEmpty == false { try? await Task.sleep(for: .milliseconds(50)) }
         RepoMenus.debugLog(session?.failure.map { "fail palette \(item.title): \($0.message)" }

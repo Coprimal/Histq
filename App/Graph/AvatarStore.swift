@@ -8,11 +8,13 @@
 // (memory, then the disk cache under `StatePaths`, then the network, off the main thread), then posts `didChange` so
 // the graphs redraw the rows of that email. A 404 is remembered on disk for 7 days; an offline or failed load keeps
 // the generated avatar for the session. Only the hash or the GitHub login leaves the Mac, over https only.
-// `ownerAvatar(of:pixels:)` loads, in every mode, the logo of the account or organization owning a remote's
+// `ownerAvatar(ofRemoteURL:pixels:)` loads, in every mode, the logo of the account or organization owning a remote's
 // repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows and the graph's remote badges), the
 // same way; only the owner's name leaves the Mac, to its own host. `gitHubAvatar(login:id:pixels:)` loads, in every
 // mode too, the GitHub avatar of an account of github.com (the pull request and issue pages); only its id or login
-// leaves the Mac, to GitHub.
+// leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in real mode only, the avatar a GitLab API
+// gives for an account (`avatar_url`), over https and only from the repository's own host (gitlab.com also from
+// gravatar.com); a remote on a GitLab Self-Managed host the profiles have an account for shows GitLab's bundled logo.
 import AppKit
 import CryptoKit
 import HistqCore
@@ -91,8 +93,9 @@ final class AvatarStore {
         if let provider = Self.provider(of: identity) { return providerAvatar(provider) }
         if Self.allowsEmoji(identity), let emoji = emojis[identity] { return emojiAvatar(emoji) }
         let fallback = mode == .initials ? initialsAvatar(name: name) : generatedAvatar(identity: identity)
-        // An author email can spell an owner identity (`owner:<host>/<x>`): never a remote owner's logo or load.
-        if identity.hasPrefix("owner:") { return fallback }
+        // An author email can spell an owner or avatar URL identity (`owner:<host>/<x>`, `avatar:<url>`): never a
+        // remote owner's logo or a load of that URL.
+        if identity.hasPrefix("owner:") || identity.hasPrefix("avatar:") { return fallback }
         // A bot's avatar sends only the bot's login to GitHub.
         guard mode == .real || identity.hasSuffix("[bot]@users.noreply.github.com") else { return fallback }
         let key = "\(identity)|\(pixels)" as String
@@ -179,18 +182,27 @@ final class AvatarStore {
 
     // MARK: Remote owners
 
-    /// The logo of the account or organization owning `repository` (`Coprimal` of `github.com/Coprimal/Histq`), at
-    /// `pixels` on its longer side, whatever the commit avatars' mode. Never blocks: nil (the caller keeps its own
-    /// icon) on another host, until it is loaded, or when it cannot be; its arrival posts `didChange` with
-    /// `ownerIdentity(_:)`.
-    func ownerAvatar(of repository: HostedRepository, pixels: Int) -> NSImage? {
-        guard AvatarLoader.ownerHosts.contains(repository.host) else { return nil }
-        if repository.host == "github.com", repository.owner.lowercased() == "github" { return gitHubOwnerLogo() }
-        let identity = Self.ownerIdentity(repository)
+    /// The logo of the account or organization owning the repository of the remote URL `url` (`Coprimal` of
+    /// `github.com/Coprimal/Histq`), at `pixels` on its longer side, whatever the commit avatars' mode. Never blocks:
+    /// nil (the caller keeps its own icon) on another host, for a URL `remoteOwner(_:)` refuses, until it is loaded, or
+    /// when it cannot be; its arrival posts `didChange` with `ownerIdentity(ofRemoteURL:)`.
+    func ownerAvatar(ofRemoteURL url: String, pixels: Int) -> NSImage? {
+        guard let remote = Self.remoteOwner(url) else { return nil }
+        guard AvatarLoader.ownerHosts.contains(remote.host) else {
+            // A GitLab Self-Managed host: GitLab's bundled logo, no request.
+            return Self.isGitLabHost(remote.host) ? providerAvatar(.gitlab) : nil
+        }
+        if remote.host == "github.com", remote.owner.lowercased() == "github" { return gitHubOwnerLogo() }
+        let identity = Self.ownerIdentity(host: remote.host, owner: remote.owner)
         let key = "\(identity)|\(pixels)"
         if let image = images.object(forKey: key as NSString) { return image }
         if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
         return nil
+    }
+
+    /// Whether a profile has a GitLab account on `host`.
+    private static func isGitLabHost(_ host: String) -> Bool {
+        ProfileLibrary.shared.store?.profiles.contains { $0.account(forHost: host)?.kind == .gitlab } ?? false
     }
 
     /// The `github` organization's logo, and GitHub's default avatar: a white mark on light gray is hard to read at 16 pt, so
@@ -240,9 +252,23 @@ final class AvatarStore {
         return gray * 2 >= count && white * 20 >= count
     }
 
-    /// The identity `didChange` names when the owner logo of `repository` arrives.
-    static func ownerIdentity(_ repository: HostedRepository) -> String {
-        "owner:\(repository.host)/\(repository.owner.lowercased())"
+    /// The identity `didChange` names when the owner logo of the remote URL `url` arrives; nil when it has none.
+    static func ownerIdentity(ofRemoteURL url: String) -> String? {
+        remoteOwner(url).map { ownerIdentity(host: $0.host, owner: $0.owner) }
+    }
+
+    private static func ownerIdentity(host: String, owner: String) -> String {
+        "owner:\(host)/\(owner.lowercased())"
+    }
+
+    /// The host and owner of a remote URL (`RemoteURL`): its first path segment, the top-level group of a GitLab
+    /// subgroup's repository. nil for a URL `RemoteURL` refuses, a path without a repository name after the owner, or
+    /// an owner `AvatarLoader.isSafeOwner(_:)` refuses (it goes into the logo's URL).
+    private static func remoteOwner(_ url: String) -> (host: String, owner: String)? {
+        guard let remote = RemoteURL(url), remote.segments.count >= 2,
+              AvatarLoader.isSafeOwner(Substring(remote.segments[0]))
+        else { return nil }
+        return (remote.host, remote.segments[0])
     }
 
     /// Whether `email` is the identity `didChange` named (the graph compares its rows' emails with it).
@@ -270,6 +296,33 @@ final class AvatarStore {
     /// the avatar's URL from it, and `matches` compares it with what `didChange` named.
     static func gitHubEmail(login: String, id: Int?) -> String {
         (id.map { "\($0)+" } ?? "") + login + "@users.noreply.github.com"
+    }
+
+    // MARK: Hosted accounts
+
+    /// The avatar at `url`, the `avatar_url` a GitLab API gave for the account `name` of a repository on `host`, at
+    /// `pixels`: only in real mode, and only when `hostedIdentity(url:host:)` accepts the URL. Never blocks: the
+    /// mode's drawn avatar of `name` stands in until it is loaded, and stays when it cannot be; its arrival posts
+    /// `didChange` with that identity. Only the request for the image leaves the Mac, to that host (or gravatar.com).
+    func hostedAvatar(url: String?, host: String, name: String, pixels: Int) -> NSImage? {
+        let fallback = avatar(email: "", name: name, pixels: pixels)
+        guard mode == .real, let identity = Self.hostedIdentity(url: url, host: host) else { return fallback }
+        let key = "\(identity)|\(pixels)"
+        if let image = images.object(forKey: key as NSString) { return image }
+        if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
+        return fallback
+    }
+
+    /// `avatar:<url>` for an https `url` on `host` (with its port, if any; gitlab.com's also on gravatar.com, its
+    /// default avatars), as given (paths are case-sensitive); nil for any other URL.
+    static func hostedIdentity(url: String?, host: String) -> String? {
+        guard let url, let parsed = URL(string: url), parsed.scheme?.lowercased() == "https",
+              let avatarHost = parsed.host()?.lowercased(), !avatarHost.isEmpty
+        else { return nil }
+        let host = host.lowercased()
+        let authority = parsed.port.map { "\(avatarHost):\($0)" } ?? avatarHost
+        let gravatar = host == "gitlab.com" && (avatarHost == "gravatar.com" || avatarHost.hasSuffix(".gravatar.com"))
+        return authority == host || gravatar ? "avatar:" + url : nil
     }
 
     // MARK: Provider logos
@@ -340,7 +393,10 @@ final class AvatarStore {
         if let image = drawn.object(forKey: cacheKey) { return image }
         let hash = Array(SHA256.hash(data: Data(identity.utf8)))
         let lanes = Palette.graphLanes
-        let color = lanes[Int(hash[0]) % lanes.count]
+        let lane = Int(hash[0]) % lanes.count
+        // Lane 0's blue is a touch lighter than the accent for the graph's thin lines; on an avatar it reads as a
+        // second blue, so it takes the app's one blue (the accent, the selected tab's pill) (user, 2026-11-23).
+        let color = lane == 0 ? Self.accent : lanes[lane]
         // Bits 0..<15 of bytes 1...2 pick the cells of the 3 left columns; the right 2 mirror them.
         let bits = UInt32(hash[1]) | UInt32(hash[2]) << 8
         let background = Self.background
@@ -415,6 +471,8 @@ final class AvatarStore {
 
     /// An emoji avatar's glyph box, as a fraction of the disc's diameter: the emoji fills the disc inside the lane ring.
     private static let emojiFill: CGFloat = 0.9
+    /// The accent (`AccentColor`) in sRGB: lane 0's color on a generated avatar. #2F86FB
+    private static let accent = NSColor(srgbRed: 0x2F / 255, green: 0x86 / 255, blue: 0xFB / 255, alpha: 1)
     /// The generated avatar's background: darker than the card so the pattern stands out. #1C1C1E
     private static let background = NSColor(srgbRed: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
     /// The initials avatar's disc and letters. #48484A, white 0.92
@@ -491,9 +549,15 @@ private enum AvatarLoader {
     }
 
     /// Gravatar by hash, or the GitHub avatar for a noreply address (`<id>+<login>@` or `<login>@`), or a remote
-    /// owner's logo (`owner:<host>/<owner>`). nil when a GitHub address has neither a valid id nor a valid login.
+    /// owner's logo (`owner:<host>/<owner>`), or an account's avatar URL (`avatar:<https URL>`). nil when a GitHub
+    /// address has neither a valid id nor a valid login, or an avatar URL is not https.
     static func url(identity: String, hash: String, pixels: Int) async -> URL? {
         if identity.hasPrefix("owner:") { return await ownerURL(identity.dropFirst("owner:".count), pixels: pixels) }
+        if identity.hasPrefix("avatar:") {
+            let url = URL(string: String(identity.dropFirst("avatar:".count)))
+            guard let url, url.scheme?.lowercased() == "https", url.host() != nil else { return nil }
+            return url
+        }
         let suffix = "@users.noreply.github.com"
         guard identity.hasSuffix(suffix) else {
             return URL(string: "https://gravatar.com/avatar/\(hash)?s=\(pixels)&d=404")
@@ -519,7 +583,7 @@ private enum AvatarLoader {
 
     /// `<host>/<owner>`: GitHub's avatar of the login, Bitbucket's workspace avatar (a redirect to the image), or the
     /// `avatar_url` gitlab.com's API gives. The owner goes into the request URL, so it is checked again here as
-    /// `GitHubClient.repository(fromRemoteURL:)` checks it (ASCII letters, digits, `-`, `_`): nil when it fails.
+    /// `AvatarStore.remoteOwner(_:)` checks it (ASCII letters, digits, `-`, `_`): nil when it fails.
     private static func ownerURL(_ path: Substring, pixels: Int) async -> URL? {
         let parts = path.split(separator: "/")
         guard parts.count == 2, isSafeOwner(parts[1]) else { return nil }
@@ -563,8 +627,8 @@ private enum AvatarLoader {
         return nil
     }
 
-    /// `[A-Za-z0-9_-]+`, the owner rule of `GitHubClient.repository(fromRemoteURL:)`.
-    private static func isSafeOwner(_ owner: Substring) -> Bool {
+    /// `[A-Za-z0-9_-]+`: an owner put into a logo's URL as it is.
+    static func isSafeOwner(_ owner: Substring) -> Bool {
         !owner.isEmpty && owner.unicodeScalars.allSatisfy {
             $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_")
         }

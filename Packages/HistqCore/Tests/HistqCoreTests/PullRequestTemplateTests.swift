@@ -1,5 +1,6 @@
 // Security and core tests for the pull request template reader (task 5.1), each on a private temp repo read with the
-// read environment: a template in `.github/` is found whatever its name's case, a symlink named like a template is
+// read environment: a template in `.github/` is found whatever its name's case, a GitLab repo's `Default.md` is
+// preferred among its merge request templates, a symlink named like a template is
 // never followed, a template `.aiignore` matches is skipped, and a ref without a template (or no such ref) gives nil.
 import Foundation
 import HistqCore
@@ -7,9 +8,10 @@ import Testing
 
 struct PullRequestTemplateTests {
     /// Commits `files` (path → text) on top of `Sandbox.makeRepo`'s first commit, and `links` (path → target) as
-    /// symlinks; returns the template read at HEAD, skipping what `ignore` (`.aiignore` text) matches.
+    /// symlinks; returns the template `kind` reads at HEAD, skipping what `ignore` (`.aiignore` text) matches.
     private func read(
-        files: [String: String] = [:], links: [String: String] = [:], ref: String = "HEAD", ignore: String? = nil
+        files: [String: String] = [:], links: [String: String] = [:], ref: String = "HEAD", ignore: String? = nil,
+        kind: HostingKind = .github, defaultOnly: Bool = false
     ) async throws -> String?
     {
         let sandbox = try await Sandbox()
@@ -30,13 +32,32 @@ struct PullRequestTemplateTests {
         let env = try await GitInvocation.readEnvironment(
             profile: nil, base: sandbox.base, runner: sandbox.runner, cwd: repo)
         return await PullRequestTemplate.read(
-            ref: ref, runner: sandbox.runner, cwd: repo, env: env, ignore: ignore.map(AIIgnore.init(text:)))
+            ref: ref, runner: sandbox.runner, cwd: repo, env: env, ignore: ignore.map(AIIgnore.init(text:)), kind: kind,
+            defaultOnly: defaultOnly)
     }
 
     @Test("a template in .github/ is found whatever its name's case")
     func foundCaseInsensitivelyInGitHubFolder() async throws {
         let text = "## Summary\n\n## Testing\n"
         #expect(try await read(files: [".github/Pull_Request_TEMPLATE.md": text, "docs/notes.md": "x\n"]) == text)
+    }
+
+    @Test("a GitLab repo's Default.md is preferred over its other merge request templates")
+    func gitLabDefaultTemplate() async throws {
+        let files = [".gitlab/merge_request_templates/Bug.md": "## Bug\n",
+                     ".gitlab/merge_request_templates/Default.md": "## Default\n",
+                     ".github/pull_request_template.md": "## GitHub\n"]
+        #expect(try await read(files: files, kind: .gitlab) == "## Default\n")
+    }
+
+    @Test("without Default.md, the prefill (defaultOnly) gets no GitLab template; the AI prompt still gets the first")
+    func gitLabWithoutDefault() async throws {
+        let files = [".gitlab/merge_request_templates/Bug.md": "## Bug\n",
+                     ".gitlab/merge_request_templates/Feature.md": "## Feature\n"]
+        #expect(try await read(files: files, kind: .gitlab, defaultOnly: true) == nil)
+        #expect(try await read(files: files, kind: .gitlab) == "## Bug\n")
+        let withDefault = files.merging([".gitlab/merge_request_templates/default.MD": "## Default\n"]) { $1 }
+        #expect(try await read(files: withDefault, kind: .gitlab, defaultOnly: true) == "## Default\n")
     }
 
     @Test("a symlink named like a template is ignored, never followed")

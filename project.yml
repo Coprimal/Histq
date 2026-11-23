@@ -34,15 +34,27 @@ targets:
       - package: HistqCore
       - package: SwiftTerm
       - package: Sparkle
+    # Includes the untracked Config/Secrets.xcconfig (HISTQ_BITBUCKET_CLIENT_SECRET) when it exists; the settings below
+    # still win over it.
+    configFiles:
+      Debug: Config/Base.xcconfig
+      Release: Config/Base.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.math2it.histq"
         GENERATE_INFOPLIST_FILE: YES
-        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID, Sparkle's SU*), merged with the generated ones.
+        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID, HistqGitLabClientID, HistqBitbucketClient*, Sparkle's SU*), merged with the generated ones.
         INFOPLIST_FILE: App/Info.plist
         # The client ID of the GitHub OAuth App used by "Sign in with GitHub" (device flow; a public value, no secret).
         # Empty until one is registered: Settings › Integrations then shows how to set it, and paste/import still work.
         HISTQ_GITHUB_CLIENT_ID: "Ov23ct3if1iFB6cEigym"
+        # The Application ID of the GitLab application used by "Sign in with GitLab" on gitlab.com (device flow, public
+        # client, no secret). Empty until one is registered: GitLab then connects with a personal access token only.
+        HISTQ_GITLAB_CLIENT_ID: "2b3ce01fe36183b5b9d7bab9da5792350c26c5fcf272686a64ed156826d17c01"
+        # The client ID of Histq's Bitbucket OAuth client used by "Sign in with Bitbucket" (authorization code, loopback
+        # redirect http://127.0.0.1:47823/callback; public). Its secret, HISTQ_BITBUCKET_CLIENT_SECRET, is never here:
+        # it comes from the untracked Config/Secrets.xcconfig, and without it Bitbucket connects with an API token only.
+        HISTQ_BITBUCKET_CLIENT_ID: "niJlylklLcAGhUoVOArgjecG2vtpxoZG"
         INFOPLIST_KEY_LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
         INFOPLIST_KEY_CFBundleDisplayName: "Histq"
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Coprimal"

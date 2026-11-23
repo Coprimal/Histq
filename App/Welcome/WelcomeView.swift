@@ -45,20 +45,26 @@ final class WelcomeModel {
         }
     }
 
-    /// Where the clone URL comes from: typed, or picked from the repositories of a profile's GitHub account (nil, or a
-    /// profile no longer listed: the first one `gitHubProfiles` lists).
+    /// Where the clone URL comes from: typed, or picked from the repositories of a profile's account on `host` (nil,
+    /// or an account no longer listed: the first one `cloneAccounts` lists; any of the profile's without `host`).
     enum CloneSource: Hashable {
         case url
-        case github(profileID: UUID?)
+        case github(profileID: UUID?, host: String?)
+    }
+
+    /// A profile's account whose repositories a GitHub source lists.
+    struct CloneAccount: Equatable, Sendable {
+        let profile: Profile
+        let account: HostingAccount
     }
 
     /// A profile's GitHub repositories, for the clone picker.
     enum RepoList: Equatable {
         case idle
         case loading
-        case loaded(account: Profile.GitHubAccount, repos: [GitHubRepository])
-        /// No default profile or GitHub account on it, or (`account` set) its token is not in the Keychain.
-        case notConnected(account: Profile.GitHubAccount?)
+        case loaded(account: HostingAccount, repos: [HostedCloneRepository])
+        /// No profile with an account, or (`account` set) its token is not in the Keychain.
+        case notConnected(account: HostingAccount?)
         /// `reconnect` when GitHub refused the token.
         case failed(message: String, reconnect: Bool)
     }
@@ -111,8 +117,8 @@ final class WelcomeModel {
     @ObservationIgnored private var reposToken = 0
     /// The profile whose repositories `repoList` holds (or is loading): the one a GitHub clone runs as.
     @ObservationIgnored private var repoProfileID: UUID?
-    /// That profile's GitHub account when the list was asked for: another account on the same profile reloads.
-    @ObservationIgnored private var repoAccount: Profile.GitHubAccount?
+    /// That profile's account when the list was asked for: another account on the same profile reloads.
+    @ObservationIgnored private var repoAccount: HostingAccount?
 
     init(open: @escaping (URL) -> Void) {
         self.open = open
@@ -121,7 +127,7 @@ final class WelcomeModel {
         #if DEBUG
         // QA: `-HistqWelcomeSource github` opens the Clone form on the GitHub list (with `-HistqGitHubStub YES`).
         if AppState.launchFlag("-HistqWelcomeSource") == "github" {
-            cloneSource = .github(profileID: nil)
+            cloneSource = .github(profileID: nil, host: nil)
             loadRepositoriesIfNeeded()
         }
         // QA: `-HistqWelcomeCloneURL <url>` fills the URL field, `-HistqWelcomeFolderName <name>` the folder name.
@@ -132,7 +138,7 @@ final class WelcomeModel {
         // cached); not when the user has picked a source or typed a URL meanwhile.
         Task { [weak self] in
             guard await Self.isGitHubConnected(), let self, !sourceChosen, cloneURL.isEmpty else { return }
-            cloneSource = .github(profileID: nil)
+            cloneSource = .github(profileID: nil, host: nil)
         }
     }
 
@@ -181,7 +187,7 @@ final class WelcomeModel {
     }
 
     /// The picked repository while it is still listed and `cloneURL` is still its URL.
-    var selectedRepository: GitHubRepository? {
+    var selectedRepository: HostedCloneRepository? {
         guard case .loaded(_, let repos) = repoList else { return nil }
         return repos.first { $0.id == selectedRepoID && $0.cloneURL == cloneURL }
     }
@@ -425,12 +431,12 @@ final class WelcomeModel {
         clone = .running(line: text, fraction: percent.map { min($0, 100) / 100 })
     }
 
-    /// What a clone ran as, for its submodule step: the same git, profile, environment base and token.
+    /// What a clone ran as, for its submodule step: the same git, profile, environment base and credentials.
     private struct CloneContext: Sendable {
         let runner: GitRunner
         let profile: Profile?
         let base: [String: String]
-        let token: String?
+        let credentials: [GitCredential]
     }
 
     @concurrent
@@ -441,16 +447,16 @@ final class WelcomeModel {
         let toolchain = try await GitToolchain.resolve()
         let runner = GitRunner(executable: toolchain.executable.url)
         // The clone opens with `profileID`'s profile (the default one when nil or deleted), so it clones as that
-        // profile too (SSH key) and, when the URL (after the user's rewrites) is https on the profile's GitHub host,
-        // with its token.
+        // profile too (SSH key) and, when the URL (after the user's rewrites) is https on one of the profile's account
+        // hosts, with that account's token.
         let store = await ProfileLibrary.shared.loaded()
         let profile = profileID.flatMap { store?.profile(id: $0) } ?? store?.defaultProfile
-        let token = await GitHubTokens.token(for: profile)
+        let credentials = await HostingTokens.credentials(for: profile)
         let base = await GitToolchain.writeBase()
         let cloneEnv = await GitInvocation.cloneEnvironment(
-            url: url, profile: profile, base: base, token: token, runner: runner)
+            url: url, profile: profile, base: base, credentials: credentials, runner: runner)
         try await GitOperations.clone(url: url, into: destination, runner: runner, env: cloneEnv, progress: progress)
-        return CloneContext(runner: runner, profile: profile, base: base, token: token)
+        return CloneContext(runner: runner, profile: profile, base: base, credentials: credentials)
     }
 
     /// Clones the submodules of the clone at `folder` (no git without `.gitmodules`) as the clone ran: the token only
@@ -462,7 +468,7 @@ final class WelcomeModel {
         do {
             try await GitOperations.cloneSubmodules(
                 in: folder, runner: context.runner, profile: context.profile, base: context.base,
-                token: context.token, progress: progress)
+                credentials: context.credentials, progress: progress)
             return nil
         } catch {
             return error is CancellationError || Task.isCancelled ? nil : error
@@ -472,7 +478,7 @@ final class WelcomeModel {
     // MARK: GitHub repositories
 
     /// The loaded repositories grouped by owner: the account's own login first, then the others alphabetically.
-    var repoGroups: [(owner: String, repos: [GitHubRepository])] {
+    var repoGroups: [(owner: String, repos: [HostedCloneRepository])] {
         guard case .loaded(let account, let repos) = repoList else { return [] }
         let groups = Dictionary(grouping: repos, by: \.owner.login)
         let owners = groups.keys.sorted { lhs, rhs in
@@ -483,32 +489,34 @@ final class WelcomeModel {
         return owners.map { (owner: $0, repos: groups[$0] ?? []) }
     }
 
-    /// The profiles with a GitHub account, the default profile first: the Source picker's GitHub entries.
-    nonisolated static func gitHubProfiles(in store: ProfileStore) -> [Profile] {
-        let profiles = store.profiles.filter { $0.github != nil }
+    /// Every account of every profile, the default profile's first, each profile's in its order: the Source picker's
+    /// GitHub entries.
+    nonisolated static func cloneAccounts(in store: ProfileStore) -> [CloneAccount] {
         let defaultID = store.defaultProfileID
-        return profiles.filter { $0.id == defaultID } + profiles.filter { $0.id != defaultID }
+        let profiles = store.profiles.filter { $0.id == defaultID } + store.profiles.filter { $0.id != defaultID }
+        return profiles.flatMap { profile in profile.accounts.map { CloneAccount(profile: profile, account: $0) } }
     }
 
-    /// The GitHub profile `id` names while it is listed, else the first listed one.
-    nonisolated static func gitHubProfile(_ id: UUID?, in store: ProfileStore) -> Profile? {
-        let profiles = gitHubProfiles(in: store)
-        return profiles.first { $0.id == id } ?? profiles.first
+    /// The account of the profile `id` on `host` (its first one without `host`) while it is listed, else the first
+    /// listed one.
+    nonisolated static func cloneAccount(_ id: UUID?, host: String?, in store: ProfileStore) -> CloneAccount? {
+        let accounts = cloneAccounts(in: store)
+        return accounts.first { $0.profile.id == id && (host == nil || $0.account.host == host) } ?? accounts.first
     }
 
-    /// The profile the GitHub source lists; nil for the URL source, with no GitHub profile, or before the profiles
-    /// are read.
-    var gitHubProfile: Profile? {
-        guard case .github(let id) = cloneSource, let store = ProfileLibrary.shared.store else { return nil }
-        return Self.gitHubProfile(id, in: store)
+    /// The profile's account the GitHub source lists; nil for the URL source, with no account, or before the
+    /// profiles are read.
+    var cloneAccount: CloneAccount? {
+        guard case .github(let id, let host) = cloneSource, let store = ProfileLibrary.shared.store else { return nil }
+        return Self.cloneAccount(id, host: host, in: store)
     }
 
     /// Loads the repositories unless they are loading or loaded already. Another profile picked, or the profile's
     /// account changed or went (once the profiles are read): its list replaces the shown one (the placeholder in the
     /// same frame), and the pick from the shown one goes.
     func loadRepositoriesIfNeeded() {
-        let profile = gitHubProfile
-        if ProfileLibrary.shared.store != nil, profile?.id != repoProfileID || profile?.github != repoAccount {
+        let chosen = cloneAccount
+        if ProfileLibrary.shared.store != nil, chosen?.profile.id != repoProfileID || chosen?.account != repoAccount {
             if selectedRepository != nil { cloneURL = "" }
             selectedRepoID = nil
             isRefreshing = false
@@ -527,7 +535,7 @@ final class WelcomeModel {
     }
 
     /// Clones `repo` next: its URL goes into `cloneURL`, so the destination and the clone work as for a typed URL.
-    func selectRepository(_ repo: GitHubRepository) {
+    func selectRepository(_ repo: HostedCloneRepository) {
         cloneURL = repo.cloneURL
         selectedRepoID = repo.id
     }
@@ -536,17 +544,19 @@ final class WelcomeModel {
         reposTask?.cancel()
         reposToken &+= 1
         let token = reposToken
-        let requested: UUID? = if case .github(let id) = cloneSource { id } else { nil }
-        // nil before the profiles are read: the answer says which profile it listed.
-        repoProfileID = gitHubProfile?.id
-        repoAccount = gitHubProfile?.github
+        var requested: (id: UUID?, host: String?) = (nil, nil)
+        if case .github(let id, let host) = cloneSource { requested = (id, host) }
+        // nil before the profiles are read: the answer says which profile and account it listed.
+        let chosen = cloneAccount
+        repoProfileID = chosen?.profile.id
+        repoAccount = chosen?.account
         if case .loaded = repoList { isRefreshing = true } else { repoList = .loading }
         reposTask = Task { [weak self] in
-            let (profile, result) = await Self.fetchRepositories(requested)
+            let (chosen, result) = await Self.fetchRepositories(requested.id, host: requested.host)
             guard !Task.isCancelled, let self, token == reposToken else { return }
             isRefreshing = false
-            repoProfileID = profile?.id
-            repoAccount = profile?.github
+            repoProfileID = chosen?.profile.id
+            repoAccount = chosen?.account
             repoList = result
             switch result {
             case .loaded(_, let repos): UITiming.content("welcome repos \(repos.count)")
@@ -556,56 +566,60 @@ final class WelcomeModel {
         }
     }
 
-    /// The repositories of the GitHub profile `id` resolves to (`gitHubProfile(_:in:)`), with that profile, read off
-    /// the main actor; the token stays inside the client.
+    /// The repositories of the account `id` and `host` resolve to (`cloneAccount(_:host:in:)`), with that account and
+    /// its profile, read off the main actor; the token stays inside the client.
     @concurrent
-    private nonisolated static func fetchRepositories(_ id: UUID?) async -> (Profile?, RepoList) {
-        let profile = await ProfileLibrary.shared.loaded().flatMap { gitHubProfile(id, in: $0) }
+    private nonisolated static func fetchRepositories(_ id: UUID?, host: String?) async -> (CloneAccount?, RepoList) {
+        let chosen = await ProfileLibrary.shared.loaded().flatMap { cloneAccount(id, host: host, in: $0) }
         #if DEBUG
         if GitHubStub.isEnabled {
             // No Keychain, no network: the stub session answers, for any profile.
-            let account = profile?.github ?? Profile.GitHubAccount(host: "github.com", login: "stub")
-            return (profile, await repoList(account, client: GitHubStub.client))
+            let account = chosen?.account ?? HostingAccount(kind: .github, host: "github.com", login: "stub")
+            return (chosen, await repoList(account, client: GitHubStub.client))
         }
         #endif
-        guard let profile, let account = profile.github else { return (nil, .notConnected(account: nil)) }
-        guard let token = await GitHubTokens.token(for: profile) else {
-            return (profile, .notConnected(account: account))
-        }
-        return (profile, await repoList(account) { try GitHubClient(host: account.host, token: token) })
+        guard let chosen else { return (nil, .notConnected(account: nil)) }
+        let account = chosen.account
+        let token = await HostingTokens.token(for: account, profileID: chosen.profile.id)
+        guard let token else { return (chosen, .notConnected(account: account)) }
+        return (chosen, await repoList(account) {
+            try HostingStore.client(for: account, profileID: chosen.profile.id, token: token)
+        })
     }
 
-    /// The first GitHub profile (the default one when it has an account) has its token in the Keychain (always under
-    /// the DEBUG stub).
+    /// The first listed account (the default profile's first one when it has any) has its token in the Keychain
+    /// (always under the DEBUG stub).
     @concurrent
     private nonisolated static func isGitHubConnected() async -> Bool {
         #if DEBUG
         if GitHubStub.isEnabled { return true }
         #endif
-        guard let store = await ProfileLibrary.shared.loaded(), let profile = gitHubProfile(nil, in: store) else {
-            return false
-        }
-        return await GitHubTokens.token(for: profile) != nil
+        guard let store = await ProfileLibrary.shared.loaded(), let chosen = cloneAccount(nil, host: nil, in: store)
+        else { return false }
+        let account = chosen.account
+        return await HostingTokens.token(for: account, profileID: chosen.profile.id) != nil
     }
 
     @concurrent
     private nonisolated static func repoList(
-        _ account: Profile.GitHubAccount, client makeClient: () throws -> GitHubClient?
+        _ account: HostingAccount, client makeClient: () throws -> (any HostingProvider)?
     ) async -> RepoList {
         do {
-            guard let client = try makeClient() else { return .failed(message: "No GitHub client.", reconnect: false) }
+            guard let client = try makeClient() else {
+                return .failed(message: "No \(account.providerName) client.", reconnect: false)
+            }
             return .loaded(account: account, repos: try await client.userRepositories())
         } catch {
-            return repoListError(error)
+            return repoListError(error, account: account)
         }
     }
 
-    private nonisolated static func repoListError(_ error: any Error) -> RepoList {
+    private nonisolated static func repoListError(_ error: any Error, account: HostingAccount) -> RepoList {
         switch error {
-        case GitHubError.unauthorized:
-            .failed(message: "GitHub refused the token (revoked or expired). Reconnect the account in Settings › "
-                + "Integrations.", reconnect: true)
-        case let error as GitHubError:
+        case HostingError.unauthorized:
+            .failed(message: "\(account.providerName) refused the token (revoked or expired). Reconnect the account "
+                + "in Settings › Integrations.", reconnect: true)
+        case let error as HostingError:
             .failed(message: String(describing: error), reconnect: false)
         default:
             .failed(message: error.localizedDescription, reconnect: false)
@@ -903,25 +917,28 @@ struct CloneCard: View {
             // Back from Settings › Integrations: a list that was not connected or refused loads again.
             if !open, model.cloneSource != .url { model.loadRepositoriesIfNeeded() }
         }
-        .onChange(of: model.gitHubProfile, initial: true) {
+        .onChange(of: model.cloneAccount, initial: true) {
             // The profile the source resolves to, or its account, changed (a Settings edit, another window, or while
             // this card was hidden): the list follows it, so the title, the list and the clone's profile match.
             if model.cloneSource != .url { model.loadRepositoriesIfNeeded() }
         }
     }
 
-    /// The Source picker's GitHub entries: one per profile with a GitHub account, the default first; a lone "GitHub"
-    /// (which says to connect an account) when there is none.
+    /// The Source picker's GitHub entries: one per account of every profile, the default profile's first; a lone
+    /// "GitHub" (which says to connect an account) when there is none.
     private var gitHubSources: [WelcomeModel.CloneSource] {
-        let profiles = ProfileLibrary.shared.store.map(WelcomeModel.gitHubProfiles(in:)) ?? []
-        return profiles.isEmpty ? [.github(profileID: nil)] : profiles.map { .github(profileID: $0.id) }
+        let accounts = ProfileLibrary.shared.store.map(WelcomeModel.cloneAccounts(in:)) ?? []
+        return accounts.isEmpty
+            ? [.github(profileID: nil, host: nil)]
+            : accounts.map { .github(profileID: $0.profile.id, host: $0.account.host) }
     }
 
     /// The Source picker's selection, a GitHub source as the entry it resolves to; a switch logs its select line
     /// (switching to another GitHub profile shows the list's placeholder in the same frame).
     private var source: Binding<WelcomeModel.CloneSource> {
         Binding(get: {
-            model.cloneSource == .url ? .url : .github(profileID: model.gitHubProfile?.id)
+            let chosen = model.cloneAccount
+            return model.cloneSource == .url ? .url : .github(profileID: chosen?.profile.id, host: chosen?.account.host)
         }, set: { new in
             guard new != source.wrappedValue else { return }
             UITiming.select("welcome source \(new == .url ? "url" : "github")")
@@ -929,13 +946,13 @@ struct CloneCard: View {
         })
     }
 
-    /// "URL", or "GitHub · login (profile)" for the profile a GitHub source resolves to ("GitHub" without one).
+    /// "URL", or "GitHub · login (profile)" for the account a GitHub source resolves to ("GitHub" without one); an
+    /// account on another host shows its product and host ("GitHub Enterprise Server · login @ host (profile)").
     private func sourceTitle(_ source: WelcomeModel.CloneSource) -> String {
-        guard case .github(let id) = source else { return "URL" }
-        guard let store = ProfileLibrary.shared.store, let profile = WelcomeModel.gitHubProfile(id, in: store),
-              let account = profile.github
+        guard case .github(let id, let host) = source else { return "URL" }
+        guard let store = ProfileLibrary.shared.store, let chosen = WelcomeModel.cloneAccount(id, host: host, in: store)
         else { return "GitHub" }
-        return "GitHub · \(account.login) (\(ProfilePicker.title(profile)))"
+        return "\(chosen.account.accountTitle) (\(ProfilePicker.title(chosen.profile)))"
     }
 
     @ViewBuilder
@@ -1003,8 +1020,8 @@ private struct RepositoryRow: View {
             } label: {
                 Text("Repository")
             }
-        case .loaded(_, let repos):
-            RepositoryPicker(model: model, repos: repos)
+        case .loaded(let account, let repos):
+            RepositoryPicker(model: model, repos: repos, kind: account.kind)
         case .notConnected(let account):
             LabeledContent {
                 settingsButton
@@ -1040,15 +1057,16 @@ private struct RepositoryRow: View {
     }
 }
 
-/// The GitHub repositories as a search field: typing fuzzy-filters them (`FuzzyRank` on the
-/// name and `owner/name`, off the main actor) in a list under the field, grouped by owner. Up/Down move the highlight,
-/// Return picks it, Escape closes the list, the chevron opens or closes it. A pick fills the field with `owner/name`;
-/// that text lists every repository again.
+/// The account's repositories as a dropdown: the field shows the picked one (`owner/name`); a click opens a popover
+/// under it with a search field over the list, grouped by owner. Typing fuzzy-filters them (`FuzzyRank` on the name and
+/// `owner/name`, off the main actor); Up/Down move the highlight, Return picks it, Escape closes the popover.
 private struct RepositoryPicker: View {
-    typealias Groups = [(owner: String, repos: [GitHubRepository])]
+    typealias Groups = [(owner: String, repos: [HostedCloneRepository])]
 
     let model: WelcomeModel
-    let repos: [GitHubRepository]
+    let repos: [HostedCloneRepository]
+    /// The account's host: the hint under the label is in its words.
+    let kind: HostingKind
     @State private var query = ""
     @State private var isOpen = false
     /// The groups the list shows: `repos` filtered by the query.
@@ -1059,35 +1077,26 @@ private struct RepositoryPicker: View {
     /// What the list is filtered for: changes rerun the filter.
     private struct FilterKey: Equatable {
         let query: String
-        let repos: [GitHubRepository]
-    }
-
-    /// The query the list is filtered by: none while the field shows the picked repository.
-    private var filterQuery: String {
-        query == model.selectedRepository?.fullName ? "" : query
+        let repos: [HostedCloneRepository]
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent {
-                HStack(spacing: 8) {
-                    field
-                    refreshButton
-                }
-            } label: {
-                Text("Repository")
-                Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                Text("Organization repositories appear when the organization allows Histq's GitHub access.")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        LabeledContent {
+            HStack(spacing: 8) {
+                field
+                refreshButton
             }
-            if isOpen { list }
+        } label: {
+            Text("Repository")
+            Text(repos.count == 1 ? "1 repository" : "\(repos.count) repositories")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+            Text(accessHint)
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .onAppear {
-            query = model.selectedRepository?.fullName ?? ""
             #if DEBUG
             // QA: `-HistqWelcomeRepoQuery <text>` opens the list filtered for it (with `-HistqWelcomeSource github`).
             if let text = AppState.launchFlag("-HistqWelcomeRepoQuery") {
@@ -1096,8 +1105,8 @@ private struct RepositoryPicker: View {
             }
             #endif
         }
-        .task(id: FilterKey(query: filterQuery, repos: repos)) {
-            let query = filterQuery
+        .task(id: FilterKey(query: query, repos: repos)) {
+            let query = query
             let result = await Self.filter(model.repoGroups, query: query)
             guard !Task.isCancelled else { return }
             shown = result
@@ -1110,53 +1119,79 @@ private struct RepositoryPicker: View {
         }
     }
 
-    /// The field with a search icon and the chevron, in the card's input look.
-    private var field: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            TextField("Repository", text: $query, prompt: Text("Search repositories"))
-                .textFieldStyle(.plain)
-                .labelsHidden()
-                .focused($focused)
-                .onSubmit(pickHighlighted)
-                .onKeyPress(.downArrow) { move(by: 1) }
-                .onKeyPress(.upArrow) { move(by: -1) }
-                .onKeyPress(.escape) {
-                    guard isOpen else { return .ignored }
-                    isOpen = false
-                    return .handled
-                }
-            Button {
-                isOpen.toggle()
-                if isOpen { focused = true }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
-                    .rotationEffect(.degrees(isOpen ? 180 : 0))
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel(isOpen ? "Hide the repositories" : "Show the repositories")
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, 6)
-        .frame(minHeight: SettingsInputMetrics.minHeight)
-        .modifier(SettingsInputChrome(focused: focused))
-        .frame(maxWidth: 360)
-        .onChange(of: focused) { _, focused in
-            if focused { isOpen = true }
-        }
-        .onChange(of: query) { _, query in
-            // Typing opens the list; the text a pick wrote does not.
-            if focused, query != model.selectedRepository?.fullName { isOpen = true }
+    /// Which repositories the list holds, in the host's words (Bitbucket's are grouped by workspace).
+    private var accessHint: String {
+        switch kind {
+        case .github: "Organization repositories appear when the organization allows Histq's GitHub access."
+        case .gitlab: "Projects of your groups appear here."
+        case .bitbucketCloud: "Repositories of your workspaces appear here."
         }
     }
 
-    /// The filtered repositories under the field, grouped by owner, at most `maxHeight` tall.
+    /// The picked repository (or the prompt) and the chevron, in the card's input look; a click opens the popover.
+    private var field: some View {
+        let selected = model.selectedRepository
+        return Button {
+            isOpen.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: selected?.isPrivate == true ? "lock" : "book.closed")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(selected?.fullName ?? "Choose a repository")
+                    .foregroundStyle(selected == nil ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 6)
+            .frame(minHeight: SettingsInputMetrics.minHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .modifier(SettingsInputChrome(focused: isOpen))
+        .frame(maxWidth: 360)
+        .accessibilityLabel("Repository")
+        .accessibilityValue(selected?.fullName ?? "None")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) { dropdown }
+    }
+
+    /// The popover: the search field over the filtered list. It opens on the picked repository, unfiltered.
+    private var dropdown: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                TextField("Repository", text: $query, prompt: Text("Search repositories"))
+                    .textFieldStyle(.plain)
+                    .labelsHidden()
+                    .autocorrectionDisabled()
+                    .focused($focused)
+                    .onSubmit(pickHighlighted)
+                    .onKeyPress(.downArrow) { move(by: 1) }
+                    .onKeyPress(.upArrow) { move(by: -1) }
+            }
+            .padding(.horizontal, 10)
+            .frame(minHeight: SettingsInputMetrics.minHeight)
+            .modifier(SettingsInputChrome(focused: focused))
+            list
+        }
+        .padding(10)
+        .frame(width: 360)
+        .onAppear {
+            highlighted = model.selectedRepository?.id ?? shown.first?.repos.first?.id
+            DispatchQueue.main.async { focused = true }
+        }
+        .onDisappear { query = "" }
+    }
+
+    /// The filtered repositories, grouped by owner, at most `maxHeight` tall.
     private var list: some View {
         let rows = shown.reduce(0) { $0 + $1.repos.count }
         let height = min(Self.maxHeight, CGFloat(rows) * (SidebarItemStyle.height + 2) + CGFloat(shown.count) * 26 + 12)
@@ -1180,22 +1215,21 @@ private struct RepositoryPicker: View {
                         }
                     }
                 }
-                .padding(6)
             }
             .frame(height: rows == 0 ? nil : height)
             .overlay {
                 if rows == 0 {
-                    Text("No repository matches \"\(query)\".")
+                    Text(repos.isEmpty ? "No repository." : "No repository matches \"\(query)\".")
                         .foregroundStyle(.secondary)
                         .padding(12)
                 }
             }
+            .onAppear { if let id = highlighted { proxy.scrollTo(id, anchor: .center) } }
             .onChange(of: highlighted) { _, id in
                 if let id { proxy.scrollTo(id) }
             }
         }
         .frame(maxWidth: .infinity, minHeight: rows == 0 ? 40 : nil)
-        .modifier(SettingsInputChrome(focused: false))
     }
 
     private static let maxHeight: CGFloat = 280
@@ -1217,10 +1251,9 @@ private struct RepositoryPicker: View {
         }
     }
 
-    private func pick(_ repo: GitHubRepository) {
+    private func pick(_ repo: HostedCloneRepository) {
         UITiming.select("welcome repo")
         model.selectRepository(repo)
-        query = repo.fullName
         highlighted = repo.id
         isOpen = false
     }
@@ -1231,12 +1264,8 @@ private struct RepositoryPicker: View {
         pick(repo)
     }
 
-    /// Up/Down: opens the list, or moves the highlight, stopping at the ends.
+    /// Up/Down: moves the highlight, stopping at the ends.
     private func move(by step: Int) -> KeyPress.Result {
-        guard isOpen else {
-            isOpen = true
-            return .handled
-        }
         let ids = shown.flatMap { $0.repos.map(\.id) }
         guard !ids.isEmpty else { return .handled }
         let index = highlighted.flatMap(ids.firstIndex(of:)).map { $0 + step } ?? (step > 0 ? 0 : ids.count - 1)

@@ -164,10 +164,14 @@ xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
 # Histq.xcodeproj is generated from project.yml (gitignored), so regenerate it first.
 xcodegen generate
 if ! APP_SETTINGS="$(xcodebuild -project "$PROJECT" -target Histq -configuration Release -skipPackagePluginValidation -showBuildSettings 2>/dev/null)"; then
-  echo "error: xcodebuild -showBuildSettings failed - run it by hand to see why:" >&2
-  echo "       xcodebuild -project $PROJECT -target Histq -configuration Release -skipPackagePluginValidation -showBuildSettings" >&2
+  echo "error: xcodebuild -showBuildSettings failed - run it by hand to see why (the filter keeps secrets out):" >&2
+  echo "       xcodebuild -project $PROJECT -target Histq -configuration Release -skipPackagePluginValidation -showBuildSettings | grep -v SECRET" >&2
   exit 1
 fi
+# Config/Secrets.xcconfig (gitignored) gives the Bitbucket client secret; without it this Release hides "Sign in with
+# Bitbucket" (API tokens still work). Only whether it is set is printed, never the value.
+grep -Eq '^ *HISTQ_BITBUCKET_CLIENT_SECRET = .+' <<<"$APP_SETTINGS" \
+  || echo "warning: no HISTQ_BITBUCKET_CLIENT_SECRET (Config/Secrets.xcconfig): this Release hides Sign in with Bitbucket." >&2
 APP_MIN_OS="$(sed -n 's/^ *MACOSX_DEPLOYMENT_TARGET = //p' <<<"$APP_SETTINGS" | head -1)"
 APP_ENTITLEMENTS="$(sed -n 's/^ *CODE_SIGN_ENTITLEMENTS = //p' <<<"$APP_SETTINGS" | head -1)"
 VERSION="$(sed -n 's/^ *MARKETING_VERSION = //p' <<<"$APP_SETTINGS" | head -1)"

@@ -1,13 +1,13 @@
 // The sidebar's PRs tab: the repo's GitHub lists in their own cards (My PRs, Review requested, All open, Issues
 // assigned to me), or the Connect GitHub card without a connected account. A row shows the number, title, author
 // avatar, a draft capsule and the checks state; a click selects it at once and panel2 shows its placeholder in the same
-// frame. Also `GitHubDriver`, which keeps the tab's `GitHubStore` running while the repo tab shows (the graph's PR
+// frame. Also `GitHubDriver`, which keeps the tab's `HostingStore` running while the repo tab shows (the graph's PR
 // badges need its lists too).
 import AppKit
 import HistqCore
 import SwiftUI
 
-/// Drives the tab's `GitHubStore` while the repo tab shows: `watch` resolves the connection, reads the lists once (the
+/// Drives the tab's `HostingStore` while the repo tab shows: `watch` resolves the connection, reads the lists once (the
 /// graph's PR badges), and keeps them fresh while the PRs tab shows; it restarts when the profile, the remotes, the
 /// window's visibility, the shown tab (`tabIsShown`) or the sidebar tab change, stops when the repo tab or the window
 /// goes away, and pauses while the window is hidden or covered or a kept-alive tab is not shown. Draws nothing.
@@ -40,7 +40,7 @@ struct GitHubDriver: View {
     /// The sidebar shows the PRs tab (not hidden, `SidebarSections`).
     private var listsShown: Bool { layout.shownTab(session.sidebarTab) == .prs }
 
-    private var source: GitHubStore.Source {
+    private var source: HostingStore.Source {
         let profile = session.profile
         #if DEBUG
         let isStub = GitHubStub.isEnabled
@@ -52,8 +52,8 @@ struct GitHubDriver: View {
         case .loaded, .failed: true
         case .idle, .loading: false
         }
-        return GitHubStore.Source(
-            profilesLoaded: profilesLoaded, profileID: profile?.id, account: profile?.github,
+        return HostingStore.Source(
+            profilesLoaded: profilesLoaded, profileID: profile?.id, accounts: profile?.accounts ?? [],
             remotes: session.remotes, remotesKnown: session.refs.value != nil, settingsOpen: model.isSettingsOpen,
             windowVisible: windowState.isVisible, listsShown: listsShown, isShown: tabIsShown, isStub: isStub)
     }
@@ -78,36 +78,38 @@ struct PullRequestSections: View {
             switch store.connection {
             case .resolving:
                 ForEach(lists, id: \.self) { list in
-                    ListCard(session: session, list: list, realAvatars: false)
+                    ListCard(session: session, list: list, avatars: .drawn)
                 }
             case .notConnected(let account):
-                ConnectGitHubCard(account: account)
-            case .noRemote(let host):
-                SectionCard("GitHub", systemImage: "exclamationmark.triangle") {
+                ConnectGitHubCard(account: account, host: session.hostedRemoteHost)
+            case .noRemote where session.hostedRemoteHost != nil:
+                // A remote names a hosted repository on a host the profile has no account for.
+                ConnectGitHubCard(account: nil, host: session.hostedRemoteHost)
+            case .noRemote:
+                SectionCard("Integrations", systemImage: "exclamationmark.triangle") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("No GitHub remote")
+                        Text("No connected remote")
                             .font(textSize.bodyMedium)
-                        Text("None of this repository's remotes is on \(host), the host of this tab's GitHub account.")
+                        Text("No remote of this repository has a connected account.")
                             .font(textSize.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let hint = session.sshRemoteHint {
+                            Text("\(hint.name) uses SSH on \(hint.host): connect an account for that host in "
+                                + "Settings › Integrations. Host aliases from ~/.ssh/config are not matched to accounts.")
+                                .font(textSize.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
-            case .connected(let repository):
-                ForEach(lists, id: \.self) { list in
-                    ListCard(session: session, list: list,
-                             realAvatars: repository.host == "github.com" && !isStub)
+            case .connected:
+                // A provider without issues has no Issues list (`HostingStore` does not read it either).
+                ForEach(lists.filter { $0 != .assigned || store.offers(.issues) }, id: \.self) { list in
+                    ListCard(session: session, list: list, avatars: .of(store))
                 }
             }
         }
-    }
-
-    private var isStub: Bool {
-        #if DEBUG
-        GitHubStub.isEnabled
-        #else
-        false
-        #endif
     }
 }
 
@@ -115,9 +117,9 @@ struct PullRequestSections: View {
 /// kept, then the rows.
 private struct ListCard: View {
     let session: RepoSession
-    let list: GitHubStore.List
-    /// The authors' GitHub avatars load (github.com, not the stub), whatever `AvatarStore`'s mode.
-    let realAvatars: Bool
+    let list: HostingStore.List
+    /// Where the authors' avatars come from (`HostAvatars.of` the repository).
+    let avatars: HostAvatars
     /// The header's search (`CardSearchButton`): the field above the rows, which then show only the matching ones.
     @State private var isSearching = false
     @State private var query = ""
@@ -132,7 +134,8 @@ private struct ListCard: View {
                                      guard !isEmpty else { return }
                                      if $0 { store.collapsed.remove(list) } else { store.collapsed.insert(list) }
                                  })
-        SectionCard(list.title, systemImage: list.systemImage, count: state?.rows?.count,
+        let kind = store.kind
+        SectionCard(list.title(kind), systemImage: list.systemImage, count: state?.rows?.count,
                     countIsLoading: state?.rows == nil && state?.error == nil,
                     isExpanded: isExpanded, contentPadding: SidebarMetrics.cardPadding) {
             VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
@@ -144,11 +147,11 @@ private struct ListCard: View {
                 }
                 if let rows = state?.rows {
                     let shown = isSearching ? rows.filter { matches($0) } : rows
-                    if rows.isEmpty, state?.error == nil { EmptyRow(text: list.emptyText) }
+                    if rows.isEmpty, state?.error == nil { EmptyRow(text: list.emptyText(kind)) }
                     if shown.isEmpty, !rows.isEmpty { EmptyRow(text: "No matches") }
                     ForEach(shown) { row in
                         HostedRowView(session: session, row: row, checks: row.headSHA.flatMap { store.checks[$0] },
-                                      realAvatars: realAvatars)
+                                      avatars: avatars)
                     }
                 } else if state?.error == nil {
                     SkeletonRows(fractions: list == .allOpen ? [0.7, 0.5, 0.6] : [0.6, 0.45])
@@ -156,20 +159,52 @@ private struct ListCard: View {
             }
         } accessory: {
             if state?.rows != nil, !isEmpty {
-                CardSearchButton(title: list.title, isSearching: $isSearching, query: $query, isExpanded: isExpanded)
+                CardSearchButton(title: list.title(kind), isSearching: $isSearching, query: $query,
+                                 isExpanded: isExpanded)
             }
         }
     }
 
-    /// By its title or its number (`#12` or `12`).
+    /// By its title or its number (`#12` or `12`; GitLab's merge requests `!12`).
     private func matches(_ row: HostedRow) -> Bool {
-        FileSearch.matches("#\(row.number) \(row.title)", query: query)
+        FileSearch.matches("\(session.github.kind.reference(row.item)) \(row.title)", query: query)
+    }
+}
+
+extension HostingStore {
+    /// The connected provider's kind, whose words the PRs tab and the detail use; GitHub while none is connected.
+    var kind: HostingKind { api?.client.kind ?? .github }
+}
+
+extension HostingKind {
+    /// `#12` for an issue, the kind's `numberPrefix` for a pull request (`!12` on GitLab).
+    func reference(_ item: HostedItem) -> String {
+        switch item {
+        case .pullRequest(let number): numberPrefix + String(number)
+        case .issue(let number): "#\(number)"
+        }
+    }
+}
+
+extension HostingStore.List {
+    /// `title` in the kind's words ("My MRs" on GitLab).
+    func title(_ kind: HostingKind) -> String {
+        self == .mine ? "My \(kind.shortNoun)s" : title
+    }
+
+    /// `emptyText` in the kind's words ("No open merge requests" on GitLab).
+    func emptyText(_ kind: HostingKind) -> String {
+        switch self {
+        case .mine: "No open \(kind.pullRequestsNoun.lowercased()) of yours"
+        case .allOpen: "No open \(kind.pullRequestsNoun.lowercased())"
+        case .reviewRequested, .assigned: emptyText
+        }
     }
 }
 
 /// A failed read: GitHub's reason, and for a refused token the way to reconnect.
 private struct ListErrorRow: View {
-    let error: GitHubStore.ListError
+    let error: HostingStore.ListError
     @Environment(WindowModel.self) private var model
     @Environment(\.textSize) private var textSize
 
@@ -198,31 +233,73 @@ private struct ListErrorRow: View {
 /// Without a connected account: what is missing, and the button to Settings › Integrations.
 private struct ConnectGitHubCard: View {
     /// Set when the profile has an account whose token is not in the Keychain.
-    let account: Profile.GitHubAccount?
+    let account: HostingAccount?
+    /// `RepoSession.hostedRemoteHost`; nil when no remote names a host an account can be connected for.
+    let host: String?
     @Environment(WindowModel.self) private var model
     @Environment(\.textSize) private var textSize
 
     var body: some View {
-        SectionCard("GitHub", systemImage: "person.crop.circle.badge.plus") {
+        SectionCard(account?.providerName ?? "Integrations", systemImage: "person.crop.circle.badge.plus") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(account == nil ? "Connect GitHub" : "Reconnect GitHub")
+                Text(account.map { "Reconnect \($0.providerName)" } ?? "Connect an account")
                     .font(textSize.bodyMedium)
                 Text(detail)
                     .font(textSize.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(account == nil ? "Connect GitHub" : "Reconnect") { model.selectSettings(.integrations) }
+                Button(account == nil ? connectTitle : "Reconnect") { model.selectSettings(.integrations) }
                     .buttonStyle(RowTextButtonStyle(prominent: true))
                     .help("Settings › Integrations")
             }
         }
     }
 
+    private var connectTitle: String {
+        host.map { "Connect an account for \($0)…" } ?? "Connect an account…"
+    }
+
     private var detail: String {
         guard let account else {
-            return "Pull requests and issues of this repository show here once this tab's profile has a GitHub account."
+            return "Pull requests and issues of this repository show here once this tab's profile has an account for "
+                + (host ?? "its host") + "."
         }
         return "The token of \(account.login) on \(account.host) is not in the Keychain."
+    }
+}
+
+extension RepoSession {
+    /// The host of the first https remote (origin first) whose URL names a hosted repository on a host an account
+    /// can be connected for; nil when none does. Never an ssh remote's host, which may be an SSH alias from
+    /// `~/.ssh/config` (`git@github.com-work:…`), nor a host the profile has an account on under another port.
+    var hostedRemoteHost: String? {
+        let accountNames = Set((profile?.accounts ?? []).map { Self.hostName($0.host) })
+        return orderedRemotes.lazy.filter { $0.url.lowercased().hasPrefix("https://") }
+            .compactMap { Self.hostedHost($0.url) }
+            .first { !accountNames.contains(Self.hostName($0)) }
+    }
+
+    /// The name and host of the first ssh remote (origin first) whose URL names a hosted repository; nil when none
+    /// does.
+    var sshRemoteHint: (name: String, host: String)? {
+        orderedRemotes.lazy.filter { !$0.url.lowercased().hasPrefix("https://") }
+            .compactMap { remote in Self.hostedHost(remote.url).map { (remote.name, $0) } }
+            .first
+    }
+
+    /// The host of a remote URL whose path can name a hosted repository (at least two segments: GitHub's
+    /// `owner/repo`, GitLab's `group/sub/project`); nil otherwise.
+    private static func hostedHost(_ url: String) -> String? {
+        RemoteURL(url).flatMap { $0.segments.count >= 2 ? $0.host : nil }
+    }
+
+    private var orderedRemotes: [RemoteInfo] {
+        remotes.filter { $0.name == "origin" } + remotes.filter { $0.name != "origin" }
+    }
+
+    /// `host` without its `:port`, lowercase.
+    private static func hostName(_ host: String) -> Substring {
+        host.lowercased().split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
     }
 }
 
@@ -232,7 +309,7 @@ private struct HostedRowView: View {
     let session: RepoSession
     let row: HostedRow
     let checks: ChecksState?
-    let realAvatars: Bool
+    let avatars: HostAvatars
     @State private var hovered = false
     /// Bumped when `AvatarStore` has a new image for this author (or the avatar mode changed).
     @State private var avatarRevision = 0
@@ -243,12 +320,13 @@ private struct HostedRowView: View {
 
     var body: some View {
         let selected = session.openHosted == row.item
+        let reference = session.github.kind.reference(row.item)
         HStack(spacing: SidebarMetrics.iconGap) {
             avatar
                 .id(avatarRevision)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
-                Text("#\(row.number)")
+                Text(reference)
                     .font(textSize.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -282,9 +360,11 @@ private struct HostedRowView: View {
         .onTapGesture { session.selectHosted(row.item) }
         .onReceive(NotificationCenter.default.publisher(for: AvatarStore.didChange)) { note in
             guard let changed = note.userInfo?[AvatarStore.emailKey] as? String else { return avatarRevision &+= 1 }
-            if AvatarStore.matches(email: email, name: login, changed: changed) { avatarRevision &+= 1 }
+            if authorAvatars.matches(changed, login: login, id: row.authorID, avatarURL: row.authorAvatarURL) {
+                avatarRevision &+= 1
+            }
         }
-        .help(row.authorLogin.map { "\(row.title)\n#\(row.number) by \($0)" } ?? "\(row.title)\n#\(row.number)")
+        .help(row.authorLogin.map { "\(row.title)\n\(reference) by \($0)" } ?? "\(row.title)\n\(reference)")
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityLabel(accessibilityText)
@@ -293,18 +373,13 @@ private struct HostedRowView: View {
 
     private var login: String { row.authorLogin ?? "?" }
 
-    /// GitHub's noreply address of the author: `AvatarStore.gitHubAvatar` loads its GitHub avatar in every mode, so
-    /// an account looks the same here and on the pull request page. Empty (a drawn avatar from the login, never a
-    /// request) for the stub and for Enterprise hosts, whose avatars are elsewhere.
-    private var email: String {
-        guard realAvatars, let login = row.authorLogin else { return "" }
-        return AvatarStore.gitHubEmail(login: login, id: row.authorID)
-    }
+    /// The repository's avatars (GitHub's load in every mode, so an account looks the same here and on the pull
+    /// request page); a drawn avatar, never a request, without an author.
+    private var authorAvatars: HostAvatars { row.authorLogin == nil ? .drawn : avatars }
 
     @ViewBuilder private var avatar: some View {
         let pixels = Int((Self.avatarSize * displayScale).rounded())
-        let image = email.isEmpty ? AvatarStore.shared.avatar(email: "", name: login, pixels: pixels)
-            : AvatarStore.shared.gitHubAvatar(login: login, id: row.authorID, pixels: pixels)
+        let image = authorAvatars.image(login: login, id: row.authorID, avatarURL: row.authorAvatarURL, pixels: pixels)
         if let image {
             Image(nsImage: image)
                 .resizable()
@@ -317,7 +392,7 @@ private struct HostedRowView: View {
     }
 
     private var accessibilityText: String {
-        let kind = if case .issue = row.item { "Issue" } else { "Pull request" }
+        let kind = if case .issue = row.item { "Issue" } else { session.github.kind.pullRequestNoun }
         var parts = ["\(kind) \(row.number)", row.title]
         if let author = row.authorLogin { parts.append("by \(author)") }
         if row.isDraft { parts.append("draft") }

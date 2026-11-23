@@ -3,7 +3,7 @@
 // nothing left to show goes away, except Branches, which then says all its sections are hidden.
 import Foundation
 
-/// A sidebar section, by its id in the prefs. The PR lists' ids are `GitHubStore.List`'s raw values.
+/// A sidebar section, by its id in the prefs. The PR lists' ids are `HostingStore.List`'s raw values.
 enum SidebarSectionID: String, CaseIterable, Sendable {
     case local, remote, worktrees, submodules, tags, mine, reviewRequested, allOpen, assigned
 
@@ -23,7 +23,7 @@ enum SidebarSectionID: String, CaseIterable, Sendable {
         case .worktrees: "Worktrees"
         case .submodules: "Submodules"
         case .tags: "Tags"
-        case .mine, .reviewRequested, .allOpen, .assigned: GitHubStore.List(rawValue: rawValue)?.title ?? rawValue
+        case .mine, .reviewRequested, .allOpen, .assigned: HostingStore.List(rawValue: rawValue)?.title ?? rawValue
         }
     }
 }
@@ -46,7 +46,7 @@ struct SidebarSections: Equatable, Sendable {
         visible = ids.filter { !hidden.contains($0) }
     }
 
-    /// The sections as `Preferences.defaults` has them now (`GitHubStore`, which is not a view).
+    /// The sections as `Preferences.defaults` has them now (`HostingStore`, which is not a view).
     static var current: SidebarSections {
         SidebarSections(order: Preferences.defaults.string(forKey: PrefKey.sidebarSectionOrder.rawValue) ?? "",
                         hidden: Preferences.defaults.string(forKey: PrefKey.hiddenSidebarSections.rawValue) ?? "")
@@ -71,8 +71,8 @@ struct SidebarSections: Equatable, Sendable {
     }
 
     /// The PRs tab's visible lists, in order.
-    var pullRequestLists: [GitHubStore.List] {
-        ids(in: .prs).compactMap { GitHubStore.List(rawValue: $0.rawValue) }
+    var pullRequestLists: [HostingStore.List] {
+        ids(in: .prs).compactMap { HostingStore.List(rawValue: $0.rawValue) }
     }
 
     /// The tabs with a visible section; Branches always.

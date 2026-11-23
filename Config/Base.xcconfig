@@ -1,0 +1,5 @@
+// The app target's base settings (project.yml `configFiles`, Debug and Release). Pulls in the untracked
+// Config/Secrets.xcconfig when it exists (gitignored, never committed), which holds
+// HISTQ_BITBUCKET_CLIENT_SECRET = <secret of Histq's Bitbucket OAuth client>. Without it the setting is empty and
+// "Sign in with Bitbucket" is hidden; a Bitbucket API token still works. See CONTRIBUTING.md, "OAuth apps".
+#include? "Secrets.xcconfig"
