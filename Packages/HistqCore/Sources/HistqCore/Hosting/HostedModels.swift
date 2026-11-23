@@ -37,10 +37,78 @@ public struct HostedUser: Codable, Sendable, Equatable {
 public struct HostedRepositoryInfo: Codable, Sendable, Equatable {
     public var fullName: String?
     public var defaultBranch: String
+    /// Not part of GitHub's JSON: where a host says it (GitLab's project `merge_method`), whether a merge adds a merge
+    /// commit (`merge`, `rebase_merge`) or not (`ff`); nil when unknown.
+    public var mergeCommit: Bool? = nil
+    /// Not part of GitHub's JSON: the project's squash rule where a host has one (GitLab's `squash_option`).
+    public var squashOption: HostedSquashOption? = nil
 
     enum CodingKeys: String, CodingKey {
         case fullName = "full_name"
         case defaultBranch = "default_branch"
+    }
+}
+
+/// Whether a merge squashes, as a project rules it (GitLab's `squash_option`): never, always, or the user's choice
+/// starting checked (`defaultOn`) or not (`defaultOff`).
+public enum HostedSquashOption: String, Sendable, Equatable {
+    case never, always
+    case defaultOn = "default_on"
+    case defaultOff = "default_off"
+}
+
+/// What a host's approval box shows (GitLab's `GET .../approvals`): `required` nil or 0 means approval is optional
+/// (GitLab Community Edition sends no `approvals_required`); `left` how many are still missing; who approved; and
+/// whether the token's user may approve and already has (nil when the host does not say).
+public struct HostedApprovals: Sendable, Equatable {
+    public var required: Int?
+    public var left: Int?
+    public var approvedBy: [HostedUser]
+    public var viewerCanApprove: Bool?
+    public var viewerHasApproved: Bool?
+
+    public init(
+        required: Int? = nil, left: Int? = nil, approvedBy: [HostedUser] = [], viewerCanApprove: Bool? = nil,
+        viewerHasApproved: Bool? = nil
+    ) {
+        self.required = required
+        self.left = left
+        self.approvedBy = approvedBy
+        self.viewerCanApprove = viewerCanApprove
+        self.viewerHasApproved = viewerHasApproved
+    }
+
+    /// No approval is required.
+    public var isOptional: Bool { (required ?? 0) <= 0 }
+}
+
+/// What a host's merge box shows beyond `mergeable`/`mergeableState`, from the single pull request where the host
+/// gives it (GitLab's merge request): `status` is the host's own word for why it merges or not (GitLab's
+/// `detailed_merge_status`, kept as sent: the app words the known values and treats any other as blocked);
+/// `commitsBehind` how far the source branch is behind the target; whether the token's user may merge; whether the
+/// merge deletes the source branch as it stands (`deletesSourceBranch`) and squashes (`squashOnMerge`); the last merge
+/// or rebase error; and whether a rebase runs now.
+public struct HostedMergeDetails: Sendable, Equatable {
+    public var status: String?
+    public var commitsBehind: Int?
+    public var viewerCanMerge: Bool?
+    public var deletesSourceBranch: Bool?
+    public var squashOnMerge: Bool?
+    public var mergeError: String?
+    public var rebaseInProgress: Bool
+
+    public init(
+        status: String? = nil, commitsBehind: Int? = nil, viewerCanMerge: Bool? = nil,
+        deletesSourceBranch: Bool? = nil, squashOnMerge: Bool? = nil, mergeError: String? = nil,
+        rebaseInProgress: Bool = false
+    ) {
+        self.status = status
+        self.commitsBehind = commitsBehind
+        self.viewerCanMerge = viewerCanMerge
+        self.deletesSourceBranch = deletesSourceBranch
+        self.squashOnMerge = squashOnMerge
+        self.mergeError = mergeError
+        self.rebaseInProgress = rebaseInProgress
     }
 }
 
@@ -84,6 +152,37 @@ public struct HostedLabel: Codable, Sendable, Equatable {
     public var description: String?
 }
 
+/// A pull request's or issue's milestone where the host has milestones (GitLab's `milestone`): its title, and its
+/// due date as the host wrote it (`YYYY-MM-DD`).
+public struct HostedMilestone: Sendable, Equatable {
+    public var title: String
+    public var dueDate: String?
+
+    public init(title: String, dueDate: String? = nil) {
+        self.title = title
+        self.dueDate = dueDate
+    }
+}
+
+/// A pull request's or issue's time tracking where the host has it (GitLab's `time_stats`): the estimate and the time
+/// spent in seconds, and the host's own words for them ("1h 30m"), nil when not set.
+public struct HostedTimeStats: Sendable, Equatable {
+    public var estimate: Int
+    public var spent: Int
+    public var humanEstimate: String?
+    public var humanSpent: String?
+
+    public init(estimate: Int = 0, spent: Int = 0, humanEstimate: String? = nil, humanSpent: String? = nil) {
+        self.estimate = estimate
+        self.spent = spent
+        self.humanEstimate = humanEstimate
+        self.humanSpent = humanSpent
+    }
+
+    /// Neither an estimate nor time spent (GitLab's "No estimate or time spent").
+    public var isEmpty: Bool { estimate <= 0 && spent <= 0 }
+}
+
 /// One end of a pull request: the branch and the commit it points at.
 public struct HostedBranchRef: Codable, Sendable, Equatable {
     /// `owner:branch`.
@@ -124,6 +223,15 @@ public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     public var additions: Int?
     public var deletions: Int?
     public var changedFiles: Int?
+    /// The reactions on the pull request itself (not on its comments), where the host has `itemReactions`: not part of
+    /// the JSON (GitHub's `reactions` rollup is another shape); the app sets it from `itemReactions(of:in:)`.
+    public var reactions: [HostedReaction] = []
+    /// The merge box's details where the host gives them (GitLab); not part of the JSON: the host's mapping sets it.
+    public var mergeDetails: HostedMergeDetails? = nil
+    /// The sidebar's milestone and time tracking where the host gives them (GitLab); not part of the JSON: the host's
+    /// mapping sets them.
+    public var milestone: HostedMilestone? = nil
+    public var timeStats: HostedTimeStats? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, number, title, state, draft, user, body, head, base, labels, assignees, merged, mergeable
@@ -160,6 +268,11 @@ public struct HostedIssue: Codable, Sendable, Equatable, Identifiable {
     public var pullRequest: PullRequestLink?
     /// Only a pull request's search result has it (`GET /search/issues`).
     public var draft: Bool?
+    /// The reactions on the issue itself, as `HostedPullRequest.reactions`.
+    public var reactions: [HostedReaction] = []
+    /// The sidebar's milestone and time tracking, as `HostedPullRequest.milestone` and `timeStats`.
+    public var milestone: HostedMilestone? = nil
+    public var timeStats: HostedTimeStats? = nil
 
     public struct PullRequestLink: Codable, Sendable, Equatable {
         public var url: String?
@@ -215,6 +328,9 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     public var viewerCanEdit = false
     public var viewerCanDelete = false
     public var reactions: [HostedReaction] = []
+    /// A resolved root's resolver and when, where the host says (GitLab); not part of the JSON.
+    public var resolvedBy: HostedUser? = nil
+    public var resolvedAt: Date? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, user, body
@@ -223,6 +339,37 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
         case htmlURL = "html_url"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+    }
+}
+
+/// A history entry of a pull request's or an issue's timeline that is not a comment: a host's system note ("added 2
+/// commits", "resolved all threads") or a state, label or milestone change. Its shape is open, so a host adds kinds
+/// without a change here or in the app: `text` is the wording (a system note's Markdown body as the host sent it, or
+/// Histq's plain words built from an event's fields), `textHTML` its HTML (the note through `MarkdownHTML`, Histq's
+/// words escaped), `action` the host's own
+/// kind (GitLab's `systemNoteMetadata.action`, or `state`, `label`, `milestone` for a resource event) and `icon` its
+/// icon name (GitLab's `systemNoteIconName`), both nil when unknown. Never a comment: no reply, edit or reaction.
+/// `id` is unique within its item (`note-<id>`, `state-<id>`…).
+public struct HostedTimelineEvent: Sendable, Equatable, Identifiable {
+    public var id: String
+    public var actor: HostedUser?
+    public var createdAt: Date?
+    public var text: String
+    public var textHTML: String?
+    public var action: String?
+    public var icon: String?
+
+    public init(
+        id: String, actor: HostedUser?, createdAt: Date?, text: String, textHTML: String? = nil,
+        action: String? = nil, icon: String? = nil
+    ) {
+        self.id = id
+        self.actor = actor
+        self.createdAt = createdAt
+        self.text = text
+        self.textHTML = textHTML
+        self.action = action
+        self.icon = icon
     }
 }
 
@@ -284,6 +431,9 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var viewerCanEdit = false
     public var viewerCanDelete = false
     public var reactions: [HostedReaction] = []
+    /// As in `HostedComment`: a resolved thread's resolver and when, on its root (GitLab).
+    public var resolvedBy: HostedUser? = nil
+    public var resolvedAt: Date? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, path, line, side, body, user

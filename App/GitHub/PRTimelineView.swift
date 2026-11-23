@@ -37,6 +37,18 @@ struct PRTimelineHTML: Sendable {
     /// row changes only these.
     var reactions: [String: PRReactionTarget] = [:]
     var reactionKinds: [String] = []
+    /// The page folds each thread's replies under a summary (`PRPageLayout.collapsesReplies`): the collapse rule of its
+    /// review threads (`PRTimeline.isCollapsed(_:expanded:collapsesReplies:)`).
+    var collapsesReplies = false
+}
+
+/// What a host's Activity page adds to the timeline (`PRPageLayout.activity`): its history entries (nil when their
+/// read failed or was not made), the filter and sort, and whether replies fold under a summary.
+struct PRActivityPage: Sendable {
+    let layout: PRActivity
+    var view: PRActivityView
+    let events: [HostedTimelineEvent]?
+    let collapsesReplies: Bool
 }
 
 /// The ids an optimistic page gives what the host has not answered yet (a reply, a new inline thread and its comment):
@@ -128,6 +140,10 @@ struct PRGeneralThread: Sendable {
     /// The host resolves general threads (`resolveGeneralThreads`) and this root may be: its row offers Resolve, its
     /// header a chevron.
     let resolvable: Bool
+    /// The Activity page's rule (`PRActivityPage.collapsesReplies`): true when its replies fold under a summary
+    /// (collapsed unless expanded), false when it has none to fold (never collapsed: its reply row, with Resolve,
+    /// stays); nil keeps today's rule.
+    var foldsReplies: Bool? = nil
 
     var isResolved: Bool { resolvable && root.resolved == true }
 }
@@ -333,12 +349,37 @@ enum PRLaunchActionGate {
         pending.append(action)
     }
 
-    /// A timeline page was shown: the waiting actions run.
+    /// A timeline page was shown: the waiting actions run, and the column scrolls once to `-HistqPRScrollTo`'s card.
     static func pageDidShow() {
         pageShown = true
         let actions = pending
         pending = []
         actions.forEach { $0() }
+        scrollIfAsked()
+    }
+
+    /// DEBUG `-HistqPRScrollTo merge|activity` (stub launches only): the card the conversation column scrolls to, once,
+    /// on the next main-queue turn after the first page shows (its new height applied by then), so a shot can show
+    /// content below the fold. A card the column has not registered is logged `scroll-to <target> missing`.
+    private static let scrollTarget = GitHubStub.isEnabled ? AppState.launchFlag("-HistqPRScrollTo") : nil
+    private static var scrolled = false
+    private static var scroller: (ids: Set<String>, scroll: @MainActor (String) -> Void)?
+
+    /// The conversation column's scroll ids (`PRConversationTab.mergeID`, `.activityID`) and how it scrolls to one.
+    static func registerScroller(ids: Set<String>, scroll: @escaping @MainActor (String) -> Void) {
+        scroller = (ids, scroll)
+    }
+
+    private static func scrollIfAsked() {
+        guard let target = scrollTarget, !scrolled else { return }
+        scrolled = true
+        DispatchQueue.main.async {
+            guard let scroller, scroller.ids.contains(target) else {
+                return UITiming.content("scroll-to \(target) missing")
+            }
+            scroller.scroll(target)
+            UITiming.content("scroll-to \(target)")
+        }
     }
 }
 #endif
@@ -407,15 +448,16 @@ extension PRTimeline {
     /// collapses like a thread when resolved (`gthread-<root>`). Where `general` offers reactions, every comment (not
     /// the description or a review's body) has an add-reaction button in its header (`cadd-<key>`), and one with
     /// reactions a row of chips after its body (`creact-<key>`). An issue's page has no
-    /// reviews and no threads. Dates follow the user's date format (Settings › Appearance, 24 h by default).
+    /// reviews and no threads. Dates are relative to `now`, the detail load's (`PRPageDates`), with the absolute date in
+    /// the user's date format (Settings › Appearance, 24 h by default) as their tooltip.
     nonisolated static func page(
         author: HostedUser?, action: String, date: Date?, html: String?, markdown: String?,
         comments: [HostedComment], reviews: [HostedReview] = [], threads: Loadable<PRThreads> = .idle,
-        expanded: [Int: Bool] = [:], general options: PRGeneralOptions = PRGeneralOptions()
+        expanded: [Int: Bool] = [:], general options: PRGeneralOptions = PRGeneralOptions(), now: Date,
+        activity: PRActivityPage? = nil
     ) -> PRTimelineHTML {
-        let dates = DateFormatter()
-        dates.locale = Locale(identifier: Locale.current.identifier)
-        dates.dateFormat = Preferences.defaults.string(forKey: PrefKey.dateFormat.rawValue) ?? "MM/dd/yy @ HH:mm"
+        let dates = PRPageDates(now: now)
+        let folds = activity?.collapsesReplies ?? false
         var avatars: [String: HostedUser] = [:]
         var general: [Int: PRGeneralThread] = [:]
         var targets: [String: PRCommentTarget] = [:]
@@ -440,27 +482,37 @@ extension PRTimeline {
             target.map { "<div class=\"slot-edit\" data-slot=\"cedit-\($0.key)\"></div>" } ?? ""
         }
 
+        /// A date: relative, the absolute one as its tooltip.
+        func when(_ date: Date?) -> String {
+            date.map {
+                "<span class=\"date\" title=\"\(HostedHTML.escape(dates.absolute($0)))\">"
+                    + "\(HostedHTML.escape(dates.relative($0)))</span>"
+            } ?? ""
+        }
+
         /// A header's content: the avatar slot, the login, what they did (none for a thread's comment), `extra` (a
         /// capsule), when, the add-reaction button's slot when `reactions` (kept for the overlays), and the "…" menu's
-        /// slot when `menu` (the viewer's own comment).
+        /// slot when `menu` (the viewer's own comment). `named`: the account's name then its `@login` (GitLab's),
+        /// instead of the login alone.
         func head(
             _ slot: String, _ user: HostedUser?, action: String?, badge: String? = nil, extra: String = "", date: Date?,
-            menu: PRCommentTarget? = nil, reactions: PRReactionTarget? = nil
+            menu: PRCommentTarget? = nil, reactions: PRReactionTarget? = nil, named: Bool = false
         ) -> String {
             avatars[slot] = user
             let what = action.map { action in
                 " " + (badge.map { "<span class=\"badge \($0)\">\(HostedHTML.escape(action))</span>" }
                     ?? HostedHTML.escape(action))
             } ?? ""
-            let when = date.map { "<span class=\"date\">\(HostedHTML.escape(dates.string(from: $0)))</span>" } ?? ""
+            let whenHTML = when(date)
             // A key is `g` or `r` and an integer id: the format the measuring script accepts.
             let menu = menu.map { "<span class=\"slot-menu\" data-slot=\"cmenu-\($0.key)\"></span>" } ?? ""
             if let reactions { reactionTargets[reactions.key] = reactions }
             let add = reactions.map { "<span class=\"slot-add\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
+            let who = named ? Self.named(user) : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
             return "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>"
-                + "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>\(what)\(extra)\(when)\(add)\(menu)"
+                + "\(who)\(what)\(extra)\(whenHTML)\(add)\(menu)"
         }
 
         /// A comment in a thread or a reply: its header (avatar slot, login, date, the add-reaction and menu slots),
@@ -470,7 +522,8 @@ extension PRTimeline {
             reactions: PRReactionTarget? = nil
         ) -> String {
             let body = body.map { "<div class=\"body\">\($0)</div>" } ?? ""
-            let header = head(slot, user, action: nil, date: date, menu: menu, reactions: reactions)
+            let header = head(slot, user, action: nil, date: date, menu: menu, reactions: reactions,
+                              named: activity != nil)
             return "<div class=\"comment\"><div class=\"comment-head\">\(header)</div>\(body)\(editSlot(menu))"
                 + "\(reactionSlot(reactions))</div>"
         }
@@ -551,6 +604,129 @@ extension PRTimeline {
                 + "<div class=\"slot-reply\" data-slot=\"greply-\(id)\"></div></section>"
         }
 
+        /// The Activity's "Resolved <time> by X" line under a resolved thread's header (its parts the host gave).
+        func resolvedLine(by user: HostedUser?, at date: Date?) -> String {
+            let by = user.map { " by " + Self.named($0, handle: false) } ?? ""
+            return "<div class=\"resolved-line\">Resolved \(when(date))\(by)</div>"
+        }
+
+        /// The Activity's fold of a thread's replies (`id`, the element the patch collapses): a summary row with the
+        /// chevron's slot, "N replies", the last replier's avatar, "Last reply by X <time>" while collapsed and
+        /// "Collapse replies" while open, then the replies and the reply row. The summary's avatar shares the last
+        /// reply's slot id: the stylesheet shows exactly one of the two at a time (the reply's is in the folded
+        /// part), so one native avatar covers whichever has a box.
+        func fold(
+            id: String, chevron: String, collapsed: Bool, replies list: [(comment: HostedReviewComment?,
+            general: HostedComment?, html: String)], slotPrefix: String, reply: String
+        ) -> String {
+            let users = list.map { $0.comment?.user ?? $0.general?.user }
+            let lastIndex = list.indices.max { a, b in
+                let da = list[a].comment?.createdAt ?? list[a].general?.createdAt ?? .distantPast
+                let db = list[b].comment?.createdAt ?? list[b].general?.createdAt ?? .distantPast
+                return (da, a) < (db, b)
+            }
+            let last = lastIndex.map { (user: users[$0], id: list[$0].comment?.id ?? list[$0].general?.id ?? 0,
+                                        date: list[$0].comment?.createdAt ?? list[$0].general?.createdAt) }
+            let count = list.count == 1 ? "1 reply" : "\(list.count) replies"
+            // Integer ids only: the slot formats the measuring script accepts.
+            let avatar = last.map { last -> String in
+                avatars["\(slotPrefix)\(last.id)"] = last.user
+                return "<span class=\"slot-avatar\" data-slot=\"\(slotPrefix)\(last.id)\"></span>"
+            } ?? ""
+            let lastBy = last.map { "Last reply by \(Self.named($0.user, handle: false)) \(when($0.date))" } ?? ""
+            return "<div class=\"fold\(collapsed ? " collapsed" : "")\" id=\"\(id)\"><div class=\"summary\">"
+                + "<span class=\"slot-chevron\" data-slot=\"\(chevron)\"></span>"
+                + "<span class=\"folded\">\(avatar)<span class=\"count\">\(count)</span> \(lastBy)</span>"
+                + "<span class=\"open\">Collapse replies</span></div>"
+                + "<div class=\"replies\">\(list.map(\.html).joined())</div>\(reply)</div>"
+        }
+
+        /// A general thread or comment on the Activity: "<name> @login started a thread / commented <time>", the
+        /// resolved line, the body, and its replies folded under a summary (none: the reply row alone).
+        func activityItem(_ root: HostedComment, _ list: [HostedTimelineOrder.Reply]) -> String {
+            var generalThread: PRGeneralThread?
+            if options.replies || options.resolve, !PRPlaceholderID.isPlaceholder(root.id) {
+                generalThread = PRGeneralThread(root: root, resolvable: options.resolve && root.resolvable == true,
+                                                foldsReplies: folds ? !list.isEmpty : nil)
+                general[root.id] = generalThread
+            }
+            let menu = target(Self.target(root, options))
+            let reactions = Self.reactions(root, options)
+            let header = head("avatar-i\(root.id)", root.user,
+                              action: root.resolvable == true ? "started a thread" : "commented", date: root.createdAt,
+                              menu: menu, reactions: reactions, named: true)
+            let resolved = generalThread?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
+            let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
+            let replyRow = generalThread.map { "<div class=\"slot-reply\" data-slot=\"greply-\($0.root.id)\"></div>" }
+                ?? ""
+            let rows = list.map { reply in
+                (comment: HostedReviewComment?.none, general: Optional(reply.comment),
+                 html: commentHTML("avatar-i\(reply.comment.id)", reply.comment.user, date: reply.comment.createdAt,
+                                   body: bodyHTML(reply.comment.bodyHTML, reply.comment.body),
+                                   menu: target(Self.target(reply.comment, options)),
+                                   reactions: Self.reactions(reply.comment, options)))
+            }
+            let tail: String
+            if rows.isEmpty || !folds {
+                tail = (rows.isEmpty ? "" : "<div class=\"replies\">\(rows.map(\.html).joined())</div>") + replyRow
+            } else {
+                let collapsed = generalThread.map { isCollapsed($0, expanded: options.expanded) } ?? true
+                tail = fold(id: "gthread-\(root.id)", chevron: "gchevron-\(root.id)", collapsed: collapsed,
+                            replies: rows, slotPrefix: "avatar-i", reply: replyRow)
+            }
+            return "<section class=\"item gl\"><div class=\"head\">\(header)</div>\(resolved)\(body)"
+                + "\(editSlot(menu))\(reactionSlot(reactions))\(tail)</section>"
+        }
+
+        /// A diff thread on the Activity: "<name> @login started a thread on the diff <time>" (the root comment's
+        /// header), the resolved line, the file and lines with the commented rows, the root's body, and its replies
+        /// folded under a summary (none: the reply row alone).
+        func activityThread(_ thread: HostedReviewThread) -> String {
+            guard let root = thread.comments.first else { return "" }
+            let menu = target(PRCommentTarget(
+                .review, id: root.id, hostKey: root.hostKey, body: root.body, user: root.user,
+                canEdit: root.viewerCanEdit, canDelete: root.viewerCanDelete, options: options))
+            let reactions = PRReactionTarget(.review, id: root.id, hostKey: root.hostKey, reactions: root.reactions,
+                                             user: root.user, options: options)
+            let header = head("avatar-c\(root.id)", root.user, action: "started a thread on the diff",
+                              date: root.createdAt, menu: menu, reactions: reactions, named: true)
+            let resolved = thread.state?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt)
+                : ""
+            let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
+            let snippet = "<div class=\"snippet\"><div class=\"thread\">"
+                + threadHead(thread, isResolved: false, chevron: false) + excerptTable(thread) + "</div></div>"
+            // `thread.id` is an integer: it goes in unescaped. A thread the host has not answered yet has no reply row.
+            let replyRow = PRPlaceholderID.isPlaceholder(thread.id)
+                ? "" : "<div class=\"slot-reply\" data-slot=\"reply-\(thread.id)\"></div>"
+            let rows = thread.comments.dropFirst().map { comment in
+                (comment: Optional(comment), general: HostedComment?.none,
+                 html: commentHTML("avatar-c\(comment.id)", comment.user, date: comment.createdAt,
+                                   body: bodyHTML(comment.bodyHTML, comment.body), menu: target(PRCommentTarget(
+                                       .review, id: comment.id, hostKey: comment.hostKey, body: comment.body,
+                                       user: comment.user, canEdit: comment.viewerCanEdit,
+                                       canDelete: comment.viewerCanDelete, options: options)),
+                                   reactions: PRReactionTarget(.review, id: comment.id, hostKey: comment.hostKey,
+                                                               reactions: comment.reactions, user: comment.user,
+                                                               options: options)))
+            }
+            let tail = rows.isEmpty ? replyRow
+                : fold(id: "thread-\(thread.id)", chevron: "chevron-\(thread.id)",
+                       collapsed: isCollapsed(thread, expanded: expanded, collapsesReplies: true),
+                       replies: Array(rows), slotPrefix: "avatar-c", reply: replyRow)
+            return "<section class=\"item gl\"><div class=\"head\">\(header)</div>\(resolved)\(snippet)\(body)"
+                + "\(editSlot(menu))\(reactionSlot(reactions))\(tail)</section>"
+        }
+
+        /// A history entry: one line on the rail, its dot, the actor's name, the wording (the entry's `textHTML`, built
+        /// in the client: a note through `MarkdownHTML`, Histq's words escaped; never raw) and when; no slot, menu or
+        /// reaction.
+        func eventHTML(_ event: HostedTimelineEvent) -> String {
+            let text = event.textHTML ?? "<p>\(HostedHTML.escape(event.text))</p>"
+            let actor = event.actor.map { Self.named($0, handle: false) + " " } ?? ""
+            return "<div class=\"event\"><span class=\"dot\"></span><div class=\"line\">\(actor)"
+                + "<div class=\"body\">\(text)</div> \(when(event.createdAt))</div></div>"
+        }
+
         let replyOnly = threads.value?.replyOnlyReviewIDs ?? []
         // Only a commented one: an approval or a change request submitted with a reply and no text still shows.
         let shown = reviews.filter { review in
@@ -560,10 +736,34 @@ extension PRTimeline {
         // A thread whose review is not shown (pending, or missing from the reviews) would vanish: it goes in the
         // timeline at its first comment's time, in a fixed order, so the same answer always builds the same page (a
         // reload then only measures it again).
-        let sorted = HostedTimelineOrder.entries(
-            comments: comments, reviews: shown, threads: threads.value?.all ?? []
-        ).map { entry in
+        // The Activity drops the synthetic review items once the history loaded: its system notes say who approved.
+        var entries = HostedTimelineOrder.entries(
+            comments: comments, reviews: activity?.events == nil ? shown : [], threads: threads.value?.all ?? [],
+            events: activity?.events ?? [])
+        if let activity {
+            let filter = activity.view.filter
+            if filter != PRActivity.all {
+                entries = entries.filter { entry in
+                    switch entry {
+                    case .comment, .thread: activity.layout.comments == filter
+                    case .review: false
+                    case .event(let event): activity.layout.category(ofEntry: event.action) == filter
+                    }
+                }
+            }
+            if activity.view.newestFirst { entries.reverse() }
+        }
+        let sorted = entries.map { entry in
+            if activity != nil {
+                switch entry {
+                case .comment(let root, let list): return activityItem(root, list)
+                case .thread(let thread): return activityThread(thread)
+                case .event(let event): return eventHTML(event)
+                case .review: break
+                }
+            }
             switch entry {
+            case .event(let event): return eventHTML(event)
             case .comment(let root, let list):
                 var generalThread: PRGeneralThread?
                 // A root the host has not answered yet gets no reply row or chevron (`PRPlaceholderID`).
@@ -602,9 +802,16 @@ extension PRTimeline {
         if case .failed(let message) = threads {
             end += "<p class=\"empty\">The inline review comments did not load: \(HostedHTML.escape(message))</p>"
         }
+        var list = sorted.joined()
+        if activity != nil {
+            if sorted.isEmpty { list = "<p class=\"empty\">Nothing to show with this filter.</p>" }
+            list = "<div class=\"rail\">\(list)</div>"
+        }
         return PRTimelineHTML(
-            html: ([description] + sorted).joined() + end, avatars: avatars, count: comments.count + shown.count,
-            general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions)
+            html: description + list + end, avatars: avatars,
+            count: comments.count + (activity?.events == nil ? shown.count : 0),
+            general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
+            collapsesReplies: folds)
     }
 
     /// A general comment's reaction row target, when `options` offer reactions.
@@ -622,9 +829,18 @@ extension PRTimeline {
     }
 
     /// Whether the general thread `thread` shows collapsed (its header only): only a resolvable one can be, a resolved
-    /// one is, unless the user chose otherwise (`expanded`, by root comment id).
+    /// one is, unless the user chose otherwise (`expanded`, by root comment id). On the Activity page
+    /// (`foldsReplies` set) only its replies fold: collapsed unless expanded, and never one without replies.
     nonisolated static func isCollapsed(_ thread: PRGeneralThread, expanded: [Int: Bool]) -> Bool {
-        thread.resolvable && !(expanded[thread.root.id] ?? !thread.isResolved)
+        if let folds = thread.foldsReplies { return folds && !(expanded[thread.root.id] ?? false) }
+        return thread.resolvable && !(expanded[thread.root.id] ?? !thread.isResolved)
+    }
+
+    /// An account as GitLab's page names it: its name in bold, then its `@login` (`handle`); "ghost" without one.
+    private nonisolated static func named(_ user: HostedUser?, handle: Bool = true) -> String {
+        guard let user else { return "<b>ghost</b>" }
+        let name = "<b>\(HostedHTML.escape(user.name ?? user.login))</b>"
+        return handle ? name + " <span class=\"handle\">@\(HostedHTML.escape(user.login))</span>" : name
     }
 
     /// `comments` as they are once `action` is done, for the optimistic page: a reply appended under its root, by
@@ -650,6 +866,8 @@ extension PRTimeline {
             reply.parentID = root.id
             reply.resolvable = nil
             reply.resolved = nil
+            reply.resolvedBy = nil
+            reply.resolvedAt = nil
             reply.viewerCanEdit = false
             reply.viewerCanDelete = false
             reply.reactions = []
@@ -657,7 +875,12 @@ extension PRTimeline {
         case .resolve(let root, let resolved):
             return comments.map { comment in
                 var comment = comment
-                if comment.id == root.id { comment.resolved = resolved }
+                if comment.id == root.id {
+                    comment.resolved = resolved
+                    // "Resolved just now by <viewer>" until the reload brings the host's.
+                    comment.resolvedBy = resolved ? viewer : nil
+                    comment.resolvedAt = resolved ? .now : nil
+                }
                 return comment
             }
         case .edit(let target, let body) where target.kind == .general:
@@ -785,14 +1008,20 @@ extension PRTimeline {
 
     /// Whether `thread` shows collapsed (its header only): a resolved one is, an unresolved one is not, unless the user
     /// chose otherwise (`expanded`, by root comment id). The page and the native views on it agree on it.
-    nonisolated static func isCollapsed(_ thread: HostedReviewThread, expanded: [Int: Bool]) -> Bool {
-        !(expanded[thread.id] ?? (thread.state?.isResolved != true))
+    /// `collapsesReplies` (the Activity page): only a thread with replies folds them, collapsed unless expanded.
+    nonisolated static func isCollapsed(
+        _ thread: HostedReviewThread, expanded: [Int: Bool], collapsesReplies: Bool = false
+    ) -> Bool {
+        if collapsesReplies { return thread.comments.count > 1 && !(expanded[thread.id] ?? false) }
+        return !(expanded[thread.id] ?? (thread.state?.isResolved != true))
     }
 
     /// The chevron slot, the path with its folders shortened in the middle when it is too long (the file name
     /// stays), "Line N" or "Lines a–b", and the Outdated and Resolved capsules (Resolved green with a check, so a
     /// resolved thread reads at a glance: user, 2026-11-20).
-    private nonisolated static func threadHead(_ thread: HostedReviewThread, isResolved: Bool) -> String {
+    private nonisolated static func threadHead(_ thread: HostedReviewThread, isResolved: Bool, chevron: Bool = true)
+        -> String
+    {
         let slash = thread.path.lastIndex(of: "/")
         let folder = slash.map { String(thread.path[..<$0]) } ?? ""
         let file = slash.map { String(thread.path[$0...]) } ?? thread.path
@@ -802,7 +1031,8 @@ extension PRTimeline {
         default: nil
         }
         // `thread.id` is an integer: it goes in unescaped (a String id would need `HostedHTML.escape`).
-        return "<div class=\"thread-head\"><span class=\"slot-chevron\" data-slot=\"chevron-\(thread.id)\"></span>"
+        let slot = chevron ? "<span class=\"slot-chevron\" data-slot=\"chevron-\(thread.id)\"></span>" : ""
+        return "<div class=\"thread-head\">\(slot)"
             + "<span class=\"path\" title=\"\(HostedHTML.escape(thread.path))\">"
             + "<span class=\"folder\">\(HostedHTML.escape(folder))</span>"
             + "<span class=\"file\">\(HostedHTML.escape(file))</span></span>"
@@ -882,9 +1112,10 @@ struct PRTimelinePage: View {
         let generalExpanded = general?.generalExpanded ?? [:]
         // `thread-<integer id>` and `gthread-<integer id>`, the page's ids and the only ones the patch accepts
         // (`GitHubHTMLPage`).
+        let folds = timeline.collapsesReplies
         let collapsed = Dictionary(uniqueKeysWithValues: threads.values.map { thread in
-            ("thread-\(thread.id)", PRTimeline.isCollapsed(thread, expanded: expanded))
-        } + timeline.general.values.filter(\.resolvable).map { thread in
+            ("thread-\(thread.id)", PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: folds))
+        } + timeline.general.values.filter { $0.resolvable || $0.foldsReplies == true }.map { thread in
             ("gthread-\(thread.root.id)", PRTimeline.isCollapsed(thread, expanded: generalExpanded))
         })
         // `cedit-<key>`, the editor slots' format the patch accepts.
@@ -966,15 +1197,18 @@ struct PRTimelinePage: View {
             GitHubUserAvatar(login: user?.login ?? "ghost", id: user?.id, avatarURL: user?.avatarURL,
                              size: slot.frame.width, avatars: avatars)
         } else if let thread = Self.thread(of: slot, "chevron-", in: threads) {
-            chevron(thread, collapsed: PRTimeline.isCollapsed(thread, expanded: expanded))
+            chevron(thread, collapsed: PRTimeline.isCollapsed(
+                thread, expanded: expanded, collapsesReplies: timeline.collapsesReplies),
+                    fills: slot.frame.width > Self.chevronWidth)
         } else if let thread = Self.thread(of: slot, "reply-", in: threads),
-                  !PRTimeline.isCollapsed(thread, expanded: expanded) {
+                  !PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: timeline.collapsesReplies) {
             measured(PRReplyRow(session: session, number: number, thread: thread,
                                 resolveUnavailable: self.threads?.resolveUnavailable, width: slot.frame.width),
                      slot: slot)
         } else if let general, let thread = Self.general(of: slot, "gchevron-", in: timeline.general) {
             let collapsed = PRTimeline.isCollapsed(thread, expanded: generalExpanded)
-            PRThreadChevron(collapsed: collapsed, subject: "\(thread.root.user?.login ?? "ghost")'s comment") {
+            PRThreadChevron(collapsed: collapsed, subject: "\(thread.root.user?.login ?? "ghost")'s comment",
+                            fills: slot.frame.width > Self.chevronWidth) {
                 general.generalExpanded[thread.root.id] = collapsed
             }
         } else if let general, let thread = Self.general(of: slot, "greply-", in: timeline.general),
@@ -1035,6 +1269,10 @@ struct PRTimelinePage: View {
         return Int(slot.id.dropFirst(prefix.count)).flatMap { threads[$0] }
     }
 
+    /// A chevron slot's width in a header (the stylesheet's); a wider one is an Activity summary row, all of it a
+    /// click target.
+    private static let chevronWidth: CGFloat = 20
+
     /// The thread of a `chevron-<root>` or `reply-<root>` slot.
     private static func thread(
         of slot: HostedHTMLSlot, _ prefix: String, in threads: [Int: HostedReviewThread]
@@ -1045,8 +1283,8 @@ struct PRTimelinePage: View {
 
     /// The thread's chevron: a click expands or collapses it at once (the user's choice, kept across reloads), and
     /// the page follows with the patch.
-    private func chevron(_ thread: HostedReviewThread, collapsed: Bool) -> some View {
-        PRThreadChevron(collapsed: collapsed, subject: thread.path) {
+    private func chevron(_ thread: HostedReviewThread, collapsed: Bool, fills: Bool) -> some View {
+        PRThreadChevron(collapsed: collapsed, subject: thread.path, fills: fills) {
             session.pullDetail.threadExpanded[thread.id] = collapsed
         }
     }
@@ -1057,9 +1295,26 @@ private struct PRThreadChevron: View {
     let collapsed: Bool
     /// What the conversation is on, for VoiceOver (a path, "reviewer's comment").
     let subject: String
+    /// On an Activity summary row's slot: the chevron at its leading edge, a click anywhere on the row toggles.
+    var fills = false
     let toggle: () -> Void
 
     var body: some View {
+        if fills {
+            ZStack(alignment: .leading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: toggle)
+                button
+                    .padding(.leading, 10)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            button
+        }
+    }
+
+    private var button: some View {
         Button(action: toggle) {
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .bold))
@@ -1431,8 +1686,9 @@ private struct PRReactionRow: View {
     }
 }
 
-/// One reaction: its emoji and count in a capsule, in the accent color when the viewer gave it.
-private struct PRReactionChip: View {
+/// One reaction: its emoji and count in a capsule, in the accent color when the viewer gave it. The merge request's
+/// award bar (`PRAwardBarCard`) uses it too.
+struct PRReactionChip: View {
     let reaction: HostedReaction
     let busy: Bool
     let toggle: () -> Void
@@ -1478,10 +1734,29 @@ private struct PRReactionAddButton: View {
     let kinds: [String]
     let model: any PRGeneralThreadModel
     let busy: Bool
+
+    var body: some View {
+        PRReactionPicker(kinds: kinds, reactions: target.reactions, busy: busy,
+                         label: "Add a reaction to \(target.author)'s comment") { kind, add in
+            model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+        }
+    }
+}
+
+/// The add-reaction button of a comment (`PRReactionAddButton`) and of the merge request's award bar
+/// (`PRAwardBarCard`): a smiley with `PRCommentMenu`'s hover circle; a click opens `kinds` under the pointer (the
+/// viewer's, from `reactions`, checked); a pick calls `toggle` with the kind and whether to add it. Off while `busy`.
+struct PRReactionPicker: View {
+    /// The host's kinds, in its picker's order.
+    let kinds: [String]
+    let reactions: [HostedReaction]
+    let busy: Bool
+    /// VoiceOver's name for it.
+    let label: String
+    let toggle: (_ kind: String, _ add: Bool) -> Void
     @State private var hovered = false
 
     var body: some View {
-        let author = target.author
         Image(systemName: "face.smiling")
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
@@ -1494,19 +1769,18 @@ private struct PRReactionAddButton: View {
             .help("Add a reaction")
             .accessibilityElement()
             .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("Add a reaction to \(author)'s comment")
+            .accessibilityLabel(label)
             .accessibilityAction { if !busy { open() } }
     }
 
     /// The host's kinds under the pointer (the click's place), the viewer's checked.
     private func open() {
-        let mine = Set(target.reactions.filter(\.viewerReacted).map(\.kind))
+        let mine = Set(reactions.filter(\.viewerReacted).map(\.kind))
         let entries = kinds.map { kind in
             MenuEntry.action("\(PRReactionGlyph.glyph(kind))  \(PRReactionGlyph.name(kind))",
                              checked: mine.contains(kind)) {
                 guard !busy else { return }
-                model.perform(.react(target, kind: kind, add: !mine.contains(kind)), on: number,
-                              github: session.github)
+                toggle(kind, !mine.contains(kind))
             }
         }
         MenuBuilder.menu(entries).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)

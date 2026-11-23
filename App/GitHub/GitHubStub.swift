@@ -25,7 +25,10 @@
 // on bitbucket.org, answered on api.bitbucket.org). The Welcome clone picker stays GitHub's.
 //
 // DEBUG `-HistqStubFailWrites YES`: every stub answers each write and GraphQL mutation with a 500 (reads still answer),
-// so a launch checks how an action's failure rolls back.
+// so a launch checks how an action's failure rolls back; GitLab's rebase alone is let through, and fails later through
+// its `merge_error` (`GitLabStub.isRebase`).
+//
+// DEBUG `-HistqPRDraft YES`: every stub kind serves its pull request #1 (GitLab's !1) as a draft.
 import Foundation
 import HistqCore
 import os
@@ -43,6 +46,8 @@ enum GitHubStub {
     /// DEBUG `-HistqStubFailWrites YES`: every host's stub answers each write and GraphQL mutation with a 500; reads,
     /// GraphQL queries included, still answer (`GitHubStubProtocol`), so a launch checks an action's rollback.
     static let failsWrites = AppState.launchFlag("-HistqStubFailWrites") == "YES"
+    /// DEBUG `-HistqPRDraft YES`: every stub kind's #1 (GitLab's !1) is a draft.
+    static let servesDraft = AppState.launchFlag("-HistqPRDraft") == "YES"
 
     /// `text` as the inside of a JSON string literal (quotes, backslashes and control characters escaped), for a
     /// request's text going into the stubs' JSON.
@@ -352,7 +357,7 @@ enum GitHubStub {
         let body = created ? "Polishes the feature." : "Adds the feature branch's work."
         return """
             {"id": \(500 + number), "number": \(number), "title": "\(title)",
-             "state": "\(isMerged && !created && full ? "closed" : "open")", "draft": false,
+             "state": "\(isMerged && !created && full ? "closed" : "open")", "draft": \(servesDraft && !created),
              "html_url": "https://github.com/stub/stub/pull/\(number)", "user": \(user),
              "body": "\(body)", "body_html": "<p>\(body)</p>",
              "head": {"label": "stub:feature", "ref": "feature", "sha": "\(created ? createdSHA : headSHA)"},
@@ -383,7 +388,7 @@ enum GitHubStub {
 
     /// PR #1 as the issues API and search return it: issue-shaped, with `pull_request` and `draft`.
     private static let pullAsIssue = """
-        {"id": 501, "number": 1, "title": "Add feature", "state": "open", "draft": false,
+        {"id": 501, "number": 1, "title": "Add feature", "state": "open", "draft": \(servesDraft),
          "html_url": "https://github.com/stub/stub/pull/1", "user": \(user), "comments": 2,
          "body": "Adds the feature branch's work.", "labels": [{"name": "enhancement", "color": "a2eeef"}],
          "assignees": [\(user)], "created_at": "2026-11-10T09:00:00Z", "updated_at": "2026-11-12T16:30:00Z",
@@ -470,10 +475,8 @@ enum GitHubStub {
     /// of code, which a fit page must wrap. Each has a node id: `stub`'s (every second) are its to edit and delete
     /// (the stub keeps no write to them).
     private static let generatedComments: String? = {
-        guard let count = AppState.launchFlag("-HistqPRStubComments").flatMap(Int.init), count >= 0 else {
-            return nil
-        }
-        return (0..<min(count, 600)).map { index in
+        guard let count = generatedCount else { return nil }
+        return (0..<count).map { index in
             let id = 10_000 + index
             let text = "Comment \(index + 1) of a long conversation."
             let line = "let total = items.map { $0.price * $0.count }.reduce(0, +); "
@@ -488,6 +491,29 @@ enum GitHubStub {
                 """
         }.joined(separator: ", ")
     }()
+
+    /// DEBUG `-HistqPRStubComments <n>`: how many generated general comments every stub kind serves on #1 (at most
+    /// 600); nil without the flag.
+    static let generatedCount: Int? = AppState.launchFlag("-HistqPRStubComments").flatMap(Int.init)
+        .flatMap { $0 >= 0 ? min($0, 600) : nil }
+
+    /// The generated comment `index` as Markdown (GitLab's and Bitbucket's stubs): `generatedComments`' text, and
+    /// every third its long line of code in a fence.
+    static func generatedMarkdown(_ index: Int) -> String {
+        let text = "Comment \(index + 1) of a long conversation."
+        guard index % 3 == 2 else { return text }
+        let line = "let total = items.map { $0.price * $0.count }.reduce(0, +); "
+        return text + "\n\n```\n" + String(repeating: line, count: 4) + "\n```"
+    }
+
+    /// The generated comment `index`'s time on 2026-11-12 ("HH:mm"): a minute apart from 12:00.
+    static func generatedTime(_ index: Int) -> String {
+        String(format: "%02d:%02d", 12 + index / 60, index % 60)
+    }
+
+    /// DEBUG `-HistqStubPageSeed YES`: the stubs serve the extra data of the host-like pages (Phases 15-17); without
+    /// it each stub serves exactly its Phase 14 data.
+    static let seedsPage = AppState.launchFlag("-HistqStubPageSeed") == "YES"
 
     /// PR #1's inline review comments on `feature.txt`, as GitHub lists them: thread A (root 811 on lines 4-6,
     /// unresolved) with `stub`'s reply 812, which GitHub files in a review of its own (`replyReview`, 702), and
@@ -659,12 +685,19 @@ enum GitHubStub {
 /// resolved), then `stub`'s comment and a system note, its `detailed_merge_status` as `-HistqPRMergeable
 /// true|false|null` says (`mergeable`, `conflict`, `checking`), open issue #2 assigned to `stub` with `reviewer`'s
 /// thread and `stub`'s reply, then `stub`'s note, the project's labels and users. The GraphQL `NoteStates` read gives
-/// each note's rights (`stub` may edit and delete only its own) and awards (one by `stub`). A reply to a general
+/// each note's rights (`stub` may edit and delete only its own) and awards (one by `stub`), and !1's and issue #2's own
+/// global ids and awards (`itemAwards`: seeded only with `-HistqStubPageSeed YES`; `stub`'s adds and removes kept in
+/// `writes`). A reply to a general
 /// thread or comment (!1's and issue #2's) and a resolve of a general thread (REST on !1, GraphQL
 /// `discussionToggleResolve` on issue #2) are kept in memory (`writes`), so the next load shows them. The other
 /// writes answer as GitLab does and change nothing: a note, a reply to A or B, resolve/unresolve of A or B, approve,
 /// unapprove, a change request (GraphQL), a merge (409 unless pinned to the head), close/reopen, and a create that
-/// always makes !3. Anything else is 404.
+/// always makes !3. A rebase of !1 answers 202 and then reads as running for one read of !1 and done after it (with a
+/// `merge_error` under `-HistqStubFailWrites YES`). With `-HistqStubPageSeed YES` !1 has the merge box's fields (2
+/// commits behind, `stub` may merge, the source branch deleted, no squash), its approvals say approval is optional
+/// (`approvals_required` 0) and the project merges with a merge commit, squash off by default;
+/// `-HistqPRMergeable blocked` then makes it need 2 approvals (1 left), `detailed_merge_status` `not_approved`.
+/// Anything else is 404.
 enum GitLabStub {
     static let repository = HostedRepository(host: "gitlab.com", owner: "stub", name: "stub")
 
@@ -680,6 +713,9 @@ enum GitLabStub {
         let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         let path = url.path(percentEncoded: true)
         switch (method, path) {
+        case ("PUT", "\(mr1)/rebase"):
+            writes.withLock { $0.rebaseReads = 1 }
+            return (202, #"{"rebase_in_progress": true}"#)
         case ("PUT", "\(mr1)/merge"):
             guard json["sha"] as? String == GitHubStub.headSHA else {
                 return (409, #"{"message": "SHA does not match HEAD of source branch"}"#)
@@ -703,7 +739,9 @@ enum GitLabStub {
             guard (json["query"] as? String)?.contains("mergeRequestRequestChanges") == true else { return notFound }
             return (200, #"{"data": {"mergeRequestRequestChanges": {"errors": [], "mergeRequest": {"iid": "1"}}}}"#)
         case ("POST", "\(mr1)/notes"): return (201, note(803, by: user, body: "Thanks.", at: "17:00"))
-        case ("POST", "\(mr1)/discussions"): return newDiffDiscussion(json)
+        case ("POST", "\(mr1)/discussions"):
+            return json["position"] == nil ? newThread(json, on: mr1) : newDiffDiscussion(json)
+        case ("POST", "\(project)/issues/2/discussions"): return newThread(json, on: "\(project)/issues/2")
         case ("PUT", mr1): return (200, mergeRequest(1, full: true))
         case ("POST", "\(project)/issues/2/notes"): return (201, note(804, by: user, body: "Thanks.", at: "17:00"))
         case ("PUT", "\(project)/issues/2"): return (200, issue)
@@ -738,8 +776,9 @@ enum GitLabStub {
         switch path {
         case "/api/v4/user": return (200, user)
         case project:
+            let rules = GitHubStub.seedsPage ? #", "merge_method": "merge", "squash_option": "default_off""# : ""
             return (200, #"{"id": 3001, "name": "stub", "path_with_namespace": "stub/stub", "default_branch": "main", "#
-                + #""visibility": "private", "http_url_to_repo": "https://gitlab.com/stub/stub.git"}"#)
+                + #""visibility": "private", "http_url_to_repo": "https://gitlab.com/stub/stub.git"\#(rules)}"#)
         case "\(project)/labels": return (200, "[\(labels)]")
         case "\(project)/users": return (200, "[\(user), \(reviewer)]")
         // The open list and My MRs (`author_id`) have !1; no merge request asks `stub` for a review.
@@ -750,7 +789,8 @@ enum GitLabStub {
         case "\(mr1)/notes":
             return (200, "[\(note(801, by: reviewer, body: "Nice work.", at: "14:00")), \(systemNote)]")
         case "\(mr1)/discussions": return (200, "[" + mrDiscussions.map(\.json).joined(separator: ", ") + "]")
-        case "\(mr1)/approvals": return (200, #"{"approved": true, "approved_by": [\#(approver(reviewer))]}"#)
+        case "\(mr1)/approvals":
+            return (200, #"{"approved": true, "approved_by": [\#(approver(reviewer))]\#(approvalRules)}"#)
         case "\(mr1)/reviewers":
             return (200, #"[{"user": \#(reviewer), "state": "approved", "created_at": "2026-11-10T09:00:00Z"}]"#)
         // GitLab lists a merge request's commits newest first.
@@ -758,6 +798,14 @@ enum GitLabStub {
             return (200, "[\(commit(GitHubStub.headSHA, "Finish the feature", "2026-11-12T16:20:00Z")), "
                 + "\(commit("3333333333333333333333333333333333333333", "Start the feature", "2026-11-10T08:50:00Z"))]")
         case "\(mr1)/diffs": return (200, diffs)
+        case "\(mr1)/resource_state_events", "\(mr1)/resource_label_events", "\(mr1)/resource_milestone_events":
+            return (200, GitHubStub.seedsPage ? resourceEvents(path) : "[]")
+        case "\(project)/issues/2/resource_label_events" where GitHubStub.seedsPage:
+            return (200, issueLabelEvents)
+        // Another item's resource events are none, as GitLab answers an item without any.
+        case let path where path.hasSuffix("/resource_state_events") || path.hasSuffix("/resource_label_events")
+            || path.hasSuffix("/resource_milestone_events"):
+            return (200, "[]")
         case mr3: return (200, mergeRequest(3, full: true))
         case "\(mr3)/notes", "\(mr3)/discussions", "\(mr3)/diffs", "\(mr3)/reviewers": return (200, "[]")
         case "\(mr3)/approvals": return (200, #"{"approved": false, "approved_by": []}"#)
@@ -797,11 +845,45 @@ enum GitLabStub {
         #"{"user": \#(user), "approved_at": "2026-11-12T15:00:00Z"}"#
     }
 
-    /// `-HistqPRMergeable` (default true) as `detailed_merge_status`: `mergeable`, `conflict`, or `checking`.
+    /// `-HistqPRMergeable` (default true) as `detailed_merge_status`: `mergeable`, `conflict`, or `checking`; with
+    /// `-HistqStubPageSeed YES` also `blocked`, `not_approved` (2 approvals required); `-HistqPRDraft YES` makes a
+    /// mergeable !1 `draft_status`.
     private static let mergeStatus = switch AppState.launchFlag("-HistqPRMergeable") {
     case "false": "conflict"
     case "null": "checking"
-    default: "mergeable"
+    case "blocked" where GitHubStub.seedsPage: "not_approved"
+    default: GitHubStub.servesDraft ? "draft_status" : "mergeable"
+    }
+
+    /// With `-HistqStubPageSeed YES`, !1's approvals' Enterprise Edition fields: none required (optional), or 2 with 1
+    /// left when `-HistqPRMergeable blocked`; `stub` may approve and has not. Empty without the seed.
+    private static let approvalRules = !GitHubStub.seedsPage ? ""
+        : mergeStatus == "not_approved"
+        ? #", "approvals_required": 2, "approvals_left": 1, "user_can_approve": true, "user_has_approved": false"#
+        : #", "approvals_required": 0, "approvals_left": 0, "user_can_approve": true, "user_has_approved": false"#
+
+    /// GitLab's own rebase of !1 (`PUT .../rebase`): let through `-HistqStubFailWrites YES`, which fails it later
+    /// through `merge_error`, as GitLab reports a rebase that failed.
+    static func isRebase(method: String, url: URL) -> Bool {
+        method == "PUT" && url.host() == repository.host
+            && url.path(percentEncoded: true) == "/api/v4/projects/stub%2Fstub/merge_requests/1/rebase"
+    }
+
+    /// !1's merge box fields: with `-HistqStubPageSeed YES` 2 commits behind, `stub` may merge, the source branch
+    /// deleted on merge, no squash; once a rebase started, `rebase_in_progress` for one read (`Writes.rebaseReads`),
+    /// then done, with a `merge_error` under `-HistqStubFailWrites YES`.
+    private static func mergeBoxFields() -> String {
+        let seeded = !GitHubStub.seedsPage ? "" : #", "diverged_commits_count": 2, "user": {"can_merge": true}, "#
+            + #""force_remove_source_branch": true, "squash_on_merge": false"#
+        let running = writes.withLock { writes -> Bool? in
+            guard let reads = writes.rebaseReads else { return nil }
+            if reads > 0 { writes.rebaseReads = reads - 1 }
+            return reads > 0
+        }
+        guard let running else { return seeded }
+        let error = !running && GitHubStub.failsWrites ? #""Rebase failed: the stub cannot rebase. Please rebase locally""#
+            : "null"
+        return seeded + #", "rebase_in_progress": \#(running), "merge_error": \#(error)"#
     }
 
     /// !3's head commit.
@@ -823,7 +905,8 @@ enum GitLabStub {
             """
         return """
             {"id": \(500 + iid), "iid": \(iid), "title": "\(title)", "description": "\(body)",
-             "description_html": "<p>\(body)</p>", "state": "opened", "draft": false, "author": \(user),
+             "description_html": "<p>\(body)</p>", "state": "opened", "draft": \(GitHubStub.servesDraft && !created),
+             "author": \(user),
              "assignees": [\(user)], "reviewers": [\(reviewer)], "labels": [\(labels)],
              "web_url": "https://gitlab.com/stub/stub/-/merge_requests/\(iid)", "source_branch": "feature",
              "target_branch": "main", "source_project_id": 3001, "target_project_id": 3001, "sha": "\(head)",
@@ -831,9 +914,17 @@ enum GitLabStub {
                            "start_sha": "\(GitHubStub.baseSHA)"},
              "created_at": "2026-11-10T09:00:00Z", "updated_at": "2026-11-12T16:30:00Z",
              "detailed_merge_status": "\(created ? "mergeable" : mergeStatus)", "changes_count": "1",
-             "user_notes_count": \(created ? 0 : 6)\(pipeline)}
+             "user_notes_count": \(created ? 0 : 6)\(pipeline)\(created || !full ? "" : mergeBoxFields())\(
+                created || !full ? "" : mergeRequestSidebar)}
             """
     }
+
+    /// With `-HistqStubPageSeed YES`, !1's sidebar fields: milestone 1.0 (the one its milestone event sets) and 1h 30m
+    /// estimated, 45m spent. Empty without the seed.
+    private static let mergeRequestSidebar = !GitHubStub.seedsPage ? ""
+        : #", "milestone": {"id": 61, "iid": 1, "title": "1.0", "due_date": "2026-12-01"}, "time_stats": "#
+            + #"{"time_estimate": 5400, "total_time_spent": 2700, "human_time_estimate": "1h 30m", "#
+            + #""human_total_time_spent": "45m"}"#
 
     private static let labels = """
         {"id": 1, "name": "enhancement", "color": "#a2eeef", "description": "New feature"},
@@ -841,11 +932,15 @@ enum GitLabStub {
         {"id": 3, "name": "documentation", "color": "#0075ca"}
         """
 
+    /// Issue #2; with `-HistqStubPageSeed YES` its sidebar fields too: no milestone, and time tracking with neither an
+    /// estimate nor time spent ("No estimate or time spent").
     private static let issue = """
         {"id": 602, "iid": 2, "title": "Crash when opening an empty repository", "state": "opened",
          "description": "Steps: open an empty folder.", "author": \(reviewer), "assignees": [\(user)],
          "labels": [{"name": "bug", "color": "#d73a4a"}], "web_url": "https://gitlab.com/stub/stub/-/issues/2",
-         "user_notes_count": 3, "created_at": "2026-11-11T08:00:00Z", "updated_at": "2026-11-12T10:00:00Z"}
+         "user_notes_count": 3, "created_at": "2026-11-11T08:00:00Z", "updated_at": "2026-11-12T10:00:00Z"\(
+            !GitHubStub.seedsPage ? "" : #", "milestone": null, "time_stats": {"time_estimate": 0, "#
+                + #""total_time_spent": 0, "human_time_estimate": null, "human_total_time_spent": null}"#)}
         """
 
     /// A plain note (a comment) at `time` on 2026-11-12, or a general thread's note (`DiscussionNote`, resolvable)
@@ -871,6 +966,8 @@ enum GitLabStub {
         let admin: Bool
         let resolvable: Bool
         var awards: [(name: String, user: Int)] = []
+        /// A system note's GraphQL `systemNoteMetadata.action` and `systemNoteIconName` (seeded ones only).
+        var system: (action: String, icon: String)? = nil
     }
 
     /// A seeded discussion: its REST id (the last segment of its global id), whether it is a lone comment, and
@@ -918,8 +1015,14 @@ enum GitLabStub {
         var deleted: Set<Int> = []
         /// Whether `stub` (user 1001) has each award it added or removed, by note id and emoji name.
         var awards: [Int: [String: Bool]] = [:]
+        /// The same on !1 or issue #2 itself, by its global id's `<Type>/<id>` (`MergeRequest/501`, `Issue/602`).
+        var itemAwards: [String: [String: Bool]] = [:]
         /// The new diff discussions on !1, in order (`newDiffDiscussion`).
         var diffDiscussions: [SeedDiscussion] = []
+        /// The new general threads ("Start thread"), by item path (`newThread`), in order.
+        var threads: [String: [SeedDiscussion]] = [:]
+        /// Once a rebase of !1 started: how many more reads of !1 still find it running (nil: none started).
+        var rebaseReads: Int?
     }
 
     /// `POST .../merge_requests/1/discussions` with a `position`: a new diff thread by `stub` on the head, kept for
@@ -946,6 +1049,24 @@ enum GitLabStub {
                 id: "d" + String(format: "%039d", id), individual: false, resolved: false,
                 notes: [SeedNote(id: id, json: note, type: "DiffNote", admin: true, resolvable: true)])
             writes.diffDiscussions.append(discussion)
+            return discussion
+        }
+        return (201, discussion.json)
+    }
+
+    /// `POST .../discussions` with only a body (GitLab's "Start thread"): a new resolvable general thread by `stub` on
+    /// `item` (!1 or issue #2), kept for the next load and answered with it (201); one without a body is GitLab's 400.
+    private static func newThread(_ json: [String: Any], on item: String) -> (status: Int, body: String) {
+        guard let body = json["body"] as? String, !body.isEmpty else {
+            return (400, #"{"message": "400 Bad request - body is missing"}"#)
+        }
+        let discussion = writes.withLock { writes in
+            writes.nextID += 1
+            let id = writes.nextID
+            let note = generalNote(id, own: true, body: GitHubStub.jsonText(body), at: replyTime(id), threaded: true)
+            let discussion = SeedDiscussion(id: "e" + String(format: "%039d", id), individual: false, resolved: false,
+                                            notes: [note])
+            writes.threads[item, default: []].append(discussion)
             return discussion
         }
         return (201, discussion.json)
@@ -985,7 +1106,7 @@ enum GitLabStub {
         let notes = discussion.notes.filter { !deleted.contains($0.id) }.map { note in
             edits[note.id].map { body in
                 SeedNote(id: note.id, json: edited(note.json, body: body), type: note.type, admin: note.admin,
-                         resolvable: note.resolvable, awards: note.awards)
+                         resolvable: note.resolvable, awards: note.awards, system: note.system)
             } ?? note
         }
         guard !notes.isEmpty else { return nil }
@@ -1017,7 +1138,17 @@ enum GitLabStub {
     private static func setAward(_ json: [String: Any], added: Bool) -> (status: Int, body: String) {
         let variables = json["variables"] as? [String: Any] ?? [:]
         let field = added ? "awardEmojiAdd" : "awardEmojiRemove"
-        let id = (variables["awardableId"] as? String)?.split(separator: "/").last.flatMap { Int($0) }
+        let awardable = (variables["awardableId"] as? String) ?? ""
+        // !1 or issue #2 itself (the global ids `NoteStates` gives them).
+        if [itemID(mergeRequest: true), itemID(mergeRequest: false)].contains(awardable) {
+            guard let name = variables["name"] as? String, !name.isEmpty else {
+                return (200, #"{"data": {"\#(field)": {"errors": ["Name is not a valid emoji name"]}}}"#)
+            }
+            let key = String(awardable.dropFirst("gid://gitlab/".count))
+            writes.withLock { $0.itemAwards[key, default: [:]][name] = added }
+            return (200, #"{"data": {"\#(field)": {"errors": []}}}"#)
+        }
+        let id = awardable.split(separator: "/").last.flatMap { Int($0) }
         let known = (mrDiscussions + issueDiscussions).contains { $0.notes.contains { $0.id == id } }
         guard let id, known, let name = variables["name"] as? String, !name.isEmpty else {
             return (200, #"{"data": {"\#(field)": {"errors": ["Not found"]}}}"#)
@@ -1028,13 +1159,34 @@ enum GitLabStub {
 
     /// `note`'s awards with `stub`'s written ones (`Writes.awards`): one added once, one removed gone.
     private static func awarded(_ note: SeedNote) -> [(name: String, user: Int)] {
-        var awards = note.awards
-        for (name, added) in (writes.withLock { $0.awards[note.id] } ?? [:]).sorted(by: { $0.key < $1.key }) {
+        withWritten(note.awards, writes.withLock { $0.awards[note.id] } ?? [:])
+    }
+
+    /// `awards` with `stub`'s `written` ones (by emoji name, added or removed): one added once, one removed gone.
+    private static func withWritten(_ awards: [(name: String, user: Int)], _ written: [String: Bool])
+        -> [(name: String, user: Int)]
+    {
+        var awards = awards
+        for (name, added) in written.sorted(by: { $0.key < $1.key }) {
             let mine = awards.contains { $0 == (name, 1001) }
             if added, !mine { awards.append((name, 1001)) }
             if !added { awards.removeAll { $0 == (name, 1001) } }
         }
         return awards
+    }
+
+    /// !1's (`mergeRequest`) or issue #2's GraphQL global id (by their REST ids, 501 and 602).
+    private static func itemID(mergeRequest: Bool) -> String {
+        mergeRequest ? "gid://gitlab/MergeRequest/501" : "gid://gitlab/Issue/602"
+    }
+
+    /// !1's or issue #2's own awards: with `-HistqStubPageSeed YES` a thumbsup and a tada by `reviewer` on !1 and a
+    /// thumbsup by `reviewer` on #2 (none without it), then this run's by `stub` (`Writes.itemAwards`).
+    private static func itemAwards(mergeRequest: Bool) -> [(name: String, user: Int)] {
+        let seeded: [(name: String, user: Int)] = !GitHubStub.seedsPage ? []
+            : mergeRequest ? [("thumbsup", 1002), ("tada", 1002)] : [("thumbsup", 1002)]
+        let key = String(itemID(mergeRequest: mergeRequest).dropFirst("gid://gitlab/".count))
+        return withWritten(seeded, writes.withLock { $0.itemAwards[key] } ?? [:])
     }
 
     /// GraphQL `discussionToggleResolve` on issue #2's thread (by its global id), kept for the next load.
@@ -1063,8 +1215,12 @@ enum GitLabStub {
     /// !1's discussions in GitLab's order: `reviewer`'s thread 801 (a thumbsup by `stub` and one by `reviewer`) with
     /// `stub`'s reply 806, diff discussions A and B, `stub`'s comment 805 after them (a heart by `reviewer`), so the
     /// diff threads sit between two general comments by time, and the push's system note; with this run's writes (its
-    /// new diff threads last).
+    /// new diff threads last). With `-HistqPRStubComments` the general ones are the generated comments instead.
     private static var mrDiscussions: [SeedDiscussion] {
+        if let generatedDiscussions {
+            return (generatedDiscussions + [discussion(threadA, resolved: false), discussion(threadB, resolved: true)]
+                + writes.withLock { $0.diffDiscussions }).compactMap(withEdits)
+        }
         let resolved = writes.withLock { $0.resolved[generalThread] } ?? false
         return [SeedDiscussion]([
             withReplies(SeedDiscussion(id: generalThread, individual: false, resolved: resolved, notes: [
@@ -1079,13 +1235,108 @@ enum GitLabStub {
                             threaded: false, awards: [("heart", 1002)]),
             ])),
             SeedDiscussion(id: "0000000000000000000000000000000000000850", individual: true, resolved: false, notes: [
-                SeedNote(id: 850, json: systemNote, type: "Note", admin: false, resolvable: false),
+                SeedNote(id: 850, json: systemNote, type: "Note", admin: false, resolvable: false,
+                         system: GitHubStub.seedsPage ? ("commit", "commit") : nil),
             ]),
-        ] + writes.withLock { $0.diffDiscussions }).compactMap(withEdits)
+        ] + pageSeedDiscussions + writes.withLock { $0.diffDiscussions + ($0.threads[mrPath] ?? []) })
+            .compactMap(withEdits)
     }
 
+    private static let mrPath = "/api/v4/projects/stub%2Fstub/merge_requests/1"
+
+    /// With `-HistqStubPageSeed YES`, !1's Activity, first in time so a shot scrolled to the Activity shows each kind:
+    /// `stub` asking `reviewer` for a review (a system note), `reviewer`'s thread 860 with 4 replies (`stub` and
+    /// `reviewer` by turns), resolved by `stub`, and `reviewer`'s lone comment 865; later more system notes with
+    /// GraphQL's action and icon: `reviewer`'s approval, a push with GitLab's own body (a commit list in HTML, which
+    /// shows as inert text, and a compare link), and `stub` resolving all threads. None without the flag.
+    private static let pageSeedDiscussions: [SeedDiscussion] = !GitHubStub.seedsPage ? [] : [
+        seedSystemNote(870, by: user, body: "requested review from @reviewer", at: "13:00",
+                       system: ("reviewer", "user")),
+        SeedDiscussion(id: "c860c860c860c860c860c860c860c860c860c860", individual: false, resolved: true, notes: [
+            generalNote(860, own: false, body: "Should the usage show the short flag too?", at: "13:20", threaded: true,
+                        resolved: true),
+            generalNote(861, own: true, body: "Both, I think.", at: "13:25", threaded: true, resolved: true),
+            generalNote(862, own: false, body: "Then the readme needs it too.", at: "13:30", threaded: true,
+                        resolved: true),
+            generalNote(863, own: true, body: "Added there as well.", at: "13:35", threaded: true, resolved: true),
+            generalNote(864, own: false, body: "Looks good now.", at: "13:40", threaded: true, resolved: true),
+        ]),
+        SeedDiscussion(id: "0000000000000000000000000000000000000865", individual: true, resolved: false, notes: [
+            generalNote(865, own: false, body: "Ready for another look.", at: "13:45", threaded: false),
+        ]),
+        seedSystemNote(871, by: reviewer, body: "approved this merge request", at: "15:40",
+                       system: ("approved", "check")),
+        seedSystemNote(872, by: user, body: #"added 1 commit\n\n<ul><li>2222222 - Finish the feature</li></ul>"#
+                       + #"\n\n[Compare with previous version](/stub/stub/-/merge_requests/1/diffs?diff_id=2)"#,
+                       at: "16:21", system: ("commit", "commit")),
+        seedSystemNote(873, by: user, body: "resolved all threads", at: "16:40", system: ("discussion", "comment")),
+    ]
+
+    /// A seeded system note alone in its discussion, with its GraphQL action and icon; `body` goes in as JSON text.
+    private static func seedSystemNote(
+        _ id: Int, by author: String, body: String, at time: String, system: (action: String, icon: String)
+    ) -> SeedDiscussion {
+        let json = """
+            {"id": \(id), "type": null, "body": "\(body)", "author": \(author),
+             "created_at": "2026-11-12T\(time):00Z", "system": true, "resolvable": false}
+            """
+        return SeedDiscussion(id: String(format: "%040d", id), individual: true, resolved: false, notes: [
+            SeedNote(id: id, json: json, type: "Note", admin: false, resolvable: false, system: system),
+        ])
+    }
+
+    /// With `-HistqStubPageSeed YES`, !1's resource events (`path` names the list): `stub` closing and reopening it,
+    /// adding the `enhancement` label and setting milestone 1.0, all on 2026-11-12 after the last comment.
+    private static func resourceEvents(_ path: String) -> String {
+        if path.hasSuffix("resource_state_events") {
+            return """
+                [{"id": 31, "user": \(user), "created_at": "2026-11-12T16:45:00Z", "resource_type": "MergeRequest",
+                  "resource_id": 501, "state": "closed"},
+                 {"id": 32, "user": \(user), "created_at": "2026-11-12T16:47:00Z", "resource_type": "MergeRequest",
+                  "resource_id": 501, "state": "reopened"}]
+                """
+        }
+        if path.hasSuffix("resource_label_events") {
+            return """
+                [{"id": 41, "user": \(user), "created_at": "2026-11-12T16:50:00Z", "resource_type": "MergeRequest",
+                  "resource_id": 501, "action": "add",
+                  "label": {"id": 1, "name": "enhancement", "color": "#a2eeef", "description": "New feature"}}]
+                """
+        }
+        return """
+            [{"id": 51, "user": \(user), "created_at": "2026-11-12T16:55:00Z", "resource_type": "MergeRequest",
+              "resource_id": 501, "action": "add", "milestone": {"id": 61, "iid": 1, "title": "1.0"}}]
+            """
+    }
+
+    /// DEBUG `-HistqPRStubComments <n>`: !1's general discussions are n lone comments (`GitHubStub`'s generated
+    /// ones in Markdown, at the same times), `reviewer`'s and `stub`'s by turns; nil without the flag.
+    private static let generatedDiscussions: [SeedDiscussion]? = GitHubStub.generatedCount.map { count in
+        (0..<count).map { index in
+            let id = 10_000 + index
+            let own = !index.isMultiple(of: 2)
+            let body = GitHubStub.jsonText(GitHubStub.generatedMarkdown(index))
+            let json = note(id, by: own ? user : reviewer, body: body, at: GitHubStub.generatedTime(index))
+            return SeedDiscussion(id: String(format: "%040d", id), individual: true, resolved: false,
+                                  notes: [SeedNote(id: id, json: json, type: "Note", admin: own, resolvable: false)])
+        }
+    }
+
+    /// With `-HistqStubPageSeed YES`, issue #2's history: `reviewer` adding the `bug` label as they open it (a label
+    /// event), `stub` assigning themselves (a system note) and changing the description (another); none without it.
+    private static let issueLabelEvents = """
+        [{"id": 42, "user": \(reviewer), "created_at": "2026-11-11T08:01:00Z", "resource_type": "Issue",
+          "resource_id": 602, "action": "add", "label": {"id": 2, "name": "bug", "color": "#d73a4a"}}]
+        """
+
+    private static let issuePageSeedDiscussions: [SeedDiscussion] = !GitHubStub.seedsPage ? [] : [
+        seedSystemNote(875, by: user, body: "assigned to @stub", at: "09:30", system: ("assignee", "user")),
+        seedSystemNote(876, by: user, body: "changed the description", at: "10:45",
+                       system: ("description", "pencil")),
+    ]
+
     /// Issue #2's discussions: `reviewer`'s thread 820 (a thumbsup by `stub`) with `stub`'s reply 821, then `stub`'s
-    /// comment 802; with this run's writes.
+    /// comment 802 (with `-HistqStubPageSeed YES`, `issuePageSeedDiscussions` too); with this run's writes.
     private static var issueDiscussions: [SeedDiscussion] {
         let resolved = writes.withLock { $0.resolved[issueThread] } ?? false
         return [SeedDiscussion]([
@@ -1098,31 +1349,47 @@ enum GitLabStub {
             withReplies(SeedDiscussion(id: issueComment, individual: true, resolved: false, notes: [
                 generalNote(802, own: true, body: "I can reproduce it on 0.1.", at: "11:00", threaded: false),
             ])),
-        ]).compactMap(withEdits)
+        ] + issuePageSeedDiscussions + writes.withLock { $0.threads["/api/v4/projects/stub%2Fstub/issues/2"] ?? [] }).compactMap(withEdits)
     }
 
     /// `NoteStates`: !1's or issue #2's discussions (another item's are none) on one page, with what GraphQL adds to
     /// REST: global ids whose last segment is the REST id, each discussion's `resolved`, each note's rights and its
-    /// awards with the user's global id (this run's by `stub` included).
+    /// awards with the user's global id (this run's by `stub` included), and the item's own global id and awards
+    /// (`itemAwards`; another item has its id, `500 + iid` or `600 + iid`, and none).
     private static func noteStates(_ json: [String: Any]) -> (status: Int, body: String) {
         let isIssue = (json["query"] as? String)?.contains("issue(iid:") == true
         let iid = (json["variables"] as? [String: Any])?["iid"] as? String
         let discussions = isIssue ? (iid == "2" ? issueDiscussions : []) : (iid == "1" ? mrDiscussions : [])
+        let known = iid == (isIssue ? "2" : "1")
+        let itemID = known ? itemID(mergeRequest: !isIssue)
+            : "gid://gitlab/\(isIssue ? "Issue" : "MergeRequest")/\((isIssue ? 600 : 500) + (iid.flatMap { Int($0) } ?? 0))"
+        let itemAwards = (known ? itemAwards(mergeRequest: !isIssue) : []).map { award in
+            #"{"name": "\#(award.name)", "user": {"id": "gid://gitlab/User/\#(award.user)"}}"#
+        }
         let nodes = discussions.map { discussion in
             let notes = discussion.notes.map { note in
                 let awards = awarded(note).map { award in
                     #"{"name": "\#(award.name)", "user": {"id": "gid://gitlab/User/\#(award.user)"}}"#
                 }
+                let system = note.system.map {
+                    #", "systemNoteIconName": "\#($0.icon)", "systemNoteMetadata": {"action": "\#($0.action)"}"#
+                } ?? ""
                 return """
                     {"id": "gid://gitlab/\(note.type)/\(note.id)",
                      "userPermissions": {"adminNote": \(note.admin), "resolveNote": \(note.resolvable)},
-                     "awardEmoji": {"nodes": [\(awards.joined(separator: ", "))]}}
+                     "awardEmoji": {"nodes": [\(awards.joined(separator: ", "))]}\(system)}
                     """
             }.joined(separator: ", ")
+            // With the page seed, a resolved discussion says who resolved it (`stub`) and when.
+            let resolver = discussion.resolved && GitHubStub.seedsPage
+                ? #""resolvedAt": "2026-11-12T16:40:00Z", "resolvedBy": {"id": "gid://gitlab/User/1001", "#
+                    + #""username": "stub", "name": "Stub User"}, "# : ""
             return #"{"id": "gid://gitlab/Discussion/\#(discussion.id)", "resolved": \#(discussion.resolved), "#
+                + resolver
                 + #""notes": {"nodes": [\#(notes)]}}"#
         }.joined(separator: ", ")
-        return (200, #"{"data": {"project": {"\#(isIssue ? "issue" : "mergeRequest")": {"discussions": {"#
+        return (200, #"{"data": {"project": {"\#(isIssue ? "issue" : "mergeRequest")": {"id": "\#(itemID)", "#
+            + #""awardEmoji": {"nodes": [\#(itemAwards.joined(separator: ", "))]}, "discussions": {"#
             + #""nodes": [\#(nodes)], "pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}"#)
     }
 
@@ -1159,7 +1426,9 @@ enum GitLabStub {
             + #""end": {"type": "new", "old_line": null, "new_line": 6}}"#
         return """
             {"id": \(id), "type": "DiffNote", "body": "\(body)", "author": \(author),
-             "created_at": "2026-11-12T\(time):00Z", "system": false, "resolvable": true, "resolved": \(resolved),
+             "created_at": "2026-11-12T\(time):00Z", "system": false, "resolvable": true, "resolved": \(resolved),\(
+                resolved && GitHubStub.seedsPage
+                    ? #" "resolved_by": \#(user), "resolved_at": "2026-11-12T16:40:00Z","# : "")
              "position": {"base_sha": "\(GitHubStub.baseSHA)", "start_sha": "\(GitHubStub.baseSHA)",
               "head_sha": "\(GitHubStub.headSHA)", "old_path": "feature.txt", "new_path": "feature.txt",
               "position_type": "text", "old_line": null, "new_line": \(onList ? 6 : 10)\(range)}}
@@ -1248,20 +1517,24 @@ enum BitbucketStub {
     /// #1's comments: a general thread two replies deep, the inline threads, a deleted comment kept for its reply, and
     /// `stub`'s comment after the threads, so they sit between general comments by time; then this run's comments,
     /// and its edits and deletions (a deleted comment stays in the list, `deleted: true`, as Bitbucket keeps it).
+    /// With `-HistqPRStubComments` the general ones are the generated comments instead.
     private static var comments: [String] {
         let writes = writes.withLock { $0 }
         let resolved = writes.resolved
-        let comments = [
-            comment(801, by: reviewer, body: "Nice work.", at: "14:00", resolved: resolved.contains(801)),
-            comment(806, by: reviewer, body: "One more thing: a test for an empty input?", at: "14:10",
-                    parent: 801),
-            comment(807, by: user, body: "Added one in the second commit.", at: "14:20", parent: 806),
+        let inline = [
             comment(811, by: reviewer, body: "Could the three steps be one sentence?", at: "14:55",
                     inline: #"{"path": "feature.txt", "from": null, "to": 6, "start_from": null, "start_to": 4}"#),
             comment(812, by: user, body: "I kept the list: it reads better.", at: "16:00", parent: 811,
                     inline: #"{"path": "feature.txt", "from": null, "to": 6}"#),
             comment(813, by: reviewer, body: "Show the output flag in the usage too.", at: "14:57",
                     inline: #"{"path": "feature.txt", "from": null, "to": 10}"#, resolved: true),
+        ]
+        let comments = generatedComments.map { $0 + inline + writes.comments } ?? [
+            comment(801, by: reviewer, body: "Nice work.", at: "14:00", resolved: resolved.contains(801)),
+            comment(806, by: reviewer, body: "One more thing: a test for an empty input?", at: "14:10",
+                    parent: 801),
+            comment(807, by: user, body: "Added one in the second commit.", at: "14:20", parent: 806),
+        ] + inline + [
             comment(809, by: reviewer, body: "", at: "15:00", deleted: true),
             comment(810, by: reviewer, body: "The link I removed is in the docs now.", at: "15:05", parent: 809),
             comment(805, by: user, body: "Rebased on main; the usage is in the readme too.", at: "15:30",
@@ -1281,6 +1554,18 @@ enum BitbucketStub {
             }
             guard let data = try? JSONSerialization.data(withJSONObject: comment) else { return json }
             return String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    /// DEBUG `-HistqPRStubComments <n>`: #1's general comments are n generated ones (`GitHubStub`'s, in Markdown
+    /// with their HTML, at the same times), `reviewer`'s and `stub`'s by turns; nil without the flag.
+    private static let generatedComments: [String]? = GitHubStub.generatedCount.map { count in
+        (0..<count).map { index in
+            let markdown = GitHubStub.generatedMarkdown(index)
+            let html = MarkdownHTML.html(markdown)
+            return comment(10_000 + index, by: index.isMultiple(of: 2) ? reviewer : user,
+                           body: GitHubStub.jsonText(markdown), at: GitHubStub.generatedTime(index),
+                           html: GitHubStub.jsonText(html))
         }
     }
 
@@ -1416,7 +1701,8 @@ enum BitbucketStub {
              "participated_on": "2026-11-12T15:00:00.000000+00:00"}
             """
         return """
-            {"type": "pullrequest", "id": \(id), "title": "\(title)", "state": "OPEN", "draft": false,
+            {"type": "pullrequest", "id": \(id), "title": "\(title)", "state": "OPEN",
+             "draft": \(GitHubStub.servesDraft && !fork),
              "author": \(fork ? reviewer : user),
              "summary": {"raw": "\(body)", "markup": "markdown", "html": "<p>\(body)</p>"},
              "rendered": {"description": {"raw": "\(body)", "markup": "markdown", "html": "<p>\(body)</p>"}},
@@ -1516,7 +1802,8 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
         let reply = request.url.map { url -> (status: Int, body: String) in
             let method = request.httpMethod ?? "GET"
             let body = request.httpBody ?? request.httpBodyStream.map(Self.read)
-            if GitHubStub.failsWrites, GitHubStub.isWrite(method: method, url: url, body: body) {
+            if GitHubStub.failsWrites, GitHubStub.isWrite(method: method, url: url, body: body),
+               !GitLabStub.isRebase(method: method, url: url) {
                 return url.host() == BitbucketStub.apiHost
                     ? (500, #"{"type": "error", "error": {"message": "Stub write failure"}}"#)
                     : (500, #"{"message": "Stub write failure"}"#)

@@ -31,6 +31,13 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     public let graphQLURL: URL
     /// The most pages one list follows (100 items each), so a huge project cannot keep a list loading.
     public var maxPages = 10
+    /// The waits between the reads of a merge request while GitLab rebases its source branch
+    /// (`rebaseSourceBranch(_:in:sha:)`): short first, longer later, about a minute in all; past the last one the
+    /// rebase is reported as still running.
+    public var rebasePollDelays: [Duration] = [
+        .milliseconds(250), .milliseconds(500), .seconds(1), .seconds(1), .seconds(2), .seconds(2), .seconds(3),
+        .seconds(5), .seconds(5), .seconds(10), .seconds(10), .seconds(15),
+    ]
     private let token: TokenProvider
     private let session: URLSession
     private let memo = Memo()
@@ -69,6 +76,8 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// share it: removed when it finishes and by a write on the item. `globalIDs` keeps the GraphQL global id of
     /// each note and discussion a load read (`itemKey` + `note`/`discussion` + REST id), which the award and issue
     /// resolve mutations take, and `resolvableDiscussions` the general threads a load found resolvable.
+    /// `approvalLoads` holds the running approvals read of each merge request (`itemKey`), as `threadLoads`, so the
+    /// reviews and the approval box of one detail load share one `GET .../approvals`.
     private final class Memo: Sendable {
         let userID = Mutex<Int?>(nil)
         let mergeRequestByHead = Mutex<[String: Int]>([:])
@@ -78,6 +87,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         let threadLoads = Mutex<[String: (token: UUID, task: Task<GitLabThreads, any Error>)]>([:])
         let globalIDs = Mutex<[String: String]>([:])
         let resolvableDiscussions = Mutex<Set<String>>([])
+        let approvalLoads = Mutex<[String: (token: UUID, task: Task<GitLabApprovals, any Error>)]>([:])
     }
 
     // MARK: - Hosts and remote URLs
@@ -129,9 +139,13 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .unapprove, .generalReplies, .resolveGeneralThreads, .editComments, .deleteComments, .reactions,
-            .newInlineComments, .multiLineInlineComments,
+            .newInlineComments, .multiLineInlineComments, .itemReactions, .rebaseSourceBranch, .startThreads,
+            .timelineEvents,
         ]
     }
+
+    /// Deleting the source branch once merged (`should_remove_source_branch`).
+    public var supportedMergeOptions: Set<HostedMergeOption> { [.deleteSourceBranch] }
 
     /// What `PUT .../merge` does: a merge (commit or fast-forward, as the project is set up) or a squash. A rebase is
     /// its own endpoint, not a merge method.
@@ -276,6 +290,10 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                     comment.resolvable = true
                     comment.resolved = threads.discussionResolved?[discussion.id]
                         ?? resolvableNotes.allSatisfy { $0.resolved == true }
+                    if comment.resolved == true {
+                        (comment.resolvedBy, comment.resolvedAt) = Self.resolution(
+                            of: discussion.id, notes: resolvableNotes, in: threads)
+                    }
                 }
                 let state = viewerState(of: note, in: threads)
                 (comment.viewerCanEdit, comment.viewerCanDelete) = (state.canAdmin, state.canAdmin)
@@ -292,7 +310,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// synthetic, keyed by the user's id.
     public func reviews(of number: Int, in repo: HostedRepository) async throws -> [HostedReview] {
         let path = try projectPath(repo) + ["merge_requests", String(number)]
-        async let approvalsAnswer: GitLabApprovals = get(url(path + ["approvals"]))
+        async let approvalsAnswer = sharedApprovals(number, in: repo)
         async let reviewersAnswer: [GitLabReviewer] = list(url(path + ["reviewers"]))
         let approvers = try await approvalsAnswer.approvedBy ?? []
         let reviewers = try await reviewersAnswer
@@ -332,6 +350,9 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         var result: [HostedReviewComment] = []
         for (id, notes) in threads {
             guard let root = notes.first, let position = root.position else { continue }
+            let resolvable = notes.filter { $0.resolvable == true }
+            let resolution = !resolvable.isEmpty && resolvable.allSatisfy { $0.resolved == true }
+                ? Self.resolution(of: id, notes: resolvable, in: load) : (nil, nil)
             let place = Self.place(position)
             let current = Self.isCurrent(position, head: head)
             let hunk = current
@@ -346,6 +367,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                     user: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
                     htmlURL: Self.noteURL(page, note.id))
                 comment.hostKey = id
+                if note.id == root.id { (comment.resolvedBy, comment.resolvedAt) = resolution }
                 let state = viewerState(of: note, in: load)
                 (comment.viewerCanEdit, comment.viewerCanDelete) = (state.canAdmin, state.canAdmin)
                 comment.reactions = state.reactions
@@ -456,12 +478,21 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return runs
     }
 
+    /// With the project's merge rules: `merge_method` `merge` and `rebase_merge` add a merge commit, `ff` does not;
+    /// `squash_option` as sent (an unknown value is nil).
     public func repositoryInfo(_ repo: HostedRepository) async throws -> HostedRepositoryInfo {
         let project: GitLabProject = try await get(url(try projectPath(repo)))
         guard let defaultBranch = project.defaultBranch else {
             throw HostingError.invalidResponse("a project without a default branch")
         }
-        return HostedRepositoryInfo(fullName: project.pathWithNamespace, defaultBranch: defaultBranch)
+        let mergeCommit: Bool? = switch project.mergeMethod {
+        case "merge", "rebase_merge": true
+        case "ff": false
+        default: nil
+        }
+        return HostedRepositoryInfo(
+            fullName: project.pathWithNamespace, defaultBranch: defaultBranch, mergeCommit: mergeCommit,
+            squashOption: project.squashOption.flatMap(HostedSquashOption.init(rawValue:)))
     }
 
     public func labels(in repo: HostedRepository) async throws -> [HostedLabel] {
@@ -673,19 +704,68 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// `PUT .../merge`, always with `sha`: a push since the user reviewed makes GitLab answer 409, thrown as
     /// `HostingError.headChanged`. `squash` is sent either way, so the method chosen is the one done.
     public func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws {
+        try await merge(number, in: repo, method: method, sha: sha, options: HostedMergeOptions())
+    }
+
+    /// As `merge(_:in:method:sha:)`, with `should_remove_source_branch` when `options` sets it (true or false: left
+    /// out, GitLab follows the merge request's own `force_remove_source_branch`).
+    public func merge(
+        _ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String, options: HostedMergeOptions
+    ) async throws {
         guard mergeMethods.contains(method) else {
             throw HostingError.validationFailed(message: "GitLab merges with a merge commit or a squash only")
         }
         guard !sha.isEmpty else { throw HostingError.validationFailed(message: "a merge needs the head's sha") }
-        struct Body: Encodable { var sha: String; var squash: Bool }
+        struct Body: Encodable {
+            var sha: String
+            var squash: Bool
+            var shouldRemoveSourceBranch: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case sha, squash
+                case shouldRemoveSourceBranch = "should_remove_source_branch"
+            }
+        }
         do {
             let _: Updated = try await send(
                 "PUT", url(try itemPath(.pullRequest(number), in: repo) + ["merge"]),
-                body: Body(sha: sha, squash: method == .squash))
+                body: Body(sha: sha, squash: method == .squash, shouldRemoveSourceBranch: options.deleteSourceBranch))
         } catch HostingError.http(status: 409, message: _) {
             // Mapped here only: a 409 of another endpoint means something else.
             throw HostingError.headChanged
         }
+    }
+
+    /// `GET .../approvals` (shared with `reviews(of:in:)` in one detail load): `approvals_required` and
+    /// `approvals_left` only where GitLab sends them (Community Edition does not: approval is optional there).
+    public func approvals(of number: Int, in repo: HostedRepository) async throws -> HostedApprovals {
+        let answer = try await sharedApprovals(number, in: repo)
+        return HostedApprovals(
+            required: answer.approvalsRequired, left: answer.approvalsLeft,
+            approvedBy: (answer.approvedBy ?? []).map(\.user.hosted), viewerCanApprove: answer.userCanApprove,
+            viewerHasApproved: answer.userHasApproved)
+    }
+
+    /// `PUT .../rebase`, then the merge request read again (`include_rebase_in_progress=true`) after each of
+    /// `rebasePollDelays` until `rebase_in_progress` is false: done when `merge_error` is null, else that error is the
+    /// failure. GitLab's rebase takes no sha, so the head is checked right before the `PUT` instead: not atomic, a push
+    /// between the two is rebased too. GitLab's own refusals (403 protected or missing branch, 409 the rebase could not
+    /// be queued) are thrown as they come (a 409 here is not `headChanged`).
+    public func rebaseSourceBranch(_ number: Int, in repo: HostedRepository, sha: String) async throws {
+        let path = try itemPath(.pullRequest(number), in: repo)
+        guard try await mergeRequest(number, in: repo).sha == sha else { throw HostingError.headChanged }
+        _ = try await perform("PUT", url(path + ["rebase"]))
+        for delay in rebasePollDelays {
+            try await Task.sleep(for: delay)
+            let mr = try await mergeRequest(number, in: repo)
+            guard mr.rebaseInProgress != true else { continue }
+            if let error = mr.mergeError, !error.isEmpty {
+                throw HostingError.validationFailed(message: String(error.prefix(500)))
+            }
+            return
+        }
+        throw HostingError.validationFailed(
+            message: "GitLab is still rebasing the source branch: reload the merge request in a moment.")
     }
 
     /// `state_event=close|reopen`.
@@ -780,14 +860,36 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     public func addReaction(
         _ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws {
-        try await setAward(kind, on: comment, item: item, in: repo, added: true)
+        try await setAward(kind, on: "note\u{0}\(comment.id)", item: item, in: repo, added: true)
     }
 
     /// GraphQL `awardEmojiRemove` on the note's global id, as `addReaction(_:to:on:in:)`.
     public func removeReaction(
         _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws {
-        try await setAward(kind, on: comment, item: item, in: repo, added: false)
+        try await setAward(kind, on: "note\u{0}\(comment.id)", item: item, in: repo, added: false)
+    }
+
+    /// The merge request's or issue's own award emoji, from the load's GraphQL read (`threads(of:in:)`: the item's
+    /// `awardEmoji` rides the first `NoteStates` page, so a detail load that reads the comments too makes no extra
+    /// request), counted as a note's are. Throws when that read failed: the awards are unknown and no award can be
+    /// written without the item's global id.
+    public func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction] {
+        let load = try await threads(of: item, in: repo)
+        guard let awards = load.itemAwards else {
+            throw HostingError.invalidResponse("GitLab did not give the emoji reactions")
+        }
+        return reactions(awards, viewerID: load.viewerID)
+    }
+
+    /// GraphQL `awardEmojiAdd` on the merge request's or issue's global id from the client's last load.
+    public func addItemReaction(_ kind: String, to item: HostedItem, in repo: HostedRepository) async throws {
+        try await setAward(kind, on: "item", item: item, in: repo, added: true)
+    }
+
+    /// GraphQL `awardEmojiRemove` on the merge request's or issue's global id, as `addItemReaction(_:to:in:)`.
+    public func removeItemReaction(_ kind: String, from item: HostedItem, in repo: HostedRepository) async throws {
+        try await setAward(kind, on: "item", item: item, in: repo, added: false)
     }
 
     /// `POST .../merge_requests/:iid/discussions` with a text `position` on the merge request's current `diff_refs`
@@ -869,6 +971,114 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return comment
     }
 
+    /// `POST .../discussions` with only the body: a new resolvable general thread on the merge request or issue
+    /// (GitLab's "Start thread"; `internal` is not taken there, so never sent).
+    public func startThread(on item: HostedItem, in repo: HostedRepository, body: String) async throws
+        -> HostedComment
+    {
+        defer { forgetThreads(of: item, in: repo) }
+        let discussion: GitLabDiscussion = try await send(
+            "POST", url(try itemPath(item, in: repo) + ["discussions"]), body: ["body": body])
+        guard let note = discussion.notes.first else {
+            throw HostingError.invalidResponse("a new thread without its note")
+        }
+        var comment = Self.comment(note, page: webURL(Self.webTarget(item), in: repo))
+        comment.hostKey = discussion.id
+        comment.resolvable = note.resolvable ?? true
+        comment.resolved = note.resolved ?? false
+        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
+        return comment
+    }
+
+    // MARK: - History entries
+
+    /// The item's system notes (every `system` note of the load's discussions, inside a thread too, its body as
+    /// GitLab sent it, kind and icon from the load's GraphQL read: no extra request) and its state, label and
+    /// milestone changes (`resource_state_events`, `resource_label_events`, `resource_milestone_events`, read side by
+    /// side, worded by Histq). A resource list GitLab refuses is left out; a failed discussions load fails the read.
+    public func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws
+        -> [HostedTimelineEvent]
+    {
+        let path = try itemPath(item, in: repo)
+        async let load = threads(of: item, in: repo)
+        async let states: [GitLabResourceEvent]? = try? list(url(path + ["resource_state_events"]))
+        async let labels: [GitLabResourceEvent]? = try? list(url(path + ["resource_label_events"]))
+        async let milestones: [GitLabResourceEvent]? = try? list(url(path + ["resource_milestone_events"]))
+        let threads = try await load
+        var events: [HostedTimelineEvent] = []
+        for note in threads.discussions.flatMap(\.notes) where note.system == true {
+            let state = threads.noteStates?[note.id]
+            let text = note.body ?? ""
+            events.append(HostedTimelineEvent(
+                id: "note-\(note.id)", actor: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
+                text: text, textHTML: MarkdownHTML.html(text), action: state?.systemAction, icon: state?.systemIcon))
+        }
+        let mergeRequest = Self.isMergeRequest(item)
+        for event in await states ?? [] {
+            guard let text = Self.stateWording(event) else { continue }
+            let icon = switch event.state {
+            case "closed": mergeRequest ? "merge-request-close" : "issue-close"
+            case "merged": "merge"
+            default: "work-item-issue"
+            }
+            events.append(Self.event(event, "state", text: text, icon: icon))
+        }
+        for event in await labels ?? [] {
+            let name = event.label.map { " " + Self.reference("~", $0.name) } ?? ""
+            let text = (event.action == "remove" ? "removed" : "added") + (name.isEmpty ? " a label" : name + " label")
+            events.append(Self.event(event, "label", text: text, icon: "label"))
+        }
+        for event in await milestones ?? [] {
+            let name = event.milestone.map { Self.reference("%", $0.title) }
+            let text = event.action == "remove" ? "removed milestone" + (name.map { " " + $0 } ?? "")
+                : "changed milestone" + (name.map { " to " + $0 } ?? "")
+            events.append(Self.event(event, "milestone", text: text, icon: "milestone"))
+        }
+        return events
+    }
+
+    /// A state event's words: "closed" (with what closed it), "reopened" (GitLab records a reopen as `opened` or
+    /// `reopened`), "merged", or the state as sent; nil without a state.
+    private static func stateWording(_ event: GitLabResourceEvent) -> String? {
+        guard let state = event.state, !state.isEmpty else { return nil }
+        switch state {
+        case "closed":
+            if let iid = event.sourceMergeRequest?.iid { return "closed via merge request !\(iid)" }
+            if let sha = event.sourceCommit, !sha.isEmpty { return "closed via commit \(sha.prefix(8))" }
+            return "closed"
+        case "opened", "reopened": return "reopened"
+        default: return state
+        }
+    }
+
+    /// GitLab's reference form of a label (`~`) or milestone (`%`): the name alone, quoted when it has a space.
+    private static func reference(_ sigil: String, _ name: String) -> String {
+        name.contains(where: \.isWhitespace) ? "\(sigil)\"\(name)\"" : sigil + name
+    }
+
+    private static func event(_ event: GitLabResourceEvent, _ kind: String, text: String, icon: String)
+        -> HostedTimelineEvent
+    {
+        HostedTimelineEvent(
+            id: "\(kind)-\(event.id)", actor: event.user?.hosted, createdAt: GitLabDate.parse(event.createdAt),
+            // Histq's own wording around host names (labels, milestones): escaped as plain text, so a name written as
+            // Markdown (emphasis, an image) never renders as such.
+            text: text, textHTML: "<p>\(MarkdownHTML.escape(text))</p>", action: kind, icon: icon)
+    }
+
+    /// A resolved discussion's resolver and when: GraphQL's (`discussionResolution`), else the latest `resolved_by`
+    /// of its REST notes (merge requests only).
+    private static func resolution(of discussion: String, notes: [GitLabNote], in load: GitLabThreads)
+        -> (HostedUser?, Date?)
+    {
+        if let read = load.discussionResolution?[discussion], read.user != nil || read.at != nil {
+            return (read.user, read.at)
+        }
+        let latest = notes.filter { $0.resolvedBy != nil }
+            .max { (GitLabDate.parse($0.resolvedAt) ?? .distantPast) < (GitLabDate.parse($1.resolvedAt) ?? .distantPast) }
+        return (latest?.resolvedBy?.hosted, GitLabDate.parse(latest?.resolvedAt))
+    }
+
     /// The discussion id a general write takes: the comment's `hostKey`; a ref without one is refused unsent.
     private static func discussionID(of comment: HostedCommentRef) throws -> String {
         guard let id = comment.hostKey, !id.isEmpty else {
@@ -877,15 +1087,17 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         return id
     }
 
-    /// Adds or removes the token's user's award `kind` on the note, by its global id from the client's last load
-    /// (refused unsent without one, or for an empty name). A mutation's `errors` are thrown.
+    /// Adds or removes the token's user's award `kind` on `awardable` of `item` (`note<NUL><id>` for a note, `item`
+    /// for the merge request or issue itself), by its global id from the client's last load (refused unsent without
+    /// one, or for an empty name). A mutation's `errors` are thrown.
     private func setAward(
-        _ kind: String, on comment: HostedCommentRef, item: HostedItem, in repo: HostedRepository, added: Bool
+        _ kind: String, on awardable: String, item: HostedItem, in repo: HostedRepository, added: Bool
     ) async throws {
         guard !kind.isEmpty else { throw HostingError.validationFailed(message: "an empty emoji name") }
         let key = try itemKey(item, in: repo)
-        guard let awardableID = memo.globalIDs.withLock({ $0[key + "\u{0}note\u{0}\(comment.id)"] }) else {
-            throw HostingError.validationFailed(message: "a GitLab comment without its GraphQL id: reload it")
+        guard let awardableID = memo.globalIDs.withLock({ $0[key + "\u{0}" + awardable] }) else {
+            let what = awardable == "item" ? "merge request or issue" : "comment"
+            throw HostingError.validationFailed(message: "a GitLab \(what) without its GraphQL id: reload it")
         }
         struct Variables: Encodable { var awardableId, name: String }
         struct Payload: Decodable { var errors: [String]? }
@@ -925,8 +1137,32 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     // MARK: - Mapping
 
+    /// With the merge box's extras: how far the source branch is behind, and whether a rebase runs.
     private func mergeRequest(_ number: Int, in repo: HostedRepository) async throws -> GitLabMergeRequest {
-        try await get(url(try projectPath(repo) + ["merge_requests", String(number)], query: ["render_html": "true"]))
+        try await get(url(
+            try projectPath(repo) + ["merge_requests", String(number)],
+            query: [
+                "render_html": "true", "include_diverged_commits_count": "true",
+                "include_rebase_in_progress": "true",
+            ]))
+    }
+
+    /// The merge request's approvals, read once for the reads of one detail load (`approvalLoads`, as `threads`).
+    private func sharedApprovals(_ number: Int, in repo: HostedRepository) async throws -> GitLabApprovals {
+        let key = try itemKey(.pullRequest(number), in: repo)
+        let target = url(try itemPath(.pullRequest(number), in: repo) + ["approvals"])
+        let token = UUID()
+        let task = memo.approvalLoads.withLock { loads -> Task<GitLabApprovals, any Error> in
+            if let running = loads[key] { return running.task }
+            let task = Task { [self] in
+                defer { memo.approvalLoads.withLock { if $0[key]?.token == token { $0[key] = nil } } }
+                let answer: GitLabApprovals = try await get(target)
+                return answer
+            }
+            loads[key] = (token, task)
+            return task
+        }
+        return try await task.value
     }
 
     /// Also remembers which merge request has the head, for `checkRuns(for:in:)`, and the head, for approving. The
@@ -952,7 +1188,14 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             updatedAt: GitLabDate.parse(mr.updatedAt), mergedAt: GitLabDate.parse(mr.mergedAt),
             merged: mr.state == "merged", mergeable: Self.mergeable(mr.detailedMergeStatus),
             mergeableState: Self.mergeableState(mr.detailedMergeStatus),
-            changedFiles: mr.changesCount.flatMap { Int($0) })
+            changedFiles: mr.changesCount.flatMap { Int($0) },
+            mergeDetails: HostedMergeDetails(
+                status: mr.detailedMergeStatus, commitsBehind: mr.divergedCommitsCount,
+                viewerCanMerge: mr.user?.canMerge,
+                deletesSourceBranch: mr.shouldRemoveSourceBranch ?? mr.forceRemoveSourceBranch,
+                squashOnMerge: mr.squashOnMerge, mergeError: mr.mergeError,
+                rebaseInProgress: mr.rebaseInProgress ?? false),
+            milestone: mr.milestone?.hosted, timeStats: mr.timeStats?.hosted)
     }
 
     private func issue(_ issue: GitLabIssue) -> HostedIssue {
@@ -961,7 +1204,8 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             user: issue.author?.hosted, body: issue.description, bodyHTML: issue.description.map(MarkdownHTML.html),
             htmlURL: issue.webUrl, labels: issue.labels?.map(\.hosted), assignees: issue.assignees?.map(\.hosted),
             comments: issue.userNotesCount, createdAt: GitLabDate.parse(issue.createdAt),
-            updatedAt: GitLabDate.parse(issue.updatedAt), closedAt: GitLabDate.parse(issue.closedAt))
+            updatedAt: GitLabDate.parse(issue.updatedAt), closedAt: GitLabDate.parse(issue.closedAt),
+            milestone: issue.milestone?.hosted, timeStats: issue.timeStats?.hosted)
     }
 
     /// The project's open merge requests whose `filter` (`author_id`, `reviewer_id`) is the token's user, as
@@ -1039,7 +1283,8 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         let loaded = try await discussions
         let read = await states
         return GitLabThreads(
-            discussions: loaded, noteStates: read?.notes, discussionResolved: read?.resolved, viewerID: await viewerID)
+            discussions: loaded, noteStates: read?.notes, discussionResolved: read?.resolved,
+            discussionResolution: read?.resolution, itemAwards: read?.itemAwards, viewerID: await viewerID)
     }
 
     /// Discussions per GraphQL page: the query nests notes and awards (100 each) under each discussion, so the page
@@ -1048,15 +1293,21 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     /// GraphQL `discussions` of the merge request or issue, one query per `noteStatePageSize` discussions (up to
     /// as many discussions as the REST list reads): each note's rights and awards, each discussion's `resolved`,
-    /// joined to REST on the trailing segment of their global ids (`gid://gitlab/<Type>/<id>`). The global ids are
-    /// remembered for the mutations that take them, never built. Values go in `variables` only.
+    /// joined to REST on the trailing segment of their global ids (`gid://gitlab/<Type>/<id>`), and the item's own
+    /// global id and awards (read from the first page). The global ids are remembered for the mutations that take
+    /// them, never built. Values go in `variables` only.
     private func noteStates(of item: HostedItem, key: String, projectPath: String) async throws
-        -> (notes: [Int: GitLabNoteState], resolved: [String: Bool])
+        -> (notes: [Int: GitLabNoteState], resolved: [String: Bool], resolution: [String: GitLabResolution],
+            itemAwards: [(name: String, userID: Int?)])
     {
         struct Variables: Encodable { var projectPath, iid: String; var after: String? }
         struct Answer: Decodable { var project: Project? }
         struct Project: Decodable { var mergeRequest, issue: Item? }
-        struct Item: Decodable { var discussions: Page }
+        struct Item: Decodable {
+            var id: String?
+            var awardEmoji: Awards?
+            var discussions: Page
+        }
         struct Page: Decodable {
             var nodes: [Discussion]
             var pageInfo: PageInfo
@@ -1068,14 +1319,26 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         struct Discussion: Decodable {
             var id: String
             var resolved: Bool?
+            var resolvedAt: String?
+            var resolvedBy: Resolver?
             var notes: Notes
+        }
+        struct Resolver: Decodable {
+            var id: String
+            var username: String
+            var name: String?
+            var avatarUrl: String?
+            var webUrl: String?
         }
         struct Notes: Decodable { var nodes: [Note] }
         struct Note: Decodable {
             var id: String
             var userPermissions: Permissions?
             var awardEmoji: Awards?
+            var systemNoteIconName: String?
+            var systemNoteMetadata: Metadata?
         }
+        struct Metadata: Decodable { var action: String? }
         struct Permissions: Decodable { var adminNote, resolveNote: Bool? }
         struct Awards: Decodable { var nodes: [Award] }
         struct Award: Decodable {
@@ -1088,14 +1351,19 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             query NoteStates($projectPath: ID!, $iid: String!, $after: String) {
               project(fullPath: $projectPath) {
                 \(field)(iid: $iid) {
+                  id
+                  awardEmoji(first: 100) { nodes { name user { id } } }
                   discussions(first: \(Self.noteStatePageSize), after: $after) {
                     nodes {
-                      id resolved
+                      id resolved resolvedAt
+                      resolvedBy { id username name avatarUrl webUrl }
                       notes(first: 100) {
                         nodes {
                           id
                           userPermissions { adminNote resolveNote }
                           awardEmoji(first: 100) { nodes { name user { id } } }
+                          systemNoteIconName
+                          systemNoteMetadata { action }
                         }
                       }
                     }
@@ -1107,18 +1375,36 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             """
         var notes: [Int: GitLabNoteState] = [:]
         var resolved: [String: Bool] = [:]
+        var resolution: [String: GitLabResolution] = [:]
         var globalIDs: [String: String] = [:]
+        var itemAwards: [(name: String, userID: Int?)]?
         var after: String?
         for _ in 0..<(maxPages * 100 / Self.noteStatePageSize) {
             let answer: Answer = try await graphQL(
                 query, variables: Variables(projectPath: projectPath, iid: String(item.number), after: after))
-            guard let page = (answer.project?.mergeRequest ?? answer.project?.issue)?.discussions else {
+            guard let read = answer.project?.mergeRequest ?? answer.project?.issue else {
                 throw HostingError.invalidResponse("a GraphQL answer without the item's discussions")
+            }
+            let page = read.discussions
+            if itemAwards == nil {
+                if let id = read.id { globalIDs[key + "\u{0}item"] = id }
+                itemAwards = (read.awardEmoji?.nodes ?? []).map { award in
+                    (award.name, award.user.flatMap { Int(Self.lastSegment($0.id)) })
+                }
             }
             for discussion in page.nodes {
                 let discussionID = Self.lastSegment(discussion.id)
                 globalIDs[key + "\u{0}discussion\u{0}" + discussionID] = discussion.id
                 if let value = discussion.resolved { resolved[discussionID] = value }
+                if discussion.resolvedBy != nil || discussion.resolvedAt != nil {
+                    let user = discussion.resolvedBy.flatMap { by in
+                        Int(Self.lastSegment(by.id)).map { id in
+                            HostedUser(id: id, login: by.username, avatarURL: by.avatarUrl, htmlURL: by.webUrl,
+                                       name: by.name, reviewerID: String(id))
+                        }
+                    }
+                    resolution[discussionID] = GitLabResolution(user: user, at: GitLabDate.parse(discussion.resolvedAt))
+                }
                 for note in discussion.notes.nodes {
                     guard let noteID = Int(Self.lastSegment(note.id)) else { continue }
                     globalIDs[key + "\u{0}note\u{0}\(noteID)"] = note.id
@@ -1127,14 +1413,15 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                         canResolve: note.userPermissions?.resolveNote,
                         awards: (note.awardEmoji?.nodes ?? []).map { award in
                             (award.name, award.user.flatMap { Int(Self.lastSegment($0.id)) })
-                        })
+                        },
+                        systemAction: note.systemNoteMetadata?.action, systemIcon: note.systemNoteIconName)
                 }
             }
             guard page.pageInfo.hasNextPage, let cursor = page.pageInfo.endCursor else { break }
             after = cursor
         }
         memo.globalIDs.withLock { $0.merge(globalIDs) { _, new in new } }
-        return (notes, resolved)
+        return (notes, resolved, resolution, itemAwards ?? [])
     }
 
     /// The text after a global id's last `/` (`gid://gitlab/DiffNote/12` is `12`).
@@ -1152,19 +1439,25 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         guard let state = load.noteStates?[note.id] else {
             return (load.viewerID != nil && note.author?.id == load.viewerID, [])
         }
+        return (state.canAdmin, reactions(state.awards, viewerID: load.viewerID))
+    }
+
+    /// Awards counted per name, GitLab's default kinds first in `reactionKinds` order, then the others as first seen,
+    /// each marked when one is `viewerID`'s.
+    private func reactions(_ awards: [(name: String, userID: Int?)], viewerID: Int?) -> [HostedReaction] {
         var names: [String] = []
         var byName: [String: HostedReaction] = [:]
-        for award in state.awards {
+        for award in awards {
             if byName[award.name] == nil {
                 names.append(award.name)
                 byName[award.name] = HostedReaction(kind: award.name, count: 0)
             }
             byName[award.name]?.count += 1
-            if award.userID != nil, award.userID == load.viewerID { byName[award.name]?.viewerReacted = true }
+            if award.userID != nil, award.userID == viewerID { byName[award.name]?.viewerReacted = true }
         }
         let kinds = reactionKinds
         let ordered = kinds.filter { byName[$0] != nil } + names.filter { !kinds.contains($0) }
-        return (state.canAdmin, ordered.compactMap { byName[$0] })
+        return ordered.compactMap { byName[$0] }
     }
 
     /// The memo key of an item: the project's path, the item's kind and its iid.

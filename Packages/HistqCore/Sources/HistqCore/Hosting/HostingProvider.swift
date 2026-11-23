@@ -47,6 +47,24 @@ public enum HostedMergeMethod: String, Sendable {
     case merge, squash, rebase
 }
 
+/// A merge option a provider may take beside the method (`HostingProvider.supportedMergeOptions`).
+public enum HostedMergeOption: Sendable, Hashable {
+    /// Deletes the source branch once merged (GitLab's `should_remove_source_branch`).
+    case deleteSourceBranch
+}
+
+/// The options of one merge, each nil to leave it to the host (GitLab: the merge request's own setting). Empty, a
+/// merge is today's `merge(_:in:method:sha:)`.
+public struct HostedMergeOptions: Sendable, Hashable {
+    public var deleteSourceBranch: Bool?
+
+    public init(deleteSourceBranch: Bool? = nil) {
+        self.deleteSourceBranch = deleteSourceBranch
+    }
+
+    public var isEmpty: Bool { deleteSourceBranch == nil }
+}
+
 /// Which code host a provider talks to. The raw value is saved in `profiles.json`: never change it.
 public enum HostingKind: String, Codable, Sendable, Hashable {
     case github
@@ -145,6 +163,16 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     /// Writes a new inline comment on a diff line (`createInlineComment(at:on:in:body:)`), and on a range of lines.
     public static let newInlineComments = HostingCapabilities(rawValue: 1 << 14)
     public static let multiLineInlineComments = HostingCapabilities(rawValue: 1 << 15)
+    /// Reads, adds and removes reactions on a pull request or an issue itself, not on its comments
+    /// (`itemReactions(of:in:)`, `addItemReaction(_:to:in:)`), of the provider's `reactionKinds`.
+    public static let itemReactions = HostingCapabilities(rawValue: 1 << 16)
+    /// Rebases the source branch onto the target on the host (`rebaseSourceBranch(_:in:sha:)`).
+    public static let rebaseSourceBranch = HostingCapabilities(rawValue: 1 << 17)
+    /// Starts a new resolvable general thread on a pull request or an issue (`startThread(on:in:body:)`), beside a
+    /// plain comment.
+    public static let startThreads = HostingCapabilities(rawValue: 1 << 18)
+    /// Reads the history entries of a pull request or an issue (`timelineEvents(of:in:)`).
+    public static let timelineEvents = HostingCapabilities(rawValue: 1 << 19)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -336,6 +364,13 @@ public protocol HostingProvider: Sendable {
     func unapprove(_ number: Int, in repo: HostedRepository) async throws
     /// Merges only while the head is still `sha` (409 otherwise, `HostingError.headChanged` for GitHub).
     func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws
+    /// The same with `options`, each one the provider lists in `supportedMergeOptions` (a provider without any
+    /// forwards an empty `options` to `merge(_:in:method:sha:)` and refuses others unsent).
+    func merge(
+        _ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String, options: HostedMergeOptions
+    ) async throws
+    /// The merge options the provider takes (the UI shows only these); none by default.
+    var supportedMergeOptions: Set<HostedMergeOption> { get }
     /// Closes (`open` false) or reopens an issue or a pull request.
     func setOpen(_ open: Bool, item: HostedItem, in repo: HostedRepository) async throws
 
@@ -363,6 +398,27 @@ public protocol HostingProvider: Sendable {
     func createInlineComment(
         at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
     ) async throws -> HostedReviewComment
+
+    /// The reactions on `item` itself (not on its comments), one per kind in `reactionKinds` order and then any other
+    /// kind given, the token's user's marked (only with `itemReactions`).
+    func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction]
+    /// Adds the token's user's reaction `kind` to `item` itself (only with `itemReactions`).
+    func addItemReaction(_ kind: String, to item: HostedItem, in repo: HostedRepository) async throws
+    /// Removes the token's user's reaction `kind` from `item` itself (only with `itemReactions`).
+    func removeItemReaction(_ kind: String, from item: HostedItem, in repo: HostedRepository) async throws
+
+    /// The approval box's data of pull request `number` (GitLab's approvals); a provider without one throws.
+    func approvals(of number: Int, in repo: HostedRepository) async throws -> HostedApprovals
+    /// Rebases pull request `number`'s source branch onto its target on the host, while its head is still `sha`
+    /// (`HostingError.headChanged` otherwise), and returns once the host has finished it (only with
+    /// `rebaseSourceBranch`); the host's own failure is thrown.
+    func rebaseSourceBranch(_ number: Int, in repo: HostedRepository, sha: String) async throws
+
+    /// Starts a new resolvable general thread on `item` with `body` as its first note (only with `startThreads`).
+    func startThread(on item: HostedItem, in repo: HostedRepository, body: String) async throws -> HostedComment
+    /// The history entries of `item` that are not comments (system notes, state, label and milestone changes), in
+    /// any order (only with `timelineEvents`).
+    func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedTimelineEvent]
 }
 
 extension HostingProvider {
@@ -415,5 +471,53 @@ extension HostingProvider {
         at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
     ) async throws -> HostedReviewComment {
         throw HostingError.validationFailed(message: "this host cannot write a new inline comment")
+    }
+
+    /// A host without the `itemReactions` capability refuses the reads and writes unsent.
+    public func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction] {
+        throw HostingError.validationFailed(message: "this host cannot read the reactions of a pull request")
+    }
+
+    public func addItemReaction(_ kind: String, to item: HostedItem, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot add a reaction to a pull request")
+    }
+
+    public func removeItemReaction(_ kind: String, from item: HostedItem, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot remove a reaction from a pull request")
+    }
+
+    /// No options: an empty `options` is today's merge, any other is refused unsent.
+    public func merge(
+        _ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String, options: HostedMergeOptions
+    ) async throws {
+        guard options.isEmpty else {
+            throw HostingError.validationFailed(message: "this host takes no merge options")
+        }
+        try await merge(number, in: repo, method: method, sha: sha)
+    }
+
+    public var supportedMergeOptions: Set<HostedMergeOption> { [] }
+
+    public func approvals(of number: Int, in repo: HostedRepository) async throws -> HostedApprovals {
+        throw HostingError.validationFailed(message: "this host has no approval box")
+    }
+
+    /// A host without the `rebaseSourceBranch` capability refuses it unsent.
+    public func rebaseSourceBranch(_ number: Int, in repo: HostedRepository, sha: String) async throws {
+        throw HostingError.validationFailed(message: "this host cannot rebase the source branch")
+    }
+
+    /// A host without the `startThreads` capability refuses it unsent.
+    public func startThread(on item: HostedItem, in repo: HostedRepository, body: String) async throws
+        -> HostedComment
+    {
+        throw HostingError.validationFailed(message: "this host cannot start a thread")
+    }
+
+    /// A host without the `timelineEvents` capability refuses it unsent.
+    public func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws
+        -> [HostedTimelineEvent]
+    {
+        throw HostingError.validationFailed(message: "this host has no history entries")
     }
 }

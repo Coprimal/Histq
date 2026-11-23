@@ -47,6 +47,9 @@ struct GitLabProject: Decodable {
     var visibility: String?
     var namespace: GitLabNamespace?
     var forkedFromProject: Forked?
+    /// `merge`, `rebase_merge` or `ff`; and `never`, `always`, `default_on` or `default_off` (a single project only).
+    var mergeMethod: String?
+    var squashOption: String?
 
     struct Forked: Decodable { var id: Int }
 }
@@ -120,6 +123,24 @@ struct GitLabMergeRequest: Decodable {
     var userNotesCount: Int?
     /// Only a single merge request has it, and only for a user who can see pipelines.
     var headPipeline: GitLabPipeline?
+    /// Only a single merge request: with `include_diverged_commits_count=true`, how many commits the source branch
+    /// is behind the target; with `include_rebase_in_progress=true`, whether a rebase runs; the token's user's
+    /// `can_merge`; the merge's branch deletion (`should_remove_source_branch` once set, else the merge request's own
+    /// `force_remove_source_branch`) and squash; the last merge or rebase error.
+    var divergedCommitsCount: Int?
+    var rebaseInProgress: Bool?
+    var user: Rights?
+    var shouldRemoveSourceBranch: Bool?
+    var forceRemoveSourceBranch: Bool?
+    var squashOnMerge: Bool?
+    var mergeError: String?
+    /// The sidebar's milestone and time tracking (the list and the single merge request).
+    var milestone: GitLabMilestone?
+    var timeStats: GitLabTimeStats?
+
+    struct Rights: Decodable {
+        var canMerge: Bool?
+    }
 
     struct DiffRefs: Decodable {
         var baseSha: String?
@@ -143,6 +164,29 @@ struct GitLabIssue: Decodable {
     var createdAt: String?
     var updatedAt: String?
     var closedAt: String?
+    var milestone: GitLabMilestone?
+    var timeStats: GitLabTimeStats?
+}
+
+/// A merge request's or issue's `milestone`.
+struct GitLabMilestone: Decodable {
+    var title: String
+    var dueDate: String?
+
+    var hosted: HostedMilestone { HostedMilestone(title: title, dueDate: dueDate) }
+}
+
+/// A merge request's or issue's `time_stats`: seconds, and GitLab's words for them (nil when not set).
+struct GitLabTimeStats: Decodable {
+    var timeEstimate: Int?
+    var totalTimeSpent: Int?
+    var humanTimeEstimate: String?
+    var humanTotalTimeSpent: String?
+
+    var hosted: HostedTimeStats {
+        HostedTimeStats(estimate: timeEstimate ?? 0, spent: totalTimeSpent ?? 0, humanEstimate: humanTimeEstimate,
+                        humanSpent: humanTotalTimeSpent)
+    }
 }
 
 /// A note (a comment), from `/notes` or inside a discussion. `type` is `DiffNote` for a comment on a diff line,
@@ -156,6 +200,9 @@ struct GitLabNote: Decodable {
     var system: Bool?
     var resolvable: Bool?
     var resolved: Bool?
+    /// Only a merge request's notes: who resolved the note's thread, and when.
+    var resolvedBy: GitLabUser?
+    var resolvedAt: String?
     var position: Position?
 
     /// Where a diff note sits: an added line has only `newLine`, a removed one only `oldLine`, an unchanged one
@@ -195,15 +242,46 @@ struct GitLabNoteState {
     var canAdmin: Bool
     var canResolve: Bool?
     var awards: [(name: String, userID: Int?)]
+    /// A system note's kind (`systemNoteMetadata.action`) and icon name (`systemNoteIconName`); nil when GitLab gives
+    /// none.
+    var systemAction: String? = nil
+    var systemIcon: String? = nil
 }
 
-/// One load of an item's discussions: the REST threads, the GraphQL note states by REST note id and each
-/// discussion's `resolved` by REST discussion id (both nil when the GraphQL read failed), and the token's user's id
-/// (nil when unknown).
+/// A discussion's resolver and when (GraphQL `resolvedBy`, `resolvedAt`), which issues have only there.
+struct GitLabResolution {
+    var user: HostedUser?
+    var at: Date?
+}
+
+/// A resource event of a merge request or an issue (`resource_state_events`, `resource_label_events`,
+/// `resource_milestone_events`): who and when, and the event's own fields (`state`; `label` or `milestone` with
+/// `action` `add`/`remove`). A deleted label or milestone is null.
+struct GitLabResourceEvent: Decodable {
+    var id: Int
+    var user: GitLabUser?
+    var createdAt: String?
+    var state: String?
+    var action: String?
+    var label: GitLabLabel?
+    var milestone: Milestone?
+    var sourceCommit: String?
+    var sourceMergeRequest: Reference?
+
+    struct Milestone: Decodable { var title: String }
+    struct Reference: Decodable { var iid: Int? }
+}
+
+/// One load of an item's discussions: the REST threads, the GraphQL note states by REST note id, each
+/// discussion's `resolved` by REST discussion id and the item's own awards (all three nil when the GraphQL read
+/// failed), and the token's user's id (nil when unknown).
 struct GitLabThreads {
     var discussions: [GitLabDiscussion]
     var noteStates: [Int: GitLabNoteState]?
     var discussionResolved: [String: Bool]?
+    /// Each resolved discussion's resolver, by REST discussion id (nil when the GraphQL read failed).
+    var discussionResolution: [String: GitLabResolution]? = nil
+    var itemAwards: [(name: String, userID: Int?)]?
     var viewerID: Int?
 }
 
@@ -230,9 +308,15 @@ struct GitLabDiff: Decodable {
     var collapsed: Bool?
 }
 
-/// `GET .../approvals`: on every tier `approved_by` lists the users who approved.
+/// `GET .../approvals`: on every tier `approved_by` lists the users who approved, and `user_can_approve` and
+/// `user_has_approved` say what the token's user may do; `approvals_required` and `approvals_left` only on Enterprise
+/// Edition (GitLab.com included).
 struct GitLabApprovals: Decodable {
     var approvedBy: [Approver]?
+    var approvalsRequired: Int?
+    var approvalsLeft: Int?
+    var userCanApprove: Bool?
+    var userHasApproved: Bool?
 
     struct Approver: Decodable {
         var user: GitLabUser

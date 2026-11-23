@@ -521,6 +521,29 @@ enum HostedHTML {
                 .replies { margin: 0 10px 8px 19px; border-left: 2px solid \(border); }
                 .replies .replies { margin: 0 0 0 21px; } .thread > .replies { margin: 0 0 0 19px; }
                 .replies > .comment { border-top: 0; padding: 4px 10px 6px 12px; }
+                .handle { color: \(secondary); font-weight: 400; }
+                .gl .head .date, .gl .comment-head .date { margin-left: 0; }
+                .gl .date + .slot-add, .gl .date + .slot-menu { margin-left: auto; }
+                .resolved-line { background: \(header); color: \(secondary); font-size: 12px; padding: 0 10px 6px 36px; }
+                .resolved-line b { color: \(text); font-weight: 600; }
+                .snippet { padding: 8px 10px 0; } .snippet .thread { margin-top: 0; }
+                .fold { border-top: 1px solid \(border); }
+                .summary { position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 10px 6px 34px;
+                  color: \(secondary); }
+                .summary > .slot-chevron { position: absolute; left: 0; top: 0; right: 0; bottom: 0; width: auto;
+                  height: auto; }
+                .summary b { color: \(text); font-weight: 600; } .summary .count { color: \(link); }
+                .folded { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+                .fold.collapsed > .replies, .fold.collapsed > .slot-reply, .fold.collapsed .open,
+                .fold:not(.collapsed) .folded { display: none; }
+                .fold > .replies { margin-top: 4px; } .fold > .slot-reply, .item.gl > .slot-reply { margin: 0 10px 8px 36px; }
+                .rail { margin-left: 10px; padding-left: 14px; border-left: 2px solid \(border); }
+                .event { position: relative; margin: 0 0 10px; padding: 2px 0; color: \(secondary); }
+                .event .dot { position: absolute; left: -20px; top: 8px; width: 8px; height: 8px; border-radius: 50%;
+                  background: \(secondary); box-shadow: 0 0 0 3px \(rgba(background)); }
+                .event b { color: \(text); font-weight: 600; }
+                .event .body { display: inline; padding: 0; } .event .body > p { display: inline; margin: 0; }
+                .event .date { margin-left: 4px; }
                 """
         }
         return css

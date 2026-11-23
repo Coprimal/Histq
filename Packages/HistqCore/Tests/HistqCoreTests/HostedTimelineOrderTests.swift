@@ -42,6 +42,7 @@ struct HostedTimelineOrderTests {
                 case .review(let review, let threads): "r\(review.id)" + threads.map { " t\($0.id)" }.joined()
                 case .thread(let thread):
                     "t\(thread.id) " + thread.comments.map { String($0.id) }.joined(separator: ",")
+                case .event(let event): "e-" + event.id
                 }
             }
         }
@@ -64,5 +65,35 @@ struct HostedTimelineOrderTests {
         // The input's order never changes the answer.
         #expect(describe(HostedTimelineOrder.entries(
             comments: comments.reversed(), reviews: reviews.reversed(), threads: threads.reversed())) == expected)
+
+        // History entries go in at their date, after a comment, review and thread of the same time (then by id), a
+        // dateless one with the earliest (after a dateless comment); the others keep their order.
+        func event(_ id: String, _ time: String?) -> HostedTimelineEvent {
+            HostedTimelineEvent(
+                id: id, actor: nil, createdAt: time.flatMap { ISO8601DateFormatter().date(from: "2026-11-12T\($0):00Z") },
+                text: id)
+        }
+        let events = [event("s3", "15:30"), event("s1", "14:02"), event("s0", nil), event("s2", "15:30"),
+                      event("s4", "16:00")]
+        let withEvents = [
+            "c840", "e-s0",
+            "c801 808/1 806/1 807/2",
+            "e-s1",
+            "t811 811,812",
+            "t813 813",
+            "c809 810/1",
+            "r701 t10",
+            "c805",
+            "r703",
+            "t20 20",
+            "e-s2", "e-s3",
+            "c830",
+            "e-s4",
+        ]
+        #expect(describe(HostedTimelineOrder.entries(
+            comments: comments, reviews: reviews, threads: threads, events: events)) == withEvents)
+        #expect(describe(HostedTimelineOrder.entries(
+            comments: comments.reversed(), reviews: reviews.reversed(), threads: threads.reversed(),
+            events: events.reversed())) == withEvents)
     }
 }

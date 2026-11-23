@@ -1027,8 +1027,9 @@ struct GitLabClientTests {
             """
     }
 
-    /// A `NoteStates` answer page for a merge request (`field` `mergeRequest`) or an issue (`issue`): discussions as
-    /// (REST id, resolved, notes), `next` the end cursor when another page follows.
+    /// A `NoteStates` answer page for a merge request (`field` `mergeRequest`, global id `MergeRequest/9005`, awards
+    /// thumbsup by user 8 and thumbsdown and clap by the viewer 7) or an issue (`issue`, `Issue/9003`, no awards):
+    /// discussions as (REST id, resolved, notes), `next` the end cursor when another page follows.
     static func noteStatesPage(field: String, _ discussions: [(String, Bool?, [String])], next: String? = nil)
         -> String
     {
@@ -1037,8 +1038,13 @@ struct GitLabClientTests {
                 + #""notes": {"nodes": [\#(notes.joined(separator: ", "))]}}"#
         }
         let cursor = next.map { "\"\($0)\"" } ?? "null"
+        let item = field == "issue" ? #""id": "gid://gitlab/Issue/9003", "awardEmoji": {"nodes": []}"#
+            : #""id": "gid://gitlab/MergeRequest/9005", "awardEmoji": {"nodes": ["#
+                + [("thumbsup", 8), ("thumbsdown", 7), ("clap", 7)]
+                    .map { #"{"name": "\#($0.0)", "user": {"id": "gid://gitlab/User/\#($0.1)"}}"# }
+                    .joined(separator: ", ") + "]}"
         return """
-            {"data": {"project": {"\(field)": {"discussions": {"nodes": [\(nodes.joined(separator: ", "))],
+            {"data": {"project": {"\(field)": {\(item), "discussions": {"nodes": [\(nodes.joined(separator: ", "))],
              "pageInfo": {"hasNextPage": \(next != nil), "endCursor": \(cursor)}}}}}}
             """
     }
@@ -1048,6 +1054,7 @@ struct GitLabClientTests {
     static let diffID = "3333333333333333333333333333333333333333"
     static let systemID = "4444444444444444444444444444444444444444"
     static let issueThreadID = "5555555555555555555555555555555555555555"
+    static let newThreadID = "6666666666666666666666666666666666666666"
 
     /// Merge request !5's discussions: an individual note 100 by the viewer (7); a resolvable general thread (root
     /// 200 by user 8, reply 201 by the viewer, a system note 202 inside); a resolvable diff thread (300 by user 8,
@@ -1173,13 +1180,14 @@ struct GitLabClientTests {
         #expect((issueQuery as? String)?.contains("issue(iid: $iid)") == true)
     }
 
-    @Test("the three reads of one detail load share one discussions fetch and one GraphQL read; a later read fetches again")
+    @Test("the five reads of one detail load share one discussions fetch and one GraphQL read; a later read fetches again")
     func discussionsLoadedOnce() async throws {
         let stub = StubServer { request in
             if request.url?.path(percentEncoded: true) == Self.mrPath + "/5/discussions" {
                 Thread.sleep(forTimeInterval: 0.3)  // keeps the load running while the other reads join it
             }
             if request.url?.path(percentEncoded: true) == Self.mrPath + "/5" { return .init(body: Self.minimalMR()) }
+            if request.url?.path().hasSuffix("_events") == true { return .init(body: "[]") }
             return Self.commentReads(request) ?? .init(status: 404, body: #"{"message": "404 Not Found"}"#)
         }
         let client = try Self.client(stub, refreshes: Self.refreshed())
@@ -1188,9 +1196,13 @@ struct GitLabClientTests {
         async let comments = client.comments(on: .pullRequest(5), in: Self.writeRepo)
         async let reviewComments = client.reviewComments(of: 5, in: Self.writeRepo)
         async let states = client.reviewThreadStates(of: 5, in: Self.writeRepo)
-        let loaded = try await (comments, reviewComments, states)
+        async let itemReactions = client.itemReactions(of: .pullRequest(5), in: Self.writeRepo)
+        async let events = client.timelineEvents(of: .pullRequest(5), in: Self.writeRepo)
+        let loaded = try await (comments, reviewComments, states, itemReactions, events)
 
         #expect(loaded.0.map(\.id) == [100, 200, 201] && loaded.1.map(\.id) == [300, 301] && loaded.2.count == 1)
+        #expect(loaded.3.map(\.kind) == ["thumbsup", "thumbsdown", "clap"], "the item's awards join the same load")
+        #expect(loaded.4.map(\.id) == ["note-202", "note-400"], "the system notes join the same load")
         #expect(count(Self.mrPath + "/5/discussions") == 1)
         #expect(count(Self.graphQLPath) == 2, "one NoteStates read of two pages")
 
@@ -1224,6 +1236,10 @@ struct GitLabClientTests {
                 }
                 let name = query.contains("awardEmojiAdd") ? "awardEmojiAdd" : "awardEmojiRemove"
                 return .init(body: #"{"data": {"\#(name)": {"errors": []}}}"#)
+            case "POST" where path == Self.mrPath + "/5/discussions" && Self.json(request)["position"] == nil:
+                return .init(status: 201, body: Self.restDiscussion(Self.newThreadID, [
+                    Self.restNote(700, by: 7, resolvable: true),
+                ]))
             case "POST" where path == Self.mrPath + "/5/discussions":
                 return .init(status: 201, body: Self.restDiscussion(Self.diffID, [
                     Self.restNote(310, by: 7, type: "DiffNote", resolvable: true, diff: true),
@@ -1237,6 +1253,12 @@ struct GitLabClientTests {
         // The loads the detail did: they give the resolvable threads and the global ids the mutations take.
         _ = try await client.comments(on: .pullRequest(5), in: repo)
         _ = try await client.comments(on: .issue(3), in: repo)
+        // The item's own awards ride the same GraphQL read, counted as a note's (default kinds first).
+        #expect(try await client.itemReactions(of: .pullRequest(5), in: repo) == [
+            HostedReaction(kind: "thumbsup", count: 1), HostedReaction(kind: "thumbsdown", count: 1, viewerReacted: true),
+            HostedReaction(kind: "clap", count: 1, viewerReacted: true),
+        ])
+        #expect(try await client.itemReactions(of: .issue(3), in: repo).isEmpty)
         let mrRoot = HostedCommentRef(kind: .general, id: 200, hostKey: Self.threadID)
         let issueRoot = HostedCommentRef(kind: .general, id: 500, hostKey: Self.issueThreadID)
         let diffNote = HostedCommentRef(kind: .review, id: 300, hostKey: Self.diffID)
@@ -1286,6 +1308,17 @@ struct GitLabClientTests {
             }),
             ("POST", Self.graphQLPath, nil, ["awardableId": "gid://gitlab/Note/500", "name": "eyes"], {
                 try await client.removeReaction("eyes", from: issueRoot, on: .issue(3), in: repo)
+            }),
+            ("POST", Self.graphQLPath, nil, ["awardableId": "gid://gitlab/MergeRequest/9005", "name": "thumbsup"], {
+                try await client.addItemReaction("thumbsup", to: .pullRequest(5), in: repo)
+            }),
+            ("POST", Self.graphQLPath, nil, ["awardableId": "gid://gitlab/Issue/9003", "name": "thumbsdown"], {
+                try await client.removeItemReaction("thumbsdown", from: .issue(3), in: repo)
+            }),
+            ("POST", discussions, nil, ["body": "Start"], {
+                let thread = try await client.startThread(on: .pullRequest(5), in: repo, body: "Start")
+                #expect(thread.id == 700 && thread.hostKey == Self.newThreadID && thread.parentID == nil)
+                #expect(thread.resolvable == true && thread.resolved == false && thread.viewerCanEdit)
             }),
             ("POST", discussions, nil, ["body": "Hm", "position": merged(base(), ["new_line": 12])], {
                 try await inline(.init(path: "a.swift", oldLine: nil, newLine: 12, lineKind: .added, headSHA: "abc1"))
@@ -1389,6 +1422,102 @@ struct GitLabClientTests {
         #expect(stub.requests.map(\.httpMethod) == ["GET"], "only the merge request read, no POST")
     }
 
+    @Test("history entries: every system note (inside a thread too) with GraphQL's action and icon, and the state, label and milestone events in Histq's words; resolved threads say who resolved them (GraphQL, else REST's resolved_by); a refused event list is left out")
+    func historyEntriesAndResolvedBy() async throws {
+        let resolvedNote = """
+            {"id": 300, "type": "DiffNote", "body": "note 300", "author": \(Self.user(8, "u8")),
+             "created_at": "2026-11-02T10:00:00Z", "system": false, "resolvable": true, "resolved": true,
+             "resolved_by": \(Self.user(7, "u7")), "resolved_at": "2026-11-03T09:00:00Z",
+             "position": {"old_path": "a.swift", "new_path": "a.swift", "new_line": 1}}
+            """
+        let discussions = "[" + [
+            Self.restDiscussion(Self.threadID, [
+                Self.restNote(200, by: 8, resolvable: true, resolved: true),
+                Self.restNote(201, by: 7, resolvable: true, resolved: true),
+                Self.restNote(202, by: 8, type: nil, system: true),
+            ]),
+            Self.restDiscussion(Self.diffID, [resolvedNote]),
+            Self.restDiscussion(Self.systemID, individual: true, [Self.restNote(400, by: 8, type: nil, system: true)]),
+        ].joined(separator: ", ") + "]"
+        let graphQL = """
+            {"data": {"project": {"mergeRequest": {"id": "gid://gitlab/MergeRequest/9005", "awardEmoji": {"nodes": []},
+             "discussions": {"nodes": [
+              {"id": "gid://gitlab/Discussion/\(Self.threadID)", "resolved": true,
+               "resolvedAt": "2026-11-04T08:00:00Z", "resolvedBy": {"id": "gid://gitlab/User/8", "username": "u8",
+               "name": "User 8", "avatarUrl": "https://git.example.com/a/8.png"},
+               "notes": {"nodes": [
+                {"id": "gid://gitlab/DiscussionNote/200", "userPermissions": {"adminNote": false}},
+                {"id": "gid://gitlab/Note/202", "systemNoteIconName": "comment",
+                 "systemNoteMetadata": {"action": "discussion"}}]}},
+              {"id": "gid://gitlab/Discussion/\(Self.diffID)", "resolved": true, "resolvedAt": null,
+               "resolvedBy": null, "notes": {"nodes": []}},
+              {"id": "gid://gitlab/Discussion/\(Self.systemID)", "resolved": null,
+               "notes": {"nodes": [{"id": "gid://gitlab/Note/400", "systemNoteIconName": "commit",
+                                    "systemNoteMetadata": {"action": "commit"}}]}}],
+             "pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}
+            """
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            switch path {
+            case Self.mrPath + "/5/discussions": return .init(body: discussions)
+            case Self.graphQLPath: return .init(body: graphQL)
+            case "/gitlab/api/v4/user": return .init(body: Self.user(7, "me"))
+            case Self.mrPath + "/5/resource_state_events":
+                return .init(body: """
+                    [{"id": 11, "user": \(Self.user(8, "u8")), "created_at": "2026-11-05T10:00:00Z", "state": "closed",
+                      "source_merge_request": {"iid": 9}},
+                     {"id": 12, "user": \(Self.user(8, "u8")), "created_at": "2026-11-06T10:00:00Z", "state": "opened"},
+                     {"id": 13, "user": \(Self.user(7, "u7")), "created_at": "2026-11-07T10:00:00Z", "state": "merged"}]
+                    """)
+            case Self.mrPath + "/5/resource_label_events":
+                return .init(body: """
+                    [{"id": 21, "user": \(Self.user(7, "u7")), "created_at": "2026-11-05T11:00:00Z", "action": "add",
+                      "label": {"id": 1, "name": "bug", "color": "#d73a4a"}},
+                     {"id": 22, "user": \(Self.user(7, "u7")), "created_at": "2026-11-05T12:00:00Z",
+                      "action": "remove", "label": {"id": 2, "name": "needs <b>review</b> *now*"}},
+                     {"id": 23, "user": null, "created_at": "2026-11-05T13:00:00Z", "action": "add", "label": null}]
+                    """)
+            case Self.mrPath + "/5/resource_milestone_events":
+                return .init(status: 403, body: #"{"message": "403 Forbidden"}"#)
+            default: return .init(status: 404, body: #"{"message": "404 Not Found"}"#)
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let events = try await client.timelineEvents(of: .pullRequest(5), in: Self.writeRepo)
+        #expect(events.map(\.id) == [
+            "note-202", "note-400", "state-11", "state-12", "state-13", "label-21", "label-22", "label-23",
+        ])
+        #expect(events.map(\.text) == [
+            "note 202", "note 400", "closed via merge request !9", "reopened", "merged", "added ~bug label",
+            #"removed ~"needs <b>review</b> *now*" label"#, "added a label",
+        ])
+        #expect(events[6].textHTML == "<p>removed ~&quot;needs &lt;b&gt;review&lt;/b&gt; *now*&quot; label</p>",
+                "a host's label name is escaped plain text, never Markdown or HTML")
+        #expect(events.map(\.action) == [
+            "discussion", "commit", "state", "state", "state", "label", "label", "label",
+        ])
+        #expect(events.map(\.icon) == [
+            "comment", "commit", "merge-request-close", "work-item-issue", "merge", "label", "label", "label",
+        ])
+        #expect(events[0].actor?.login == "u8" && events[2].actor?.login == "u8" && events[7].actor == nil)
+        #expect(events[2].createdAt == ISO8601DateFormatter().date(from: "2026-11-05T10:00:00Z"))
+        #expect(events[0].textHTML == "<p>note 202</p>\n", "the body through MarkdownHTML, never raw")
+        #expect(!events.contains { $0.id.hasPrefix("milestone-") }, "a refused list is left out")
+
+        let comments = try await client.comments(on: .pullRequest(5), in: Self.writeRepo)
+        #expect(comments.map(\.id) == [200, 201], "system notes stay out of the comments")
+        #expect(comments[0].resolvedBy?.login == "u8" && comments[0].resolvedBy?.id == 8, "GraphQL's resolver")
+        #expect(comments[0].resolvedAt == ISO8601DateFormatter().date(from: "2026-11-04T08:00:00Z"))
+        #expect(comments[1].resolvedBy == nil, "only the root")
+        let reviewComments = try await client.reviewComments(of: 5, in: Self.writeRepo)
+        #expect(reviewComments.first?.resolvedBy?.login == "u7", "REST's resolved_by without GraphQL's")
+        #expect(reviewComments.first?.resolvedAt == ISO8601DateFormatter().date(from: "2026-11-03T09:00:00Z"))
+
+        let query = stub.requests.first { $0.url?.path() == Self.graphQLPath }.map { Self.json($0)["query"] }
+        #expect((query as? String)?.contains("systemNoteMetadata { action }") == true)
+    }
+
     @Test("GitLab offers the comment interactions and its 8 default reactions")
     func commentCapabilities() throws {
         let client = try GitLabClient(host: "gitlab.com", session: .shared) { _ in Self.token }
@@ -1400,5 +1529,180 @@ struct GitLabClientTests {
         #expect(client.reactionKinds == [
             "thumbsup", "thumbsdown", "laughing", "tada", "confused", "heart", "rocket", "eyes",
         ])
+    }
+
+    // MARK: - Approval box and merge box
+
+    @Test("the merge box's fields map from the single merge request, the approval box's from approvals (none on Community Edition), the merge rules from the project; reviews and approvals share one approvals read")
+    func mergeBoxFields() async throws {
+        let mr = """
+            {"id": 9005, "iid": 5, "title": "T", "state": "opened", "draft": false,
+             "web_url": "https://git.example.com/gitlab/group/proj/-/merge_requests/5", "source_branch": "feature",
+             "target_branch": "main", "sha": "abc1", "detailed_merge_status": "not_approved",
+             "diverged_commits_count": 6, "rebase_in_progress": false, "user": {"can_merge": false},
+             "force_remove_source_branch": true, "squash_on_merge": true, "merge_error": "Rebase failed"}
+            """
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            if path == Self.mrPath + "/5/approvals" { Thread.sleep(forTimeInterval: 0.3) }
+            return switch path {
+            case Self.mrPath + "/5": .init(body: mr)
+            case Self.mrPath + "/6": .init(body: Self.minimalMR(iid: 6))
+            case Self.mrPath + "/5/approvals":
+                .init(body: """
+                    {"approved": false, "approvals_required": 2, "approvals_left": 1, "user_can_approve": true,
+                     "user_has_approved": false, "approved_by": [{"user": \(Self.user(7, "ann")),
+                     "approved_at": "2026-11-12T15:00:00Z"}]}
+                    """)
+            case Self.mrPath + "/6/approvals":
+                .init(body: #"{"approved": false, "approved_by": [], "user_can_approve": true, "user_has_approved": false}"#)
+            case Self.mrPath + "/5/reviewers": .init(body: "[]")
+            case "/gitlab/api/v4/projects/group%2Fproj":
+                .init(body: #"{"id": 1, "name": "proj", "path_with_namespace": "group/proj", "default_branch": "main", "merge_method": "ff", "squash_option": "default_on"}"#)
+            default: .init(status: 404, body: "{}")
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let pull = try await client.pullRequest(5, in: Self.writeRepo)
+        let query = stub.requests.first?.url?.query() ?? ""
+        #expect(query.contains("include_diverged_commits_count=true") && query.contains("include_rebase_in_progress=true"))
+        #expect(pull.mergeDetails == HostedMergeDetails(
+            status: "not_approved", commitsBehind: 6, viewerCanMerge: false, deletesSourceBranch: true,
+            squashOnMerge: true, mergeError: "Rebase failed", rebaseInProgress: false))
+        #expect(pull.mergeableState == "blocked", "the shared mapping is unchanged")
+        let bare = try await client.pullRequest(6, in: Self.writeRepo)
+        #expect(bare.mergeDetails == HostedMergeDetails(), "fields GitLab leaves out stay nil")
+
+        async let reviews = client.reviews(of: 5, in: Self.writeRepo)
+        async let approvals = client.approvals(of: 5, in: Self.writeRepo)
+        let (reviewed, approved) = try await (reviews, approvals)
+        #expect(reviewed.map(\.state) == ["APPROVED"])
+        #expect(approved.required == 2 && approved.left == 1 && !approved.isOptional)
+        #expect(approved.approvedBy.map(\.login) == ["ann"])
+        #expect(approved.viewerCanApprove == true && approved.viewerHasApproved == false)
+        #expect(stub.requests.count { $0.url?.path(percentEncoded: true) == Self.mrPath + "/5/approvals" } == 1)
+
+        let community = try await client.approvals(of: 6, in: Self.writeRepo)
+        #expect(community.required == nil && community.left == nil && community.isOptional)
+
+        let info = try await client.repositoryInfo(Self.writeRepo)
+        #expect(info.defaultBranch == "main" && info.mergeCommit == false && info.squashOption == .defaultOn)
+        #expect(client.supportedMergeOptions == [.deleteSourceBranch])
+        #expect(client.capabilities.contains(.rebaseSourceBranch))
+    }
+
+    @Test("the sidebar's milestone and time stats map from the single merge request and issue; left out or null, none", arguments: [
+        (#", "milestone": {"id": 61, "iid": 1, "title": "1.0", "due_date": "2026-12-01"}, "time_stats": {"time_estimate": 5400, "total_time_spent": 1800, "human_time_estimate": "1h 30m", "human_total_time_spent": "30m"}"#,
+         HostedMilestone?.some(HostedMilestone(title: "1.0", dueDate: "2026-12-01")),
+         HostedTimeStats?.some(HostedTimeStats(estimate: 5400, spent: 1800, humanEstimate: "1h 30m", humanSpent: "30m"))),
+        (#", "milestone": null, "time_stats": {"time_estimate": 0, "total_time_spent": 0, "human_time_estimate": null, "human_total_time_spent": null}"#,
+         HostedMilestone?.none, HostedTimeStats?.some(HostedTimeStats())),
+        ("", HostedMilestone?.none, HostedTimeStats?.none),
+    ])
+    func sidebarFields(fields: String, milestone: HostedMilestone?, timeStats: HostedTimeStats?) async throws {
+        let issuePath = "/gitlab/api/v4/projects/group%2Fproj/issues"
+        let stub = StubServer { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case Self.mrPath + "/5":
+                .init(body: String(Self.minimalMR().dropLast()) + fields + "}")
+            case issuePath + "/3":
+                .init(body: #"{"id": 9003, "iid": 3, "title": "I", "state": "opened", "#
+                    + #""web_url": "https://git.example.com/gitlab/group/proj/-/issues/3"\#(fields)}"#)
+            default: .init(status: 404, body: "{}")
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let pull = try await client.pullRequest(5, in: Self.writeRepo)
+        let issue = try await client.issue(3, in: Self.writeRepo)
+        #expect(pull.milestone == milestone && pull.timeStats == timeStats)
+        #expect(issue.milestone == milestone && issue.timeStats == timeStats)
+        #expect(pull.timeStats?.isEmpty == timeStats.map { $0.estimate == 0 && $0.spent == 0 },
+                "zero seconds read as no estimate or time spent")
+        #expect(stub.requests.count == 2, "no request beyond the item's own read")
+    }
+
+    @Test("a merge sends should_remove_source_branch only when the options set it, true or false", arguments: [
+        (Bool?.none, Bool?.none), (true, true), (false, false),
+    ])
+    func mergeOptionsBody(delete: Bool?, sent: Bool?) async throws {
+        let stub = StubServer { _ in .init(body: Self.minimalMR()) }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        try await client.merge(
+            5, in: Self.writeRepo, method: .squash, sha: "abc1", options: HostedMergeOptions(deleteSourceBranch: delete))
+        let body = Self.json(try #require(stub.requests.first))
+        #expect(body["sha"] as? String == "abc1" && body["squash"] as? Bool == true)
+        #expect(body["should_remove_source_branch"] as? Bool == sent)
+        #expect(Set(body.keys) == (sent == nil ? ["sha", "squash"] : ["sha", "squash", "should_remove_source_branch"]))
+    }
+
+    /// What the rebase test's merge request reads answer, one after the other: the first is the head check.
+    enum RebaseCase: Sendable, CustomTestStringConvertible {
+        case done, failed, staleHead, stillRunning
+
+        var testDescription: String { "\(self)" }
+    }
+
+    @Test("rebase checks the head, PUTs .../rebase, then polls the merge request until rebase_in_progress is false; merge_error is the failure, a moved head sends nothing, a rebase past the polls is still running", arguments: [
+        RebaseCase.done, .failed, .staleHead, .stillRunning,
+    ])
+    func rebaseFlow(rebaseCase: RebaseCase) async throws {
+        let reads = Mutex(0)
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            if request.httpMethod == "PUT", path == Self.mrPath + "/5/rebase" {
+                return .init(status: 202, body: #"{"rebase_in_progress": true}"#)
+            }
+            guard request.httpMethod == "GET", path == Self.mrPath + "/5" else {
+                return .init(status: 404, body: "{}")
+            }
+            let read = reads.withLock { count in
+                count += 1
+                return count
+            }
+            let sha = rebaseCase == .staleHead ? "moved" : "abc1"
+            // The head check, one poll still running, then the answer.
+            let running = read <= 2 || rebaseCase == .stillRunning
+            let error = rebaseCase == .failed && !running ? #""Rebase failed. Please rebase locally""# : "null"
+            return .init(body: """
+                {"id": 9005, "iid": 5, "title": "T", "state": "opened", "source_branch": "feature",
+                 "target_branch": "main", "sha": "\(sha)", "rebase_in_progress": \(running && read > 1),
+                 "merge_error": \(error), "web_url": "https://git.example.com/gitlab/group/proj/-/merge_requests/5"}
+                """)
+        }
+        var client = try Self.client(stub, refreshes: Self.refreshed())
+        client.rebasePollDelays = [.zero, .zero, .zero]
+
+        let result: (any Error)?
+        do {
+            try await client.rebaseSourceBranch(5, in: Self.writeRepo, sha: "abc1")
+            result = nil
+        } catch {
+            result = error
+        }
+        let methods = stub.requests.map { $0.httpMethod ?? "" }
+        switch rebaseCase {
+        case .done:
+            #expect(result == nil)
+            #expect(methods == ["GET", "PUT", "GET", "GET"], "the head check, the rebase, a running poll, the done one")
+            let put = stub.requests[1]
+            #expect(put.httpBody == nil || put.httpBody?.isEmpty == true, "GitLab's rebase takes no sha")
+            #expect(stub.requests[2].url?.query()?.contains("include_rebase_in_progress=true") == true)
+        case .failed:
+            #expect(result as? HostingError == .validationFailed(message: "Rebase failed. Please rebase locally"))
+            #expect(methods == ["GET", "PUT", "GET", "GET"])
+        case .staleHead:
+            #expect(result as? HostingError == .headChanged)
+            #expect(methods == ["GET"], "no rebase once the head moved")
+        case .stillRunning:
+            guard case HostingError.validationFailed(let message)? = result as? HostingError else {
+                Issue.record("expected the still-running failure, got \(String(describing: result))")
+                return
+            }
+            #expect(message.contains("still rebasing"))
+            #expect(methods == ["GET", "PUT", "GET", "GET", "GET"], "one read per delay, then it stops")
+        }
     }
 }

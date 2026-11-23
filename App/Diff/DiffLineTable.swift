@@ -453,6 +453,8 @@ struct DiffInlineThreads {
     /// A header click: the thread's id and whether it is collapsed now (the table shows it at once).
     let onToggle: @MainActor (Int, Bool) -> Void
     let onReply: @MainActor () -> Void
+    /// The reply button's title: "Reply in Conversation", or the host's tab name ("Reply in Overview").
+    var replyTitle = "Reply in Conversation"
     /// Where the host takes new inline comments: the "+" on a hovered line and the open comment box. nil hides both.
     var newComments: DiffNewComments?
 }
@@ -1131,7 +1133,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     private func configure(_ cell: DiffThreadCellView, _ thread: DiffInlineThread) {
         cell.configure(thread, collapsed: collapsedThreads.contains(thread.id),
                        onToggle: { [weak self] in self?.toggleThread(thread.id) },
-                       onReply: { [weak self] in self?.view?.inlineThreads?.onReply() })
+                       onReply: { [weak self] in self?.view?.inlineThreads?.onReply() },
+                       replyTitle: view?.inlineThreads?.replyTitle ?? "Reply in Conversation")
     }
 
     /// A header click: the thread collapses or expands at once, then the owner keeps the choice.
@@ -2276,7 +2279,8 @@ final class DiffThreadCellView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     func configure(_ thread: DiffInlineThread, collapsed: Bool, onToggle: @escaping () -> Void,
-                   onReply: @escaping () -> Void) {
+                   onReply: @escaping () -> Void, replyTitle: String = "Reply in Conversation") {
+        if reply.title != replyTitle { reply.title = replyTitle }
         self.thread = thread
         self.collapsed = collapsed
         self.onToggle = onToggle
