@@ -369,7 +369,8 @@ final class IssueDetailModel {
     private nonisolated static func page(
         _ detail: IssueDetail, comments: [HostedComment], general: PRGeneralOptions, activity: PRActivityView
     ) async -> PRTimelineHTML {
-        timeline(detail.issue, comments: comments, general: general, now: detail.now,
+        timeline(detail.issue, comments: comments, general: general, now: detail.now, layout: detail.layout,
+                 roles: detail.memberRoles, events: detail.events,
                  activity: activityPage(detail.layout, events: detail.events, view: activity,
                                         roles: detail.memberRoles))
     }
@@ -386,12 +387,14 @@ final class IssueDetailModel {
 
     /// The page of `issue`: its body, then `comments`, dated against `now`, with the layout's Activity (`activity`).
     private nonisolated static func timeline(
-        _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions, now: Date,
-        activity: PRActivityPage?
+        _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions, now: Date, layout: PRPageLayout,
+        roles: [Int: String]?, events: [HostedTimelineEvent]?, activity: PRActivityPage?
     ) -> PRTimelineHTML {
         PRTimeline.page(
-            author: issue.user, action: "opened this issue", date: issue.createdAt, html: issue.bodyHTML,
-            markdown: issue.body, comments: comments, general: general, now: now, activity: activity)
+            author: issue.user, action: layout.descriptionVerb ?? "opened this issue", date: issue.createdAt,
+            html: issue.bodyHTML, markdown: issue.body, comments: comments, general: general, now: now,
+            activity: activity, roles: layout.roleBadges ? roles ?? [:] : nil,
+            descriptionReactions: layout.descriptionReactions, events: layout.timelineEvents ? events : nil)
     }
 
     /// The Activity's filter or sort changed (`view`): it shows at once in its controls, the page is rebuilt off the
@@ -432,10 +435,12 @@ final class IssueDetailModel {
         async let issue = client.issue(number, in: repository)
         async let comments = client.comments(on: .issue(number), in: repository)
         async let viewer = general.replies ? try? await client.currentUser() : nil
-        let readsEvents = layout.issueActivity != nil && client.capabilities.contains(.timelineEvents)
+        let readsEvents = (layout.issueActivity != nil || layout.timelineEvents)
+            && client.capabilities.contains(.timelineEvents)
         async let events: Loadable<[HostedTimelineEvent]> = !readsEvents ? .idle
             : await part(client.kind) { try await client.timelineEvents(of: .issue(number), in: repository) }
-        let barKinds = layout.reactionBar && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
+        let showsReactions = layout.reactionBar || layout.descriptionReactions
+        let barKinds = showsReactions && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
         async let itemReactions: Loadable<[HostedReaction]> = barKinds.isEmpty ? .idle
             : await part(client.kind) { try await client.itemReactions(of: .issue(number), in: repository) }
         let asksCandidates = layout.sidebar && client.capabilities.contains(.assignees)
@@ -449,11 +454,17 @@ final class IssueDetailModel {
             let viewer = await viewer
             // The badges' roles, once the commenters are known (`PullRequestDetailModel.fetch`'s rule).
             let users = [issue.user, viewer] + comments.map(\.user)
-            let roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
+            var roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
                 try await client.memberRoles(of: users.compactMap { $0?.id }, in: repository)
             }.value
+            if layout.roleBadges {
+                // GitHub's `author_association` on each comment (`PullRequestDetailModel.fetch`'s rule).
+                roles = PRTimeline.associationRoles(comments.map { ($0.user, $0.authorAssociation) })
+                    .merging(roles ?? [:]) { _, member in member }
+            }
             let events = await events.value
-            let timeline = timeline(issue, comments: comments, general: general, now: now,
+            let timeline = timeline(issue, comments: comments, general: general, now: now, layout: layout,
+                                    roles: roles, events: events,
                                     activity: activityPage(layout, events: events, view: activityView, roles: roles))
             let reactions = await itemReactions.value
             var shown = issue
@@ -612,6 +623,16 @@ private struct IssueHeaderCard: View {
                 Group {
                     if let value, value.layout.issueSentence == .created {
                         createdSummary(value)
+                    } else if let value, value.layout.issueSentence == .openedStateFirst {
+                        HStack(spacing: 6) {
+                            IssueStatePill(isOpen: value.isOpen)
+                                .fixedSize()
+                            summary(value)
+                                .font(.settingsCaption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     } else if let value {
                         summary(value)
                             .font(.settingsCaption)
@@ -707,12 +728,22 @@ private struct IssueContent: View {
         }
     }
 
+    /// The description's reaction row (`PRPageLayout.descriptionReactions`), as on the pull request page.
+    private var itemReactions: PRItemReactions? {
+        guard detail.layout.descriptionReactions, !detail.reactionKinds.isEmpty else { return nil }
+        let number = detail.issue.number
+        return PRItemReactions(kinds: detail.reactionKinds, given: detail.issue.reactions,
+                               busy: session.issueDetail.isBusy(number), noun: "issue") { [session] kind, add in
+            session.issueDetail.perform(.itemReaction(kind: kind, add: add), on: number, github: session.github)
+        }
+    }
+
     /// The column's cards, each as tall as its content: a long conversation pushes the comment box down. Where the
     /// layout has them, the award bar first and the host's Activity (title, filter and sort) in place of the
     /// Conversation.
     private func main(sideCards: Bool) -> some View {
         VStack(spacing: SectionCardMetrics.spacing) {
-            if !detail.reactionKinds.isEmpty {
+            if detail.layout.reactionBar, !detail.reactionKinds.isEmpty {
                 let number = detail.issue.number
                 PRAwardBarCard(kinds: detail.reactionKinds, given: detail.issue.reactions,
                                busy: session.issueDetail.isBusy(number), noun: "issue") { [session] kind, add in
@@ -725,7 +756,8 @@ private struct IssueContent: View {
                 // The page fits its content and never scrolls itself: a wheel over it scrolls this column.
                 PRTimelinePage(session: session, number: detail.issue.number, timeline: detail.timeline,
                                loadID: detail.loadID, kind: "issue",
-                               avatars: .of(session.github), general: session.issueDetail)
+                               avatars: .of(session.github), general: session.issueDetail,
+                               itemReactions: itemReactions)
                     .frame(maxWidth: .infinity)
             } accessory: {
                 if let activity = detail.layout.issueActivity {
@@ -885,6 +917,35 @@ private struct IssueSideColumn: View {
                         ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
                     }
                 }
+            }
+        }
+        if detail.layout.githubSidebar {
+            // GitHub's issue sidebar after Labels: Milestone and Participants (Projects, Relationships, Development
+            // and Notifications stay on GitHub).
+            SectionCard("Milestone", systemImage: "flag") {
+                if let milestone = detail.issue.milestone {
+                    Text(milestone.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(milestone.title)
+                } else {
+                    PRSideEmpty(text: "No milestone")
+                }
+            }
+            let participants = HostSidebar.participants(
+                [detail.issue.user] + (detail.issue.assignees ?? []) + detail.comments.map(\.user))
+            SectionCard("Participants", systemImage: "person.3", count: participants.count) {
+                let avatars = HostAvatars.of(session.github)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 22, maximum: 22), spacing: 6)], alignment: .leading,
+                          spacing: 6) {
+                    ForEach(participants, id: \.login) { user in
+                        GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 22,
+                                         avatars: avatars)
+                            .help(user.login)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text("Participants: " + participants.map(\.login).joined(separator: ", ")))
             }
         }
     }

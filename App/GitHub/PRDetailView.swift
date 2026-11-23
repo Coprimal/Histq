@@ -135,6 +135,10 @@ struct PullRequestDetail: Sendable {
     /// The commenters' member roles by user id (`PRPageLayout.roleBadges`): nil without badges; empty when their read
     /// failed (only "Author" shows).
     var memberRoles: [Int: String]? = nil
+    /// Whether a merged pull request's head branch still exists, for the merged box's Delete branch / Restore branch
+    /// (`PRPageLayout.githubMergeBox`): nil when it was not read (not merged, a fork's branch, no push permission, no
+    /// `deleteHeadBranch`) or the read failed, which shows neither.
+    var headBranchExists: Bool? = nil
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -174,6 +178,12 @@ enum PullRequestAction: Equatable, Sendable {
     case addAssignees([HostedUser])
     /// Adds the labels named (the sidebar's Labels: Edit); adds only.
     case addLabels([String])
+    /// Merges the base into the out-of-date head on the host, while the head is still `sha` (GitHub's Update branch).
+    case updateBranch(sha: String)
+    /// Deletes the merged pull request's head branch on the host (GitHub's merged box), shown gone at once.
+    case deleteBranch(String)
+    /// Makes the deleted head branch again at `sha` (Restore branch), shown back at once.
+    case restoreBranch(String, sha: String)
 
     var progressTitle: String {
         switch self {
@@ -192,6 +202,9 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "Assigning the reviewer…"
         case .addAssignees: "Assigning…"
         case .addLabels: "Adding the label…"
+        case .updateBranch: "Updating the branch…"
+        case .deleteBranch: "Deleting the branch…"
+        case .restoreBranch: "Restoring the branch…"
         }
     }
 
@@ -212,6 +225,9 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "The reviewer was not assigned"
         case .addAssignees: "The assignee was not added"
         case .addLabels: "The label was not added"
+        case .updateBranch: "The branch was not updated"
+        case .deleteBranch: "The branch was not deleted"
+        case .restoreBranch: "The branch was not restored"
         }
     }
 
@@ -234,6 +250,9 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "The reviewer of \(number) was not assigned"
         case .addAssignees: "The assignee of \(number) was not added"
         case .addLabels: "The label of \(number) was not added"
+        case .updateBranch: "The branch of \(number) was not updated"
+        case .deleteBranch: "The branch of \(number) was not deleted"
+        case .restoreBranch: "The branch of \(number) was not restored"
         }
     }
 
@@ -255,6 +274,9 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "assign-reviewer"
         case .addAssignees: "assign"
         case .addLabels: "add-label"
+        case .updateBranch: "update-branch"
+        case .deleteBranch: "delete-branch"
+        case .restoreBranch: "restore-branch"
         }
     }
 }
@@ -446,7 +468,8 @@ final class PullRequestDetailModel {
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
     #if DEBUG
     /// DEBUG `-HistqPRAction <action>` (`comment`, `start-thread`, `approve`, `request-changes`, `unapprove`, `merge`, `merge-stale`,
-    /// `merge-stale-closed`, `close`, `reopen`, `rebase`): runs that action once, on the first load, without its confirmation
+    /// `merge-stale-closed`, `close`, `reopen`, `rebase`, `update-branch`, `delete-branch`, `restore-branch`): runs
+    /// that action once, on the first load, without its confirmation
     /// (the stub answers it), so a launch exercises the action path and its reload. Only with `-HistqGitHubStub YES`:
     /// never an unconfirmed action on a real account.
     /// `resolve-manual` is the merge box's own (`PRActionsCard.launchResolve`): a local merge, not a GitHub action.
@@ -463,6 +486,9 @@ final class PullRequestDetailModel {
     case "close": .setOpen(false)
     case "reopen": .setOpen(true)
     case "rebase": .rebase(sha: GitHubStub.headSHA)
+    case "update-branch": .updateBranch(sha: GitHubStub.headSHA)
+    case "delete-branch": .deleteBranch("feature")
+    case "restore-branch": .restoreBranch("feature", sha: GitHubStub.headSHA)
     default: nil
     }
     /// DEBUG `-HistqPRAction reply|resolve|unresolve|greply|gresolve|edit|edit-save|delete|delete-confirm|react|`
@@ -873,6 +899,19 @@ final class PullRequestDetailModel {
             state = .loaded(shown)
             UITiming.content("pr \(number) action \(action.timingName) patched")
         }
+        // Delete branch and Restore branch change the merged box at once; a failure puts it back, on the same load only.
+        var branchShown: (loadID: Int, exists: Bool?)?
+        let branchTarget: Bool? = switch action {
+        case .deleteBranch: false
+        case .restoreBranch: true
+        default: nil
+        }
+        if let branchTarget, self.number == number, case .loaded(var shown) = state {
+            branchShown = (shown.loadID, shown.headBranchExists)
+            shown.headBranchExists = branchTarget
+            state = .loaded(shown)
+            UITiming.content("pr \(number) action \(action.timingName) patched")
+        }
         let expanded = threadExpanded
         // "#12 Merging…" in the footer.
         let reference = github.kind.reference(.pullRequest(number))
@@ -904,6 +943,11 @@ final class PullRequestDetailModel {
                 if let reactionsShown, self.number == number, case .loaded(var detail) = state,
                    detail.loadID == reactionsShown.loadID {
                     detail.pull.reactions = reactionsShown.reactions
+                    state = .loaded(detail)
+                }
+                if let branchShown, self.number == number, case .loaded(var detail) = state,
+                   detail.loadID == branchShown.loadID {
+                    detail.headBranchExists = branchShown.exists
                     state = .loaded(detail)
                 }
                 if case .general(.edit(let target, let body)) = action, self.number == number {
@@ -971,7 +1015,8 @@ final class PullRequestDetailModel {
                     let result = shown.isMerged ? "merged" : shown.isOpen ? "open" : "closed"
                     UITiming.content("pr \(number) state \(result)")
                 }
-            case .unapprove, .newInline, .itemReaction, .rebase, .requestReviewers, .addAssignees, .addLabels:
+            case .unapprove, .newInline, .itemReaction, .rebase, .requestReviewers, .addAssignees, .addLabels,
+                 .updateBranch, .deleteBranch, .restoreBranch:
                 break
             }
             afterSuccess?()
@@ -1012,7 +1057,8 @@ final class PullRequestDetailModel {
         timeline(detail.pull, noun: noun, comments: comments, reviews: detail.reviews, threads: threads,
                  expanded: expanded, general: general, now: detail.now,
                  activity: activityPage(detail.layout, events: detail.events, view: activity,
-                                        roles: detail.memberRoles))
+                                        roles: detail.memberRoles),
+                 layout: detail.layout, roles: detail.memberRoles, events: detail.events)
     }
 
     /// The Activity of a page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
@@ -1030,12 +1076,14 @@ final class PullRequestDetailModel {
     private nonisolated static func timeline(
         _ pull: HostedPullRequest, noun: String, comments: [HostedComment], reviews: [HostedReview],
         threads: Loadable<PRThreads>, expanded: [Int: Bool], general: PRGeneralOptions, now: Date,
-        activity: PRActivityPage?
+        activity: PRActivityPage?, layout: PRPageLayout, roles: [Int: String]?, events: [HostedTimelineEvent]?
     ) -> PRTimelineHTML {
         PRTimeline.page(
-            author: pull.user, action: "opened this \(noun.lowercased())", date: pull.createdAt, html: pull.bodyHTML,
-            markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded,
-            general: general, now: now, activity: activity)
+            author: pull.user, action: layout.descriptionVerb ?? "opened this \(noun.lowercased())",
+            date: pull.createdAt, html: pull.bodyHTML, markdown: pull.body, comments: comments, reviews: reviews,
+            threads: threads, expanded: expanded, general: general, now: now, activity: activity,
+            roles: layout.roleBadges ? roles ?? [:] : nil, descriptionReactions: layout.descriptionReactions,
+            events: layout.timelineEvents ? events : nil)
     }
 
     /// The Activity's filter or sort changed (`view`): it shows at once in its controls, the page is rebuilt off the
@@ -1084,7 +1132,8 @@ final class PullRequestDetailModel {
         // The Activity's history entries, only where the layout has an Activity and the provider reads them; started
         // with the comments, so a host that reads both in one request (GitLab's discussions) shares it. A failure only
         // leaves them out.
-        let readsEvents = layout.activity != nil && client.capabilities.contains(.timelineEvents)
+        let readsEvents = (layout.activity != nil || layout.timelineEvents)
+            && client.capabilities.contains(.timelineEvents)
         async let events: Loadable<[HostedTimelineEvent]> = !readsEvents ? .idle
             : await part(client.kind) { try await client.timelineEvents(of: .pullRequest(number), in: repository) }
         async let reviews = client.reviews(of: number, in: repository)
@@ -1097,7 +1146,8 @@ final class PullRequestDetailModel {
         // The award bar's reactions, only where the layout has the bar and the provider reads them; started with the
         // comments, so a host that reads both in one request (GitLab's GraphQL note states) shares it. A failure only
         // hides the bar.
-        let barKinds = layout.reactionBar && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
+        let showsReactions = layout.reactionBar || layout.descriptionReactions
+        let barKinds = showsReactions && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
         async let itemReactions: Loadable<[HostedReaction]> = barKinds.isEmpty ? .idle
             : await part(client.kind) { try await client.itemReactions(of: .pullRequest(number), in: repository) }
         // The approval and merge boxes' reads, only where the layout has them; started with the reviews, so a host that
@@ -1124,16 +1174,33 @@ final class PullRequestDetailModel {
             let viewer = await viewer
             // The badges' roles: read once the commenters are known (the author, the viewer for an optimistic reply,
             // every general and diff comment's author). A failure only leaves the roles out.
-            let users = [pull.user, viewer] + comments.map(\.user) + (threads.value?.all ?? []).flatMap(\.comments).map(\.user)
-            let roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
+            let threadComments = (threads.value?.all ?? []).flatMap(\.comments)
+            let users = [pull.user, viewer] + comments.map(\.user) + threadComments.map(\.user)
+            var roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
                 try await client.memberRoles(of: users.compactMap { $0?.id }, in: repository)
             }.value
+            if layout.roleBadges {
+                // A host that says each author's relation on the comment itself (GitHub's `author_association`).
+                let said = comments.map { ($0.user, $0.authorAssociation) }
+                    + reviews.map { ($0.user, $0.authorAssociation) }
+                    + threadComments.map { ($0.user, $0.authorAssociation) }
+                roles = PRTimeline.associationRoles(said).merging(roles ?? [:]) { _, member in member }
+            }
             let events = await events.value
             let timeline = timeline(
                 pull, noun: client.kind.pullRequestNoun, comments: comments, reviews: reviews, threads: threads,
                 expanded: expanded, general: general, now: now,
-                activity: activityPage(layout, events: events, view: activityView, roles: roles))
+                activity: activityPage(layout, events: events, view: activityView, roles: roles), layout: layout,
+                roles: roles, events: events)
             let reviewers = reviewers(pull, reviews)
+            // The merged box's Delete branch / Restore branch: only a merged pull request's own branch (not a fork's)
+            // of a repository the token's user may push to.
+            let merged = pull.mergedAt != nil || pull.merged == true
+            let readsBranch = layout.githubMergeBox && client.capabilities.contains(.deleteHeadBranch) && merged
+                && pull.isFromSameRepository && pull.viewerCanPush == true && pull.head.ref != pull.base.ref
+            let headBranchExists: Bool? = !readsBranch ? nil : await part(client.kind) {
+                try await client.headBranchExists(pull.head.ref, in: repository)
+            }.value
             let viewerApproved = viewer.map { viewer in
                 client.capabilities.contains(.unapprove)
                     && reviewers.contains { $0.userID == viewer.id && $0.state == "APPROVED" }
@@ -1148,7 +1215,7 @@ final class PullRequestDetailModel {
                 viewerApproved: viewerApproved, reactionKinds: reactions == nil ? [] : barKinds,
                 approvals: await approvals.value, repositoryInfo: await repositoryInfo.value,
                 reviewerCandidates: await candidates.value ?? [], labelChoices: await labelChoices.value ?? [],
-                events: events, memberRoles: roles))
+                events: events, memberRoles: roles, headBranchExists: headBranchExists))
         } catch {
             return .failure(error)
         }
@@ -1314,6 +1381,9 @@ final class PullRequestDetailModel {
             case .requestReviewers(let users): try await client.requestReviewers(users, on: number, in: repository)
             case .addAssignees(let users): try await client.addAssignees(users, to: .pullRequest(number), in: repository)
             case .addLabels(let names): try await client.addLabels(names, to: .pullRequest(number), in: repository)
+            case .updateBranch(let sha): try await client.updateBranch(number, in: repository, expectedHeadSHA: sha)
+            case .deleteBranch(let branch): try await client.deleteHeadBranch(branch, in: repository)
+            case .restoreBranch(let branch, let sha): try await client.restoreHeadBranch(branch, sha: sha, in: repository)
             }
             return nil
         } catch {
@@ -1547,6 +1617,7 @@ private struct PRHeaderCard: View {
                         switch layout.mergeSentence {
                         case .wantsToMerge: summary(value)
                         case .requestedToMerge: requestedSummary(value)
+                        case .stateFirst: summary(value, stateFirst: true)
                         }
                     } else {
                         SkeletonLine(width: 260, height: 12)
@@ -1577,15 +1648,24 @@ private struct PRHeaderCard: View {
     /// "wanted to merge"), on one line, or on two before "into" in a narrow card. The two branches are blue chips, so
     /// which one goes into which reads at a glance (user, 2026-11-17); the words keep their width and the chips give
     /// way first.
-    private func summary(_ value: PullRequestDetail) -> some View {
+    /// `stateFirst`: GitHub's order, the state pill first on the row (not by the title).
+    private func summary(_ value: PullRequestDetail, stateFirst: Bool = false) -> some View {
         let pull = value.pull
         let count = pull.commits ?? value.commits.value?.count ?? 0
         let verb = value.isMerged ? "merged" : value.isOpen ? "wants to merge" : "wanted to merge"
+        // GitHub's merged sentence names who merged it (not the author) and ends with when.
+        let actor = stateFirst && value.isMerged ? pull.mergedBy?.login ?? pull.user?.login : pull.user?.login
+        let dates = PRPageDates(now: value.now)
+        let mergedWhen = stateFirst && value.isMerged ? pull.mergedAt : nil
         let layout = narrow
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 6))
         return layout {
             HStack(spacing: 6) {
-                Text(pull.user?.login ?? "ghost")
+                if stateFirst {
+                    PRStatePill(detail: value)
+                        .fixedSize()
+                }
+                Text(actor ?? "ghost")
                     .fontWeight(.semibold)
                 Text("\(verb) \(count) \(count == 1 ? "commit" : "commits")")
                     .foregroundStyle(.secondary)
@@ -1601,6 +1681,12 @@ private struct PRHeaderCard: View {
                     .foregroundStyle(.secondary)
                     .layoutPriority(1)
                 branchChip(headName(pull))
+                if let mergedWhen {
+                    Text(verbatim: dates.relative(mergedWhen))
+                        .foregroundStyle(.secondary)
+                        .help(dates.absolute(mergedWhen))
+                        .layoutPriority(1)
+                }
             }
         }
         .font(.body)
@@ -1781,7 +1867,7 @@ private struct PRContent: View {
                 .onAppear { UITiming.content("pr \(number) conversation \(detail.timelineCount)") }
         case .commits:
             PRCommitsTab(commits: detail.commits, now: detail.now, github: session.github,
-                         byDay: detail.layout.commitsByDay)
+                         byDay: detail.layout.commitsByDay, verb: detail.layout.commitVerb)
                 .onAppear { UITiming.content("pr \(number) commits \(Self.count(detail.commits))") }
         case .files:
             PRFilesTab(session: session, detail: detail)
@@ -1827,6 +1913,18 @@ struct PRConversationTab: View {
     static let mergeID = "merge"
     static let activityID = "activity"
 
+    /// The description's reaction row (`PRPageLayout.descriptionReactions`): the pull request's own reactions, written
+    /// through the detail's optimistic `itemReaction`; nil without the row or when they did not load.
+    private var itemReactions: PRItemReactions? {
+        guard detail.layout.descriptionReactions, !detail.reactionKinds.isEmpty else { return nil }
+        let number = detail.pull.number
+        return PRItemReactions(
+            kinds: detail.reactionKinds, given: detail.pull.reactions, busy: session.pullDetail.isBusy(number),
+            noun: session.github.kind.pullRequestNoun.lowercased()) { [session] kind, add in
+            session.pullDetail.perform(.itemReaction(kind: kind, add: add), on: number, github: session.github)
+        }
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let wide = proxy.size.width >= Self.wideEnough
@@ -1860,7 +1958,7 @@ struct PRConversationTab: View {
     /// instead of sharing the panel's height with them.
     private func main(sideCards: Bool) -> some View {
         VStack(spacing: SectionCardMetrics.spacing) {
-            if !detail.reactionKinds.isEmpty {
+            if detail.layout.reactionBar, !detail.reactionKinds.isEmpty {
                 let model = session.pullDetail
                 let number = detail.pull.number
                 PRAwardBarCard(kinds: detail.reactionKinds, given: detail.pull.reactions, busy: model.isBusy(number),
@@ -1880,7 +1978,8 @@ struct PRConversationTab: View {
                 // the page scrolls this column.
                 PRTimelinePage(session: session, number: detail.pull.number, timeline: detail.timeline,
                                loadID: detail.loadID, threads: detail.threads.value,
-                               avatars: .of(session.github), general: session.pullDetail)
+                               avatars: .of(session.github), general: session.pullDetail,
+                               itemReactions: itemReactions)
                     .frame(maxWidth: .infinity)
             } accessory: {
                 if let activity = detail.layout.activity {
@@ -2360,6 +2459,40 @@ private struct PRSideColumn: View {
                     }
                 }
             }
+            if detail.layout.githubSidebar {
+                gitHubMilestoneAndParticipants(avatars: avatars)
+            }
+        }
+    }
+
+    /// GitHub's sidebar after Labels: Milestone ("No milestone"), then Participants (their avatars, as Histq knows
+    /// them: `HostSidebar.participants`); Projects, Development and Notifications stay on GitHub.
+    @ViewBuilder private func gitHubMilestoneAndParticipants(avatars: HostAvatars) -> some View {
+        let pull = detail.pull
+        SectionCard("Milestone", systemImage: "flag") {
+            if let milestone = pull.milestone {
+                Text(milestone.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(milestone.title)
+            } else {
+                PRSideEmpty(text: "No milestone")
+            }
+        }
+        let participants = HostSidebar.participants(
+            [pull.user] + (pull.assignees ?? []) + (pull.requestedReviewers ?? []) + detail.comments.map(\.user)
+                + detail.reviews.map(\.user) + (detail.threads.value?.all ?? []).flatMap { $0.comments.map(\.user) })
+        SectionCard("Participants", systemImage: "person.3", count: participants.count) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 22, maximum: 22), spacing: 6)], alignment: .leading,
+                      spacing: 6) {
+                ForEach(participants, id: \.login) { user in
+                    GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 22,
+                                     avatars: avatars)
+                        .help(user.login)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Participants: " + participants.map(\.login).joined(separator: ", ")))
         }
     }
 }
@@ -2617,6 +2750,8 @@ private struct PRActionsCard: View {
     var body: some View {
         if detail.layout.mergeBoxes {
             mergeBoxCard
+        } else if detail.layout.githubMergeBox {
+            gitHubMergeCard
         } else {
             actionsCard
         }
@@ -2799,6 +2934,191 @@ private struct PRActionsCard: View {
     }
 
     private typealias Status = (tone: Color?, symbol: String, title: String, note: String?)
+
+    // MARK: GitHub's merge box
+
+    /// GitHub's merge box after the timeline: for an open pull request, the reviews and checks rows over the merge
+    /// state (Update branch under an out-of-date one), then the merge method, Merge and the other buttons as in the
+    /// Actions card; for a merged one, GitHub's merged box with Delete branch / Restore branch.
+    @ViewBuilder private var gitHubMergeCard: some View {
+        let pull = detail.pull
+        let busy = session.pullDetail.busy[pull.number]
+        SectionCard(nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                if detail.isMerged {
+                    gitHubMergedBox(busy: busy)
+                } else if detail.isOpen {
+                    if let reviews = reviewsStatus { statusBox(reviews) }
+                    if let checks = checksStatus { statusBox(checks) }
+                    statusBox(status, details: pull.mergeableState == "behind"
+                        && session.github.offers(.updateBranch) ? AnyView(updateBranchButton(busy: busy)) : nil)
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        if detail.isOpen {
+                            mergeControls(busy: busy)
+                            Spacer(minLength: 8)
+                        }
+                        otherButtons(busy: busy)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if detail.isOpen { HStack(spacing: 8) { mergeControls(busy: busy) } }
+                        HStack(spacing: 8) { otherButtons(busy: busy) }
+                    }
+                }
+                if case .unavailable(let reason) = checkoutWay {
+                    Text(reason)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let busy {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text(busy.progressTitle)
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The reviews row from each reviewer's latest review: changes requested first, then approvals, then reviews
+    /// only requested; nil without reviewers.
+    private var reviewsStatus: Status? {
+        let reviewers = detail.reviewers
+        let changes = reviewers.count { $0.state == "CHANGES_REQUESTED" }
+        let approved = reviewers.count { $0.state == "APPROVED" }
+        if changes > 0 {
+            return (Color(nsColor: Palette.diffRemovedSign), "xmark.circle.fill", "Changes requested",
+                    "\(changes) \(changes == 1 ? "review" : "reviews") requesting changes")
+        }
+        if approved > 0 {
+            return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill", "Changes approved",
+                    "\(approved) approving \(approved == 1 ? "review" : "reviews")")
+        }
+        let waiting = reviewers.count { $0.state == nil }
+        guard waiting > 0 else { return nil }
+        return (nil, "circle.dashed", "Review requested",
+                "Waiting on \(waiting) \(waiting == 1 ? "reviewer" : "reviewers")")
+    }
+
+    /// The checks row from the head's check runs: failures first, then runs not finished, then all passed; nil while
+    /// they load, when they failed to load or without runs.
+    private var checksStatus: Status? {
+        guard let runs = detail.checks.value, !runs.isEmpty else { return nil }
+        let failedConclusions: Set<String> = ["failure", "timed_out", "cancelled", "action_required", "startup_failure"]
+        let failed = runs.count { $0.status == "completed" && failedConclusions.contains($0.conclusion ?? "") }
+        let pending = runs.count { $0.status != "completed" }
+        let passed = runs.count { $0.status == "completed" && $0.conclusion == "success" }
+        let skipped = runs.count { $0.status == "completed" && ["skipped", "neutral"].contains($0.conclusion ?? "") }
+        func plural(_ count: Int, _ word: String) -> String { "\(count) \(word) \(count == 1 ? "check" : "checks")" }
+        if failed > 0 {
+            return (Color(nsColor: Palette.diffRemovedSign), "xmark.circle.fill", "Some checks were not successful",
+                    "\(plural(failed, "failing")), \(plural(passed, "successful"))")
+        }
+        if pending > 0 {
+            return (Palette.conflictTone, "circle.dotted", "Some checks haven't completed yet",
+                    "\(plural(pending, "pending")), \(plural(passed, "successful"))")
+        }
+        return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill", "All checks have passed",
+                plural(passed, "successful") + (skipped > 0 ? ", \(skipped) skipped" : ""))
+    }
+
+    /// Update branch: GitHub merges the base into the head, the head pinned to the shown one; busy from the click
+    /// until GitHub accepted it.
+    private func updateBranchButton(busy: PullRequestAction?) -> some View {
+        let pull = detail.pull
+        let updating = { if case .updateBranch = busy { true } else { false } }()
+        return Button {
+            session.pullDetail.perform(.updateBranch(sha: pull.head.sha), on: pull.number, github: session.github)
+        } label: {
+            HStack(spacing: 6) {
+                if updating { ProgressView().controlSize(.mini) }
+                Text("Update branch")
+            }
+        }
+        .buttonStyle(RowTextButtonStyle())
+        .fixedSize()
+        .disabled(busy != nil)
+        .help("Merge \(pull.base.ref) into \(pull.head.ref) on \(session.github.kind.name)")
+    }
+
+    /// GitHub's merged box, in the merged purple: "Merged", "<who> merged commit <short sha> into <base> <time>",
+    /// then "Delete the <head> branch to tidy up." with Delete branch while the branch exists, or "The <head> branch
+    /// was deleted." with Restore branch once it is gone (only where the head branch was read:
+    /// `PullRequestDetail.headBranchExists`).
+    private func gitHubMergedBox(busy: PullRequestAction?) -> some View {
+        let pull = detail.pull
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        let dates = PRPageDates(now: detail.now)
+        let who = pull.mergedBy?.login ?? "Someone"
+        let commit = pull.mergeCommitSHA.map { " commit \($0.prefix(7))" } ?? ""
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "arrow.triangle.merge")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Palette.mergedTone)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Merged")
+                        .font(.body.weight(.semibold))
+                    Text(verbatim: "\(who) merged\(commit) into \(pull.base.ref)"
+                        + (pull.mergedAt.map { " " + dates.relative($0) } ?? ""))
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .help(pull.mergedAt.map(dates.absolute) ?? "")
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+                if let exists = detail.headBranchExists {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(exists ? "Delete the \(pull.head.ref) branch to tidy up."
+                             : "The \(pull.head.ref) branch was deleted.")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        if exists {
+                            Button { confirmDeleteBranch() } label: {
+                                Text("Delete branch")
+                            }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .fixedSize()
+                            .disabled(busy != nil)
+                        } else {
+                            Button {
+                                session.pullDetail.perform(.restoreBranch(pull.head.ref, sha: pull.head.sha),
+                                                           on: pull.number, github: session.github)
+                            } label: {
+                                Text("Restore branch")
+                            }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .fixedSize()
+                            .disabled(busy != nil)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(shape.fill(Palette.mergedTone.opacity(0.14)))
+        .overlay(shape.strokeBorder(Palette.mergedTone.opacity(0.35), lineWidth: 1))
+    }
+
+    /// Delete branch's confirmation, in the window's modal: its button deletes the branch (shown gone at once).
+    private func confirmDeleteBranch() {
+        let pull = detail.pull
+        let kind = session.github.kind
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Delete branch \(pull.head.ref)?",
+            message: "The branch is deleted on \(kind.name). Restore branch brings it back at its last commit.",
+            button: "Delete Branch", isDestructive: true,
+            perform: { [session, number = pull.number, branch = pull.head.ref] in
+                session.pullDetail.perform(.deleteBranch(branch), on: number, github: session.github)
+            })))
+    }
 
     // MARK: GitLab's merge box
 
@@ -3448,8 +3768,10 @@ private struct PRCommitsTab: View {
     /// The detail load's "now" (`PullRequestDetail.now`).
     let now: Date
     let github: HostingStore
-    /// GitLab's list (`PRPageLayout.commitsByDay`): the commits under day headings, each row with a copy button.
+    /// The host's list (`PRPageLayout.commitsByDay`): the commits under day headings, each row with a copy button.
     var byDay = false
+    /// "authored" (GitLab) or "committed" (GitHub), with `byDay`.
+    var verb = "authored"
 
     var body: some View {
         switch commits {
@@ -3481,7 +3803,8 @@ private struct PRCommitsTab: View {
 
     private func row(_ commit: HostedCommit, dates: PRPageDates) -> some View {
         PRCommitRow(commit: commit, url: github.webURL(.commit(commit.sha)), hostName: github.kind.name, dates: dates,
-                     gitLabStyle: byDay)
+                     gitLabStyle: byDay, verb: byDay ? verb : "committed",
+                     idLength: byDay && github.kind == .gitlab ? 8 : 7)
     }
 
     /// The day headings' format, GitLab's ("Nov 20, 2026"), in the pages' English.
@@ -3534,8 +3857,12 @@ private struct PRCommitRow: View {
     /// The host's product name ("GitHub", "GitLab").
     let hostName: String
     let dates: PRPageDates
-    /// GitLab's row: "<author> authored <time>", the 8-character short id with a copy button beside it.
+    /// The host's own row (`commitsByDay`): a copy button beside the short id.
     var gitLabStyle = false
+    /// "<author> <verb> <time>".
+    var verb = "committed"
+    /// The short id's length, the host's (GitLab 8, GitHub 7).
+    var idLength = 7
     @State private var hovered = false
 
     var body: some View {
@@ -3551,7 +3878,7 @@ private struct PRCommitRow: View {
                     .truncationMode(.tail)
                 Group {
                     if let date = commit.commit.author?.date {
-                        Text(verbatim: "\(author) \(gitLabStyle ? "authored" : "committed") \(dates.relative(date))")
+                        Text(verbatim: "\(author) \(verb) \(dates.relative(date))")
                             .help(dates.absolute(date))
                     } else {
                         Text(verbatim: author)
@@ -3565,7 +3892,7 @@ private struct PRCommitRow: View {
             Button {
                 GitHubLinks.open(url)
             } label: {
-                Text(String(commit.sha.prefix(gitLabStyle ? 8 : 7)))
+                Text(String(commit.sha.prefix(idLength)))
                     .font(.settingsCaption.monospaced())
             }
             .buttonStyle(RowTextButtonStyle())

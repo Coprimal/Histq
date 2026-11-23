@@ -43,9 +43,25 @@ struct PRPageLayout: Sendable, Equatable {
     /// Each Activity comment's header shows "Author" on the item author's comments and the commenter's member role
     /// ("Owner", "Developer") the provider reads (`memberRoles`), as GitLab's badges.
     var roleBadges = false
-    /// The Commits tab groups the commits under day headings ("Nov 20, 2026"), each "<author> authored <time>" with a
-    /// copy button beside its short id (GitLab's).
+    /// The Commits tab groups the commits under day headings ("Nov 20, 2026"), each "<author> <commitVerb> <time>"
+    /// with a copy button beside its short id (GitLab's, GitHub's).
     var commitsByDay = false
+    /// The Commits tab's verb with `commitsByDay`: GitLab's "authored", GitHub's "committed".
+    var commitVerb = "authored"
+    /// The description's own reactions as chips under it inside the page, with the picker (GitHub's), where the
+    /// provider has `itemReactions`; the award bar (`reactionBar`) is GitLab's place for them.
+    var descriptionReactions = false
+    /// What the description's header says its author did ("opened this pull request" when nil; GitHub's "commented").
+    var descriptionVerb: String? = nil
+    /// The host's history entries (`timelineEvents`) one line each on a rail among the comments and reviews, without
+    /// the Activity's filter (GitHub's Conversation).
+    var timelineEvents = false
+    /// GitHub's merge box after the timeline: reviews and checks rows over the merge state (Update branch when out of
+    /// date), and for a merged pull request "<who> merged commit <sha> into <base>" with Delete branch / Restore
+    /// branch.
+    var githubMergeBox = false
+    /// GitHub's side cards: today's Reviewers, Assignees and Labels, then Milestone and Participants.
+    var githubSidebar = false
     /// A thread's resolve button says "Resolve thread" / "Reopen thread" (GitLab's) instead of "Resolve conversation"
     /// / "Unresolve conversation".
     var threadWords = false
@@ -57,11 +73,16 @@ struct PRPageLayout: Sendable, Equatable {
         mergeSentence: .requestedToMerge, reactionBar: true, mergeBoxes: true, activity: .gitLabMergeRequest,
         issueActivity: .gitLabIssue, issueSentence: .created, sidebar: true, collapsesReplies: true,
         startThread: true, headerEdit: true, roleBadges: true, commitsByDay: true, threadWords: true)
+    static let github = PRPageLayout(
+        name: "github", tabs: [.conversation, .commits, .checks, .files], mergeSentence: .stateFirst,
+        issueSentence: .openedStateFirst, roleBadges: true, commitsByDay: true, commitVerb: "committed",
+        descriptionReactions: true, descriptionVerb: "commented", timelineEvents: true, githubMergeBox: true,
+        githubSidebar: true)
 
     func title(of tab: PRTab) -> String { tabTitles[tab] ?? tab.title }
 
     /// A lookup, not a `switch`, so a new kind builds without a value of its own.
-    private static let byKind: [HostingKind: PRPageLayout] = [.gitlab: .gitlab]
+    private static let byKind: [HostingKind: PRPageLayout] = [.gitlab: .gitlab, .github: .github]
 
     #if DEBUG
     /// DEBUG `-HistqPageLayout default`: every kind gets `.default`.
@@ -134,6 +155,9 @@ enum PRMergeSentence: Sendable, Equatable {
     case wantsToMerge
     /// GitLab's "[Open] stub requested to merge [feature] [copy] into [main] 2 days ago", the state badge first.
     case requestedToMerge
+    /// GitHub's "[Open] stub wants to merge 2 commits into [main] from [stub:feature]", the state badge first (merged:
+    /// "<merged by> merged 2 commits into [main] from [stub:feature] <time>").
+    case stateFirst
 }
 
 /// The issue header's sentence under the title.
@@ -142,6 +166,8 @@ enum PRIssueSentence: Sendable, Equatable {
     case openedThisIssue
     /// GitLab's "[Open] reviewer opened this issue 2 days ago", the state badge first (no comment count).
     case created
+    /// GitHub's "[Open] reviewer opened this issue 2 days ago · 1 comment", the state badge first.
+    case openedStateFirst
 }
 
 /// The pages' dates against `now`, one detail load's "now" (`loadNow()`), pinned for that load: every rebuild and

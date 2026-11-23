@@ -270,12 +270,13 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// (`PRTimeline`: `avatar-d`, `avatar-c|i|r<n>`, `chevron-<n>`, `reply-<n>` for a slot, `thread-<n>` for
         /// `collapsed`, a general thread's `gchevron-<n>`, `greply-<n>` and `gthread-<n>`, and a comment's menu,
         /// editor, reaction row, add-reaction button and header Edit icon, `cmenu-<g|r><n>`, `cedit-<g|r><n>`,
-        /// `creact-<g|r><n>`, `cadd-<g|r><n>` and `cpen-<g|r><n>`, the editor open as `editing` says), in case GitHub's HTML
+        /// `creact-<g|r><n>`, `cadd-<g|r><n>` and `cpen-<g|r><n>`, the description's reaction row `creact-d`, the
+        /// editor open as `editing` says), in case GitHub's HTML
         /// ever left `.body` unbalanced. `width` is the page's own, for the DEBUG slot probe. Runs in the app's own content world
         /// (`.defaultClient`), apart from the page, which still has no JavaScript of its own: the page's settings and
         /// policy stay as they are.
         private static let measureScript = """
-            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen)-[gr][0-9]+)$/;
+            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen)-[gr][0-9]+|creact-d)$/;
             for (const slot of document.querySelectorAll('[data-slot]')) {
               if (slot.closest('.body') || !own.test(slot.dataset.slot)) continue;
               const height = heights[slot.dataset.slot];
@@ -524,6 +525,7 @@ enum HostedHTML {
                 .handle { color: \(secondary); font-weight: 400; }
                 .gl .head .date, .gl .comment-head .date { margin-left: 0; }
                 .gl .date + .slot-add, .gl .date + .slot-menu { margin-left: auto; }
+                .head .date.near, .comment-head .date.near { margin-left: 0; }
                 .tools { margin-left: auto; display: flex; gap: 6px; align-items: center; align-self: center; flex: none; }
                 .role { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 9px; background: \(code);
                   color: \(text); font-weight: 500; }

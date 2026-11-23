@@ -173,6 +173,12 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let startThreads = HostingCapabilities(rawValue: 1 << 18)
     /// Reads the history entries of a pull request or an issue (`timelineEvents(of:in:)`).
     public static let timelineEvents = HostingCapabilities(rawValue: 1 << 19)
+    /// The merge box's Update branch: the base merged into an out-of-date head on the host
+    /// (`updateBranch(_:in:expectedHeadSHA:)`).
+    public static let updateBranch = HostingCapabilities(rawValue: 1 << 20)
+    /// The merged box's Delete branch and Restore branch (`headBranchExists`, `deleteHeadBranch`,
+    /// `restoreHeadBranch`).
+    public static let deleteHeadBranch = HostingCapabilities(rawValue: 1 << 21)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -422,6 +428,15 @@ public protocol HostingProvider: Sendable {
     /// The role on the repository of each of `userIDs` who is a member, by user id, in the host's words ("Owner",
     /// "Developer"), the badge GitLab's page puts on their comments; a user who is not a member is left out.
     func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String]
+    /// Merges the base into pull request `number`'s head on the host while the head is still `expectedHeadSHA`
+    /// (`HostingError.headChanged` otherwise); returns once the host accepted it (only with `updateBranch`).
+    func updateBranch(_ number: Int, in repo: HostedRepository, expectedHeadSHA: String) async throws
+    /// Whether branch `branch` of `repo` exists (only with `deleteHeadBranch`).
+    func headBranchExists(_ branch: String, in repo: HostedRepository) async throws -> Bool
+    /// Deletes branch `branch` of `repo` (only with `deleteHeadBranch`).
+    func deleteHeadBranch(_ branch: String, in repo: HostedRepository) async throws
+    /// Makes branch `branch` of `repo` again at `sha` (only with `deleteHeadBranch`).
+    func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws
 }
 
 extension HostingProvider {
@@ -526,4 +541,22 @@ extension HostingProvider {
 
     /// A host without member roles knows none.
     public func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String] { [:] }
+
+    /// A host without the `updateBranch` capability refuses it unsent.
+    public func updateBranch(_ number: Int, in repo: HostedRepository, expectedHeadSHA: String) async throws {
+        throw HostingError.validationFailed(message: "this host cannot update the branch")
+    }
+
+    /// A host without the `deleteHeadBranch` capability refuses these unsent.
+    public func headBranchExists(_ branch: String, in repo: HostedRepository) async throws -> Bool {
+        throw HostingError.validationFailed(message: "this host cannot read branches")
+    }
+
+    public func deleteHeadBranch(_ branch: String, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot delete the branch")
+    }
+
+    public func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot restore the branch")
+    }
 }

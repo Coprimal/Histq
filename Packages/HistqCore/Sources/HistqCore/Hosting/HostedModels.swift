@@ -232,6 +232,12 @@ public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     /// mapping sets them.
     public var milestone: HostedMilestone? = nil
     public var timeStats: HostedTimeStats? = nil
+    /// The merged box's "<mergedBy> merged commit <mergeCommitSHA>", and whether the token's user may push to the
+    /// base repository (Delete branch), where the host gives them (GitHub); not part of the JSON: the host's mapping
+    /// sets them.
+    public var mergedBy: HostedUser? = nil
+    public var mergeCommitSHA: String? = nil
+    public var viewerCanPush: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, number, title, state, draft, user, body, head, base, labels, assignees, merged, mergeable
@@ -324,6 +330,10 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     /// The host's own key that writes on the comment take, where its id is not enough: GitLab's discussion id,
     /// Bitbucket Data Center's comment version, Azure DevOps' thread id, GitHub's `node_id` (JSON `node_id`).
     public var hostKey: String?
+    /// The author's relation to the repository where the host gives it (GitHub's `author_association`: `OWNER`,
+    /// `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `NONE`…), for the comment's
+    /// badge; nil elsewhere.
+    public var authorAssociation: String?
     /// Not part of the JSON (GitHub's `reactions` rollup is another shape): the host's mapping sets these.
     public var viewerCanEdit = false
     public var viewerCanDelete = false
@@ -339,6 +349,7 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
         case htmlURL = "html_url"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case authorAssociation = "author_association"
     }
 }
 
@@ -389,12 +400,15 @@ public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
     public var bodyHTML: String?
     public var htmlURL: String?
     public var submittedAt: Date?
+    /// As in `HostedComment`.
+    public var authorAssociation: String?
 
     enum CodingKeys: String, CodingKey {
         case id, user, state, body
         case bodyHTML = "body_html"
         case htmlURL = "html_url"
         case submittedAt = "submitted_at"
+        case authorAssociation = "author_association"
     }
 }
 
@@ -427,6 +441,8 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var htmlURL: String?
     /// As in `HostedComment`: the host's own key for writes (GitHub's `node_id`).
     public var hostKey: String?
+    /// As in `HostedComment`.
+    public var authorAssociation: String?
     /// As in `HostedComment`: not part of the JSON, the host's mapping sets these.
     public var viewerCanEdit = false
     public var viewerCanDelete = false
@@ -447,6 +463,7 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
         case bodyHTML = "body_html"
         case createdAt = "created_at"
         case htmlURL = "html_url"
+        case authorAssociation = "author_association"
     }
 }
 

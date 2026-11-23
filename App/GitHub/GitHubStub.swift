@@ -110,6 +110,15 @@ enum GitHubStub {
                 return (409, #"{"message": "Head branch was modified. Review and try the merge again."}"#)
             }
             return (200, #"{"sha": "\#(headSHA)", "merged": true, "message": "Merged"}"#)
+        case ("PUT", "\(repo)/pulls/1/update-branch"):
+            return (202, #"{"message": "Updating pull request branch.", "url": "https://github.com/stub/stub/pull/1"}"#)
+        // The head branch of #1, `feature`: deleted and restored for the rest of the run (the merged box).
+        case ("DELETE", "\(repo)/git/refs/heads/feature"):
+            writes.withLock { $0.headBranchDeleted = true }
+            return (204, "")
+        case ("POST", "\(repo)/git/refs"):
+            writes.withLock { $0.headBranchDeleted = false }
+            return (201, #"{"ref": "refs/heads/feature", "object": {"sha": "\#(headSHA)"}}"#)
         case ("POST", "\(repo)/pulls/1/reviews"): return (200, review)
         case ("POST", "\(repo)/issues/1/comments"): return (201, comment)
         case ("PATCH", "\(repo)/issues/1"): return (200, pullAsIssue)
@@ -141,6 +150,9 @@ enum GitHubStub {
         case "\(repo)/assignees", "\(repo)/collaborators": return (200, "[\(user), \(reviewer)]")
         case "\(repo)/pulls": return (200, "[\(pull(1, full: false))]")
         case "\(repo)/pulls/1": return (200, pull(1, full: true))
+        case "\(repo)/git/ref/heads/feature":
+            guard !(writes.withLock { $0.headBranchDeleted }) else { return notFound }
+            return (200, #"{"ref": "refs/heads/feature", "object": {"sha": "\#(headSHA)"}}"#)
         case "\(repo)/pulls/1/reviews": return (200, "[\(review), \(replyReview)]")
         case "\(repo)/pulls/1/comments": return (200, reviewComments)
         case "\(repo)/pulls/1/commits": return (200, commits)
@@ -156,6 +168,12 @@ enum GitHubStub {
         case "\(repo)/issues/1/comments": return (200, "[\(pullComments)]")
         case "\(repo)/issues/2/comments":
             return (200, "[" + written(issueSeed).map { conversationComment($0, on: 2) }.joined(separator: ", ") + "]")
+        // The history entries (`-HistqStubPageSeed YES` only; GitHub's timeline also lists the comments and
+        // reviews, which the client leaves out).
+        case let path where path.hasPrefix("\(repo)/issues/") && path.hasSuffix("/timeline"):
+            guard GitHubStub.seedsPage else { return (200, "[]") }
+            return (200, path == "\(repo)/issues/1/timeline" ? pullTimeline : path == "\(repo)/issues/2/timeline"
+                ? issueTimeline : "[]")
         case "\(repo)/commits/\(headSHA)/check-runs", "\(repo)/commits/feature/check-runs":
             return (200, #"{"total_count": 1, "check_runs": [\#(checkRun)]}"#)
         case let path where path.hasPrefix("\(repo)/commits/") && path.hasSuffix("/check-runs"):
@@ -182,6 +200,8 @@ enum GitHubStub {
         var edits: [String: String] = [:]
         var deleted: Set<String> = []
         var reactions: [String: [String: Bool]] = [:]
+        /// #1's head branch was deleted by the merged box's Delete branch (and not restored since).
+        var headBranchDeleted = false
         /// The new inline comments, in order (`newReviewComment`).
         var inline: [NewReviewComment] = []
     }
@@ -230,6 +250,7 @@ enum GitHubStub {
         let time = "17:" + String(format: "%02d", 30 + min(comment.id - 830, 29))
         return """
             {"id": \(comment.id), "node_id": "PRRC_stub\(comment.id)", "pull_request_review_id": null,
+             "author_association": "OWNER",
              "path": "\(jsonText(comment.path))", \(start), "line": \(comment.line), "original_line": \(comment.line),
              "side": "\(comment.side)", "commit_id": "\(headSHA)", "original_commit_id": "\(headSHA)",
              "user": \(user), "body": "\(jsonText(comment.body))",
@@ -335,13 +356,15 @@ enum GitHubStub {
          "avatar_url": "https://avatars.githubusercontent.com/u/1002"}
         """
 
-    /// DEBUG `-HistqPRMergeable true|false|null|merged` (default true): PR #1's `mergeable` with the `mergeable_state`
-    /// GitHub gives with it (`clean`, `dirty` for conflicts, `unknown` while it computes), for the merge box's states;
+    /// DEBUG `-HistqPRMergeable true|false|null|merged|behind` (default true): PR #1's `mergeable` with the
+    /// `mergeable_state` GitHub gives with it (`clean`, `dirty` for conflicts, `unknown` while it computes, `behind`
+    /// out of date for Update branch), for the merge box's states;
     /// `merged`: #1 is already merged (closed, `merged_at` set), for the Merged pill and box. The stub keeps no state,
     /// so null stays null on every fetch and the detail's re-poll runs out.
     private static let mergeable = switch AppState.launchFlag("-HistqPRMergeable") {
     case "false": #""mergeable": false, "mergeable_state": "dirty""#
     case "null", "merged": #""mergeable": null, "mergeable_state": "unknown""#
+    case "behind": #""mergeable": true, "mergeable_state": "behind""#
     default: #""mergeable": true, "mergeable_state": "clean""#
     }
     private static let isMerged = AppState.launchFlag("-HistqPRMergeable") == "merged"
@@ -352,6 +375,7 @@ enum GitHubStub {
         let detail = !full ? ""
             : created ? #", "merged": false, "mergeable": true, "commits": 1, "additions": 1, "deletions": 0, "changed_files": 0"#
             : isMerged ? #", "merged": true, "merged_at": "2026-11-12T17:00:00Z", \#(mergeable), "commits": 2, "additions": 12, "deletions": 3, "changed_files": 1"#
+                + #", "merged_by": \#(user), "merge_commit_sha": "6666666666666666666666666666666666666666""#
             : #", "merged": false, \#(mergeable), "commits": 2, "additions": 12, "deletions": 3, "changed_files": 1"#
         let title = created ? "Polish feature (pushed)" : "Add feature"
         let body = created ? "Polishes the feature." : "Adds the feature branch's work."
@@ -361,7 +385,7 @@ enum GitHubStub {
              "html_url": "https://github.com/stub/stub/pull/\(number)", "user": \(user),
              "body": "\(body)", "body_html": "<p>\(body)</p>",
              "head": {"label": "stub:feature", "ref": "feature", "sha": "\(created ? createdSHA : headSHA)"},
-             "base": {"label": "stub:main", "ref": "main", "sha": "\(baseSHA)"},
+             "base": {"label": "stub:main", "ref": "main", "sha": "\(baseSHA)"\(full ? #", "repo": {"permissions": {"push": true}}"# : "")},
              "labels": [\(created ? "" : #"{"name": "enhancement", "color": "a2eeef", "description": "New feature"}"#)],
              "assignees": [\(user)], "requested_reviewers": [\(reviewer)],
              "created_at": "2026-11-10T09:00:00Z", "updated_at": "2026-11-12T16:30:00Z"\(detail)}
@@ -405,13 +429,14 @@ enum GitHubStub {
 
     private static let review = """
         {"id": 701, "user": \(reviewer), "state": "APPROVED", "body": "Looks good.", "body_html": "<p>Looks good.</p>",
+         "author_association": "COLLABORATOR",
          "html_url": "https://github.com/stub/stub/pull/1#pullrequestreview-701", "submitted_at": "2026-11-12T15:00:00Z"}
         """
 
     /// The review GitHub made for `stub`'s reply 812 in thread A, as it lists it: commented, without text of its own.
     /// The timeline hides it, as GitHub does.
     private static let replyReview = """
-        {"id": 702, "user": \(user), "state": "COMMENTED", "body": "", "body_html": "",
+        {"id": 702, "user": \(user), "state": "COMMENTED", "body": "", "body_html": "", "author_association": "OWNER",
          "html_url": "https://github.com/stub/stub/pull/1#pullrequestreview-702",
          "submitted_at": "2026-11-12T16:00:00Z"}
         """
@@ -445,6 +470,60 @@ enum GitHubStub {
         Seed(id: 802, own: true, body: "I can reproduce it on 0.1.", time: "11:00"),
     ]
 
+    /// PR #1's timeline: its two commits by the same author (one "added 2 commits" entry), a comment (left out by the
+    /// client), the review request, a label, the self-assignment, a rename and a force push.
+    private static let pullTimeline = "[" + [
+        #"{"event": "committed", "sha": "3333333333333333333333333333333333333333", "message": "Start the feature", "#
+            + #""author": {"name": "Stub User", "date": "2026-11-10T08:50:00Z"}}"#,
+        #"{"event": "committed", "sha": "\#(headSHA)", "message": "Finish the feature\n\nDetails", "#
+            + #""author": {"name": "Stub User", "date": "2026-11-12T13:20:00Z"}}"#,
+        #"{"id": 9001, "event": "commented", "actor": \#(reviewer), "created_at": "2026-11-12T14:00:00Z"}"#,
+        #"{"id": 9002, "event": "review_requested", "actor": \#(user), "created_at": "2026-11-12T13:30:00Z", "#
+            + #""requested_reviewer": \#(reviewer)}"#,
+        #"{"id": 9003, "event": "labeled", "actor": \#(user), "created_at": "2026-11-12T13:31:00Z", "#
+            + #""label": {"name": "enhancement", "color": "84b6eb"}}"#,
+        #"{"id": 9004, "event": "assigned", "actor": \#(user), "created_at": "2026-11-12T13:32:00Z", "#
+            + #""assignee": \#(user)}"#,
+        #"{"id": 9005, "event": "renamed", "actor": \#(user), "created_at": "2026-11-12T13:33:00Z", "#
+            + #""rename": {"from": "Feature", "to": "Add feature"}}"#,
+        #"{"id": 9006, "event": "head_ref_force_pushed", "actor": \#(user), "created_at": "2026-11-12T15:40:00Z"}"#,
+    ].joined(separator: ", ") + "]"
+
+    /// Issue #2's timeline: a label and an assignment.
+    private static let issueTimeline = "[" + [
+        #"{"id": 9101, "event": "labeled", "actor": \#(reviewer), "created_at": "2026-11-12T09:01:00Z", "#
+            + #""label": {"name": "bug", "color": "d73a4a"}}"#,
+        #"{"id": 9102, "event": "assigned", "actor": \#(user), "created_at": "2026-11-12T09:02:00Z", "#
+            + #""assignee": \#(user)}"#,
+    ].joined(separator: ", ") + "]"
+
+    /// The node ids of PR #1 and issue #2, by number, for their own reactions (`ItemReactions`).
+    private static let itemNumbers = ["PR_stub1": 1, "I_stub2": 2]
+
+    /// PR #1's and issue #2's own reactions: none unless `-HistqStubPageSeed YES` (three +1, `stub`'s among them, and
+    /// a heart on #1; one +1 by `stub` on #2).
+    private static func itemSeed(_ number: Int) -> [(kind: String, count: Int, mine: Bool)] {
+        guard GitHubStub.seedsPage else { return [] }
+        return number == 1 ? [("+1", 3, true), ("heart", 1, false)] : [("+1", 1, true)]
+    }
+
+    /// GraphQL `repository.issueOrPullRequest(number:)` with its node id and reaction groups, the writes of this run
+    /// applied: PR #1 and issue #2; another number is null, as GitHub answers one that does not exist.
+    private static func itemReactions(_ number: Int) -> (status: Int, body: String) {
+        guard let node = itemNumbers.first(where: { $0.value == number })?.key else {
+            return (200, #"{"data": {"repository": {"issueOrPullRequest": null}}}"#)
+        }
+        let written = writes.withLock { $0.reactions[node] } ?? [:]
+        let groups = reacted(itemSeed(number), written).map { reaction in
+            let content = reactionNames.first { $0.0 == reaction.kind }?.1 ?? ""
+            return #"{"content": "\#(content)", "viewerHasReacted": \#(reaction.mine), "#
+                + #""reactors": {"totalCount": \#(reaction.count)}}"#
+        }
+        let typename = number == 1 ? "PullRequest" : "Issue"
+        return (200, #"{"data": {"repository": {"issueOrPullRequest": {"__typename": "\#(typename)", "#
+            + #""id": "\#(node)", "reactionGroups": [\#(groups.joined(separator: ", "))]}}}}"#)
+    }
+
     /// GitHub's reactions, in its picker's order: REST `content` and GraphQL `ReactionContent`.
     private static let reactionNames = [
         ("+1", "THUMBS_UP"), ("-1", "THUMBS_DOWN"), ("laugh", "LAUGH"), ("hooray", "HOORAY"),
@@ -458,6 +537,7 @@ enum GitHubStub {
         let page = number == 1 ? "pull/1" : "issues/\(number)"
         return """
             {"id": \(seed.id), "node_id": "IC_stub\(seed.id)", "user": \(seed.own ? user : reviewer),
+             "author_association": "\(seed.own ? "OWNER" : "COLLABORATOR")",
              "body": "\(jsonText(seed.body))", "body_html": "<p>\(jsonText(HostedHTML.escape(seed.body)))</p>",
              "html_url": "https://github.com/stub/stub/\(page)#issuecomment-\(seed.id)",
              "created_at": "2026-11-12T\(seed.time):00Z", "updated_at": "2026-11-12T\(seed.time):00Z",
@@ -484,6 +564,7 @@ enum GitHubStub {
             let date = String(format: "2026-11-12T%02d:%02d:00Z", 12 + index / 60, index % 60)
             return """
                 {"id": \(id), "node_id": "IC_stub\(id)", "user": \(index.isMultiple(of: 2) ? reviewer : user),
+                 "author_association": "\(index.isMultiple(of: 2) ? "COLLABORATOR" : "OWNER")",
                  "body": "\(text)",
                  "body_html": "<p>\(text)</p>\(code)",
                  "html_url": "https://github.com/stub/stub/pull/1#issuecomment-\(id)",
@@ -548,6 +629,7 @@ enum GitHubStub {
         let reply = root.map { #" "in_reply_to_id": \#($0),"# } ?? ""
         return """
             {"id": \(id), "node_id": "PRRC_stub\(id)", "pull_request_review_id": \(review),\(reply)
+             "author_association": "\(root == nil ? "COLLABORATOR" : "OWNER")",
              "path": "feature.txt", \(lines),
              "side": "RIGHT", "diff_hunk": "\(hunk)", "commit_id": "\(headSHA)", "original_commit_id": "\(headSHA)",
              "user": \(root == nil ? reviewer : user), "body": "\(jsonText(body))",
@@ -579,6 +661,9 @@ enum GitHubStub {
         let query = request?["query"] as? String ?? ""
         if query.contains("CommentViewerStates") {
             return commentViewerStates((request?["variables"] as? [String: Any])?["ids"] as? [String] ?? [])
+        }
+        if query.contains("ItemReactions") {
+            return itemReactions((request?["variables"] as? [String: Any])?["number"] as? Int ?? 0)
         }
         // Neither name contains the other.
         if query.contains("AddReaction") || query.contains("RemoveReaction") {
@@ -643,6 +728,11 @@ enum GitHubStub {
             guard let seed = (pullSeed + issueSeed).first(where: { $0.id == id }) else { return nil }
             let written = writes.withLock { $0.reactions[nodeID] } ?? [:]
             return ("IssueComment", id, seed.own, reacted(seed.reactions, written).filter(\.mine).map(\.kind))
+        }
+        if let number = itemNumbers[nodeID] {
+            let written = writes.withLock { $0.reactions[nodeID] } ?? [:]
+            return (number == 1 ? "PullRequest" : "Issue", number, false,
+                    reacted(itemSeed(number), written).filter(\.mine).map(\.kind))
         }
         if nodeID.hasPrefix("PRRC_stub"), let id = Int(nodeID.dropFirst("PRRC_stub".count)), (811...814).contains(id) {
             let written = writes.withLock { $0.reactions[nodeID] } ?? [:]

@@ -42,6 +42,9 @@ struct PRTimelineHTML: Sendable {
     var collapsesReplies = false
     /// Each comment's Edit is an icon in its header, out of its "…" menu (`PRPageLayout.headerEdit`).
     var headerEdit = false
+    /// The description has its reaction row (`creact-d`): the item's own reactions
+    /// (`PRPageLayout.descriptionReactions`).
+    var descriptionReactions = false
 }
 
 /// What a host's Activity page adds to the timeline (`PRPageLayout.activity`): its history entries (nil when their
@@ -461,9 +464,12 @@ extension PRTimeline {
         author: HostedUser?, action: String, date: Date?, html: String?, markdown: String?,
         comments: [HostedComment], reviews: [HostedReview] = [], threads: Loadable<PRThreads> = .idle,
         expanded: [Int: Bool] = [:], general options: PRGeneralOptions = PRGeneralOptions(), now: Date,
-        activity: PRActivityPage? = nil
+        activity: PRActivityPage? = nil, roles pageRoles: [Int: String]? = nil, descriptionReactions: Bool = false,
+        events pageEvents: [HostedTimelineEvent]? = nil
     ) -> PRTimelineHTML {
         let dates = PRPageDates(now: now)
+        // The badges' roles: the Activity's (GitLab), else the page's (GitHub's `author_association`); nil draws none.
+        let roles = activity?.roles ?? pageRoles
         let folds = activity?.collapsesReplies ?? false
         var avatars: [String: HostedUser] = [:]
         var general: [Int: PRGeneralThread] = [:]
@@ -523,15 +529,23 @@ extension PRTimeline {
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             let who = named ? Self.named(user) : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
             let start = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)\(whenHTML)"
-            guard named, activity?.headerEdit == true || activity?.roles != nil else { return start + add + menu }
+            if !named, activity == nil, roles != nil {
+                // GitHub's header (a page without an Activity): the date by the words, the badges and buttons at the
+                // end (`date near`).
+                let near = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)"
+                    + whenHTML.replacingOccurrences(of: "class=\"date\"", with: "class=\"date near\"")
+                let tools = badges(user) + add + menu
+                return tools.isEmpty ? near : near + "<span class=\"tools\">\(tools)</span>"
+            }
+            guard named, activity?.headerEdit == true || roles != nil else { return start + add + menu }
             // GitLab's right-hand group: the badges, then the reaction, Edit and "…" buttons.
             let tools = badges(user) + add + penHTML + menu
             return tools.isEmpty ? start : start + "<span class=\"tools\">\(tools)</span>"
         }
 
-        /// A comment header's badges (`PRActivityPage.roles`): "Author" when `user` wrote the item, then their role.
+        /// A comment header's badges (`roles`): "Author" when `user` wrote the item, then their role.
         func badges(_ user: HostedUser?) -> String {
-            guard let roles = activity?.roles, let user else { return "" }
+            guard let roles, let user else { return "" }
             var html = ""
             if let author, author.id == user.id { html += "<span class=\"role\">Author</span>" }
             if let role = roles[user.id] { html += "<span class=\"role\">\(HostedHTML.escape(role))</span>" }
@@ -762,7 +776,7 @@ extension PRTimeline {
         // The Activity drops the synthetic review items once the history loaded: its system notes say who approved.
         var entries = HostedTimelineOrder.entries(
             comments: comments, reviews: activity?.events == nil ? shown : [], threads: threads.value?.all ?? [],
-            events: activity?.events ?? [])
+            events: activity?.events ?? pageEvents ?? [])
         if let activity {
             let filter = activity.view.filter
             if filter != PRActivity.all {
@@ -818,9 +832,16 @@ extension PRTimeline {
                 return "<div class=\"threads loose\">\(thread(loose))</div>"
             }
         }
-        let description = item(
+        var description = item(
             "avatar-d", author, action, date: date, body: bodyHTML(html, markdown),
             emptyText: "No description provided.")
+        if descriptionReactions {
+            // The item's own reactions under the description, always a row (picker and chips), so adding the first
+            // or removing the last never changes the page's HTML; its views read the detail's reactions.
+            description = description.replacingOccurrences(
+                of: "</section>", with: "<div class=\"slot-react\" data-slot=\"creact-d\"></div></section>",
+                options: .backwards, range: description.range(of: "</section>", options: .backwards))
+        }
         var end = ""
         if case .failed(let message) = threads {
             end += "<p class=\"empty\">The inline review comments did not load: \(HostedHTML.escape(message))</p>"
@@ -829,12 +850,16 @@ extension PRTimeline {
         if activity != nil {
             if sorted.isEmpty { list = "<p class=\"empty\">Nothing to show with this filter.</p>" }
             list = "<div class=\"rail\">\(list)</div>"
+        } else if pageEvents?.isEmpty == false {
+            // GitHub's Conversation: comments, reviews and history entries on one rail.
+            list = "<div class=\"rail\">\(list)</div>"
         }
         return PRTimelineHTML(
             html: description + list + end, avatars: avatars,
             count: comments.count + (activity?.events == nil ? shown.count : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
-            collapsesReplies: folds, headerEdit: activity?.headerEdit ?? false)
+            collapsesReplies: folds, headerEdit: activity?.headerEdit ?? false,
+            descriptionReactions: descriptionReactions)
     }
 
     /// A general comment's reaction row target, when `options` offer reactions.
@@ -849,6 +874,24 @@ extension PRTimeline {
     private nonisolated static func target(_ comment: HostedComment, _ options: PRGeneralOptions) -> PRCommentTarget? {
         PRCommentTarget(.general, id: comment.id, hostKey: comment.hostKey, body: comment.body, user: comment.user,
                         canEdit: comment.viewerCanEdit, canDelete: comment.viewerCanDelete, options: options)
+    }
+
+    /// GitHub's badge words for each author's `author_association` (the first said wins), by user id: "Owner",
+    /// "Member", "Collaborator", "Contributor", "First-time contributor"; none for NONE, MANNEQUIN or an unknown value.
+    nonisolated static func associationRoles(_ said: [(HostedUser?, String?)]) -> [Int: String] {
+        var roles: [Int: String] = [:]
+        for case let (user?, association?) in said where roles[user.id] == nil {
+            let word: String? = switch association {
+            case "OWNER": "Owner"
+            case "MEMBER": "Member"
+            case "COLLABORATOR": "Collaborator"
+            case "CONTRIBUTOR": "Contributor"
+            case "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER": "First-time contributor"
+            default: nil
+            }
+            if let word { roles[user.id] = word }
+        }
+        return roles
     }
 
     /// A thread's resolve button: "Resolve thread" / "Reopen thread" where the host's layout words it so
@@ -1129,6 +1172,8 @@ struct PRTimelinePage: View {
     let avatars: HostAvatars
     /// What the general threads' rows, and the comments' menus and editors, act through; nil draws none.
     var general: (any PRGeneralThreadModel)?
+    /// The item's own reactions, for the description's row (`creact-d`, `PRTimelineHTML.descriptionReactions`).
+    var itemReactions: PRItemReactions?
     @Environment(WindowModel.self) private var window
     @State private var slots: [HostedHTMLSlot] = []
     /// Each reply row's height with its margins, by slot id: its slot takes it, so a field grown to more lines pushes
@@ -1254,6 +1299,8 @@ struct PRTimelinePage: View {
         } else if let general, let target = Self.comment(of: slot, "cedit-", in: timeline.comments),
                   general.editingComments.contains(target.key) {
             measured(PRCommentEditor(session: session, number: number, target: target, model: general), slot: slot)
+        } else if slot.id == "creact-d", let itemReactions {
+            PRItemReactionRow(reactions: itemReactions)
         } else if let general, let target = Self.reactions(of: slot, "creact-", in: timeline.reactions) {
             PRReactionRow(session: session, number: number, target: target, model: general, busy: busy)
         } else if let general, let target = Self.reactions(of: slot, "cadd-", in: timeline.reactions) {
@@ -1688,6 +1735,38 @@ private struct PRCommentEditButton: View {
     private func edit() {
         model.beginEdit(target)
         UITiming.content("\(kind) \(number) action edit open")
+    }
+}
+
+/// The item's own reactions for the description's row: the host's kinds, the given ones, whether an action runs on
+/// the item, the noun for VoiceOver ("pull request", "issue") and the write (a kind, add or remove).
+struct PRItemReactions {
+    let kinds: [String]
+    let given: [HostedReaction]
+    let busy: Bool
+    let noun: String
+    let perform: (String, Bool) -> Void
+}
+
+/// The description's reaction row (GitHub's): the picker, then a chip per given kind. A click changes the row at once
+/// (the detail's optimistic `itemReaction`), off while an action runs on the item.
+private struct PRItemReactionRow: View {
+    let reactions: PRItemReactions
+
+    var body: some View {
+        HStack(spacing: 6) {
+            PRReactionPicker(kinds: reactions.kinds, reactions: reactions.given, busy: reactions.busy,
+                             label: "Add a reaction to the \(reactions.noun)") { kind, add in
+                reactions.perform(kind, add)
+            }
+            ForEach(reactions.given, id: \.kind) { reaction in
+                PRReactionChip(reaction: reaction, busy: reactions.busy) {
+                    guard !reactions.busy else { return }
+                    reactions.perform(reaction.kind, !reaction.viewerReacted)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

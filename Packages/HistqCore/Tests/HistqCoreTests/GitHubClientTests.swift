@@ -110,7 +110,8 @@ struct GitHubClientTests {
 
         #expect(client.capabilities == [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
-            .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments,
+            .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
+            .timelineEvents, .updateBranch, .deleteHeadBranch,
         ])
         #expect(client.reactionKinds == ["+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"])
         await #expect(throws: HostingError.self) {
@@ -629,6 +630,167 @@ struct GitHubClientTests {
             try await inline(.init(path: "a.swift", oldLine: 4, newLine: nil, lineKind: .added, headSHA: "abc123"))
         }
         #expect(stub.requests.count == sent)
+    }
+
+    @Test("the item's own reactions: one issueOrPullRequest query (values in variables), groups in GitHub's order with the viewer's; a write reads the node id, then adds or removes on it; the wrong kind of item or an unknown kind is refused")
+    func itemReactions() async throws {
+        let stub = StubServer { request in
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+            let query = body?["query"] as? String ?? ""
+            guard query.contains("issueOrPullRequest") else { return .init(body: #"{"data": {}}"#) }
+            return .init(body: """
+                {"data": {"repository": {"issueOrPullRequest": {"__typename": "PullRequest", "id": "PR_n7",
+                 "reactionGroups": [
+                  {"content": "HEART", "viewerHasReacted": false, "reactors": {"totalCount": 1}},
+                  {"content": "THUMBS_UP", "viewerHasReacted": true, "reactors": {"totalCount": 3}},
+                  {"content": "EYES", "viewerHasReacted": false, "reactors": {"totalCount": 0}}]}}}}
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let reactions = try await client.itemReactions(of: .pullRequest(7), in: repo)
+        try await client.addItemReaction("heart", to: .pullRequest(7), in: repo)
+        try await client.removeItemReaction("+1", from: .pullRequest(7), in: repo)
+
+        #expect(reactions == [HostedReaction(kind: "+1", count: 3, viewerReacted: true),
+                              HostedReaction(kind: "heart", count: 1)], "GitHub's order; a zero group left out")
+        let bodies = try stub.requests.map { request in
+            #expect(request.url?.path() == "/graphql")
+            return try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+        }
+        #expect(bodies.count == 5, "a read, then a read and a mutation per write")
+        let read = try #require(bodies.first)
+        #expect(NSDictionary(dictionary: read["variables"] as? [String: Any] ?? [:])
+            .isEqual(to: ["owner": "octo", "name": "hello", "number": 7]))
+        #expect((bodies[2]["query"] as? String)?.contains("addReaction(input:") == true)
+        #expect(NSDictionary(dictionary: bodies[2]["variables"] as? [String: Any] ?? [:])
+            .isEqual(to: ["subjectId": "PR_n7", "content": "HEART"]))
+        #expect((bodies[4]["query"] as? String)?.contains("removeReaction(input:") == true)
+        #expect(NSDictionary(dictionary: bodies[4]["variables"] as? [String: Any] ?? [:])
+            .isEqual(to: ["subjectId": "PR_n7", "content": "THUMBS_UP"]))
+
+        let sent = stub.requests.count
+        await #expect(throws: HostingError.self) {
+            try await client.addItemReaction("tada", to: .pullRequest(7), in: repo)
+        }
+        #expect(stub.requests.count == sent, "an unknown kind is refused unsent")
+        await #expect(throws: HostingError.self) { _ = try await client.itemReactions(of: .issue(7), in: repo) }
+    }
+
+    @Test("history entries from the REST timeline: comments and reviews left out, consecutive commits by one author grouped with links, GitHub's words escaped, a merged pull request's closed left out, an unknown or malformed event left out")
+    func timelineEvents() async throws {
+        let actor = #"{"id": 7, "login": "octo"}"#
+        let other = #"{"id": 8, "login": "mona"}"#
+        let a = String(repeating: "a", count: 40), b = String(repeating: "b", count: 40)
+        let body = "[" + [
+            #"{"event": "committed", "sha": "\#(a)", "message": "First <b>\n\nmore", "author": {"name": "Octo", "date": "2026-11-01T10:00:00Z"}}"#,
+            #"{"event": "committed", "sha": "\#(b)", "message": "Second", "author": {"name": "Octo", "date": "2026-11-01T11:00:00Z"}}"#,
+            #"{"id": 1, "event": "commented", "actor": \#(actor), "created_at": "2026-11-02T10:00:00Z"}"#,
+            #"{"id": 2, "event": "reviewed", "user": \#(other), "submitted_at": "2026-11-02T11:00:00Z"}"#,
+            #"{"id": 3, "event": "labeled", "actor": \#(actor), "created_at": "2026-11-03T10:00:00Z", "label": {"name": "<img src=x>"}}"#,
+            #"{"id": 4, "event": "assigned", "actor": \#(actor), "created_at": "2026-11-03T11:00:00Z", "assignee": \#(actor)}"#,
+            #"{"id": 5, "event": "review_requested", "actor": \#(actor), "created_at": "2026-11-03T12:00:00Z", "requested_reviewer": \#(other)}"#,
+            #"{"id": 6, "event": "merged", "actor": \#(actor), "created_at": "2026-11-04T10:00:00Z", "commit_id": "\#(b)"}"#,
+            #"{"id": 8, "event": "closed", "actor": \#(actor), "created_at": "2026-11-04T10:00:00Z"}"#,
+            #"{"id": 7, "event": "subscribed", "actor": \#(actor), "created_at": "2026-11-04T11:00:00Z"}"#,
+            #"{"id": "not a number", "event": "closed"}"#,
+        ].joined(separator: ", ") + "]"
+        let stub = StubServer { _ in .init(body: body) }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let events = try await client.timelineEvents(of: .pullRequest(7), in: repo)
+
+        #expect(stub.requests.first?.url?.path() == "/repos/octo/hello/issues/7/timeline")
+        #expect(events.map(\.text) == [
+            "added 2 commits", "added the <img src=x> label", "self-assigned this", "requested a review from mona",
+            "merged commit bbbbbbb",
+        ])
+        #expect(events.map(\.action) == ["committed", "labeled", "assigned", "review_requested", "merged"])
+        #expect(events[0].actor?.login == "Octo" && events[1].actor?.login == "octo")
+        #expect(events[0].textHTML == "<p>added 2 commits</p><ul>"
+            + "<li><a href=\"https://github.com/octo/hello/commit/\(a)\"><code>aaaaaaa</code></a> First &lt;b&gt;</li>"
+            + "<li><a href=\"https://github.com/octo/hello/commit/\(b)\"><code>bbbbbbb</code></a> Second</li></ul>")
+        #expect(events[1].textHTML == "<p>added the &lt;img src=x&gt; label</p>", "a label name is plain text")
+        #expect(Set(events.map(\.id)).count == events.count)
+    }
+
+    @Test("update branch: PUT with expected_head_sha, 202 is done; a 422 naming the sha is headChanged, another 422 stays a validation error")
+    func updateBranch() async throws {
+        let answers = Mutex([
+            (202, #"{"message": "Updating pull request branch.", "url": "https://github.com/octo/hello/pull/7"}"#),
+            (422, #"{"message": "expected head sha didn't match current head ref."}"#),
+            (422, #"{"message": "merge conflict between base and head"}"#),
+        ])
+        let stub = StubServer { _ in
+            let (status, body) = answers.withLock { $0.removeFirst() }
+            return .init(status: status, body: body)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        try await client.updateBranch(7, in: repo, expectedHeadSHA: "abc123")
+        await #expect(throws: HostingError.headChanged) {
+            try await client.updateBranch(7, in: repo, expectedHeadSHA: "abc123")
+        }
+        await #expect(throws: HostingError.validationFailed(message: "merge conflict between base and head")) {
+            try await client.updateBranch(7, in: repo, expectedHeadSHA: "abc123")
+        }
+        let request = try #require(stub.requests.first)
+        #expect(request.httpMethod == "PUT" && request.url?.path() == "/repos/octo/hello/pulls/7/update-branch")
+        let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String])
+        #expect(body == ["expected_head_sha": "abc123"])
+    }
+
+    @Test("head branch: exists by git/ref (404 is gone), delete by DELETE git/refs (a 422 is an error), restore by POST git/refs at the sha; a branch with a dot segment is refused unsent")
+    func headBranch() async throws {
+        let stub = StubServer { request in
+            switch (request.httpMethod, request.url?.path(percentEncoded: true)) {
+            case ("GET", "/repos/octo/hello/git/ref/heads/feature/x"):
+                return .init(body: #"{"ref": "refs/heads/feature/x", "object": {"sha": "abc"}}"#)
+            case ("GET", _): return .init(status: 404, body: #"{"message": "Not Found"}"#)
+            case ("DELETE", "/repos/octo/hello/git/refs/heads/main"):
+                return .init(status: 422, body: #"{"message": "Cannot delete the default branch"}"#)
+            case ("DELETE", _): return .init(status: 204, body: "")
+            default: return .init(status: 201, body: #"{"ref": "refs/heads/feature/x"}"#)
+            }
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        #expect(try await client.headBranchExists("feature/x", in: repo))
+        #expect(try await client.headBranchExists("gone", in: repo) == false)
+        try await client.deleteHeadBranch("feature/x", in: repo)
+        await #expect(throws: HostingError.self) { try await client.deleteHeadBranch("main", in: repo) }
+        try await client.restoreHeadBranch("feature/x", sha: "abc", in: repo)
+
+        let requests = stub.requests
+        #expect(requests.map(\.httpMethod) == ["GET", "GET", "DELETE", "DELETE", "POST"])
+        #expect(requests[2].url?.path(percentEncoded: true) == "/repos/octo/hello/git/refs/heads/feature/x")
+        #expect(requests[4].url?.path() == "/repos/octo/hello/git/refs")
+        let body = try #require(JSONSerialization.jsonObject(with: requests[4].httpBody ?? Data()) as? [String: String])
+        #expect(body == ["ref": "refs/heads/feature/x", "sha": "abc"])
+        await #expect(throws: HostingError.self) { try await client.deleteHeadBranch("a/../b", in: repo) }
+        #expect(stub.requests.count == 5)
+    }
+
+    @Test("the single pull request carries who merged it, its merge commit, the viewer's push permission and its milestone")
+    func pullRequestExtras() async throws {
+        let stub = StubServer { _ in
+            .init(body: """
+                {"id": 1, "number": 7, "title": "T", "state": "closed", "html_url": "https://github.com/octo/hello/pull/7",
+                 "head": {"ref": "f", "sha": "h", "label": "octo:f"},
+                 "base": {"ref": "main", "sha": "b", "label": "octo:main", "repo": {"permissions": {"push": true}}},
+                 "merged_at": "2026-11-01T10:00:00Z", "merged_by": {"id": 7, "login": "octo"},
+                 "merge_commit_sha": "m123", "milestone": {"title": "1.0", "due_on": "2026-12-01T08:00:00Z"}}
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let pull = try await client.pullRequest(7, in: HostedRepository(host: "github.com", owner: "octo", name: "hello"))
+
+        #expect(pull.mergedBy?.login == "octo" && pull.mergeCommitSHA == "m123" && pull.viewerCanPush == true)
+        #expect(pull.milestone == HostedMilestone(title: "1.0", dueDate: "2026-12-01T08:00:00Z"))
     }
 
     @Test("a comment with GitHub's reactions rollup and node_id decodes its counts and node id; one without both too")
