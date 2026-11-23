@@ -5,12 +5,12 @@ import HistqCore
 import SwiftUI
 
 extension Profile {
-    /// The code host accounts the profile signs in with, as "<login> on <host>" (just the host with no login). The
-    /// one place the app reads `github` for display, so another account model can replace it here.
+    /// The code host accounts the profile signs in with, as "<login> on <host>" (just the host with no login).
     var codeHostAccounts: [String] {
-        guard let github else { return [] }
-        let login = github.login.trimmingCharacters(in: .whitespacesAndNewlines)
-        return [login.isEmpty ? github.host : "\(login) on \(github.host)"]
+        accounts.map { account in
+            let login = account.login.trimmingCharacters(in: .whitespacesAndNewlines)
+            return login.isEmpty ? account.host : "\(login) on \(account.host)"
+        }
     }
 }
 

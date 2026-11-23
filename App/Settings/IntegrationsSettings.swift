@@ -1,4 +1,5 @@
-// Settings › Integrations, per profile: the profile's code host accounts, one per host. Add Account connects GitHub
+// Settings › Integrations, per profile: the profile's code host accounts, one per host (`HostingAccountsSection`, the
+// accounts without the profile picker, is the onboarding's account step). Add Account connects GitHub
 // (github.com) or a GitHub Enterprise Server host by signing in with GitHub (OAuth device flow, github.com only), by
 // pasting a personal access token, or by importing the GitHub CLI's token; GitLab (gitlab.com) or a GitLab
 // Self-Managed host (with an optional base path) by pasting a personal access token, or by signing in with GitLab
@@ -18,6 +19,9 @@ struct IntegrationsSettings: View {
     /// The profile the page edits, shared with the Profiles and SSH pages; nil (or a deleted one) shows the first.
     @Binding var profileID: UUID?
     let onShowProfiles: () -> Void
+    /// Set by the onboarding's step (`HostingAccountsSection`): the accounts only, without the profile picker or the
+    /// page's gate, and this row when there is no profile.
+    var embedded: NoProfileRow? = nil
     /// The window's modal (`ModalHost`) asks before a disconnect.
     @Environment(WindowModel.self) private var model
     /// The account being added (Add Account), nil when no connect form shows.
@@ -113,17 +117,32 @@ struct IntegrationsSettings: View {
 
     private var library: ProfileLibrary { .shared }
 
+    /// The row shown in place of the accounts when there is no profile: a title, a hint and a button that leads to one.
+    struct NoProfileRow {
+        let title: String
+        let hint: String
+        let button: String
+        let action: () -> Void
+    }
+
     var body: some View {
-        SettingsPageGate(section: .integrations, isLoaded: !isLoading) {
-            switch library.state {
-            case .loaded(let store): loaded(store)
-            case .failed(let message): ProfileStoreFailedCard(message: message)
-            case .idle, .loading: EmptyView()
+        Group {
+            if embedded != nil {
+                if case .loaded(let store) = library.state { loaded(store) }
+            } else {
+                SettingsPageGate(section: .integrations, isLoaded: !isLoading) {
+                    switch library.state {
+                    case .loaded(let store): loaded(store)
+                    case .failed(let message): ProfileStoreFailedCard(message: message)
+                    case .idle, .loading: EmptyView()
+                    }
+                } skeleton: {
+                    SettingsSkeletonGroup(rows: 1)
+                    SettingsSkeletonGroup(rows: 2)
+                }
             }
-        } skeleton: {
-            SettingsSkeletonGroup(rows: 1)
-            SettingsSkeletonGroup(rows: 2)
         }
+        // Leaving the screen (Settings closing, the onboarding's step changing) cancels a connection in flight.
         .onDisappear { cancelConnection() }
         #if DEBUG
         .onChange(of: isLoading, initial: true) { debugFakeLogin() }
@@ -140,7 +159,7 @@ struct IntegrationsSettings: View {
     @ViewBuilder
     private func loaded(_ store: ProfileStore) -> some View {
         if let profile = store.profile(id: profileID ?? UUID()) ?? store.profiles.first {
-            profileGroup(store, current: profile)
+            if embedded == nil { profileGroup(store, current: profile) }
             accountsGroup(profile)
                 .task(id: TokenCheck(token: model.settingsToken, profileID: profile.id,
                                      hosts: profile.accounts.map(\.host))) {
@@ -154,13 +173,17 @@ struct IntegrationsSettings: View {
                 connectGroup(profile, kind: adding)
             }
         } else {
+            let row = embedded ?? NoProfileRow(
+                title: "No profiles yet",
+                hint: "Accounts belong to a profile. Without one, git uses your own credential helper.",
+                button: "Open Profiles", action: onShowProfiles)
             SettingsGroup("Accounts") {
                 LabeledContent {
-                    Button("Open Profiles", action: onShowProfiles)
+                    Button(row.button, action: row.action)
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
-                    Text("No profiles yet")
-                    SettingsHint("Accounts belong to a profile. Without one, git uses your own credential helper.")
+                    Text(row.title)
+                    SettingsHint(row.hint)
                 }
                 SettingsDivider()
                 signInRow(profile: nil, host: "github.com")
@@ -246,7 +269,7 @@ struct IntegrationsSettings: View {
 
     private func accountRow(_ profile: Profile, account: HostingAccount) -> some View {
         LabeledContent {
-            Button("Disconnect…") { confirmDisconnect(profile, account: account) }
+            Button("Disconnect") { confirmDisconnect(profile, account: account) }
                 .buttonStyle(RowTextButtonStyle(formRow: true))
         } label: {
             HStack(spacing: 8) {
@@ -275,7 +298,7 @@ struct IntegrationsSettings: View {
         {
             SettingsDivider()
             LabeledContent {
-                Button("Manage on GitHub…") { NSWorkspace.shared.open(url) }
+                Button("Manage on GitHub") { NSWorkspace.shared.open(url) }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             } label: {
                 Text("Organization access")
@@ -283,6 +306,7 @@ struct IntegrationsSettings: View {
                     + "owners, then reload the repositories. A personal access token or the GitHub CLI's token "
                     + "gets its access from that token's own settings.")
             }
+            .settingsSearchAnchor("Organization access")
         }
     }
 
@@ -643,7 +667,7 @@ struct IntegrationsSettings: View {
         let clientID = signInClientID(kind)
         return LabeledContent {
             if clientID != nil {
-                Button("Sign In…") {
+                Button("Sign In") {
                     guard let profile, let host else { return }
                     if kind == .bitbucket {
                         startCodeFlow(profile, host: host)
@@ -664,6 +688,7 @@ struct IntegrationsSettings: View {
                 SettingsHint("Opens \(kind.kind.name) in your browser, where you enter a one-time code.")
             }
         }
+        .settingsSearchAnchor("Sign in with \(kind.kind.name)")
     }
 
     @ViewBuilder
@@ -1164,5 +1189,16 @@ extension HostingAccount {
         isPublicSite
             ? "\(providerName) · \(login)"
             : "\(providerName) · \(login) @ \(address)"
+    }
+}
+
+/// A profile's accounts (`profileID`, nil or a deleted one: the first profile) without the profile picker: the
+/// onboarding's account step. With no profile, the `noProfile` row (a way to make one) above a disabled Sign In.
+struct HostingAccountsSection: View {
+    let profileID: UUID?
+    let noProfile: IntegrationsSettings.NoProfileRow
+
+    var body: some View {
+        IntegrationsSettings(profileID: .constant(profileID), onShowProfiles: noProfile.action, embedded: noProfile)
     }
 }

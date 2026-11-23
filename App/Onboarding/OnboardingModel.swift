@@ -142,7 +142,7 @@ final class OnboardingModel {
         go(to: isShown(step) ? step : shown(after: step) ?? .finish)
     }
 
-    /// Whether the card walks `step`: the clone step only while the GitHub step's profile has a GitHub account, so
+    /// Whether the card walks `step`: the clone step only while the GitHub step's profile has an account, so
     /// its form can list the account's repositories.
     func isShown(_ step: Step) -> Bool {
         step != .clone || gitHubConnected
@@ -160,7 +160,7 @@ final class OnboardingModel {
     }
 
     private var gitHubConnected: Bool {
-        ProfileLibrary.shared.store.flatMap { Self.gitHubProfile(in: $0)?.github } != nil
+        ProfileLibrary.shared.store.flatMap { Self.gitHubProfile(in: $0) }?.accounts.isEmpty == false
     }
 
     /// The first shown step after `step` in `Step.allCases` (whether `step` shows or not); nil after the last.
