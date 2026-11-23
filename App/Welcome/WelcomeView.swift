@@ -683,7 +683,7 @@ private struct OptionsCard: View {
 }
 
 /// Why git cannot run, and the ways out: install the Command Line Tools, choose a git, check again.
-private struct GitProblemCard: View {
+struct GitProblemCard: View {
     let model: WelcomeModel
     let error: GitExecutableError
 
@@ -797,8 +797,8 @@ private struct InitCard: View {
 }
 
 /// The clone form: the source (a typed URL, or the connected GitHub account's repositories), destination, then the
-/// Clone button, or git's progress with Cancel while it runs.
-private struct CloneCard: View {
+/// Clone button, or git's progress with Cancel while it runs. Also in the onboarding's GitHub step.
+struct CloneCard: View {
     @Bindable var model: WelcomeModel
     @Environment(WindowModel.self) private var windowModel
 
@@ -964,8 +964,9 @@ private struct RepositoryRow: View {
                 settingsButton
             } label: {
                 Text("Repository")
-                Text(account.map { "The token for \($0.login) is missing. Reconnect in Settings › Integrations." }
-                    ?? "Connect a GitHub account in Settings › Integrations.")
+                Text(verbatim: account.map {
+                    "The token for \($0.login) is missing. Reconnect in Settings › Integrations."
+                } ?? "Connect a GitHub account in Settings › Integrations.")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

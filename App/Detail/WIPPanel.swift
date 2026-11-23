@@ -62,8 +62,9 @@ struct WIPPanel: View {
             if !conflicted.isEmpty || session.repoState?.isOperationInProgress == true {
                 conflictedCard(conflicted)
             }
-            UnstagedStagedCards { unstagedCard(unstaged) } staged: {
-                if !staged.isEmpty { stagedCard(staged) }
+            // Each card reports its part of the spotlight's staging target (the two are siblings in this stack).
+            UnstagedStagedCards { unstagedCard(unstaged).spotlightTarget(.staging) } staged: {
+                if !staged.isEmpty { stagedCard(staged).spotlightTarget(.staging) }
             }
             if unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
@@ -77,6 +78,7 @@ struct WIPPanel: View {
     private func commitBox(staged: [FileChange], unstaged: [FileChange]) -> some View {
         CommitBox(session: session, stagedCount: staged.count, changeCount: staged.count + unstaged.count,
                   busy: $busy, error: errorBinding(.commit))
+            .spotlightTarget(.commitBox)
     }
 
     // MARK: Cards

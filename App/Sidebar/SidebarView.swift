@@ -147,6 +147,7 @@ struct SidebarView: View {
                     cards
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .spotlightTarget(.sidebarPRs)
             } else {
                 // As the WIP panel's cards: the expanded cards share the sidebar's height and scroll inside; the
                 // collapsed ones keep their header.
@@ -186,6 +187,7 @@ struct SidebarView: View {
             } accessory: {
                 HiddenRowsToggle(title: "Tags", count: hidden, isShowing: $session.tagsShowHidden)
             }
+            .spotlightTarget(.sidebarRefs)
             .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.branches, .idle), (.branches, .loading):
             ForEach(branchIDs, id: \.self) { id in
@@ -195,16 +197,19 @@ struct SidebarView: View {
                                    isExpanded: $session.localExpanded) { _ in
                         SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
                     }
+                    .spotlightTarget(.sidebarRefs)
                 case .remote:
                     SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
                                    isExpanded: $session.remoteExpanded) { _ in
                         SkeletonRows(fractions: [0.3, 0.55, 0.4])
                     }
+                    .spotlightTarget(.sidebarRefs)
                 case .worktrees:
                     SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
                                    isExpanded: $session.worktreesExpanded) { _ in
                         SkeletonRows(fractions: [0.4, 0.55])
                     }
+                    .spotlightTarget(.sidebarStashesWorktrees)
                 case .submodules:
                     // Read after the graph's first page, and only shown when the repo has some.
                     EmptyView()
@@ -216,10 +221,12 @@ struct SidebarView: View {
                            isExpanded: $session.stashesExpanded) { _ in
                 SkeletonRows(fractions: [0.5, 0.35])
             }
+            .spotlightTarget(.sidebarStashesWorktrees)
         case (.tags, .idle), (.tags, .loading):
             SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) { _ in
                 SkeletonRows(fractions: [0.3, 0.45, 0.35, 0.5])
             }
+            .spotlightTarget(.sidebarRefs)
         case (_, .failed(let message)):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(textSize.body)
@@ -243,14 +250,15 @@ private struct BranchSections: View {
     var body: some View {
         ForEach(ids, id: \.self) { id in
             switch id {
-            case .local: localCard
-            case .remote: remoteCard
-            case .worktrees: WorktreeSection(session: session)
-            case .submodules: SubmoduleSection(session: session)
+            // The spotlight's two groups (the refs; stashes, worktrees and submodules): each card reports its part.
+            case .local: localCard.spotlightTarget(.sidebarRefs)
+            case .remote: remoteCard.spotlightTarget(.sidebarRefs)
+            case .worktrees: WorktreeSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
+            case .submodules: SubmoduleSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
             default: EmptyView()
             }
         }
-        StashSection(session: session)
+        StashSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
     }
 
     // The headers count the listed rows: the hidden ones only while their card lists them.

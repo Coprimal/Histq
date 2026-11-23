@@ -1,8 +1,7 @@
-// Settings › Integrations, per profile: the profile's GitHub account. Connect it by signing in with GitHub (OAuth
-// device flow), by pasting a personal access token, or by importing the GitHub CLI's token; each token is checked
-// with `GET /user` before it is saved in the login Keychain (`GitHubTokens`), and the profile keeps only the host and
-// the login. Disconnect deletes the Keychain item. Tokens are never logged, shown or kept in the page's state longer
-// than the check.
+// Settings › Integrations, per profile: the profile's GitHub account (`GitHubConnectSection`, which the onboarding's
+// GitHub step embeds too). Connect it by signing in with GitHub (OAuth device flow), by pasting a personal access
+// token, or by importing the GitHub CLI's token; each token is checked with `GET /user` before it is saved in the login
+// Keychain (`GitHubTokens`); the profile keeps the host and login. Tokens are never logged, shown or kept past a check.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -11,6 +10,86 @@ struct IntegrationsSettings: View {
     /// The profile the page edits, shared with the Profiles and SSH pages; nil (or a deleted one) shows the first.
     @Binding var profileID: UUID?
     let onShowProfiles: () -> Void
+
+    private var library: ProfileLibrary { .shared }
+
+    var body: some View {
+        SettingsPageGate(section: .integrations, isLoaded: !isLoading) {
+            switch library.state {
+            case .loaded(let store): loaded(store)
+            case .failed(let message): ProfileStoreFailedCard(message: message)
+            case .idle, .loading: EmptyView()
+            }
+        } skeleton: {
+            SettingsSkeletonGroup(rows: 1)
+            SettingsSkeletonGroup(rows: 2)
+        }
+    }
+
+    private var isLoading: Bool {
+        switch library.state {
+        case .idle, .loading: true
+        case .loaded, .failed: false
+        }
+    }
+
+    @ViewBuilder
+    private func loaded(_ store: ProfileStore) -> some View {
+        if let profile = store.profile(id: profileID ?? UUID()) ?? store.profiles.first {
+            profileGroup(store, current: profile)
+        }
+        GitHubConnectSection(profileID: profileID, noProfile: .init(
+            title: "No profiles yet",
+            hint: "A GitHub account belongs to a profile. Without one, git uses your own credential helper.",
+            button: "Open Profiles", action: onShowProfiles))
+    }
+
+    // MARK: Profile
+
+    private func profileGroup(_ store: ProfileStore, current: Profile) -> some View {
+        SettingsGroup("Profile") {
+            LabeledContent {
+                CapsuleMenuPicker(label: "Profile", selection: Binding(get: { current.id }, set: { profileID = $0 }),
+                                  title: Text(current.name.isEmpty ? "Unnamed" : current.name)) {
+                    ForEach(store.profiles) { profile in
+                        Text(profile.name.isEmpty ? "Unnamed" : profile.name).tag(profile.id)
+                    }
+                } footer: {
+                    // Adds a profile and opens it on the Profiles page to fill in.
+                    Button("Add New Profile") {
+                        if let id = library.addProfile() { profileID = id }
+                        onShowProfiles()
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(ProfileColors.color(current.color))
+                        .frame(width: 10, height: 10)
+                    Text("Integrations of")
+                }
+                SettingsHint("Each profile has its own GitHub account, used over HTTPS by fetch, pull, push and clone "
+                    + "in its tabs.")
+            }
+        }
+    }
+}
+
+/// The "GitHub account" group of a profile (`profileID`, nil or a deleted one: the first profile): its account and
+/// Disconnect, or the ways to connect one (the device flow's code while it runs). With no profile, the `noProfile` row
+/// (a way to make one) above a disabled Sign In. A connection in flight is cancelled when the profile changes or the
+/// group leaves the screen. Used by Settings › Integrations and the onboarding's GitHub step.
+struct GitHubConnectSection: View {
+    /// The row shown in place of the account when there is no profile: a title, a hint and a button that leads to one.
+    struct NoProfileRow {
+        let title: String
+        let hint: String
+        let button: String
+        let action: () -> Void
+    }
+
+    let profileID: UUID?
+    let noProfile: NoProfileRow
     /// The window's modal (`ModalHost`) asks before a disconnect.
     @Environment(WindowModel.self) private var model
     /// The host typed for the next connection; empty = github.com.
@@ -20,7 +99,7 @@ struct IntegrationsSettings: View {
     @State private var tokenStored: Loadable<Bool> = .idle
     @State private var activity: Activity = .idle
     /// The connection in flight (a check, an import, a device flow's polling); cancelled by Cancel, a profile switch
-    /// and the Settings modal closing.
+    /// and the group leaving the screen (Settings closing).
     @State private var connectTask: Task<Void, Never>?
     @State private var copied = false
     /// The way to connect picked at the top of the account group; each shows only its own rows.
@@ -61,86 +140,44 @@ struct IntegrationsSettings: View {
 
     private var library: ProfileLibrary { .shared }
 
+    /// Nothing before the profiles are read (the page or step around it shows their loading and failure).
     var body: some View {
-        SettingsPageGate(section: .integrations, isLoaded: !isLoading) {
-            switch library.state {
-            case .loaded(let store): loaded(store)
-            case .failed(let message): ProfileStoreFailedCard(message: message)
-            case .idle, .loading: EmptyView()
+        // A `Group`, not a stack: its groups lay out as the page's (or the step's) own groups.
+        Group {
+            if let store = library.store {
+                if let profile = store.profile(id: profileID ?? UUID()) ?? store.profiles.first {
+                    accountGroup(profile)
+                        .task(id: TokenCheck(token: model.settingsToken, profileID: profile.id,
+                                             host: profile.github?.host)) {
+                            await checkToken(profile)
+                        }
+                        .onChange(of: profile.id) {
+                            cancelConnection()
+                            hostDraft = ""
+                            pastedToken = ""
+                        }
+                } else {
+                    noProfileGroup
+                        .onDisappear { cancelConnection() }
+                }
             }
-        } skeleton: {
-            SettingsSkeletonGroup(rows: 1)
-            SettingsSkeletonGroup(rows: 2)
         }
-        .onDisappear { cancelConnection() }
         #if DEBUG
-        .onChange(of: isLoading, initial: true) { debugFakeLogin() }
+        .onAppear { debugFakeLogin() }
         #endif
     }
 
-    private var isLoading: Bool {
-        switch library.state {
-        case .idle, .loading: true
-        case .loaded, .failed: false
-        }
-    }
-
-    @ViewBuilder
-    private func loaded(_ store: ProfileStore) -> some View {
-        if let profile = store.profile(id: profileID ?? UUID()) ?? store.profiles.first {
-            profileGroup(store, current: profile)
-            accountGroup(profile)
-                .task(id: TokenCheck(token: model.settingsToken, profileID: profile.id, host: profile.github?.host)) {
-                    await checkToken(profile)
-                }
-                .onChange(of: profile.id) {
-                    cancelConnection()
-                    hostDraft = ""
-                    pastedToken = ""
-                }
-        } else {
-            SettingsGroup("GitHub account") {
-                LabeledContent {
-                    Button("Open Profiles", action: onShowProfiles)
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                } label: {
-                    Text("No profiles yet")
-                    SettingsHint("A GitHub account belongs to a profile. Without one, git uses your own credential "
-                        + "helper.")
-                }
-                SettingsDivider()
-                signInRow(profile: nil, host: "github.com")
-            }
-        }
-    }
-
-    // MARK: Profile
-
-    private func profileGroup(_ store: ProfileStore, current: Profile) -> some View {
-        SettingsGroup("Profile") {
+    private var noProfileGroup: some View {
+        SettingsGroup("GitHub account") {
             LabeledContent {
-                CapsuleMenuPicker(label: "Profile", selection: Binding(get: { current.id }, set: { profileID = $0 }),
-                                  title: Text(current.name.isEmpty ? "Unnamed" : current.name)) {
-                    ForEach(store.profiles) { profile in
-                        Text(profile.name.isEmpty ? "Unnamed" : profile.name).tag(profile.id)
-                    }
-                } footer: {
-                    // Adds a profile and opens it on the Profiles page to fill in.
-                    Button("Add New Profile") {
-                        if let id = library.addProfile() { profileID = id }
-                        onShowProfiles()
-                    }
-                }
+                Button(noProfile.button, action: noProfile.action)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
             } label: {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(ProfileColors.color(current.color))
-                        .frame(width: 10, height: 10)
-                    Text("Integrations of")
-                }
-                SettingsHint("Each profile has its own GitHub account, used over HTTPS by fetch, pull, push and clone "
-                    + "in its tabs.")
+                Text(noProfile.title)
+                SettingsHint(noProfile.hint)
             }
+            SettingsDivider()
+            signInRow(profile: nil, host: "github.com")
         }
     }
 
@@ -148,13 +185,17 @@ struct IntegrationsSettings: View {
 
     @ViewBuilder
     private func accountGroup(_ profile: Profile) -> some View {
+        // Leaving the screen (Settings closing, the onboarding's step changing) cancels a connection in flight. Not on
+        // the device code's group: it goes when the approval comes, while the token is checked and saved.
         if let account = profile.github {
             connectedGroup(profile, account: account)
+                .onDisappear { cancelConnection() }
         } else {
             if case .deviceCode(let code, let host) = activity {
                 deviceCodeGroup(code, host: host)
             }
             connectGroup(profile)
+                .onDisappear { cancelConnection() }
         }
     }
 
@@ -475,7 +516,7 @@ struct IntegrationsSettings: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Waiting for the approval at \(Self.verificationURL(code, host: host).absoluteString)…")
+                Text(verbatim: "Waiting for the approval at \(Self.verificationURL(code, host: host).absoluteString)…")
                     .font(.settingsCaption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -669,12 +710,13 @@ struct IntegrationsSettings: View {
     }
 
     #if DEBUG
-    /// DEBUG `-HistqGitHubFakeLogin <login>` with `-HistqKeychain memory` in state-dir mode: once the profiles are read,
-    /// connects the shown profile (adding a "QA" profile when there is none) to github.com as `<login>` with a fake
-    /// token in the in-memory Keychain, without asking GitHub. For QA shots of the connected state.
+    /// DEBUG `-HistqGitHubFakeLogin <login>` with `-HistqKeychain memory` in state-dir mode: once the group shows (the
+    /// profiles are read), in Settings or the onboarding, connects the shown profile (adding a "QA" profile when there
+    /// is none) to github.com as `<login>` with a fake token in the in-memory Keychain, without asking GitHub. For QA
+    /// shots of the connected state.
     private func debugFakeLogin() {
         debugFakeTokens()
-        guard !isLoading, !Self.debugFakeLoginDone, let login = AppState.launchFlag("-HistqGitHubFakeLogin"),
+        guard !Self.debugFakeLoginDone, let login = AppState.launchFlag("-HistqGitHubFakeLogin"),
               AppState.isStateDirMode, KeychainStore.shared.isInMemory, let store = library.store
         else { return }
         Self.debugFakeLoginDone = true
@@ -692,7 +734,7 @@ struct IntegrationsSettings: View {
     /// DEBUG `-HistqGitHubFakeTokens YES` (in-memory Keychain only): a fake token for every profile that already has a
     /// GitHub account in `profiles.json`, on its own host, so the page shows each one connected.
     private func debugFakeTokens() {
-        guard !isLoading, !Self.debugFakeTokensDone, AppState.launchFlag("-HistqGitHubFakeTokens") == "YES",
+        guard !Self.debugFakeTokensDone, AppState.launchFlag("-HistqGitHubFakeTokens") == "YES",
               AppState.isStateDirMode, KeychainStore.shared.isInMemory, let store = library.store
         else { return }
         Self.debugFakeTokensDone = true

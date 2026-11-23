@@ -201,7 +201,7 @@ enum PaletteCommands {
     }
 
     /// Open Repository…, File's workspace commands (Close Workspace only in a workspace window) and the recent
-    /// workspaces, the Settings pages, the tab position, the layout presets and Reset Layout.
+    /// workspaces, the Settings pages, the tab position, the layout presets, Reset Layout and Show Onboarding….
     private static func app(_ model: WindowModel, into snapshot: inout PaletteSnapshot) {
         snapshot.add("Open Repository…", detail: "⌘O", section: .app, systemImage: "folder.badge.plus") {
             NSApp.sendAction(#selector(AppDelegate.openDocument(_:)), to: nil, from: nil)
@@ -255,6 +255,12 @@ enum PaletteCommands {
         }
         snapshot.add("Reset Layout", detail: "View › Reset Layout", section: .app,
                      systemImage: "arrow.counterclockwise") { LayoutPreset.reset() }
+        // Help › Show Onboarding…: the palette is closed before a row runs (`performPalette`), and refused while the
+        // onboarding runs, so it never starts twice.
+        snapshot.add("Show Onboarding…", detail: "Help › Show Onboarding…", section: .app,
+                     systemImage: "graduationcap") {
+            NSApp.sendAction(#selector(AppDelegate.showOnboarding(_:)), to: nil, from: nil)
+        }
     }
 
     /// The repo's context menus: the working tree's (when it has changes), the selected commit's or stash's, each

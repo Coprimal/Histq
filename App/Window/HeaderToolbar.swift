@@ -4,7 +4,9 @@
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge the green Update button while Sparkle has an update
 // (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, Row Height ▾ (the graph's
 // row heights), then Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed.
-// Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it.
+// Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it. While the onboarding runs
+// no item takes a click, and a spotlight dims every item but its target (`Hold`); `frame(of:)` tells the spotlight
+// where its toolbar targets are.
 //
 // The user can customize it (right-click › Customize Toolbar…): remove, re-add or move whole capsules, and add spaces.
 // AppKit saves the layout in the standard defaults domain, under "NSToolbar Configuration HeaderToolbar"
@@ -78,6 +80,22 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private var hoverButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
     /// On macOS 26, the arrow of Pull ▾ and Push ▾ (`splitButton`), by the item: enabled with it.
     private var arrowButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
+    /// How the onboarding holds the toolbar now, from the model in `apply`.
+    private var hold = Hold.none
+
+    /// How the onboarding holds the toolbar. AppKit draws the toolbar above the SwiftUI content, so neither its card's
+    /// scrim nor the spotlight's dim covers it: the items hold themselves.
+    private enum Hold: Equatable {
+        case none
+        /// The onboarding's cards: items with a view ignore clicks (`blocksInteraction`), looking as they are; items
+        /// without one (before macOS 26) are disabled.
+        case blocked
+        /// A spotlight on `target`: its items (with a view) are drawn enabled but ignore clicks; every other item is
+        /// disabled and, on macOS 26, its view dimmed to `dimmedAlpha`. Items without a view are only disabled.
+        case spotlight(SpotlightTarget)
+
+        static let dimmedAlpha: CGFloat = 0.25
+    }
 
     /// The repo actions' buttons, by the operation each shows.
     private var actionItems: [(item: NSToolbarItem, action: ToolbarAction)] {
@@ -120,6 +138,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         toolbar.allowsDisplayModeCustomization = false
         // The standard domain is the user's real one, whatever the run: a QA run keeps the default set.
         toolbar.autosavesConfiguration = !AppState.isStateDirMode
+        model.spotlight.toolbarFrame = { [weak self] target in self?.frame(of: target) }
         observe()
     }
 
@@ -378,8 +397,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
     /// window's workspace (name, path, read-only and write state), the selected tab's repo, its session's refs,
     /// running operations, status, stashes, remotes, profile, undo status, operation in progress and terminal drawer,
-    /// the profile store, the page, the Settings modal and whether Sparkle has an update are read, so other tabs and
-    /// the content's own state never wake the toolbar.
+    /// the profile store, the page, the Settings modal, whether the onboarding runs, the spotlight's target and whether
+    /// Sparkle has an update are read, so other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -390,7 +409,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     private func apply() {
+        let spotlight = model.spotlight.activeTarget
+        hold = spotlight.map(Hold.spotlight) ?? (model.isOnboarding ? .blocked : .none)
         applyWorkspace()
+        // No Customize Toolbar (its menu items, View's) while the onboarding or a spotlight runs over the window.
+        let customizable = hold == .none
+        if toolbar.allowsUserCustomization != customizable { toolbar.allowsUserCustomization = customizable }
         let selected = model.selectedIndex.map { model.tabs[$0] }
         let session = model.actionSession
         // The folder's name, never the tab's alias: the alias only shortens the tab itself.
@@ -413,7 +437,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             let target = Self.checkoutTarget(session)
             let title = target ?? Self.branchTitle(session.refs.value?.head)
             branchItem.title = title
-            branchItem.isEnabled = !isBusy && session.refs.value != nil
+            branchItem.isEnabled = gated(branchItem.item, !isBusy && session.refs.value != nil)
             // The full name, as the title may be cut.
             branchItem.toolTip = isBusy ? target.map { "Checking out \($0)…" } ?? "Checking out…"
                 : "\(title): check out another branch"
@@ -479,9 +503,101 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
         set(updateItem, hidden: !updater.updateAvailable)
         if let version = updater.availableUpdateVersion { set(updateItem, toolTip: "Install Histq \(version)") }
+        applyHold()
+        if spotlight != nil {
+            // Once the toolbar has laid out what this pass changed, the spotlight reads its target's frame again.
+            DispatchQueue.main.async { [model] in model.spotlight.frameMayHaveChanged() }
+        }
         #if DEBUG
         logItemFrames()
         #endif
+    }
+
+    // MARK: Hold
+
+    /// The button items, each with its view on macOS 26 (`view(of:)`).
+    private var buttonItems: [NSToolbarItem] {
+        [undoItem, redoItem, pullItem, pushItem, fetchItem, createBranchItem, stashItem, popItem, rowHeightItem,
+         terminalItem, searchItem, settingsItem, updateItem]
+    }
+
+    private var dropdowns: [ToolbarDropdown] { [workspaceItem, repoItem, branchItem, profileItem] }
+
+    /// The view showing `item` in the toolbar: its own (a dropdown, Pull ▾ / Push ▾, Fetch, Row Height, Update) or its
+    /// button in a row's capsule; nil before macOS 26 for the button items (subitems of a group).
+    private func view(of item: NSToolbarItem) -> NSView? {
+        item.view ?? hoverButtons[ObjectIdentifier(item)]
+    }
+
+    /// The items a spotlight on `target` keeps bright; none for a content target.
+    private func items(for target: SpotlightTarget) -> [NSToolbarItem] {
+        switch target {
+        case .workspaceMenu: [workspaceItem.item]
+        case .repoMenu: [repoItem.item]
+        case .branchMenu: [branchItem.item]
+        case .profile: [profileItem.item]
+        case .history: [undoItem, redoItem]
+        case .sync: [pullItem, pushItem, fetchItem]
+        case .branchActions: [createBranchItem, stashItem, popItem]
+        case .terminal: [terminalItem]
+        case .search: [searchItem]
+        default: []
+        }
+    }
+
+    /// `enabled` as the hold leaves it (`Hold`).
+    private func gated(_ item: NSToolbarItem, _ enabled: Bool) -> Bool {
+        switch hold {
+        case .none: enabled
+        case .blocked: enabled && view(of: item) != nil
+        case .spotlight(let target): view(of: item) != nil && items(for: target).contains { $0 === item }
+        }
+    }
+
+    /// The hold on the items `apply` sets no state for, then on every item's view: clicks blocked while the onboarding
+    /// runs, the views other than the spotlight's target dimmed.
+    private func applyHold() {
+        for item in [searchItem, settingsItem, rowHeightItem, updateItem] { set(item, enabled: true) }
+        for dropdown in [workspaceItem, repoItem, profileItem] { dropdown.isEnabled = gated(dropdown.item, true) }
+        let blocks = hold != .none
+        for button in Array(hoverButtons.values) + Array(arrowButtons.values) { button.blocksInteraction = blocks }
+        for dropdown in dropdowns { dropdown.blocksInteraction = blocks }
+        // Before macOS 26 only the dropdowns have views: no item is dimmed there (the band stays lit instead).
+        guard PlatformFeatures.liquidGlass else { return }
+        let bright: [NSToolbarItem]? = if case .spotlight(let target) = hold { items(for: target) } else { nil }
+        for item in buttonItems + dropdowns.map(\.item) {
+            guard let view = view(of: item) else { continue }
+            let alpha = bright.map { $0.contains { $0 === item } ? 1 : Hold.dimmedAlpha } ?? 1
+            if view.alphaValue != alpha { view.alphaValue = alpha }
+        }
+        let ringed: [NSToolbarItem] = if case .spotlight(let target) = hold, target.hasToolbarRing {
+            items(for: target)
+        } else { [] }
+        for item in buttonItems {
+            hoverButtons[ObjectIdentifier(item)]?.showsRing = ringed.contains { $0 === item }
+        }
+    }
+
+    /// Where `target`'s items show, in window top-left coordinates (the union of their views; a row's whole capsule
+    /// for Undo / Redo and Branch / Stash / Pop), for the spotlight; nil when none shows in the window: no view (before
+    /// macOS 26), removed in Customize Toolbar, in the overflow menu, hidden, or the toolbar in a full-screen window's
+    /// own window. The same conversion as the DEBUG `-HistqToolbarFrames` probe, then flipped to top-left.
+    func frame(of target: SpotlightTarget) -> CGRect? {
+        guard let window = model.window, let content = window.contentView else { return nil }
+        let shown: [(item: NSToolbarItem, view: NSView?)] = switch target {
+        case .history: [(undoItem, groups[ID.historyGroup]?.view)]
+        case .branchActions: [(createBranchItem, groups[ID.branchGroup]?.view)]
+        default: items(for: target).map { ($0, view(of: $0)) }
+        }
+        let rects = shown.compactMap { item, view -> CGRect? in
+            guard !item.isHidden, let view, view.window === window, !view.isHiddenOrHasHiddenAncestor
+            else { return nil }
+            var rect = content.convert(view.convert(view.bounds, to: nil), from: nil)
+            if !content.isFlipped { rect.origin.y = content.bounds.height - rect.maxY }
+            return rect
+        }
+        guard let first = rects.first else { return nil }
+        return rects.dropFirst().reduce(first) { $0.union($1) }
     }
 
     /// The workspace label from the window's workspace (its name, path, read-only flag and last write's error), hidden
@@ -531,7 +647,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         if item.title != title { item.title = title }
     }
 
+    /// Writes `enabled` as the hold leaves it (`gated`).
     private func set(_ item: NSToolbarItem, enabled: Bool) {
+        let enabled = gated(item, enabled)
         guard item.isEnabled != enabled else { return }
         item.isEnabled = enabled
         hoverButtons[ObjectIdentifier(item)]?.isEnabled = enabled
@@ -635,8 +753,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     @objc private func createBranch(_ sender: Any?) { perform(.branch) }
     @objc private func stash(_ sender: Any?) { perform(.stash) }
     @objc private func pop(_ sender: Any?) { perform(.pop) }
-    @objc private func undo(_ sender: Any?) { model.actionSession?.undo() }
-    @objc private func redo(_ sender: Any?) { model.actionSession?.redo() }
+    @objc private func undo(_ sender: Any?) { if hold == .none { model.actionSession?.undo() } }
+    @objc private func redo(_ sender: Any?) { if hold == .none { model.actionSession?.redo() } }
 
     private func selector(for action: ToolbarAction) -> Selector {
         switch action {
@@ -650,30 +768,32 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     private func perform(_ action: ToolbarAction) {
-        guard let session = model.actionSession else { return }
+        // From the overflow menu too: nothing while the onboarding holds the toolbar.
+        guard hold == .none, let session = model.actionSession else { return }
         action.perform(session)
     }
 
     @objc private func toggleSettings(_ sender: Any?) {
-        model.toggleSettings()
+        if hold == .none { model.toggleSettings() }
     }
 
     @objc private func toggleTerminal(_ sender: Any?) {
-        model.toggleTerminal()
+        if hold == .none { model.toggleTerminal() }
     }
 
     @objc private func togglePalette(_ sender: Any?) {
-        model.togglePalette()
+        if hold == .none { model.togglePalette() }
     }
 
     @objc private func installUpdate(_ sender: Any?) {
-        updater.checkForUpdates()
+        if hold == .none { updater.checkForUpdates() }
     }
 
     // MARK: Menus
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        let entries: [MenuEntry] = switch menu {
+        // Empty while the onboarding holds the toolbar (a menu opened from the overflow menu).
+        let entries: [MenuEntry] = if hold != .none { [] } else { switch menu {
         case workspaceItem.menu, workspaceItem.overflowMenu: workspaceEntries()
         case repoItem.menu, repoItem.overflowMenu: repoEntries()
         case branchItem.menu, branchItem.overflowMenu: model.actionSession.map(RepoMenus.branchPicker) ?? []
@@ -685,7 +805,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         case pushItem.menu, pushItem.menuFormRepresentation?.submenu: model.actionSession.map(RepoMenus.push) ?? []
         case _ where menu.identifier == Self.rowHeightMenuID: Self.rowHeightEntries()
         default: []
-        }
+        } }
         let built = MenuBuilder.menu(entries)
         var items = built.items
         built.removeAllItems()
@@ -878,7 +998,16 @@ private final class ToolbarDropdown {
             button.isEnabled = newValue
             chevron.isEnabled = newValue
             item.isEnabled = newValue
-            item.menuFormRepresentation?.isEnabled = newValue
+            item.menuFormRepresentation?.isEnabled = newValue && !blocksInteraction
+        }
+    }
+
+    /// The button looks as it is but ignores clicks, and its overflow entry is disabled (the onboarding's hold).
+    var blocksInteraction = false {
+        didSet {
+            guard blocksInteraction != oldValue else { return }
+            button.blocksInteraction = blocksInteraction
+            item.menuFormRepresentation?.isEnabled = isEnabled && !blocksInteraction
         }
     }
 
@@ -1022,7 +1151,15 @@ private final class ToolbarHoverButton: NSView {
     private let button = PressReportingButton()
     let menuForm: NSMenuItem
     private let highlight = NSView()
+    /// The spotlight's ring, for a target the capsule's glass would hide (`SpotlightTarget.hasToolbarRing`).
+    private let ring = NSView()
     private var isHovered = false { didSet { updateHighlight() } }
+
+    /// Whether the spotlight's ring shows around the button.
+    var showsRing: Bool {
+        get { !ring.isHidden }
+        set { if ring.isHidden == newValue { ring.isHidden = !newValue } }
+    }
     private var observers: [NSObjectProtocol] = []
 
     init(target: AnyObject, action: Selector?, label: String) {
@@ -1041,6 +1178,14 @@ private final class ToolbarHoverButton: NSView {
         highlight.frame = NSRect(x: (width - diameter) / 2, y: (Self.height - diameter) / 2,
                                  width: diameter, height: diameter)
         addSubview(highlight)
+
+        ring.wantsLayer = true
+        ring.layer?.cornerRadius = diameter / 2
+        ring.layer?.borderWidth = SpotlightMetrics.ringWidth
+        ring.layer?.borderColor = NSColor(Palette.spotlightRing).cgColor
+        ring.frame = NSRect(x: 0, y: (Self.height - diameter) / 2, width: width, height: diameter)
+        ring.isHidden = true
+        addSubview(ring)
 
         button.isBordered = false
         button.imagePosition = .imageOnly
@@ -1078,7 +1223,18 @@ private final class ToolbarHoverButton: NSView {
         get { button.isEnabled }
         set {
             button.isEnabled = newValue
-            menuForm.isEnabled = newValue
+            menuForm.isEnabled = newValue && !blocksInteraction
+            updateHighlight()
+        }
+    }
+
+    /// Drawn as it is (enabled or not) but takes no click and shows no hover, and its overflow entry is disabled (the
+    /// onboarding's hold).
+    var blocksInteraction = false {
+        didSet {
+            guard blocksInteraction != oldValue else { return }
+            button.blocksInteraction = blocksInteraction
+            menuForm.isEnabled = button.isEnabled && !blocksInteraction
             updateHighlight()
         }
     }
@@ -1119,7 +1275,7 @@ private final class ToolbarHoverButton: NSView {
     }
 
     private func updateHighlight() {
-        let color: NSColor? = !button.isEnabled ? nil
+        let color: NSColor? = !button.isEnabled || blocksInteraction ? nil
             : button.isPressed ? .white.withAlphaComponent(0.2)
             : isHovered ? .white.withAlphaComponent(0.1) : nil
         highlight.layer?.backgroundColor = color?.cgColor
@@ -1134,8 +1290,11 @@ private final class ToolbarHoverButton: NSView {
 private final class PressReportingButton: NSButton {
     var didChangePress: (() -> Void)?
     private(set) var isPressed = false
+    /// Swallows clicks (not passed on, so the title bar never drags the window or zooms it).
+    var blocksInteraction = false
 
     override func mouseDown(with event: NSEvent) {
+        guard !blocksInteraction else { return }
         isPressed = true
         didChangePress?()
         super.mouseDown(with: event)
@@ -1149,6 +1308,13 @@ final class WindowAwarePopUpButton: NSPopUpButton {
     var didMoveToWindow: (() -> Void)?
     /// Room after the title for the arrow drawn over the button (`ToolbarChevron`), which AppKit does not count.
     var trailingRoom: CGFloat = 0
+    /// Swallows clicks (not passed on, so the title bar never drags the window or zooms it).
+    var blocksInteraction = false
+
+    override func mouseDown(with event: NSEvent) {
+        guard !blocksInteraction else { return }
+        super.mouseDown(with: event)
+    }
 
     override var intrinsicContentSize: NSSize {
         var size = super.intrinsicContentSize

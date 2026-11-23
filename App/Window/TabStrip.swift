@@ -141,6 +141,7 @@ struct TabStrip: View {
             }
             TabStripButtons(model: model, popoverEdge: .bottom, buttonHeight: TabStripMetrics.buttonHeight)
         }
+        .spotlightTarget(.tabStrip)
     }
 
     /// The closed groups button at the strip's start, pulled `archiveShift` left as the archive button is alone. Before
@@ -990,9 +991,10 @@ enum TabMenu {
         if !model.closeTab(id: id) { model.closeWindow() }
     }
 
-    /// A middle click on a tab closes it without selecting it, as Chrome's; not while a modal covers the window.
+    /// A middle click on a tab closes it without selecting it, as Chrome's; not while a modal covers the window or
+    /// the onboarding runs (its tour leaves `isShowingModal` false).
     static func middleClick(_ id: WindowModel.Tab.ID, _ model: WindowModel) {
-        guard !model.isShowingModal else { return }
+        guard !(model.isShowingModal || model.isOnboarding) else { return }
         close(id, model)
     }
 }

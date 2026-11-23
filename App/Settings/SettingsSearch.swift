@@ -152,6 +152,8 @@ struct SettingsSearchItem: Identifiable {
               keywords: ["mergetool", "merge.tool", "opendiff", "vscode", "kdiff3", "conflict"]),
         .init(section: .general, group: "Git", title: "Git executable",
               keywords: ["git path", "binary", "homebrew", "/usr/bin", "version", "command line tools"]),
+        .init(section: .general, group: "Onboarding", title: "Show onboarding",
+              keywords: ["onboarding", "tour", "welcome", "getting started"]),
 
         // Appearance
         .init(section: .appearance, group: "Tabs", title: "Tab position", keywords: ["top", "left", "tab strip"]),

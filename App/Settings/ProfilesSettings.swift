@@ -389,7 +389,7 @@ private struct ProfileRow: View {
 }
 
 /// A round color choice; the selected one has a ring.
-private struct ColorSwatch: View {
+struct ColorSwatch: View {
     let hex: String
     let selected: Bool
     let action: () -> Void
