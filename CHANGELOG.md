@@ -15,6 +15,7 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Rebase with uncommitted changes: Rebase … onto … asks Stash & Rebase or Cancel (or follows Settings › General › Uncommitted changes). Your changes are stashed, the branch is rebased and the changes come back; if a commit would not replay cleanly or your changes would conflict with the rebased branch, nothing is changed and the failure names the conflicted files. Untracked files stay where they are.
 
 ### Changed
+- A branch badge's menu in the graph is shorter: its pull requests sit in one Create Pull Request submenu, its deletes (local, remote, both) in one Delete submenu, Copy and Save as Patch in one Patch submenu. It no longer shows Set Author Emoji, nor Interactive Rebase from Here when it cannot run. "Fast-forward the current branch to X" is gone from branch menus: Merge X into … › Fast-forward only does the same.
 - Fade Other Worktrees is off by default. When it is on, selecting a row of another worktree lights only that worktree: every other one fades, the current tab's own commits and WIP row too.
 - A branch checked out in another worktree shows the worktree icon on its graph badge, and keeps it when the badge is cut short. Worktrees use a folder-with-branch icon in the graph, the sidebar and the WIP panel.
 - A group's menu has Delete Group, which asks first, then closes the group and its tabs as Close Group used to (⇧⌘T brings them back).
