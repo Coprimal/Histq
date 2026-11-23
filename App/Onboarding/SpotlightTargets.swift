@@ -30,6 +30,11 @@ enum SpotlightTarget: String, Hashable, CaseIterable {
         }
     }
 
+    /// A button inside a toolbar row's capsule, whose glass (drawn above the layer) hides the layer's ring: the ring
+    /// sits further out than the capsule's end inset, so even the end button (Terminal) loses it. The toolbar draws
+    /// its ring instead (`HeaderToolbar`), on macOS 26.
+    var hasToolbarRing: Bool { self == .search || self == .terminal }
+
     /// A toolbar dropdown, which has its own view on every macOS (the button items have one only on macOS 26).
     var isToolbarDropdown: Bool {
         switch self {

@@ -1,10 +1,11 @@
 // Settings › General: the default profile of new tabs, pulling and fetching (and auto-stash), the operation toasts,
-// the external merge tool and the git executable. Each change is saved at once in `Preferences.defaults` (the default
-// profile in the profile store).
+// the external merge tool, the git executable and Show Onboarding…. Each change is saved at once in
+// `Preferences.defaults` (the default profile in the profile store).
 import HistqCore
 import SwiftUI
 
 struct GeneralSettings: View {
+    @Environment(WindowModel.self) private var model
     @AppStorage(PrefKey.pullMode.rawValue, store: Preferences.defaults) private var pullMode = "fastForward"
     @AppStorage(PrefKey.autoStash.rawValue, store: Preferences.defaults) private var autoStash = "ask"
     @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 3
@@ -103,6 +104,7 @@ struct GeneralSettings: View {
                 .settingsSearchAnchor("External merge tool")
             }
             gitGroup
+            onboardingGroup
         } skeleton: {
             EmptyView()
         }
@@ -159,6 +161,27 @@ struct GeneralSettings: View {
             SettingsHint("New tabs use their repo's last profile, else this one. None: git uses your own config.")
         }
         .settingsSearchAnchor("Default profile")
+    }
+
+    // MARK: Onboarding
+
+    /// Settings closes first, then the onboarding starts on this window as Help › Show Onboarding… does.
+    private var onboardingGroup: some View {
+        SettingsGroup("Onboarding") {
+            LabeledContent {
+                Button("Show Onboarding…") {
+                    // Closes this window's Settings even when another window already runs the onboarding.
+                    model.closeSettings()
+                    NSApp.sendAction(#selector(AppDelegate.showOnboarding(_:)), to: nil, from: nil)
+                }
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+            } label: {
+                Text("Show onboarding")
+                SettingsHint("The setup steps and the tour of the main window on a small demo repository. Every "
+                    + "step can be skipped.")
+            }
+            .settingsSearchAnchor("Show onboarding")
+        }
     }
 
     // MARK: Git

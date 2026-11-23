@@ -117,7 +117,7 @@ struct SpotlightLayer: View {
                 .contentShape(Rectangle())
                 .onTapGesture {}
                 .accessibilityHidden(true)
-            if let ring = layout.ring {
+            if let ring = layout.ring, !target.hasToolbarRing {
                 RoundedRectangle(cornerRadius: layout.radius, style: .continuous)
                     .strokeBorder(Palette.spotlightRing, lineWidth: SpotlightMetrics.ringWidth)
                     .frame(width: ring.width, height: ring.height)

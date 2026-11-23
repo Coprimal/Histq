@@ -570,6 +570,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             let alpha = bright.map { $0.contains { $0 === item } ? 1 : Hold.dimmedAlpha } ?? 1
             if view.alphaValue != alpha { view.alphaValue = alpha }
         }
+        let ringed: [NSToolbarItem] = if case .spotlight(let target) = hold, target.hasToolbarRing {
+            items(for: target)
+        } else { [] }
+        for item in buttonItems {
+            hoverButtons[ObjectIdentifier(item)]?.showsRing = ringed.contains { $0 === item }
+        }
     }
 
     /// Where `target`'s items show, in window top-left coordinates (the union of their views; a row's whole capsule
@@ -1145,7 +1151,15 @@ private final class ToolbarHoverButton: NSView {
     private let button = PressReportingButton()
     let menuForm: NSMenuItem
     private let highlight = NSView()
+    /// The spotlight's ring, for a target the capsule's glass would hide (`SpotlightTarget.hasToolbarRing`).
+    private let ring = NSView()
     private var isHovered = false { didSet { updateHighlight() } }
+
+    /// Whether the spotlight's ring shows around the button.
+    var showsRing: Bool {
+        get { !ring.isHidden }
+        set { if ring.isHidden == newValue { ring.isHidden = !newValue } }
+    }
     private var observers: [NSObjectProtocol] = []
 
     init(target: AnyObject, action: Selector?, label: String) {
@@ -1164,6 +1178,14 @@ private final class ToolbarHoverButton: NSView {
         highlight.frame = NSRect(x: (width - diameter) / 2, y: (Self.height - diameter) / 2,
                                  width: diameter, height: diameter)
         addSubview(highlight)
+
+        ring.wantsLayer = true
+        ring.layer?.cornerRadius = diameter / 2
+        ring.layer?.borderWidth = SpotlightMetrics.ringWidth
+        ring.layer?.borderColor = NSColor(Palette.spotlightRing).cgColor
+        ring.frame = NSRect(x: 0, y: (Self.height - diameter) / 2, width: width, height: diameter)
+        ring.isHidden = true
+        addSubview(ring)
 
         button.isBordered = false
         button.imagePosition = .imageOnly

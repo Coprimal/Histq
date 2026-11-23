@@ -1,7 +1,8 @@
 // The onboarding's card over the window: a scrim, a glass card sized to its step (title, progress dots, the step's body,
 // which scrolls when the window is short) and a footer (Back, Skip onboarding, Skip this step, Next). Return = Next,
 // ← / → = Back / Next and Esc = Skip this step, when no text field has the focus. Welcome, the tour's demo state and
-// finish have their bodies here, the setup steps in `OnboardingSetupSteps`; the rest show a placeholder for now.
+// finish have their bodies here, the setup steps in `OnboardingSetupSteps`, the appearance steps in
+// `OnboardingAppearanceSteps`.
 import AppKit
 import SwiftUI
 
@@ -11,6 +12,8 @@ struct OnboardingCard: View {
     var isCovered = false
     let onOpenSettings: () -> Void
     @FocusState private var focused: Bool
+    /// The heights the card measures to tell its step how tall its body may grow without scrolling.
+    @State private var heights = Heights()
 
     private static let width: CGFloat = 640
     private static let bodyMinHeight: CGFloat = 240
@@ -23,6 +26,7 @@ struct OnboardingCard: View {
                 card
                     .padding(ModalMetrics.margin)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.window = $0 }
         }
     }
 
@@ -38,10 +42,12 @@ struct OnboardingCard: View {
                     ScrollView {
                         BodyFit(minHeight: Self.bodyMinHeight) {
                             stepBody(step)
+                                .environment(\.onboardingBodyRoom, heights.bodyRoom)
                         }
                     }
                     .scrollBounceBehavior(.basedOnSize)
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.body = $0 }
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous))
                 .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius))
@@ -54,6 +60,7 @@ struct OnboardingCard: View {
             .animation(Motion.standard, value: step)
         }
         .frame(width: Self.width)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.card = $0 }
         .shadow(color: Palette.cardShadow, radius: 16, y: 6)
         .disabled(isCovered)
         .focusable(!isCovered)
@@ -136,9 +143,10 @@ struct OnboardingCard: View {
         case .profile: OnboardingProfileStep(model: model)
         case .github: OnboardingGitHubStep(model: model)
         case .ai: OnboardingAIStep(model: model)
+        case .tabPosition, .layout, .avatars, .rowHeight, .laneColors, .fadeWorktrees:
+            OnboardingAppearanceStep(step: step)
         case .tour: tourBody
         case .finish: finishBody
-        default: comingBody(step)
         }
     }
 
@@ -229,18 +237,6 @@ struct OnboardingCard: View {
         if case .ready = model.demo { true } else { false }
     }
 
-    private func comingBody(_ step: OnboardingModel.Step) -> some View {
-        VStack(spacing: 8) {
-            Text("This step is coming in a later build.")
-                .foregroundStyle(.secondary)
-            Text("Press Next or skip it.")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(SettingsMetrics.cardPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     private func warning(_ text: String, systemImage: String) -> some View {
         Label {
             Text(text).fixedSize(horizontal: false, vertical: true)
@@ -272,6 +268,24 @@ struct OnboardingCard: View {
             focused = true
         }
     }
+}
+
+/// The window's height, the card's and its body's, as last laid out: the card less its body is its fixed parts
+/// (header, footer, spacing), so the body's room is what the window leaves them, whatever the body shows now.
+private struct Heights: Equatable {
+    var window: CGFloat = 0
+    var card: CGFloat = 0
+    var body: CGFloat = 0
+
+    @MainActor var bodyRoom: CGFloat? {
+        guard window > 0, card > 0, body > 0 else { return nil }
+        return window - 2 * ModalMetrics.margin - (card - body)
+    }
+}
+
+extension EnvironmentValues {
+    /// How tall an onboarding step's body may be without scrolling in its card; nil until the card has laid out.
+    @Entry var onboardingBodyRoom: CGFloat?
 }
 
 /// The step's body: its content's ideal height, at least `minHeight`, at most the height proposed, with the content

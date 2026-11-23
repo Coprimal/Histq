@@ -325,6 +325,14 @@ final class AvatarStore {
 
     // MARK: Generated and initials avatars
 
+    /// The local drawing for an author in `mode`, whatever the stored mode: the initials in `.initials`, else the
+    /// generated pattern (in `.real` too, the stand-in while a picture loads). Never loads anything and never shows an
+    /// emoji (the onboarding's preview of each mode).
+    func localAvatar(mode: Mode, email: String, name: String) -> NSImage {
+        mode == .initials
+            ? initialsAvatar(name: name) : generatedAvatar(identity: Self.identity(email: email, name: name))
+    }
+
     /// A 5x5 mirrored pattern in one of the lane colors on a dark disc, from the identity's SHA-256. Opaque, so the
     /// node's lane fill does not show through.
     private func generatedAvatar(identity: String) -> NSImage {

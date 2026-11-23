@@ -154,14 +154,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// The DEBUG `-HistqOnboarding` request of this launch: a step or the tour opens there, `auto` runs the first-run
-    /// gate (as if no state dir were set) and `off`, an unknown step or no flag do nothing. The real auto-show comes
-    /// later. It starts on the target window, and never when a window runs one already.
+    /// The launch's onboarding. Without a DEBUG `-HistqOnboarding` flag (always in Release) the first-run gate decides:
+    /// it shows on a truly empty state, marks an existing user done silently, and stays off for a state-dir or a
+    /// launch with paths. The flag: a step or the tour opens there, `auto` runs the gate as if no state dir were set,
+    /// `off` or an unknown step do nothing. It starts on the target window, and never when a window runs one already.
     private func startLaunchOnboarding() async {
         let step: OnboardingModel.Step
         var stop: String?
         switch AppState.launchOnboarding {
-        case nil, .off:
+        case .off:
             return
         case .step(let id):
             guard let named = OnboardingModel.Step(launch: id) else { return }
@@ -170,11 +171,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // At the stop `id` names (or the next one the window has); an unknown id, at the first one.
             step = .tour
             stop = id
-        case .auto:
+        case nil, .auto:
             let decision = OnboardingGate.decide(
                 done: Preferences.defaults.bool(forKey: PrefKey.onboardingDone.rawValue),
                 recentRepos: RecentRepos.shared.urls.count, recentWorkspaces: RecentRepos.workspaces.urls.count,
-                session: await SessionStore.loaded()?.session, stateDirMode: false,
+                session: await SessionStore.loaded()?.session,
+                stateDirMode: AppState.launchOnboarding == nil && AppState.isStateDirMode,
                 launchedWithPaths: launchedWithPaths, forced: false)
             switch decision {
             case .show: step = .welcome
@@ -1065,6 +1067,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         show(entry)
     }
 
+    /// Help › Show Onboarding…: starts it at the welcome card on the target window (a new one when none is open). A
+    /// window that runs it already only comes forward, on its current step: never a second one. Not refused while it
+    /// runs, as it never doubles.
+    @objc func showOnboarding(_ sender: Any?) {
+        if let running = entries.first(where: { $0.model.isOnboarding }) {
+            show(running)
+            return
+        }
+        let entry = target() ?? newWindow()
+        entry.model.startOnboarding(at: .welcome)
+        show(entry)
+    }
+
     /// The standard About panel: the app icon, name, version and copyright from the Info.plist, then the credits.
     @objc func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [.credits: Self.aboutCredits])
@@ -1576,8 +1591,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return true
     }
 
-    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal, the tab position, the layout presets) and Window menus:
-    /// without Edit, text fields lose copy and paste.
+    /// App menu (About, Check for Updates, Settings, Hide, Quit), File, Edit, View (the terminal, the tab position, the layout presets), Window and
+    /// Help (Show Onboarding…; macOS adds its search field) menus: without Edit, text fields lose copy and paste.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Histq", action: #selector(showAbout), keyEquivalent: "").target = self
@@ -1670,8 +1685,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         NSApp.windowsMenu = windowMenu
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(withTitle: "Show Onboarding…", action: #selector(showOnboarding(_:)), keyEquivalent: "")
+            .target = self
+        NSApp.helpMenu = helpMenu
         let mainMenu = NSMenu()
-        for submenu in [appMenu, fileMenu, editMenu, viewMenu, windowMenu] {
+        for submenu in [appMenu, fileMenu, editMenu, viewMenu, windowMenu, helpMenu] {
             let item = NSMenuItem()
             item.submenu = submenu
             mainMenu.addItem(item)
