@@ -547,7 +547,10 @@ enum HostedHTML {
                 .event b { color: \(text); font-weight: 600; }
                 .event .body { display: inline; padding: 0; } .event .body > p { display: inline; margin: 0; }
                 .event .date { margin-left: 4px; }
-                .event .body > ul { margin: 2px 0; padding-left: 20px; } .event li { margin: 1px 0; }
+                /* An atomic box on its own line, not a block inside the inline body: WebKit lays a block-in-inline's lines out
+                   again when a link in it gets its hover underline, and the entry moved by 2 px each time. */
+                .event .body > ul { display: inline-block; width: 100%; box-sizing: border-box; vertical-align: top;
+                  margin: 2px 0; padding-left: 20px; } .event li { margin: 1px 0; }
                 .event a code { background: none; padding: 0; color: inherit; }
                 """
         }
