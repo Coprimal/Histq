@@ -1399,10 +1399,14 @@ enum GitLabStub {
     }
 
     /// GitLab's own note of a push: never a comment.
+    /// With `-HistqStubPageSeed YES`, GitLab's real body: the commit list in HTML and the compare link.
     private static let systemNote = """
-        {"id": 850, "type": null, "body": "added 1 commit", "author": \(user), "created_at": "2026-11-12T16:20:00Z",
-         "system": true, "resolvable": false}
+        {"id": 850, "type": null, "body": "\(systemNoteBody)", "author": \(user),
+         "created_at": "2026-11-12T16:20:00Z", "system": true, "resolvable": false}
         """
+    private static let systemNoteBody = !GitHubStub.seedsPage ? "added 1 commit"
+        : #"added 1 commit\n\n<ul><li>\#(GitHubStub.headSHA) - Finish the feature &amp; <code>main</code></li></ul>"#
+            + #"\n\n[Compare with previous version](/stub/stub/-/merge_requests/1/diffs?diff_id=2)"#
 
     /// The ids of diff discussions A and B.
     private static let threadA = "a811a811a811a811a811a811a811a811a811a811"

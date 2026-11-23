@@ -452,7 +452,7 @@ enum HostedHTML {
             let border = rgba(NSColor(Palette.surfaceBorder))
             let header = rgba(NSColor(Palette.tabFill))
             let code = rgba(NSColor(Palette.inputSurface))
-            let link = rgba(NSColor(Color.accentColor))
+            let link = rgba(Palette.linkText)
             let added = rgba(Palette.diffAddedSign)
             let removed = rgba(Palette.diffRemovedSign)
             let addedFill = rgba(Palette.diffAddedFill)
@@ -547,6 +547,8 @@ enum HostedHTML {
                 .event b { color: \(text); font-weight: 600; }
                 .event .body { display: inline; padding: 0; } .event .body > p { display: inline; margin: 0; }
                 .event .date { margin-left: 4px; }
+                .event .body > ul { margin: 2px 0; padding-left: 20px; } .event li { margin: 1px 0; }
+                .event a code { background: none; padding: 0; color: inherit; }
                 """
         }
         return css

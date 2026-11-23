@@ -62,6 +62,10 @@ enum Palette {
     /// The WIP panel's Stage All button: a muted green at the accent's lightness (OKLCH 0.61 0.115 152), under a
     /// white label at 3.59:1. #469760
     static let stageAllFill = color(srgb(0x469760))
+    /// Links on the pull request and issue pages (mentions, "N replies", URLs): the accent lifted 30 % toward white,
+    /// as thin text in the accent read dark on the page's near-black (user, 2026-11-23). 6.5:1 on `sheetCardOpaque`.
+    /// #6DAAFC
+    static let linkText = srgb(0x6DAAFC)
     /// A merged pull request: its state pill under a white label (5.0:1) and the tint of its Merged box, a purple
     /// apart from the brand blue so the merge reads at a glance (user, 2026-11-20). #8250DF
     static let mergedTone = color(srgb(0x8250DF))

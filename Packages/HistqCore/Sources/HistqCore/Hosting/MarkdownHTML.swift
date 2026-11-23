@@ -17,10 +17,12 @@ public enum MarkdownHTML {
 
     /// `markdown` as an HTML body fragment (no document, style or script). `mentionsAt`: a web root
     /// (`https://gitlab.com`) under which each `@username` of the text (not in code or a link) links to that user's
-    /// page, as GitLab's own page does; nil links none (another host's bodies).
-    public static func html(_ markdown: String, mentionsAt mentionRoot: String?) -> String {
+    /// page, as GitLab's own page does; nil links none (another host's bodies). `origin`: the host's
+    /// `https://host[:port]`, against which a link to a root-relative path (`/group/project/-/…`, GitLab's system
+    /// notes) resolves; nil keeps such a link as its text.
+    public static func html(_ markdown: String, mentionsAt mentionRoot: String?, origin: String? = nil) -> String {
         if nestsDeeper(markdown, than: maxDepth) { return "<p class=\"plain\">\(escape(markdown))</p>\n" }
-        var renderer = Renderer(mentionRoot: mentionRoot)
+        var renderer = Renderer(mentionRoot: mentionRoot, origin: origin)
         renderer.visit(Document(parsing: markdown, options: [.disableSmartOpts]))
         return renderer.result
     }
@@ -124,6 +126,7 @@ public enum MarkdownHTML {
 
     private struct Renderer: MarkupWalker {
         let mentionRoot: String?
+        let origin: String?
         var result = ""
 
         mutating func visitText(_ text: Text) {
@@ -195,7 +198,12 @@ public enum MarkdownHTML {
         }
 
         mutating func visitLink(_ link: Link) {
-            guard let href = allowedURL(link.destination, schemes: ["http", "https", "mailto"]) else {
+            // A root-relative path (one `/`, not `//host`) joins the origin; the result is checked as any link is.
+            var destination = link.destination
+            if let origin, let path = destination, path.hasPrefix("/"), !path.hasPrefix("//") {
+                destination = origin + path
+            }
+            guard let href = allowedURL(destination, schemes: ["http", "https", "mailto"]) else {
                 descendInto(link)
                 return
             }

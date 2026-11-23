@@ -137,4 +137,22 @@ struct MarkdownHTMLTests {
         let html = MarkdownHTML.html("say @x", mentionsAt: "https://h\"x")
         #expect(html == "<p>say <a class=\"mention\" href=\"https://h&quot;x/x\">@x</a></p>\n")
     }
+
+    // A root-relative link (GitLab's system notes) joins the host's origin and never names another host; `//host` and
+    // relative paths stay text; without an origin nothing changes.
+    @Test(arguments: [
+        ("[x](/a/b?c=1)", "https://git.example.com/a/b?c=1"), ("[x](/\\evil.com)", "https://git.example.com/\\evil.com"),
+        ("[x](/@evil.com/p)", "https://git.example.com/@evil.com/p"), ("[x](/%2F/evil)", "https://git.example.com/%2F/evil"),
+    ])
+    func rootRelativeLinksJoinTheOrigin(_ markdown: String, _ href: String) {
+        let html = MarkdownHTML.html(markdown, mentionsAt: nil, origin: "https://git.example.com")
+        #expect(html == "<p><a href=\"\(href)\">x</a></p>\n")
+    }
+
+    @Test func otherRelativeLinksStayText() {
+        let origin = "https://git.example.com"
+        #expect(MarkdownHTML.html("[x](//evil.com/p)", mentionsAt: nil, origin: origin) == "<p>x</p>\n")
+        #expect(MarkdownHTML.html("[x](a/b)", mentionsAt: nil, origin: origin) == "<p>x</p>\n")
+        #expect(MarkdownHTML.html("[x](/a/b)") == "<p>x</p>\n")
+    }
 }

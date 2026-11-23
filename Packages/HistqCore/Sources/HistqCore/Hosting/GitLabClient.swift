@@ -1037,7 +1037,8 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             let text = note.body ?? ""
             events.append(HostedTimelineEvent(
                 id: "note-\(note.id)", actor: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
-                text: text, textHTML: markdownHTML(text), action: state?.systemAction, icon: state?.systemIcon))
+                text: text, textHTML: systemNoteHTML(Self.systemNoteMarkdown(text) { webURL(.commit($0), in: repo) }),
+                action: state?.systemAction, icon: state?.systemIcon))
         }
         let mergeRequest = Self.isMergeRequest(item)
         for event in await states ?? [] {
@@ -1622,7 +1623,96 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// A note's or description's markdown as HTML, its `@username` mentions linked to their pages on this GitLab, as
     /// GitLab's page links them.
     private func markdownHTML(_ text: String) -> String {
-        MarkdownHTML.html(text, mentionsAt: "https://\(host)" + basePath.map { "/" + $0 }.joined())
+        MarkdownHTML.html(text, mentionsAt: webRoot)
+    }
+
+    /// A system note's markdown as HTML (`markdownHTML`), its root-relative links (GitLab's "Compare with previous
+    /// version", which carries the relative URL root) joined to the host. Only system notes: a comment's attachment
+    /// link (`/uploads/<secret>/file`) is project-relative on GitLab's page, so it stays text there.
+    private func systemNoteHTML(_ text: String) -> String {
+        MarkdownHTML.html(text, mentionsAt: webRoot, origin: "https://\(host)")
+    }
+
+    /// `https://<host>[/<basePath>]`: the root of GitLab's pages.
+    private var webRoot: String { "https://\(host)" + basePath.map { "/" + $0 }.joined() }
+
+    /// A system note's body with the commit list GitLab writes in HTML ("added 2 commits" then
+    /// `<ul><li><sha>[...<sha>] - <title></li>…</ul>`, the titles HTML-escaped, `<code>` around a branch name) as a
+    /// Markdown list: each full sha a link to its commit (`commitURL`) showing its first 8 characters, as GitLab's page
+    /// shows it, `<code>` a code span, the rest plain text (entities decoded, Markdown punctuation escaped). Any other
+    /// HTML stays as it was, for `MarkdownHTML` to show as text; a body without such a list is returned unchanged.
+    static func systemNoteMarkdown(_ body: String, commitURL: (String) -> URL?) -> String {
+        guard let open = body.range(of: "<ul>"), let close = body.range(of: "</ul>", range: open.upperBound..<body.endIndex)
+        else { return body }
+        let list = body[open.upperBound..<close.lowerBound]
+        let items = list.components(separatedBy: "<li>").dropFirst().map { item in
+            "- " + itemMarkdown(item.components(separatedBy: "</li>")[0], commitURL: commitURL)
+        }
+        guard !items.isEmpty else { return body }
+        let rest = systemNoteMarkdown(String(body[close.upperBound...]), commitURL: commitURL)
+        return String(body[..<open.lowerBound]) + "\n\n" + items.joined(separator: "\n") + "\n\n" + rest
+    }
+
+    /// One list item: `<code>…</code>` as code spans, full shas as links, the rest plain.
+    private static func itemMarkdown(_ html: String, commitURL: (String) -> URL?) -> String {
+        var result = ""
+        var rest = Substring(html)
+        while let start = rest.range(of: "<code>") {
+            result += plainMarkdown(rest[..<start.lowerBound], commitURL: commitURL)
+            let after = rest[start.upperBound...]
+            guard let end = after.range(of: "</code>") else {
+                rest = rest[start.lowerBound...]
+                break
+            }
+            result += codeSpan(decodeEntities(String(after[..<end.lowerBound])))
+            rest = after[end.upperBound...]
+        }
+        return result + plainMarkdown(rest, commitURL: commitURL)
+    }
+
+    /// Text with its entities decoded and every ASCII punctuation mark escaped, each 40-hex word a commit link.
+    private static func plainMarkdown(_ html: Substring, commitURL: (String) -> URL?) -> String {
+        let text = decodeEntities(String(html))
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            let previous = index > text.startIndex ? text[text.index(before: index)] : " "
+            if character.isHexDigit, !(previous.isLetter || previous.isNumber),
+               let end = text.index(index, offsetBy: 40, limitedBy: text.endIndex),
+               text[index..<end].allSatisfy({ $0.isASCII && $0.isHexDigit }),
+               end == text.endIndex || !(text[end].isLetter || text[end].isNumber),
+               let url = commitURL(String(text[index..<end]).lowercased())
+            {
+                result += "[`\(text[index..<text.index(index, offsetBy: 8)])`](\(url.absoluteString))"
+                index = end
+                continue
+            }
+            if character.isASCII, character.isPunctuation || character.isSymbol {
+                result += "\\"
+            }
+            result.append(character)
+            index = text.index(after: index)
+        }
+        return result
+    }
+
+    /// `text` as one code span, fenced with one more backtick than its longest run.
+    private static func codeSpan(_ text: String) -> String {
+        var longest = 0, run = 0
+        for character in text {
+            run = character == "`" ? run + 1 : 0
+            longest = max(longest, run)
+        }
+        let fence = String(repeating: "`", count: longest + 1)
+        return fence + " " + text + " " + fence
+    }
+
+    /// The five entities GitLab's `escape_html` writes, decoded (`&amp;` last).
+    private static func decodeEntities(_ text: String) -> String {
+        text.replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"").replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&#x27;", with: "'").replacingOccurrences(of: "&amp;", with: "&")
     }
 
     private static func noteURL(_ page: URL?, _ id: Int) -> String? {

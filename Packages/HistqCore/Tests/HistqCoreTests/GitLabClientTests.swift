@@ -941,6 +941,38 @@ struct GitLabClientTests {
         #expect(ids == ["3", "4", "5", "9"])
     }
 
+    @Test("a commit-list system note: its HTML list becomes a Markdown list, each sha an 8-character commit link, <code> a code span, titles plain; the compare link resolves on the host")
+    func commitListSystemNote() async throws {
+        let body = "added 3 commits\n\n<ul><li>b4e5f17a1934f0d791b8af65d1f9c6e4159d066e...16ae9ad775e427262903c27c0499e5af353bee10 - 2 commits from branch <code>main</code></li>"
+            + "<li>b11661e081418cbdc5366e80e72ab2498fbc35f1 - Fix &lt;b&gt; *bold* [x](javascript:alert(1)) &amp; more</li></ul>\n\n"
+            + "[Compare with previous version](/group/proj/-/merge_requests/5/diffs?diff_id=1&start_sha=b11661e081418cbdc5366e80e72ab2498fbc35f1)"
+        let note = #"{"id": 900, "type": null, "body": \#(String(data: try JSONEncoder().encode(body), encoding: .utf8)!), "author": \#(Self.user(8, "u8")), "created_at": "2026-11-02T10:00:00Z", "system": true}"#
+        let discussions = "[" + Self.restDiscussion(Self.systemID, individual: true, [note]) + "]"
+        let stub = StubServer { request in
+            request.url?.path(percentEncoded: true) == Self.mrPath + "/5/discussions"
+                ? .init(body: discussions) : .init(status: 404, body: #"{"message": "404 Not Found"}"#)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let events = try await client.timelineEvents(of: .pullRequest(5), in: Self.writeRepo)
+        let html = try #require(events.first { $0.id == "note-900" }?.textHTML)
+
+        let commit = "https://git.example.com/gitlab/group/proj/-/commit/"
+        #expect(html.hasPrefix("<p>added 3 commits</p>\n<ul>"))
+        #expect(html.contains("<li><a href=\"\(commit)b4e5f17a1934f0d791b8af65d1f9c6e4159d066e\"><code>b4e5f17a</code></a>...<a href=\"\(commit)16ae9ad775e427262903c27c0499e5af353bee10\"><code>16ae9ad7</code></a> - 2 commits from branch <code>main</code></li>"))
+        #expect(html.contains("<li><a href=\"\(commit)b11661e081418cbdc5366e80e72ab2498fbc35f1\"><code>b11661e0</code></a> - Fix &lt;b&gt; *bold* [x](javascript:alert(1)) &amp; more</li>"),
+                "a title is plain text: no HTML, emphasis or link")
+        #expect(html.contains("<a href=\"https://git.example.com/group/proj/-/merge_requests/5/diffs?diff_id=1&amp;start_sha=b11661e081418cbdc5366e80e72ab2498fbc35f1\">Compare with previous version</a>"))
+        #expect(!html.contains("javascript:alert(1)\""))
+
+        let comment = #"{"id": 77, "body": "see [log.txt](/uploads/abc/log.txt)", "author": \#(Self.user(8, "u8"))}"#
+        let commentStub = StubServer { _ in .init(status: 201, body: comment) }
+        let posted = try await Self.client(commentStub, refreshes: Self.refreshed())
+            .comment(on: .pullRequest(5), in: Self.writeRepo, body: "x")
+        #expect(posted.bodyHTML == "<p>see log.txt</p>\n",
+                "a comment's root-relative attachment link is project-relative on GitLab: it stays text")
+    }
+
     // MARK: - Pages and the token provider
 
     /// The `page` query item of a request, nil on the first page (`per_page=100` holds `page=1` as text).
