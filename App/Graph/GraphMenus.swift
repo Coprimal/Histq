@@ -321,7 +321,8 @@ enum RepoMenus {
         ]
     }
 
-    static func commit(_ hash: String, _ session: RepoSession) -> [MenuEntry] {
+    /// `onBadge` (a graph badge's commit part): no author emoji items, Copy / Save as Patch in one Patch submenu.
+    static func commit(_ hash: String, _ session: RepoSession, onBadge: Bool = false) -> [MenuEntry] {
         let commit = session.log.value?.commits.first { $0.hash == hash }
         let short = String(hash.prefix(7))
         let refs = session.refs.value
@@ -396,16 +397,17 @@ enum RepoMenus {
         let patch: PatchExport = .commits(several ? selection.commits : [hash])
         let patchReason = several ? selection.reason : commit?.isMerge == true ? mergeHasNoPatch : nil
         let what = several ? " \(selection.commits.count) Commits" : ""
-        entries += [
-            .separator,
-            .action("Copy\(what) as Patch", enabled: patchReason == nil, toolTip: patchReason) {
+        let patchEntries: [MenuEntry] = [
+            .action(onBadge ? "Copy\(what)" : "Copy\(what) as Patch", enabled: patchReason == nil, toolTip: patchReason) {
                 session.copyPatch(patch)
             },
-            .action("Save\(what) as Patch…", enabled: patchReason == nil, toolTip: patchReason) {
+            .action(onBadge ? "Save\(what)…" : "Save\(what) as Patch…", enabled: patchReason == nil,
+                    toolTip: patchReason) {
                 session.savePatch(patch)
             },
         ]
-        let emoji = commit.map { authorEmoji(email: $0.authorEmail, name: $0.authorName, session) } ?? []
+        entries += [.separator] + (onBadge ? [.submenu("Patch", patchEntries)] : patchEntries)
+        let emoji = onBadge ? [] : commit.map { authorEmoji(email: $0.authorEmail, name: $0.authorName, session) } ?? []
         return [.submenu("Copy", copies)] + emoji + [.separator] + entries
     }
 
@@ -503,19 +505,22 @@ enum RepoMenus {
 
     // MARK: Refs
 
-    /// The menu of a graph badge: its ref's menu, then its commit's, without what the ref's part already has (its own
-    /// checkout and its submenu).
+    /// The menu of a graph badge: its ref's menu (grouped), then its commit's, without what the ref's part already has
+    /// (its own checkout and its submenu), and without "Interactive Rebase from Here…" when it cannot run (the ref is
+    /// off the current branch).
     static func badge(_ ref: SidebarItem, on item: GraphItem, session: RepoSession) -> [MenuEntry] {
-        let refEntries = self.ref(ref, session)
+        let refEntries = self.ref(ref, session, grouped: true)
         // Reveal in Finder ends the menu.
         let reveal: [MenuEntry] = if case .local(let name) = ref { [.separator, revealBranch(name, session)] } else { [] }
         guard case .commit(let hash) = item else { return refEntries + reveal }
         let actionTitles = Set(refEntries.compactMap { entry -> String? in
             if case .action = entry.kind { entry.title } else { nil }
         })
-        let commitEntries = commit(hash, session).filter { entry in
+        let commitEntries = commit(hash, session, onBadge: true).filter { entry in
             switch entry.kind {
-            case .action: !actionTitles.contains(entry.title)
+            case .action:
+                !actionTitles.contains(entry.title)
+                    && !(entry.title == "Interactive Rebase from Here…" && !entry.isEnabled)
             case .submenu, .lazySubmenu: entry.title != ref.menuTitle
             case .separator: true
             }
@@ -542,15 +547,16 @@ enum RepoMenus {
         }
     }
 
-    static func ref(_ item: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
+    /// `grouped` (a graph badge): a local branch's pull requests and deletes each in one submenu.
+    static func ref(_ item: SidebarItem, _ session: RepoSession, grouped: Bool = false) -> [MenuEntry] {
         switch item {
-        case .local(let name): local(name, session)
+        case .local(let name): local(name, grouped: grouped, session)
         case .remote(let name): remote(name, session)
         case .tag(let name): tag(name, session)
         }
     }
 
-    private static func local(_ name: String, _ session: RepoSession) -> [MenuEntry] {
+    private static func local(_ name: String, grouped: Bool = false, _ session: RepoSession) -> [MenuEntry] {
         let refs = session.refs.value
         let current = session.currentBranch
         let isCurrent = name == current
@@ -578,17 +584,18 @@ enum RepoMenus {
             // branch into it (e.g. a feature branch into main), then this branch into the default branch.
             .separator,
         ]
+        var pullRequests: [MenuEntry] = []
         if let current, !isCurrent {
-            entries.append(pullRequestEntry(head: .local(current), base: .local(name), session))
+            pullRequests.append(pullRequestEntry(head: .local(current), base: .local(name), session))
         }
-        entries.append(pullRequestEntry(head: .local(name), base: nil, session))
+        pullRequests.append(pullRequestEntry(head: .local(name), base: nil, session))
+        entries += grouped ? group("Create Pull Request", pullRequests, capitalized: true) : pullRequests
         if let current, !isCurrent {
             entries += [.separator] + integrate(name, ref: ref, commit: branch?.commit, into: current,
                                                 twoWay: true, session)
         }
-        entries += [
-            .separator,
-            .action("Rename \(name)…") { session.dialog = .renameBranch(name) },
+        entries += [.separator, .action("Rename \(name)…") { session.dialog = .renameBranch(name) }]
+        var deletes: [MenuEntry] = [
             .action("Delete \(name)…", enabled: !isCurrent, destructive: true) {
                 session.confirm("Delete branch \(name)?",
                                 message: "The local branch is deleted; git refuses if it has commits no other branch has.",
@@ -597,12 +604,12 @@ enum RepoMenus {
             },
         ]
         if let upstream {
-            entries.append(deleteRemote(upstream, session))
+            deletes.append(deleteRemote(upstream, session))
             // Both at the same commit: one click deletes them together.
             if upstream.commit == branch?.commit {
                 let short = localName(of: upstream)
                 let both = "\(name) and \(upstream.name)"
-                entries.append(.action("Delete \(both)…", enabled: !isCurrent, destructive: true) {
+                deletes.append(.action("Delete \(both)…", enabled: !isCurrent, destructive: true) {
                     session.confirm("Delete \(both)?",
                                     message: "The local branch is deleted, then \(short) is deleted on "
                                         + "\(upstream.remote) for everyone. The remote branch cannot be brought back.",
@@ -612,6 +619,7 @@ enum RepoMenus {
                 })
             }
         }
+        entries += grouped ? group("Delete", deletes) : deletes
         entries += visibility(ref, canHide: !isCurrent, session)
         let copies: [MenuEntry] = [.action("Branch Name") { copy(name) }] + (upstream.map { [copyLink(to: $0, session)] } ?? [])
         entries += [.separator, .submenu("Copy", copies)]
@@ -668,8 +676,8 @@ enum RepoMenus {
         return entries
     }
 
-    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current` (each merge mode), fast-forward
-    /// `current` to it (git refuses when they diverged), rebase `current` onto it (plain or interactive), compare with it.
+    /// Merge `name` (full `ref`, tip `commit`) into the checked-out branch `current` (each merge mode; Fast-forward only
+    /// fast-forwards `current` to it), rebase `current` onto it (plain or interactive), compare with it.
     /// `twoWay` (a local branch) also offers the other direction next to each: merge `current` into `name` (checked
     /// out first) and fast-forward `name` to `current` (no checkout), e.g. a branch `current` was started from. When
     /// another worktree has `name` checked out, both run inside that worktree instead.
@@ -703,12 +711,7 @@ enum RepoMenus {
             mergeSubmenu("Merge \(name) into \(current)") { mode in
                 session.run(.merge(ref, checkoutFirst: nil, mode: mode), title: "Merge \(name) into \(current)")
             },
-        ] + (twoWay ? [mergeBack] : []) + [
-            .action("Fast-forward \(current) to \(name)") {
-                session.run(.merge(ref, checkoutFirst: nil, mode: .fastForwardOnly),
-                            title: "Fast-forward \(current) to \(name)")
-            },
-        ] + (twoWay ? [fastForwardBack] : []) + [
+        ] + (twoWay ? [mergeBack, fastForwardBack] : []) + [
             .action("Rebase \(current) onto \(name)") {
                 session.rebase(onto: ref, title: "Rebase \(current) onto \(name)")
             },
@@ -719,6 +722,20 @@ enum RepoMenus {
                 session.selectCompare(base: "refs/heads/\(current)", head: ref)
             },
         ]
+    }
+
+    /// `entries` as one submenu `title`, each child's title without its leading "`title` " (the next letter
+    /// `capitalized` or not); a single entry stays as it is.
+    private static func group(_ title: String, _ entries: [MenuEntry], capitalized: Bool = false) -> [MenuEntry] {
+        guard entries.count > 1 else { return entries }
+        return [.submenu(title, entries.map { entry in
+            var entry = entry
+            if entry.title.hasPrefix(title + " ") {
+                let rest = entry.title.dropFirst(title.count + 1)
+                entry.title = capitalized ? rest.prefix(1).uppercased() + rest.dropFirst() : String(rest)
+            }
+            return entry
+        })]
     }
 
     /// A "Merge X into Y" submenu's choices: the item's title, the palette row's suffix, the mode.
