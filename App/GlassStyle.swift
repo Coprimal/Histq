@@ -65,6 +65,9 @@ enum Palette {
     /// The WIP panel's Conflicted card: its title and icon, and the tint of its fill and edge (`SectionCard.tone`). The
     /// conflict editor's gold. #F2B630
     static let conflictTone = color(srgb(0xF2B630))
+    /// A success status in text, such as an integration's "Connected to …": the diff's added green
+    /// (`diffAddedSign`). #5CC98A
+    static let success = color(srgb(0x5CC98A))
     /// A primary button's label shadow: lifts the white text off the blue so it stands out more (user, 2026-11-13).
     static let onPrimaryShadow = Color.black.opacity(0.4)
     static let switchOffFill = color(.white.withAlphaComponent(0.22))

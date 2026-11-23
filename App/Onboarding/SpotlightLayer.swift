@@ -11,6 +11,19 @@ struct SpotlightPopover: Equatable {
     var message: String
     /// SF Symbols or Lucide assets (`IconImage`), shown as chips under the text.
     var icons: [String] = []
+    /// What each icon means, as rows under the text (the graph's ref badges).
+    var legend: [SpotlightLegendRow] = []
+}
+
+/// A legend row: an icon (SF Symbol or Lucide asset) or a few characters drawn as the app draws them, and its meaning.
+struct SpotlightLegendRow: Equatable {
+    enum Mark: Equatable {
+        case icon(String)
+        case text(String)
+    }
+
+    var mark: Mark
+    var text: String
 }
 
 /// The tour's controls in a popover: where the stop is in the tour (Back, Next and Skip are the layer's own actions).
@@ -331,6 +344,7 @@ private struct SpotlightPopoverView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if !popover.legend.isEmpty { legend }
                 if !popover.icons.isEmpty {
                     HStack(spacing: 6) {
                         ForEach(popover.icons, id: \.self) { name in
@@ -348,6 +362,27 @@ private struct SpotlightPopoverView: View {
         .frame(width: SpotlightMetrics.popoverWidth)
         .fixedSize(horizontal: false, vertical: true)
         .shadow(color: Palette.cardShadow, radius: 16, y: 6)
+    }
+
+    /// One row per legend entry: the mark in a fixed column (wide enough for "↑2 ↓1"), so the texts line up.
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(popover.legend.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Group {
+                        switch row.mark {
+                        case .icon(let name): IconImage(name, size: 13)
+                        case .text(let text): Text(verbatim: text).monospacedDigit()
+                        }
+                    }
+                    .frame(width: 40, alignment: .center)
+                    Text(row.text)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.callout)
+            }
+        }
     }
 
     /// The counter with Back / Next (Skip is in the header). No key equivalents: the layer's key monitor owns the keys.

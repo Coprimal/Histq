@@ -142,6 +142,8 @@ struct SidebarView: View {
                 help: \.title,
                 fillsWidth: true,
                 systemImage: \.systemImage)
+                // In the frame of the shown tab's stop: Branches and Tags, or Pull Requests and Issues.
+                .spotlightTarget(tab == .prs ? .sidebarPRs : .sidebarRefs)
             if tab == .prs {
                 ScrollView {
                     cards

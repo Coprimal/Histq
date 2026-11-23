@@ -148,6 +148,12 @@ private struct SpotlightTargetModifier: ViewModifier {
             .onChange(of: tabIsShown) { _, shown in
                 model.spotlight.setFrame(shown ? last.frame : nil, for: target, owner: last)
             }
+            // A view whose target follows its state (the sidebar's tab row) moves its part over: its frame may not
+            // change, so no geometry report would.
+            .onChange(of: target) { old, new in
+                model.spotlight.setFrame(nil, for: old, owner: last)
+                model.spotlight.setFrame(tabIsShown ? last.frame : nil, for: new, owner: last)
+            }
             .onDisappear { model.spotlight.setFrame(nil, for: target, owner: last) }
     }
 

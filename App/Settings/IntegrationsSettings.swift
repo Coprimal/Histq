@@ -235,8 +235,12 @@ struct GitHubConnectSection: View {
                     Text(account.login)
                         .font(.body.weight(.semibold))
                 }
-                SettingsHint(account.host == "github.com" ? "Connected to github.com"
+                // SettingsHint's caption, in green: the connection is the group's success status.
+                Text(account.host == "github.com" ? "Connected to github.com"
                     : "Connected to GitHub Enterprise at \(account.host)")
+                    .font(.settingsCaption)
+                    .foregroundStyle(Palette.success)
+                    .fixedSize(horizontal: false, vertical: true)
                 tokenStatus
             }
             // Histq's OAuth App exists on github.com only. An organization that restricts OAuth Apps (a new one does by

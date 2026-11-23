@@ -66,8 +66,15 @@ final class WelcomeModel {
     private(set) var gitCheck = GitCheck.checking
     /// "Install Command Line Tools" was clicked: the card says to come back once the installer is done.
     private(set) var installStarted = false
-    var cloneURL = ""
-    /// The folder the clone goes into, as `<cloneParent>/<repoName>`.
+    var cloneURL = "" {
+        didSet {
+            // Another repository's name replaces the folder name (an edit included); the same name keeps an edit.
+            if Self.repoName(of: cloneURL) != Self.repoName(of: oldValue) { folderName = repoName }
+        }
+    }
+    /// The clone form's folder name: `repoName` until the user edits it. Cleared, the clone uses `repoName` again.
+    var folderName = ""
+    /// The folder the clone goes into, as `<cloneParent>/<effectiveFolderName>`.
     private(set) var cloneParent: URL
     private(set) var clone = CloneState.idle
     /// The clone form's "Clone submodules": after the clone, its submodules (every level) are cloned too.
@@ -117,6 +124,9 @@ final class WelcomeModel {
             cloneSource = .github(profileID: nil)
             loadRepositoriesIfNeeded()
         }
+        // QA: `-HistqWelcomeCloneURL <url>` fills the URL field, `-HistqWelcomeFolderName <name>` the folder name.
+        if let url = AppState.launchFlag("-HistqWelcomeCloneURL") { cloneURL = url }
+        if let name = AppState.launchFlag("-HistqWelcomeFolderName") { folderName = name }
         #endif
         // A connected GitHub account makes GitHub the default source (the Keychain is read off the main actor, and
         // cached); not when the user has picked a source or typed a URL meanwhile.
@@ -133,17 +143,36 @@ final class WelcomeModel {
         reposTask?.cancel()
     }
 
-    /// The folder name a clone of `cloneURL` gets: its last path component without `.git`.
-    var repoName: String {
-        var text = cloneURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// The folder name a clone of `cloneURL` gets by default: its last path component without `.git`.
+    var repoName: String { Self.repoName(of: cloneURL) }
+
+    private static func repoName(of url: String) -> String {
+        var text = url.trimmingCharacters(in: .whitespacesAndNewlines)
         while text.hasSuffix("/") { text.removeLast() }
         let last = text.split(whereSeparator: { "/:\\".contains($0) }).last.map(String.init) ?? ""
         let name = last.hasSuffix(".git") ? String(last.dropLast(4)) : last
         return name == "." || name == ".." ? "" : name
     }
 
+    /// The folder the clone gets: the folder name field, or `repoName` when the field is empty.
+    var effectiveFolderName: String {
+        let name = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? repoName : name
+    }
+
+    /// Why the folder name cannot be used, for the form; nil when it can (or is empty: `repoName` then applies).
+    var folderNameProblem: String? {
+        let name = effectiveFolderName
+        if name == "." || name == ".." { return "Choose another folder name." }
+        if name.contains("/") || name.contains(":") { return "A folder name cannot contain a slash or a colon." }
+        return nil
+    }
+
+    /// Nil without a repository name (an empty URL never clones into a typed folder name) or with an invalid name.
     var cloneDestination: URL? {
-        repoName.isEmpty ? nil : cloneParent.appending(path: repoName, directoryHint: .isDirectory)
+        let name = effectiveFolderName
+        guard !repoName.isEmpty, !name.isEmpty, folderNameProblem == nil else { return nil }
+        return cloneParent.appending(path: name, directoryHint: .isDirectory)
     }
 
     var isCloning: Bool {
@@ -845,6 +874,23 @@ struct CloneCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+            }
+            SettingsDivider()
+            LabeledContent {
+                // Cleared, the prompt shows the name the clone falls back to.
+                TextField("Folder name", text: $model.folderName, prompt: Text(verbatim: model.repoName))
+                    .textFieldStyle(.settings)
+                    .labelsHidden()
+                    .frame(maxWidth: 300)
+                    .disabled(model.isCloning)
+                    .onSubmit(model.startClone)
+            } label: {
+                Text("Folder name")
+                if let problem = model.folderNameProblem {
+                    Text(problem)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.red)
+                }
             }
             SettingsDivider()
             SettingsSwitchRow(title: "Clone submodules", hint: "Also clones the submodules it has, at every level.",

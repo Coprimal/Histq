@@ -288,7 +288,7 @@ struct OnboardingGitHubStep: View {
         let names = model.pendingClones.map(\.lastPathComponent)
         if !names.isEmpty {
             Label {
-                // The folders' names come from the repositories' URLs: plain text.
+                // The folders' names come from the repositories' URLs or the form's folder name: plain text.
                 Text(verbatim: names.count == 1 ? "\(names[0]) is cloned. It opens when you finish."
                     : "\(names.formatted(.list(type: .and))) are cloned. They open when you finish.")
                     .fixedSize(horizontal: false, vertical: true)

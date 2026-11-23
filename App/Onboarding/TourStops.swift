@@ -29,6 +29,8 @@ struct TourStop: Identifiable {
     let message: String
     /// SF Symbols or Lucide assets (`IconImage`), shown as chips under the text.
     var icons: [String] = []
+    /// What the target's icons mean, as rows under the text.
+    var legend: [SpotlightLegendRow] = []
     /// Run on the demo tab's session before the spotlight moves here, on Next, Back or a `tour:<id>` launch alike, so
     /// each stop sets the selection it needs itself.
     var prepare: (@MainActor (RepoSession) -> Void)?
@@ -36,7 +38,7 @@ struct TourStop: Identifiable {
     /// The `-HistqOnboarding tour:<id>` id.
     var id: String { target.rawValue }
 
-    var popover: SpotlightPopover { SpotlightPopover(title: title, message: message, icons: icons) }
+    var popover: SpotlightPopover { SpotlightPopover(title: title, message: message, icons: icons, legend: legend) }
 
     /// Whether the tour shows this stop when its target is at `frame` (the registry's, read after `prepare` and a
     /// layout pass). A content target needs a frame, and so does a toolbar dropdown (it has a view on every macOS, so
@@ -194,9 +196,19 @@ enum TourStops {
 
     private static let graph = TourStop(
         target: .graph, title: "Commit Graph",
-        message: "Every commit, with a colored lane for each line of work. Drag a branch's label onto another "
-            + "branch's label to merge or rebase it. Right-click a commit or a label for everything else.",
-        icons: ["lucide-git-branch"])
+        message: "Every commit, with a colored lane for each line of work. Drag a branch's label onto another to "
+            + "merge or rebase it; right-click for everything else. On the labels:",
+        // The icons the ref badges draw (`GraphCells`).
+        legend: [
+            SpotlightLegendRow(mark: .icon(SidebarMetrics.currentImage), text: "The branch checked out here"),
+            SpotlightLegendRow(mark: .icon(SidebarMetrics.localImage), text: "A local branch"),
+            SpotlightLegendRow(mark: .icon(SidebarMetrics.remoteImage),
+                               text: "A remote branch (its owner's avatar once loaded)"),
+            SpotlightLegendRow(mark: .icon(SidebarMetrics.worktreeImage), text: "Checked out in another worktree"),
+            SpotlightLegendRow(mark: .icon("tag"), text: "A tag"),
+            SpotlightLegendRow(mark: .icon("lucide-git-pull-request-arrow"), text: "An open pull request"),
+            SpotlightLegendRow(mark: .text("↑2 ↓1"), text: "Commits ahead of and behind its upstream"),
+        ])
 
     private static let detail = TourStop(
         target: .detail, title: "Commit Details",
