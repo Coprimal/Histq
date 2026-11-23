@@ -250,6 +250,7 @@ final class GraphPreviewView: NSView {
         row.date.tone = .secondary
         row.refs.badges = sample.badges
         row.graph.hasRefs = !sample.badges.isEmpty
+        row.graph.hasHeadRef = sample.badges.contains { $0.isHead }
         row.graph.node = sample.commit.isMerge
             ? .merge : .commit(initials: GraphRowDrawing.initials(of: sample.commit.authorName))
         return row

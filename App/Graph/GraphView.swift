@@ -1192,6 +1192,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // Another worktree's row has its folder's badge: its line runs on to the dashed node here too.
             cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? (worktree(synthetic) != nil)
             cell.hasGhostRef = ghost(at: row, commit: commit) != nil
+            cell.hasHeadRef = commit.flatMap { badges[$0.hash] }?.contains { $0.isHead } ?? false
             cell.isFaded = isWorktreeFaded(row: row)
             cell.isSegmentFaded = { [weak self] owner in
                 owner >= 0 && self?.isWorktreeFaded(commit: Int(owner)) == true

@@ -139,9 +139,14 @@ enum GraphNodeStyle: Equatable {
 
 @MainActor
 enum GraphRowDrawing {
+    /// The line from a row's badges to its node: full on the checked-out branch's row (or a detached HEAD's), thinner
+    /// and a little fainter on every other branch's, so the checked-out one stands out.
+    static func refsLineWidth(isHead: Bool) -> CGFloat { isHead ? 1.5 : 1 }
+    static func refsLineAlpha(isHead: Bool) -> CGFloat { isHead ? 1 : 0.7 }
+
     /// Draws `row` in `bounds` (a flipped view's bounds, the graph column's cell), clipped to it. `hasRefs` draws the
     /// line from the column's left edge (where the ref badges' line ends) to the node, at `refsAlpha` (a ghost badge's
-    /// is faded). `avatar`, when given, fills the node. `nodeAlpha` fades the row's own band, refs line and node
+    /// is faded), `refsLineWidth(isHead:)` thick. `avatar`, when given, fills the node. `nodeAlpha` fades the row's own band, refs line and node
     /// (another worktree's row), not the lanes passing by. `isSegmentFaded` tells, by `GraphSegment.owner`, the lines
     /// drawn at `Palette.graphOtherWorktreeAlpha` (another worktree's branch). `selected` draws the band brighter (the
     /// selected row).
@@ -154,7 +159,8 @@ enum GraphRowDrawing {
     /// narrowest column draws none (the collapsed column), the nodes' ring colors and the band's edge bar tell
     /// the branches apart.
     static func draw(
-        _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, refsAlpha: CGFloat = 1, nodeAlpha: CGFloat = 1,
+        _ row: GraphRow, node: GraphNodeStyle, hasRefs: Bool, hasHeadRef: Bool = false, refsAlpha: CGFloat = 1,
+        nodeAlpha: CGFloat = 1,
         isSegmentFaded: (Int32) -> Bool = { _ in false }, selected: Bool = false, avatar: NSImage?, metrics: GraphMetrics, logLanes: Int, in bounds: CGRect, context: CGContext
     ) {
         context.saveGState()
@@ -185,7 +191,7 @@ enum GraphRowDrawing {
         if hasRefs {
             let alpha = refsAlpha * nodeAlpha
             (alpha < 1 ? laneColor.withAlphaComponent(alpha) : laneColor).setStroke()
-            context.setLineWidth(1.5)
+            context.setLineWidth(refsLineWidth(isHead: hasHeadRef))
             context.move(to: CGPoint(x: bounds.minX, y: midY))
             context.addLine(to: CGPoint(x: nodeX, y: midY))
             context.strokePath()
@@ -386,6 +392,8 @@ final class GraphCellView: NSView {
     var hasRefs = false
     /// The row shows only a ghost badge (`RefBadge.isGhost`): its line to the node is faded.
     var hasGhostRef = false
+    /// The row shows the checked-out branch's badge (or a detached HEAD's): its line to the node stays full width.
+    var hasHeadRef = false
     /// Another worktree's faded row: its band, refs line and node are faded (`Palette.graphOtherWorktreeAlpha`).
     var isFaded = false
     /// The lines of another worktree's faded branch, by `GraphSegment.owner`.
@@ -401,8 +409,8 @@ final class GraphCellView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let row, let context = NSGraphicsContext.current?.cgContext else { return }
-        GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef,
-                             refsAlpha: hasRefs ? 1 : Palette.graphGhostAlpha,
+        GraphRowDrawing.draw(row, node: node, hasRefs: hasRefs || hasGhostRef, hasHeadRef: hasHeadRef,
+                             refsAlpha: hasRefs ? GraphRowDrawing.refsLineAlpha(isHead: hasHeadRef) : Palette.graphGhostAlpha,
                              nodeAlpha: isFaded ? Palette.graphOtherWorktreeAlpha : 1, isSegmentFaded: isSegmentFaded,
                              selected: (superview as? NSTableRowView)?.isSelected ?? false, avatar: avatar, metrics: metrics,
                              logLanes: logLanes, in: bounds, context: context)

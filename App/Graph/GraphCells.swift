@@ -497,8 +497,10 @@ final class RefBadgeCellView: NSView {
         let lane = Palette.graphLane(color, metrics.laneColors)
         // Not beside "+N" alone (no badge drawn): that line is the row's own.
         let onlyGhosts = !layout.badges.isEmpty && layout.badges.allSatisfy { badges[$0.index].isGhost }
-        (onlyGhosts ? lane.withAlphaComponent(Palette.graphGhostAlpha) : lane).setStroke()
-        context.setLineWidth(1.5)
+        let isHead = badges.contains { $0.isHead && !$0.isGhost }
+        lane.withAlphaComponent(onlyGhosts ? Palette.graphGhostAlpha : GraphRowDrawing.refsLineAlpha(isHead: isHead))
+            .setStroke()
+        context.setLineWidth(GraphRowDrawing.refsLineWidth(isHead: isHead))
         context.move(to: CGPoint(x: layout.lineStart, y: lineY))
         context.addLine(to: CGPoint(x: lineEnd, y: lineY))
         context.strokePath()
