@@ -51,6 +51,21 @@ struct GitHubClientTests {
         }
     }
 
+    @Test("no read comes from a URL cache: a reload right after a merge sees the merged pull request")
+    func readsNeverUseTheURLCache() async throws {
+        let stub = StubServer { _ in
+            .init(headers: ["Cache-Control": "private, max-age=60"], body: Self.pullJSON(1))
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = try #require(GitHubClient.repository(fromRemoteURL: "https://github.com/octo/hello.git"))
+
+        _ = try await client.pullRequest(1, in: repo)
+
+        #expect(stub.requests.map(\.cachePolicy) == [.reloadIgnoringLocalCacheData])
+        #expect(HostingHTTP.session.configuration.urlCache == nil)
+        #expect(HostingHTTP.session.configuration.requestCachePolicy == .reloadIgnoringLocalCacheData)
+    }
+
     @Test("the user's repositories come sorted by name from every page, with the token only in the header")
     func userRepositoriesFollowPages() async throws {
         @Sendable func repoJSON(_ id: Int, owner: String, name: String, isPrivate: Bool) -> String {

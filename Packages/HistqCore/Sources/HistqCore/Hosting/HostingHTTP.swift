@@ -3,6 +3,16 @@ import Foundation
 /// What the client and the device flow share: loading with the redirect guard, status mapping, JSON, `Link`,
 /// and the host and token checks.
 public enum HostingHTTP {
+    /// The hosting clients' default session, with no URL cache in memory or on disk: a host's `Cache-Control`
+    /// (GitHub's `max-age=60`) would otherwise answer a reload right after a write (a merge, a resolve) with the stale
+    /// body, and `URLSession.shared` keeps authenticated responses in its on-disk cache.
+    public static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
     /// `allowedPathPrefix` (a percent-encoded path such as `/gitlab/api/v4`) also refuses a same-origin redirect
     /// whose path is not under it, so a host under a relative root never sends the token elsewhere on its origin.
     /// Without it, a followed same-origin redirect gets the request's `Authorization` back on any path: pass one for
@@ -10,6 +20,9 @@ public enum HostingHTTP {
     static func load(_ request: URLRequest, session: URLSession, allowedPathPrefix: String? = nil) async throws
         -> (Data, HTTPURLResponse)
     {
+        // Also for an injected session: every read is fresh.
+        var request = request
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         let data: Data
         let response: URLResponse
         do {

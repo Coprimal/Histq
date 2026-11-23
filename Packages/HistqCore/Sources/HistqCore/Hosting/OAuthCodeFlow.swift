@@ -70,7 +70,7 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
     /// not `http://127.0.0.1:<port>/<path>`.
     public init(
         authorizeEndpoint: URL, tokenEndpoint: URL, clientID: String, clientSecret: String? = nil, redirectURI: URL,
-        scopes: [String] = [], usesPKCE: Bool = false, session: URLSession = .shared
+        scopes: [String] = [], usesPKCE: Bool = false, session: URLSession = HostingHTTP.session
     ) throws {
         for endpoint in [authorizeEndpoint, tokenEndpoint] {
             guard endpoint.scheme == "https", let host = endpoint.host(),
@@ -100,7 +100,7 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
     /// secret as HTTP Basic client authentication, redirect `bitbucketRedirectURI`. No PKCE: Atlassian's Bitbucket Cloud
     /// REST docs describe the grant without it, and do not say whether the token endpoint accepts or ignores it.
     public static func bitbucketCloud(
-        clientID: String, clientSecret: String, session: URLSession = .shared
+        clientID: String, clientSecret: String, session: URLSession = HostingHTTP.session
     ) throws -> OAuthCodeFlow {
         try OAuthCodeFlow(
             authorizeEndpoint: URL(string: "https://bitbucket.org/site/oauth2/authorize")!,

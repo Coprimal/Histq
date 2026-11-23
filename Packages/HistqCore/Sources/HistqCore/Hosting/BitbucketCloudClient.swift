@@ -31,7 +31,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     private let session: URLSession
     private let memo = Memo()
 
-    public init(session: URLSession = .shared, token: @escaping TokenProvider) {
+    public init(session: URLSession = HostingHTTP.session, token: @escaping TokenProvider) {
         self.token = token
         self.session = session
     }

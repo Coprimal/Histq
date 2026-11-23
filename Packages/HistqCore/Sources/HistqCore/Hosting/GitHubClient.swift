@@ -79,7 +79,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     private let session: URLSession
 
     /// `token` nil reads public data only. Throws `HostingError.invalidHost` or `.invalidToken`.
-    public init(host: String = "github.com", token: String?, session: URLSession = .shared) throws {
+    public init(host: String = "github.com", token: String?, session: URLSession = HostingHTTP.session) throws {
         guard let host = HostingHTTP.validatedHost(host), let apiBase = Self.apiBase(forHost: host) else {
             throw HostingError.invalidHost(host)
         }

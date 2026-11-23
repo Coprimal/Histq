@@ -108,7 +108,7 @@ public struct DeviceFlow: Sendable {
     /// root (ignored for GitHub). Throws `HostingError.invalidHost` or `DeviceFlowError.missingClientID`.
     public init(
         kind: HostingKind = .github, host: String = "github.com", basePath: String? = nil, clientID: String,
-        scopes: [String]? = nil, session: URLSession = .shared,
+        scopes: [String]? = nil, session: URLSession = HostingHTTP.session,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) throws {
         let segments = kind == .gitlab ? GitLabClient.basePathSegments(basePath) : []

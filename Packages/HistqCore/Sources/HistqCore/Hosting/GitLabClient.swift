@@ -38,7 +38,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// `basePath` is the relative URL root (`gitlab` for `https://example.com/gitlab`), nil or empty at the root.
     /// Throws `HostingError.invalidHost` for a host or base path that is not plain.
     public init(
-        host: String = "gitlab.com", basePath: String? = nil, session: URLSession = .shared,
+        host: String = "gitlab.com", basePath: String? = nil, session: URLSession = HostingHTTP.session,
         token: @escaping TokenProvider
     ) throws {
         guard let validHost = HostingHTTP.validatedHost(host), let segments = Self.basePathSegments(basePath),
