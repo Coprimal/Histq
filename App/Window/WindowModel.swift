@@ -2030,8 +2030,8 @@ final class WindowModel {
 
     /// Starts the onboarding over this window at `step` (on the tour, at the stop `stop` names), its window actions
     /// wired to this model: the tour's demo tab (`openDemoTab`, `closeDemoTab`), its spotlight and stops, the repos
-    /// cloned meanwhile (`openTab`), their toasts and its end (`endOnboarding`). What was open over the page closes
-    /// first. Nothing when it runs already.
+    /// cloned meanwhile (`openTab`), their toasts, the Skip onboarding confirmation (`presentModal`) and its end
+    /// (`endOnboarding`). What was open over the page closes first. Nothing when it runs already.
     func startOnboarding(at step: OnboardingModel.Step = .welcome, stop: String? = nil) {
         guard onboarding == nil else { return }
         palette = nil
@@ -2043,6 +2043,13 @@ final class WindowModel {
             closeDemo: { [weak self] in self?.closeDemoTab() },
             openRepo: { [weak self] url in self?.openTab(url) },
             end: { [weak self] in self?.endOnboarding() },
+            // The window's confirmation, drawn by `ModalHost` above the card (which it disables meanwhile).
+            confirmSkipAll: { [weak self] skip in
+                self?.presentModal(.confirmation(ModalConfirmation(
+                    title: "Skip the onboarding?",
+                    message: "You can run it again from Help › Show Onboarding… or Settings › General.",
+                    button: "Skip", isDestructive: false, perform: skip)))
+            },
             postToast: { [weak self] toast in self?.showToast(toast) },
             spotlight: spotlight,
             stops: { [weak self] in self.map { TourStops.stops(TourContext.current($0)) } ?? [] })

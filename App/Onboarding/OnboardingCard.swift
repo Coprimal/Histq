@@ -1,5 +1,5 @@
 // The onboarding's card over the window: a scrim, a glass card sized to its step (title, progress dots, the step's body,
-// which scrolls when the window is short) and a footer (Back, Skip onboarding, Skip this step, Next). Return = Next,
+// which scrolls when the window is short) and a footer (Skip onboarding, Skip this step, Back, Next). Return = Next,
 // ← / → = Back / Next and Esc = Skip this step, when no text field has the focus. Welcome, the tour's demo state and
 // finish have their bodies here, the setup steps in `OnboardingSetupSteps`, the appearance steps in
 // `OnboardingAppearanceSteps`.
@@ -49,8 +49,7 @@ struct OnboardingCard: View {
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights.body = $0 }
                 .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous))
-                .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius))
+                .modifier(StepBodyCard(isShown: step != .welcome))
                     .padding(.horizontal, ModalMetrics.bodyInset)
                     // A new body per step, switched in the click's frame and faded in.
                     .id(step)
@@ -105,20 +104,22 @@ struct OnboardingCard: View {
     }
 
     private func footer(_ step: OnboardingModel.Step) -> some View {
+        // Skips on the left, Back and Next together on the right. Welcome and finish carry their own buttons in the
+        // body (Start and Skip onboarding; Open Settings / Done), so welcome's footer stays empty.
         HStack(spacing: ModalFooterMetrics.spacing) {
+            if step != .welcome, step != .finish {
+                Button("Skip onboarding") { model.requestSkipAll() }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .disabled(model.tourStarting)
+                Button("Skip this step") { model.skipStep() }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+            }
+            Spacer(minLength: 0)
             if model.index > 0 {
                 Button("Back") { model.back() }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
-            Spacer(minLength: 0)
-            if step != .finish {
-                Button("Skip onboarding") { model.skipAll() }
-                    .buttonStyle(RowTextButtonStyle(formRow: true))
-            }
-            // Welcome and finish carry their own buttons in the body (Start; Open Settings / Done).
             if step != .welcome, step != .finish {
-                Button("Skip this step") { model.skipStep() }
-                    .buttonStyle(RowTextButtonStyle(formRow: true))
                 Button("Next") { model.next() }
                     .buttonStyle(Self.primary)
             }
@@ -161,10 +162,14 @@ struct OnboardingCard: View {
                 .multilineTextAlignment(.center)
             Text("Set it up and take a short tour. Takes about 3 minutes.")
                 .foregroundStyle(.secondary)
-            Button("Start") { model.next() }
-                .buttonStyle(Self.primary)
-                .environment(\.isModalFooter, true)
-                .padding(.top, 4)
+            HStack(spacing: ModalFooterMetrics.spacing) {
+                Button("Skip onboarding") { model.requestSkipAll() }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                Button("Start") { model.next() }
+                    .buttonStyle(Self.primary)
+            }
+            .environment(\.isModalFooter, true)
+            .padding(.top, 4)
         }
         .padding(SettingsMetrics.cardPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -266,6 +271,21 @@ struct OnboardingCard: View {
         DispatchQueue.main.async {
             guard !isCovered, !(NSApp.keyWindow?.firstResponder is NSText) else { return }
             focused = true
+        }
+    }
+}
+
+/// The step body's rounded glass card; welcome sits bare on the panel, its logo and text need no frame.
+private struct StepBodyCard: ViewModifier {
+    let isShown: Bool
+
+    func body(content: Content) -> some View {
+        if isShown {
+            content
+                .clipShape(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous))
+                .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius))
+        } else {
+            content
         }
     }
 }

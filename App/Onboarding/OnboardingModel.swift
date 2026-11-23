@@ -45,6 +45,15 @@ final class OnboardingModel {
     var currentStop: TourStop? { spotlightRunning && tourStops.indices.contains(stopIndex) ? tourStops[stopIndex] : nil }
     /// Whether the card shows: on every step except the tour while its spotlight runs.
     var showsCard: Bool { !(current == .tour && spotlightRunning) }
+    /// Whether the tour is on its way: its demo is made or opens and the spotlight has not started yet. Skip onboarding
+    /// waits meanwhile, as the demo tab's opening would close its confirmation and the spotlight would cover it.
+    var tourStarting: Bool {
+        guard current == .tour, !spotlightRunning else { return false }
+        switch demo {
+        case .creating, .ready: return true
+        case .idle, .failed: return false
+        }
+    }
 
     /// Set when no usable git was found (by the git step's check, or when the tour could not resolve git).
     var gitMissing = false
@@ -74,6 +83,8 @@ final class OnboardingModel {
     @ObservationIgnored private let makeStops: () -> [TourStop]
     @ObservationIgnored private let openRepo: (URL) -> Void
     @ObservationIgnored private let end: () -> Void
+    /// Asks before Skip onboarding with the window's modal; runs its argument only when confirmed.
+    @ObservationIgnored private let confirmSkipAll: (@escaping @MainActor () -> Void) -> Void
     @ObservationIgnored private var demoTask: Task<Void, Never>?
     /// The demo tab's session, while it is open.
     @ObservationIgnored private weak var demoSession: RepoSession?
@@ -87,6 +98,7 @@ final class OnboardingModel {
 
     init(openDemo: @escaping (URL) -> RepoSession? = { _ in nil }, closeDemo: @escaping () -> Void = {},
          openRepo: @escaping (URL) -> Void = { _ in }, end: @escaping () -> Void = {},
+         confirmSkipAll: @escaping (@escaping @MainActor () -> Void) -> Void = { _ in },
          postToast: @escaping (OperationToast) -> Void = { _ in },
          spotlight: SpotlightRegistry? = nil, stops: @escaping () -> [TourStop] = { [] }) {
         self.openDemo = openDemo
@@ -95,6 +107,7 @@ final class OnboardingModel {
         self.makeStops = stops
         self.openRepo = openRepo
         self.end = end
+        self.confirmSkipAll = confirmSkipAll
         // A clone made in the GitHub step waits for the end of the onboarding, so the tour's demo never replaces it. It
         // is in the recent repos at once, so it stays easy to find if the window closes before then.
         welcome.open = { [weak self] url in
@@ -131,8 +144,14 @@ final class OnboardingModel {
         advance()
     }
 
-    /// Ends the onboarding from any step.
-    func skipAll() {
+    /// Skip onboarding: asks first, and ends the onboarding from any step only once confirmed.
+    func requestSkipAll() {
+        guard !tourStarting else { return }
+        confirmSkipAll { [weak self] in self?.skipAll() }
+    }
+
+    /// Ends the onboarding from any step; only through `requestSkipAll`'s confirmation.
+    private func skipAll() {
         close()
     }
 

@@ -1,15 +1,16 @@
-// The onboarding appearance steps' preview boxes. `GraphPreview`: five sample commits (a merge, three lanes, one row of
-// another worktree) laid out by `GraphLayout` and drawn with the graph's own cells, for a row height, lane colors,
-// avatar mode and fade setting given as parameters, never the stored ones; avatars are local drawings or bundled
-// samples, never a network load. `MiniWindowPreview`: a window sketch for a tab position and a layout preset.
+// The onboarding appearance steps' preview boxes. `GraphPreview`: a set of sample commits (a few rows, or more lanes
+// for the lane colors, or more worktrees for the fade) laid out by `GraphLayout` and drawn with the graph's own cells,
+// for a row height, lane colors, avatar mode and fade setting given as parameters, never the stored ones; avatars are
+// local drawings or bundled samples, never a network load. `MiniWindowPreview`: a window sketch for a tab position
+// and a layout preset.
 import AppKit
 import HistqCore
 import SwiftUI
 
 // MARK: - Graph sample
 
-/// A few rows of a sample graph, drawn as the commit graph draws them. Inert: no clicks, tooltips or accessibility
-/// elements of its own (the step's tile around it is the control).
+/// A few rows of a sample graph, drawn as the commit graph draws them: the step's large preview of the current picks.
+/// Inert: no clicks, tooltips or accessibility elements of its own (the step's tiles under it are the controls).
 struct GraphPreview: NSViewRepresentable {
     /// `PrefKey.rowDensity`: "compact", "regular" or "comfortable".
     var density: String
@@ -17,22 +18,20 @@ struct GraphPreview: NSViewRepresentable {
     var avatarMode: AvatarStore.Mode
     /// `PrefKey.graphFadeOtherWorktrees`: the row of another worktree and its line fade.
     var fadeOtherWorktrees: Bool
-
-    /// The privacy notice of real avatars, in Settings › Appearance › Avatars' words: the avatars step's caption.
-    static let realAvatarsNotice = "Real avatars send each author's email hash to gravatar.com and GitHub logins to "
-        + "GitHub to download their pictures. Generated avatars stand in while they load."
+    /// The sample commits: the basic set unless the step needs more lanes or worktrees to show its setting.
+    var samples: GraphPreviewView.SampleSet = .basic
 
     func makeNSView(context: Context) -> GraphPreviewView { GraphPreviewView() }
 
     func updateNSView(_ view: GraphPreviewView, context: Context) {
-        view.configure(metrics: GraphMetrics(density: density, laneColors: laneColors), avatarMode: avatarMode,
-                       fadeOtherWorktrees: fadeOtherWorktrees)
+        view.configure(samples: samples, metrics: GraphMetrics(density: density, laneColors: laneColors),
+                       avatarMode: avatarMode, fadeOtherWorktrees: fadeOtherWorktrees)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: GraphPreviewView, context: Context) -> CGSize? {
         let metrics = GraphMetrics(density: density, laneColors: laneColors)
         return CGSize(width: proposal.width ?? GraphPreviewView.idealWidth,
-                      height: GraphPreviewView.height(rowHeight: metrics.rowHeight))
+                      height: GraphPreviewView.height(rowHeight: metrics.rowHeight, samples: samples))
     }
 }
 
@@ -40,6 +39,16 @@ struct GraphPreview: NSViewRepresentable {
 /// opaque card color with the cards' edge. Narrow, it drops the date, then the author column, then the branch column
 /// once `main` no longer fits whole (a lone check would read as a selected tile); its width goes to the graph.
 final class GraphPreviewView: NSView {
+    /// The sample graphs a step can show.
+    enum SampleSet {
+        /// Five commits: a merge, three lanes, one row of another worktree (avatars, row height).
+        case basic
+        /// Five branches open side by side, so many lane colors show at once.
+        case lanes
+        /// Three branches checked out in other worktrees beside `main`'s own commits, so their fading shows.
+        case worktrees
+    }
+
     /// A sample commit and what the graph would show beside it.
     private struct Sample {
         let commit: Commit
@@ -63,36 +72,82 @@ final class GraphPreviewView: NSView {
     /// Above the first row and under the last.
     private static let padding: CGFloat = 6
 
-    static func height(rowHeight: CGFloat) -> CGFloat { CGFloat(samples.count) * rowHeight + 2 * padding }
+    static func height(rowHeight: CGFloat, samples: SampleSet) -> CGFloat {
+        CGFloat(Self.samples(samples).count) * rowHeight + 2 * padding
+    }
 
     /// Reserved demo identities (`.invalid` never resolves), so no real person shows up or is looked up.
     private static let ada = ("Ada Lovelace", "ada@example.invalid")
     private static let grace = ("Grace Hopper", "grace@example.invalid")
     private static let alan = ("Alan Turing", "alan@example.invalid")
 
+    private static func samples(_ set: SampleSet) -> [Sample] {
+        switch set {
+        case .basic: basicSamples
+        case .lanes: laneSamples
+        case .worktrees: worktreeSamples
+        }
+    }
+
     /// Newest first: `main`'s merge of a typo fix, `feature/search` checked out in another worktree (a tip of its own,
     /// so three lanes), the fix, and the two commits they branch from.
-    private static let samples: [Sample] = {
-        func commit(_ hash: String, _ parents: [String], _ author: (String, String), _ minutesAgo: Int,
-                    _ subject: String) -> Commit
-        {
-            let date = reference.addingTimeInterval(TimeInterval(-60 * minutesAgo))
-            return Commit(hash: hash, parents: parents, authorName: author.0, authorEmail: author.1, authorDate: date,
-                          committerDate: date, subject: subject, body: "")
-        }
-        return [
-            Sample(commit: commit("a5", ["c3", "t4"], ada, 20, "Merge branch 'fix/typos'"),
-                   badges: [RefBadge(kind: .branch(isLocal: true, isRemote: true, isHead: true), name: "main",
-                                     remote: "origin")]),
-            Sample(commit: commit("f4", ["c3"], grace, 45, "Add the search field"),
-                   badges: [RefBadge(kind: .branch(isLocal: true, isRemote: false, isHead: false),
-                                     name: "feature/search", isOtherWorktree: true)],
-                   isOtherWorktree: true),
-            Sample(commit: commit("t4", ["c3"], alan, 90, "Fix typos in README"), badges: []),
-            Sample(commit: commit("c3", ["r1"], ada, 26 * 60, "Show branches in the sidebar"), badges: []),
-            Sample(commit: commit("r1", [], grace, 50 * 60, "Initial commit"), badges: []),
-        ]
-    }()
+    private static let basicSamples: [Sample] = [
+        Sample(commit: commit("a5", ["c3", "t4"], ada, 20, "Merge branch 'fix/typos'"), badges: [mainBadge]),
+        Sample(commit: commit("f4", ["c3"], grace, 45, "Add the search field"),
+               badges: [branch("feature/search", isOtherWorktree: true)], isOtherWorktree: true),
+        Sample(commit: commit("t4", ["c3"], alan, 90, "Fix typos in README"), badges: []),
+        Sample(commit: commit("c3", ["r1"], ada, 26 * 60, "Show branches in the sidebar"), badges: []),
+        Sample(commit: commit("r1", [], grace, 50 * 60, "Initial commit"), badges: []),
+    ]
+
+    /// The basic commits and three more, no worktree (a faded row would dull its colors): `main`'s merge of
+    /// `fix/typos`, with `feature/search`, `release/1.0` and `feature/login` open beside it, five lanes at once.
+    private static let laneSamples: [Sample] = [
+        Sample(commit: commit("a5", ["c3", "t4"], ada, 20, "Merge branch 'fix/typos'"), badges: [mainBadge]),
+        Sample(commit: commit("f4", ["c3"], grace, 45, "Add the search field"), badges: [branch("feature/search")]),
+        Sample(commit: commit("v6", ["c3"], ada, 60, "Bump the version to 1.0"),
+               badges: [branch("release/1.0", isRemote: true)]),
+        Sample(commit: commit("t4", ["c3"], alan, 90, "Fix typos in README"), badges: [branch("fix/typos")]),
+        Sample(commit: commit("l5", ["l2"], alan, 3 * 60, "Add the sign-in form"), badges: [branch("feature/login")]),
+        Sample(commit: commit("c3", ["r1"], ada, 26 * 60, "Show branches in the sidebar"), badges: []),
+        Sample(commit: commit("l2", ["r1"], grace, 36 * 60, "Sketch the sign-in screen"), badges: []),
+        Sample(commit: commit("r1", [], grace, 50 * 60, "Initial commit"), badges: []),
+    ]
+
+    /// `main`'s own commits, and two each of `feature/search`, `feature/login` and `release/1.0`, checked out in other
+    /// worktrees: only the commits no branch of this tab reaches are the other worktrees' (the fork points stay lit).
+    private static let worktreeSamples: [Sample] = [
+        Sample(commit: commit("a5", ["c3"], ada, 5, "Show the commit count"), badges: [mainBadge]),
+        Sample(commit: commit("s5", ["f4"], grace, 15, "Highlight the matches"),
+               badges: [branch("feature/search", isOtherWorktree: true)], isOtherWorktree: true),
+        Sample(commit: commit("g6", ["g3"], alan, 35, "Remember the last account"),
+               badges: [branch("feature/login", isOtherWorktree: true)], isOtherWorktree: true),
+        Sample(commit: commit("f4", ["c3"], grace, 45, "Add the search field"), badges: [], isOtherWorktree: true),
+        Sample(commit: commit("v5", ["v2"], ada, 70, "Bump the version to 1.0"),
+               badges: [branch("release/1.0", isOtherWorktree: true)], isOtherWorktree: true),
+        Sample(commit: commit("g3", ["c3"], alan, 2 * 60, "Add the sign-in form"), badges: [], isOtherWorktree: true),
+        Sample(commit: commit("c3", ["r1"], ada, 26 * 60, "Show branches in the sidebar"), badges: []),
+        Sample(commit: commit("v2", ["r1"], grace, 30 * 60, "Write the release notes"), badges: [],
+               isOtherWorktree: true),
+        Sample(commit: commit("r1", [], grace, 50 * 60, "Initial commit"), badges: []),
+    ]
+
+    /// The checked-out branch, local and on `origin`.
+    private static let mainBadge = RefBadge(kind: .branch(isLocal: true, isRemote: true, isHead: true), name: "main",
+                                            remote: "origin")
+
+    private static func branch(_ name: String, isRemote: Bool = false, isOtherWorktree: Bool = false) -> RefBadge {
+        RefBadge(kind: .branch(isLocal: true, isRemote: isRemote, isHead: false), name: name,
+                 remote: isRemote ? "origin" : nil, isOtherWorktree: isOtherWorktree)
+    }
+
+    private static func commit(_ hash: String, _ parents: [String], _ author: (String, String), _ minutesAgo: Int,
+                               _ subject: String) -> Commit
+    {
+        let date = reference.addingTimeInterval(TimeInterval(-60 * minutesAgo))
+        return Commit(hash: hash, parents: parents, authorName: author.0, authorEmail: author.1, authorDate: date,
+                      committerDate: date, subject: subject, body: "")
+    }
 
     /// A fixed moment, so the dates never change between two looks.
     nonisolated private static let reference = Calendar.current.date(
@@ -106,6 +161,9 @@ final class GraphPreviewView: NSView {
     }()
 
     private var metrics = GraphMetrics(density: "regular")
+    /// The set `samples` and `cells` show; nil until the first `configure`.
+    private var sampleSet: SampleSet?
+    private var samples: [Sample] = []
     private var cells: [RowCells] = []
     private var rows: [GraphRow] = []
     private var logLanes = 1
@@ -124,46 +182,41 @@ final class GraphPreviewView: NSView {
         layer?.borderWidth = 1
         layer?.borderColor = NSColor(Palette.sheetCardBorder).cgColor
         setAccessibilityElement(false)
-        cells = Self.samples.map { sample in
-            let row = RowCells()
-            for cell in row.all { addSubview(cell) }
-            row.message.text = sample.commit.subject
-            row.message.tone = .primary
-            row.author.text = sample.commit.authorName
-            row.author.tone = .secondary
-            row.date.text = Self.dateFormatter.string(from: sample.commit.authorDate)
-            row.date.tone = .secondary
-            row.refs.badges = sample.badges
-            row.graph.hasRefs = !sample.badges.isEmpty
-            row.graph.node = sample.commit.isMerge
-                ? .merge : .commit(initials: GraphRowDrawing.initials(of: sample.commit.authorName))
-            return row
-        }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// Clicks go to the step's tile around the preview.
+    /// Inert: clicks pass through to the step under the preview.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     /// The sample's cells are not the user's commits: nothing for VoiceOver to read here.
     override func accessibilityChildren() -> [Any]? { [] }
 
-    /// Lays the samples out again when the coloring changes, then sets every cell from the parameters.
-    func configure(metrics: GraphMetrics, avatarMode: AvatarStore.Mode, fadeOtherWorktrees: Bool) {
+    /// Makes the rows' cells when the sample set changes, lays the samples out again when it or the coloring changes,
+    /// then sets every cell from the parameters.
+    func configure(samples set: SampleSet, metrics: GraphMetrics, avatarMode: AvatarStore.Mode,
+                   fadeOtherWorktrees: Bool)
+    {
         self.metrics = metrics
+        if set != sampleSet {
+            sampleSet = set
+            samples = Self.samples(set)
+            for row in cells { for cell in row.all { cell.removeFromSuperview() } }
+            cells = samples.map(makeCells)
+            self.coloring = nil
+        }
         let coloring = metrics.laneColors.coloring
         if coloring != self.coloring {
             var layout = GraphLayout(coloring: coloring)
-            rows = layout.append(Self.samples.map(\.commit))
+            rows = layout.append(samples.map(\.commit))
             logLanes = rows.map(\.width).max() ?? 1
             self.coloring = coloring
         }
         // A commit's lines to its parents belong to it, by its index among the samples.
-        let fadedOwners = Set(Self.samples.indices.filter { fadeOtherWorktrees && Self.samples[$0].isOtherWorktree }
+        let fadedOwners = Set(samples.indices.filter { fadeOtherWorktrees && samples[$0].isOtherWorktree }
             .map(Int32.init))
-        for (index, sample) in Self.samples.enumerated() where index < rows.count {
+        for (index, sample) in samples.enumerated() where index < rows.count {
             let row = cells[index]
             let isFaded = fadedOwners.contains(Int32(index))
             row.refs.color = rows[index].color
@@ -185,8 +238,26 @@ final class GraphPreviewView: NSView {
         needsLayout = true
     }
 
+    /// One sample's cells, added to the view.
+    private func makeCells(_ sample: Sample) -> RowCells {
+        let row = RowCells()
+        for cell in row.all { addSubview(cell) }
+        row.message.text = sample.commit.subject
+        row.message.tone = .primary
+        row.author.text = sample.commit.authorName
+        row.author.tone = .secondary
+        row.date.text = Self.dateFormatter.string(from: sample.commit.authorDate)
+        row.date.tone = .secondary
+        row.refs.badges = sample.badges
+        row.graph.hasRefs = !sample.badges.isEmpty
+        row.graph.node = sample.commit.isMerge
+            ? .merge : .commit(initials: GraphRowDrawing.initials(of: sample.commit.authorName))
+        return row
+    }
+
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: Self.height(rowHeight: metrics.rowHeight))
+        NSSize(width: NSView.noIntrinsicMetric,
+               height: Self.height(rowHeight: metrics.rowHeight, samples: sampleSet ?? .basic))
     }
 
     override func layout() {
@@ -294,7 +365,8 @@ struct MiniWindowPreview: View {
     var tabPosition: TabPosition
     var layout: LayoutPreset
 
-    private static let size = CGSize(width: 320, height: 200)
+    /// Wide: at the step's preview height it fills the onboarding card's width (the graph panel takes the extra).
+    private static let size = CGSize(width: 448, height: 200)
     private static let gap: CGFloat = 4
 
     var body: some View {

@@ -13,13 +13,11 @@ struct SpotlightPopover: Equatable {
     var icons: [String] = []
 }
 
-/// The tour's controls in a popover: where the stop is in the tour, and leaving the whole onboarding (Back, Next and
-/// Skip tour are the layer's own actions).
+/// The tour's controls in a popover: where the stop is in the tour (Back, Next and Skip are the layer's own actions).
 struct SpotlightTourControls {
     /// The stop's position, from 1.
     var position: Int
     var count: Int
-    var onSkipAll: () -> Void
 }
 
 /// The spotlight while `registry.activeTarget` is set: the onboarding's tour stop with its controls, else (DEBUG
@@ -35,8 +33,7 @@ struct SpotlightOverlay: View {
                 SpotlightLayer(
                     registry: registry, target: target, popover: stop.popover,
                     tour: SpotlightTourControls(position: onboarding.stopIndex + 1,
-                                                count: onboarding.tourStops.count,
-                                                onSkipAll: { onboarding.skipAll() }),
+                                                count: onboarding.tourStops.count),
                     onBack: { onboarding.previousStop() }, onNext: { onboarding.nextStop() },
                     onSkip: { onboarding.skipTour() })
             } else {
@@ -319,9 +316,17 @@ private struct SpotlightPopoverView: View {
     var body: some View {
         PanelContainer(cornerRadius: SpotlightMetrics.popoverRadius) {
             VStack(alignment: .leading, spacing: 8) {
-                // Plain text: the copy is the app's own.
-                Text(popover.title)
-                    .font(.headline)
+                // Skip leaves the tour; only the tour's popover has it (a sample ends with Return or Esc).
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    // Plain text: the copy is the app's own.
+                    Text(popover.title)
+                        .font(.headline)
+                    Spacer(minLength: 0)
+                    if tour != nil {
+                        Button("Skip", action: onSkip)
+                            .buttonStyle(RowTextButtonStyle())
+                    }
+                }
                 Text(popover.message)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -345,27 +350,18 @@ private struct SpotlightPopoverView: View {
         .shadow(color: Palette.cardShadow, radius: 16, y: 6)
     }
 
-    /// The counter with Back / Next, then Skip tour and Skip onboarding. No key equivalents: the layer's key monitor
-    /// owns the keys.
+    /// The counter with Back / Next (Skip is in the header). No key equivalents: the layer's key monitor owns the keys.
     private func controls(_ tour: SpotlightTourControls) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text(verbatim: "\(tour.position) / \(tour.count)")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Stop \(tour.position) of \(tour.count)")
-                Spacer(minLength: 0)
-                Button("Back", action: onBack)
-                    .buttonStyle(RowTextButtonStyle(formRow: true))
-                Button("Next", action: onNext)
-                    .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
-            }
-            HStack(spacing: 6) {
-                Button("Skip tour", action: onSkip)
-                Spacer(minLength: 0)
-                Button("Skip onboarding", action: tour.onSkipAll)
-            }
-            .buttonStyle(RowTextButtonStyle())
+        HStack(spacing: 6) {
+            Text(verbatim: "\(tour.position) / \(tour.count)")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Stop \(tour.position) of \(tour.count)")
+            Spacer(minLength: 0)
+            Button("Back", action: onBack)
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+            Button("Next", action: onNext)
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
         }
         .padding(.top, 4)
     }
