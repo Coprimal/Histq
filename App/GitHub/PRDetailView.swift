@@ -555,24 +555,12 @@ final class PullRequestDetailModel {
                         }
                         if Self.closesAfterLaunchAction { close() }
                     }
-                    if let name = Self.threadLaunchActionName {
+                    // A new inline comment needs the files, which come after the Conversation: it waits for them
+                    // (the `.files` part below).
+                    if let name = Self.threadLaunchActionName,
+                       !name.hasPrefix("new-inline") || detail.files.value != nil {
                         Self.threadLaunchActionName = nil
-                        // A new inline comment is Files changed's: it waits for that tab, not for the Conversation.
-                        let gate: @MainActor (@escaping @MainActor () -> Void) -> Void = name.hasPrefix("new-inline")
-                            ? PRFilesLaunchGate.run : PRLaunchActionGate.run
-                        if let action = Self.threadLaunchAction(name, in: detail) {
-                            if GitHubHTMLProbe.slotsEnabled {
-                                // Like `launchAction`: after the slot probe's passes at both widths.
-                                Task { [weak self] in
-                                    try? await Task.sleep(for: .seconds(6))
-                                    self?.perform(action, on: number, github: github)
-                                }
-                            } else {
-                                gate { [weak self] in self?.perform(action, on: number, github: github) }
-                            }
-                        } else {
-                            gate { [weak self] in self?.openLaunchStep(name, in: detail) }
-                        }
+                        runThreadLaunch(name, in: detail, number: number, github: github)
                     }
                     #endif
                     // A host that never says whether a branch merges (Bitbucket) is not asked again.
@@ -608,6 +596,13 @@ final class PullRequestDetailModel {
                             #endif
                         }
                         state = .loaded(shown)
+                        #if DEBUG
+                        if case .files = part, shown.files.value != nil, let name = Self.threadLaunchActionName,
+                           name.hasPrefix("new-inline") {
+                            Self.threadLaunchActionName = nil
+                            runThreadLaunch(name, in: shown, number: number, github: github)
+                        }
+                        #endif
                     }
                 case .failure(let error):
                     group.cancelAll()
@@ -622,6 +617,28 @@ final class PullRequestDetailModel {
             }
         }
     }
+
+    #if DEBUG
+    /// Runs the DEBUG thread action `name` (`threadLaunchActionName`) on `detail`, or opens its step, through its gate.
+    private func runThreadLaunch(_ name: String, in detail: PullRequestDetail, number: Int, github: HostingStore) {
+        // A new inline comment is Files changed's: it waits for that tab, not for the Conversation.
+        let gate: @MainActor (@escaping @MainActor () -> Void) -> Void = name.hasPrefix("new-inline")
+            ? PRFilesLaunchGate.run : PRLaunchActionGate.run
+        if let action = Self.threadLaunchAction(name, in: detail) {
+            if GitHubHTMLProbe.slotsEnabled {
+                // Like `launchAction`: after the slot probe's passes at both widths.
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(6))
+                    self?.perform(action, on: number, github: github)
+                }
+            } else {
+                gate { [weak self] in self?.perform(action, on: number, github: github) }
+            }
+        } else {
+            gate { [weak self] in self?.openLaunchStep(name, in: detail) }
+        }
+    }
+    #endif
 
     /// Keeps `detail` as the newest of `cache`.
     private func remember(_ detail: PullRequestDetail, of repository: HostedRepository) {
@@ -796,6 +813,8 @@ final class PullRequestDetailModel {
                 } else {
                     let reference = github.kind.reference(.pullRequest(number))
                     github.actionNotice = "\(action.failureTitle(of: reference)): \(message)"
+                    // Its kept detail may hold the optimistic change the failure could not put back.
+                    cache.removeAll { $0.detail.pull.number == number }
                 }
                 // The head moved since the user reviewed it: show the new one, so they review it before merging.
                 if case HostingError.headChanged = error {
@@ -1134,8 +1153,7 @@ extension PullRequestDetailModel {
 
 #if DEBUG
 /// DEBUG `-HistqPRAction new-inline|new-inline-post` with `-HistqPRTab files`: the action waits until Files changed
-/// shows and its table loaded, as a click there does; on another tab it runs once the detail loaded (the files come
-/// with it).
+/// shows its loaded files and its table, as a click there does; on another tab it runs once the files loaded.
 @MainActor
 enum PRFilesLaunchGate {
     private static let waitsForFiles = AppState.launchFlag("-HistqPRTab") == "files"
@@ -1490,9 +1508,15 @@ private struct PRContent: View {
                 .onAppear {
                     UITiming.content("pr \(number) files \(Self.count(detail.files))")
                     #if DEBUG
-                    PRFilesLaunchGate.filesDidShow()
+                    if detail.files.value != nil { PRFilesLaunchGate.filesDidShow() }
                     #endif
                 }
+                #if DEBUG
+                // The tab shows while its files still load (`PRPartLoading`): the gate opens once they are in.
+                .onChange(of: detail.files.value != nil) { _, loaded in
+                    if loaded { PRFilesLaunchGate.filesDidShow() }
+                }
+                #endif
         case .checks:
             PRChecksTab(checks: detail.checks, hostName: session.github.kind.name)
                 .onAppear { UITiming.content("pr \(number) checks \(Self.count(detail.checks))") }

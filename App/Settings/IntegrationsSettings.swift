@@ -128,7 +128,11 @@ struct IntegrationsSettings: View {
     var body: some View {
         Group {
             if embedded != nil {
-                if case .loaded(let store) = library.state { loaded(store) }
+                // One view, as `SettingsPageGate` gives: `onDisappear` below must not run for each of its groups (the
+                // device code's goes when the approval comes, while the token is checked and saved).
+                VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
+                    if case .loaded(let store) = library.state { loaded(store) }
+                }
             } else {
                 SettingsPageGate(section: .integrations, isLoaded: !isLoading) {
                     switch library.state {
