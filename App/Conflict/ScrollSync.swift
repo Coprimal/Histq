@@ -64,6 +64,14 @@ final class ScrollSync: NSObject {
     /// Scrolls so the document's `y` is at the top, within the document's bounds; the horizontal offset stays.
     private func scrollTop(_ scroll: NSScrollView, to y: CGFloat) {
         let clip = scroll.contentView
+        // Output lays its text out in the background: just after a load it is only a few screens tall, and the scroll
+        // would stop there. Lay it out down to the target screen first.
+        if let textView = scroll.documentView as? NSTextView, let layout = textView.layoutManager,
+           let container = textView.textContainer
+        {
+            layout.ensureLayout(forBoundingRect: NSRect(x: 0, y: 0, width: 1, height: y + clip.bounds.height),
+                                in: container)
+        }
         var bounds = clip.bounds
         bounds.origin.y = y
         clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
