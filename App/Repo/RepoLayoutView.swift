@@ -452,13 +452,20 @@ struct RepoLayoutView: View {
         }
     }
 
-    /// The open (not conflicted) file: its editor while the Edit tab shows for it, else its diff.
-    @ViewBuilder private func fileView(_ target: FileTarget) -> some View {
-        if session.editor?.showsEditor == true, session.isEditedFile(target) {
-            FileEditorView(session: session, target: target)
-        } else {
-            DiffView(session: session, target: target)
+    /// The open (not conflicted) file: its editor while the Edit tab shows for it, else its diff. The swap is not
+    /// animated: in the mode tab's animation the panel cross-faded and the new mode track's pill slid in from the whole
+    /// track's frame (user 2026-11-23). Between Diff, Split and Full file the pill still slides.
+    private func fileView(_ target: FileTarget) -> some View {
+        let editing = session.editor?.showsEditor == true && session.isEditedFile(target)
+        // A ZStack, not a Group: a Group hands the modifier to each branch, so the swap itself kept the tap's animation.
+        return ZStack {
+            if editing {
+                FileEditorView(session: session, target: target)
+            } else {
+                DiffView(session: session, target: target)
+            }
         }
+        .transaction(value: editing) { $0.animation = nil }
     }
 
     /// The gap between two panels: drag it to resize the side panel next to it. Columns (`columns` set) resizes and
