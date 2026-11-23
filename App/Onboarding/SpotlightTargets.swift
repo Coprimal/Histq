@@ -48,10 +48,14 @@ final class SpotlightRegistry {
     /// The target a spotlight frames now; nil when none shows. Set by the DEBUG `-HistqSpotlight` flag and the tour.
     var activeTarget: SpotlightTarget? {
         didSet {
+            isShowing = activeTarget != nil
             guard activeTarget != oldValue else { return }
             shownFrame = activeTarget.flatMap(frame(of:))
         }
     }
+    /// Whether a spotlight shows (`activeTarget` is set), unobserved: an AppKit view's update may read it without
+    /// depending on the target.
+    @ObservationIgnored private(set) var isShowing = false
 
     /// Bumped when the active target's frame changes.
     private(set) var revision = 0

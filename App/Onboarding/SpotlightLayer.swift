@@ -89,6 +89,7 @@ struct SpotlightLayer: View {
     var onSkip: () -> Void = {}
     /// The popover's measured size; a guess until its first layout.
     @State private var popoverSize = CGSize(width: SpotlightMetrics.popoverWidth, height: 120)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // The outer reader stays in the safe area to read the toolbar band's height; the inner one covers the window.
@@ -139,7 +140,7 @@ struct SpotlightLayer: View {
                 .position(x: layout.popover.midX, y: layout.popover.midY)
         }
         // From one target to the next; a window resize or the popover's first measure moves it at once.
-        .animation(Motion.standard, value: target)
+        .animation(reduceMotion ? nil : Motion.standard, value: target)
     }
 
     private func handle(_ key: SpotlightKey) {
@@ -434,7 +435,8 @@ private struct SpotlightKeys: NSViewRepresentable {
                           characters: String?) -> Bool
         {
             guard let window, eventWindow === window else { return false }
-            if flags == .command, characters == "q" || characters == "h" { return false }
+            if flags.subtracting([.capsLock, .function, .numericPad]) == .command,
+               characters == "q" || characters == "h" { return false }
             let plain = flags.subtracting([.function, .numericPad, .capsLock]).isEmpty
             guard plain else { return true }
             switch keyCode {

@@ -52,6 +52,7 @@ struct DemoRepositoryTests {
         #expect(try await git(["stash", "list"]).count == 1)
         #expect(try await git(["worktree", "list", "--porcelain"]).filter { $0.hasPrefix("worktree ") }.count == 2)
         #expect(try await !git(["status", "--porcelain"]).isEmpty)
+        #expect(try await git(["diff", "--cached", "--name-only"]) == ["src/app.swift"])
 
         try DemoRepository.remove(base: base, parent: parent)
         #expect(!FileManager.default.fileExists(atPath: base.path))

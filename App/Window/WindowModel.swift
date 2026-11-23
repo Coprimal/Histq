@@ -151,6 +151,9 @@ final class WindowModel {
     /// The Welcome tabs' state (the clone in flight, the git check), by tab: it outlives the view across tab
     /// switches. Created on first use by `welcome(for:)`.
     @ObservationIgnored private var welcomes: [Tab.ID: WelcomeModel] = [:]
+    /// Changes when a Welcome tab's state is replaced (`adoptWelcome`); `welcome(for:)` reads it, so a Welcome page on
+    /// screen shows the new state.
+    private var welcomesRevision = 0
     /// Session restore: the saved profile and commit of restored tabs that have no session yet (sessions are made on
     /// first select), applied when it is made; until then the next save keeps them as they were. Observed: a profile
     /// picked in such a tab's menu (`setProfile`) redraws its dot and saves the session.
@@ -428,6 +431,7 @@ final class WindowModel {
 
     /// The Welcome tab `id`'s state, created on first use. Its Open, Clone and Init open the repo in that tab.
     func welcome(for id: Tab.ID) -> WelcomeModel {
+        _ = welcomesRevision
         if let welcome = welcomes[id] { return welcome }
         let welcome = WelcomeModel { _ in }
         wire(welcome, id: id)
@@ -435,8 +439,8 @@ final class WindowModel {
         return welcome
     }
 
-    /// Points a Welcome tab's state at this window and its tab `id`: when it is made, and when it moves in from
-    /// another window (`adopt`).
+    /// Points a Welcome tab's state at this window and its tab `id`: when it is made, when it moves in from another
+    /// window (`adopt`), and when the onboarding hands over its clone (`adoptWelcome`).
     private func wire(_ welcome: WelcomeModel, id: Tab.ID) {
         welcome.open = { [weak self] url in self?.open(url, fromWelcome: id) }
         welcome.postToast = { [weak self] toast in self?.showToast(toast, from: id) }
@@ -2025,9 +2029,9 @@ final class WindowModel {
     var isOnboarding: Bool { onboarding != nil }
 
     /// Starts the onboarding over this window at `step` (on the tour, at the stop `stop` names), its window actions
-    /// wired to this model: the tour's demo tab (`openDemoTab`, `closeDemoTab`), its spotlight and stops, a repo cloned
-    /// meanwhile (`openTab`) and its end (`endOnboarding`). What was open over the page closes first. Nothing when it
-    /// runs already.
+    /// wired to this model: the tour's demo tab (`openDemoTab`, `closeDemoTab`), its spotlight and stops, the repos
+    /// cloned meanwhile (`openTab`), their toasts and its end (`endOnboarding`). What was open over the page closes
+    /// first. Nothing when it runs already.
     func startOnboarding(at step: OnboardingModel.Step = .welcome, stop: String? = nil) {
         guard onboarding == nil else { return }
         palette = nil
@@ -2039,6 +2043,7 @@ final class WindowModel {
             closeDemo: { [weak self] in self?.closeDemoTab() },
             openRepo: { [weak self] url in self?.openTab(url) },
             end: { [weak self] in self?.endOnboarding() },
+            postToast: { [weak self] toast in self?.showToast(toast) },
             spotlight: spotlight,
             stops: { [weak self] in self.map { TourStops.stops(TourContext.current($0)) } ?? [] })
         self.onboarding = onboarding
@@ -2046,17 +2051,48 @@ final class WindowModel {
     }
 
     /// Ends the onboarding without marking it done (its Finish and Skip mark it first, then call this): the spotlight
-    /// ends, the demo tab closes and its repository is removed, the folders opened meanwhile open (unless
-    /// `openingQueued` is false: the window is closing) and the shown tab takes the keyboard back.
+    /// ends, the demo tab closes and its repository is removed, the folders opened meanwhile open, a clone still
+    /// running in its GitHub step goes on in a Welcome tab (`adoptWelcome`), and the shown tab takes the keyboard back.
+    /// `openingQueued` false (the window is closing): nothing opens and that clone stops.
     func endOnboarding(openingQueued: Bool = true) {
         guard let onboarding else { return }
         onboarding.discardDemo()
+        // Held before the onboarding goes: its clone (git running) must outlive it, its `deinit` cancels the clone.
+        let welcome = onboarding.welcome
         self.onboarding = nil
         let queued = openAfterOnboardingURLs
         openAfterOnboardingURLs = []
-        guard openingQueued else { return }
+        guard openingQueued else {
+            welcome.cancel()
+            return
+        }
         for url in queued { openTab(url) }
+        // After the queued folders: one opened in the selected Welcome tab never takes the clone's tab.
+        if welcome.isCloning { adoptWelcome(welcome) }
         focusShownTab(repo: selectedIndex.flatMap { tabs[$0].repoURL?.lastPathComponent } ?? "-")
+    }
+
+    /// Takes in the onboarding's Welcome state while its clone runs, as `adopt` takes a moved tab's: the selected
+    /// Welcome tab gets it, else another Welcome tab, else a new one (never one whose own clone runs), and is selected.
+    /// The clone's progress shows there and the repo opens in that tab when it ends (`open(_:fromWelcome:)`, recents
+    /// included); closing the tab or the window stops it, as any Welcome tab's clone.
+    private func adoptWelcome(_ welcome: WelcomeModel) {
+        let takes = { (tab: Tab) in tab.repoURL == nil && !tab.isDemo && self.welcomes[tab.id]?.isCloning != true }
+        let id: Tab.ID
+        if let index = selectedIndex, takes(tabs[index]) {
+            id = tabs[index].id
+        } else if let tab = tabs.first(where: takes) {
+            id = tab.id
+        } else {
+            let tab = Tab()
+            tabs.insert(tab, at: normalEnd)
+            id = tab.id
+        }
+        welcomes.removeValue(forKey: id)?.cancel()
+        wire(welcome, id: id)
+        welcomes[id] = welcome
+        welcomesRevision &+= 1
+        selectTab(id: id)
     }
 
     /// Keeps folders opened from outside (Finder, the Dock) for when the onboarding ends (`endOnboarding`).

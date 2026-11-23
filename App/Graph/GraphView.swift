@@ -1016,10 +1016,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var spotlightPending = false
 
     /// Registers the WIP row with `registry` (nil unregisters), or tells it the row may have moved; coalesced to one
-    /// main-queue hop. Nothing while no registry is wanted or held.
+    /// main-queue hop. Nothing while no registry is wanted or held, nor while the row is registered with `registry`
+    /// and no spotlight shows (a spotlight that starts reads the row's frame from its provider).
     func syncSpotlight(_ registry: SpotlightRegistry?) {
         spotlightWanted = registry
         guard registry != nil || spotlight != nil, !spotlightPending else { return }
+        if registry === spotlight, registry?.isShowing == false { return }
         spotlightPending = true
         DispatchQueue.main.async { [weak self] in self?.applySpotlight() }
     }

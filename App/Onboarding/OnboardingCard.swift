@@ -1,7 +1,7 @@
-// The onboarding's card over the window: a scrim, then a glass card sized to its step with the title and progress
-// dots, the step's body (scrolls when the window is short) and a footer (Back, Skip onboarding, Skip this step, Next). Return = Next and ← / → = Back / Next
-// when no text field has the focus; Esc skips the step. Welcome and finish have their bodies here; the tour shows
-// its demo state; the other steps show a short placeholder until their phase builds them.
+// The onboarding's card over the window: a scrim, a glass card sized to its step (title, progress dots, the step's body,
+// which scrolls when the window is short) and a footer (Back, Skip onboarding, Skip this step, Next). Return = Next,
+// ← / → = Back / Next and Esc = Skip this step, when no text field has the focus. Welcome, the tour's demo state and
+// finish have their bodies here, the setup steps in `OnboardingSetupSteps`; the rest show a placeholder for now.
 import AppKit
 import SwiftUI
 
@@ -61,8 +61,9 @@ struct OnboardingCard: View {
         .focused($focused)
         .onKeyPress(keys: [.return, .leftArrow, .rightArrow], phases: .down) { press in handleKey(press.key) }
         .onExitCommand {
-            // Skip this step; nothing on the last one (Done ends the onboarding there).
-            guard !isCovered, step != .finish else { return }
+            // Skip this step; nothing on the last one (Done ends the onboarding there), nor while a text field has
+            // the focus (Esc is its own).
+            guard !isCovered, step != .finish, !(NSApp.keyWindow?.firstResponder is NSText) else { return }
             model.skipStep()
         }
         // The card is installed on this turn; it takes the focus on the next one, and again after a step change
@@ -131,6 +132,10 @@ struct OnboardingCard: View {
     private func stepBody(_ step: OnboardingModel.Step) -> some View {
         switch step {
         case .welcome: welcomeBody
+        case .git: OnboardingGitStep(model: model)
+        case .profile: OnboardingProfileStep(model: model)
+        case .github: OnboardingGitHubStep(model: model)
+        case .ai: OnboardingAIStep(model: model)
         case .tour: tourBody
         case .finish: finishBody
         default: comingBody(step)
@@ -279,7 +284,8 @@ private struct BodyFit: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let content = subviews.first else { return .zero }
         let ideal = content.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
-        let height = max(ideal.height, minHeight)
+        // Rounded up: a fractional height left the scroll view a hair shorter than its content, so it scrolled.
+        let height = max(ideal.height.rounded(.up), minHeight)
         return CGSize(width: proposal.width ?? ideal.width, height: min(height, proposal.height ?? height))
     }
 

@@ -56,9 +56,15 @@ final class OnboardingModel {
             + "Install the Command Line Tools or choose a git in Settings › General."
     }
 
-    /// A repository cloned during the onboarding: it opens through `openRepo` after the demo closes, when the
-    /// onboarding finishes or is skipped.
-    var pendingClone: URL?
+    /// The repositories cloned during the onboarding (the GitHub step's clone form), in order: each opens through
+    /// `openRepo` after the demo closes, when the onboarding finishes or is skipped.
+    var pendingClones: [URL] = []
+    /// The setup steps' Welcome model: the git step's check and its fixes (Install Command Line Tools, Choose git, Check
+    /// Again), and the GitHub step's clone, whose end adds to `pendingClones`. A clone still running when the
+    /// onboarding ends is handed to a Welcome tab of the window (`WindowModel.endOnboarding`).
+    @ObservationIgnored let welcome = WelcomeModel(open: { _ in })
+    /// The profile step's fields, kept here so Back keeps what was typed; Next on that step writes them.
+    @ObservationIgnored let profile = OnboardingProfileDraft()
 
     @ObservationIgnored private let openDemo: (URL) -> RepoSession?
     @ObservationIgnored private let closeDemo: () -> Void
@@ -81,6 +87,7 @@ final class OnboardingModel {
 
     init(openDemo: @escaping (URL) -> RepoSession? = { _ in nil }, closeDemo: @escaping () -> Void = {},
          openRepo: @escaping (URL) -> Void = { _ in }, end: @escaping () -> Void = {},
+         postToast: @escaping (OperationToast) -> Void = { _ in },
          spotlight: SpotlightRegistry? = nil, stops: @escaping () -> [TourStop] = { [] }) {
         self.openDemo = openDemo
         self.closeDemo = closeDemo
@@ -88,6 +95,14 @@ final class OnboardingModel {
         self.makeStops = stops
         self.openRepo = openRepo
         self.end = end
+        // A clone made in the GitHub step waits for the end of the onboarding, so the tour's demo never replaces it. It
+        // is in the recent repos at once, so it stays easy to find if the window closes before then.
+        welcome.open = { [weak self] url in
+            RecentRepos.shared.add(url)
+            self?.pendingClones.append(url)
+        }
+        // A clone's warnings (its submodules failed) show as the window's toasts.
+        welcome.postToast = postToast
     }
 
     // MARK: Navigation
@@ -99,11 +114,10 @@ final class OnboardingModel {
         go(to: step)
     }
 
-    /// The next step; on the last one, finishes.
+    /// Applies the current step (the profile step writes its profile), then the next step; on the last one, finishes.
     func next() {
-        let steps = Step.allCases
-        guard index + 1 < steps.count else { return finish() }
-        go(to: steps[index + 1])
+        if current == .profile { profile.commit() }
+        advance()
     }
 
     /// The previous step; nothing on the first one.
@@ -114,7 +128,7 @@ final class OnboardingModel {
 
     /// Leaves the current step without applying it.
     func skipStep() {
-        next()
+        advance()
     }
 
     /// Ends the onboarding from any step.
@@ -165,6 +179,13 @@ final class OnboardingModel {
         next()
     }
 
+    /// The next step, or finishes on the last one.
+    private func advance() {
+        let steps = Step.allCases
+        guard index + 1 < steps.count else { return finish() }
+        go(to: steps[index + 1])
+    }
+
     private func go(to step: Step) {
         guard !ended else { return }
         if current == .tour, step != .tour { discardDemo() }
@@ -172,16 +193,16 @@ final class OnboardingModel {
         if step == .tour { createDemo() }
     }
 
-    /// Marks the onboarding done, closes the demo, opens a pending clone and hands the window back. Runs once.
+    /// Marks the onboarding done, closes the demo, opens the pending clones and hands the window back (which takes a
+    /// clone still running, `WindowModel.endOnboarding`). Runs once.
     private func close() {
         guard !ended else { return }
         ended = true
         Preferences.defaults.set(true, forKey: PrefKey.onboardingDone.rawValue)
         discardDemo()
-        if let pendingClone {
-            self.pendingClone = nil
-            openRepo(pendingClone)
-        }
+        let clones = pendingClones
+        pendingClones = []
+        for url in clones { openRepo(url) }
         end()
     }
 
