@@ -1623,7 +1623,20 @@ enum BitbucketStub {
             return page(commit(GitHubStub.headSHA, "Finish the feature", "2026-11-12T16:20:00", parent: startSHA),
                         commit(startSHA, "Start the feature", "2026-11-10T08:50:00", parent: GitHubStub.baseSHA))
         case "\(pr1)/diff": return (200, diff)
-        case "\(pr2)/comments": return page()
+        // #1's history: opened at the first commit, updated with the second, approved by `reviewer`.
+        case "\(pr1)/activity":
+            return page(activityUpdate("2026-11-10T09:00:00", head: startSHA),
+                        #"{"approval": {"date": "2026-11-12T15:00:00.000000+00:00", "user": \#(reviewer)}}"#,
+                        activityUpdate("2026-11-12T13:20:00", head: GitHubStub.headSHA))
+        case "\(pr1)/tasks": return page(tasks)
+        case "\(pr1)/mergeability/checks":
+            return page(#"{"type": "git_mergeability_check", "status": "PASSED", "required": true, "blocking": false}"#,
+                        #"{"type": "current_user_permission_check", "status": "PASSED", "required": true}"#,
+                        #"{"type": "standard_merge_check", "name": "1+ approval", "status": "PASSED", "required": true}"#,
+                        #"{"type": "standard_merge_check", "name": "All tasks resolved", "#
+                            + #""status": "\#(GitHubStub.seedsPage ? "FAILED" : "PASSED")", "required": true, "#
+                            + #""blocking": \#(GitHubStub.seedsPage)}"#)
+        case "\(pr2)/comments", "\(pr2)/activity", "\(pr2)/tasks", "\(pr2)/mergeability/checks": return page()
         case "\(pr2)/commits":
             return page(commit(forkSHA, "Fix a typo", "2026-11-13T09:00:00", parent: GitHubStub.baseSHA))
         case "\(pr2)/diff": return (200, "")
@@ -1703,9 +1716,12 @@ enum BitbucketStub {
         var resolved: Set<Int> = []
         var edits: [Int: String] = [:]
         var deleted: Set<Int> = []
+        var tasks: [(id: Int, body: String)] = []
+        var taskStates: [Int: Bool] = [:]
+        var deletedTasks: Set<Int> = []
     }
 
-    private static let writes = OSAllocatedUnfairLock(initialState: Writes())
+    private static let writes = OSAllocatedUnfairLock(uncheckedState: Writes())
 
     /// #1's comment writes: `POST .../comments` (a reply has `parent`, a new inline comment `inline`), answered with
     /// the comment by `stub`, and `POST`/`DELETE .../comments/<801|805>/resolve`; and on any of its comments not
@@ -1715,6 +1731,25 @@ enum BitbucketStub {
         -> (status: Int, body: String)
     {
         let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        // #1's tasks: a new one (`content.raw`), a state (`PUT`, `state`) or a delete of a listed one.
+        if method == "POST", path == "\(pr1)/tasks", let raw = (json["content"] as? [String: Any])?["raw"] as? String {
+            let id = writes.withLock { writes in
+                writes.nextID += 1
+                writes.tasks.append((writes.nextID, raw))
+                return writes.nextID
+            }
+            return (201, tasks.first { $0.hasPrefix(#"{"id": \#(id),"#) } ?? "{}")
+        }
+        if ["PUT", "DELETE"].contains(method), path.hasPrefix("\(pr1)/tasks/"),
+           let id = Int(path.dropFirst("\(pr1)/tasks/".count)), tasks.contains(where: { $0.hasPrefix(#"{"id": \#(id),"#) }) {
+            if method == "DELETE" {
+                writes.withLock { _ = $0.deletedTasks.insert(id) }
+                return (204, "")
+            }
+            guard let state = json["state"] as? String else { return notFound }
+            writes.withLock { $0.taskStates[id] = state == "RESOLVED" }
+            return (200, tasks.first { $0.hasPrefix(#"{"id": \#(id),"#) } ?? "{}")
+        }
         if ["PUT", "DELETE"].contains(method), path.hasPrefix("\(pr1)/comments/"),
            let id = Int(path.dropFirst("\(pr1)/comments/".count)) {
             return editOrDelete(method, id, json)
@@ -1834,10 +1869,12 @@ enum BitbucketStub {
              "rendered": {"description": {"raw": "\(body)", "markup": "markdown", "html": "<p>\(body)</p>"}},
              "source": {"branch": {"name": "\(fork ? "typo" : "feature")"}, "commit": {"hash": "\(head)"},
                         "repository": \(source)},
-             "destination": {"branch": {"name": "main", "merge_strategies": ["merge_commit", "squash", "fast_forward"]},
+             "destination": {"branch": {"name": "main", "merge_strategies": ["merge_commit", "squash", "fast_forward"],
+                                        "default_merge_strategy": "merge_commit"},
                              "commit": {"hash": "\(GitHubStub.baseSHA.prefix(12))"},
                              "repository": \(repository("r-0001", "stub/stub"))},
              "reviewers": [\(fork ? user : reviewer)], "participants": [\(participants)],
+             "close_source_branch": \(!fork), "task_count": \(fork || !GitHubStub.seedsPage ? 0 : 1),
              "comment_count": \(fork ? 0 : 8), "created_on": "2026-11-1\(fork ? 3 : 0)T09:00:00.000000+00:00",
              "updated_on": "2026-11-1\(fork ? 3 : 2)T16:30:00.000000+00:00",
              "links": {"html": {"href": "https://bitbucket.org/stub/stub/pull-requests/\(id)"}}}
@@ -1861,6 +1898,31 @@ enum BitbucketStub {
              "created_on": "2026-11-12T\(time):00.000000+00:00",
              "links": {"html": {"href": "https://bitbucket.org/stub/stub/pull-requests/1#comment-\(id)"}}\(extra)}
             """
+    }
+
+    /// An `/activity` update: #1 by `stub` at `date` with its source at `head`.
+    private static func activityUpdate(_ date: String, head: String) -> String {
+        #"{"update": {"date": "\#(date).000000+00:00", "state": "OPEN", "title": "Add feature", "#
+            + #""description": "Adds the feature branch's work.", "author": \#(user), "#
+            + #""source": {"branch": {"name": "feature"}, "commit": {"hash": "\#(head.prefix(12))"}}, "#
+            + #""reviewers": [\#(reviewer)]}}"#
+    }
+
+    /// #1's tasks: with `-HistqStubPageSeed YES` an open one by `reviewer` on comment 806 and a resolved one by
+    /// `stub`; then this run's, each as last written, the deleted ones left out.
+    private static var tasks: [String] {
+        let writes = writes.withLock { $0 }
+        let seeded: [(id: Int, body: String, resolved: Bool, by: String, comment: Int?)] = GitHubStub.seedsPage
+            ? [(701, "Add a test for an empty input", false, reviewer, 806), (702, "Update the readme", true, user, nil)]
+            : []
+        return (seeded + writes.tasks.map { ($0.id, $0.body, false, user, nil) }).compactMap { task in
+            guard !writes.deletedTasks.contains(task.id) else { return nil }
+            let resolved = writes.taskStates[task.id] ?? task.resolved
+            return #"{"id": \#(task.id), "content": {"raw": "\#(GitHubStub.jsonText(task.body))"}, "#
+                + #""state": "\#(resolved ? "RESOLVED" : "UNRESOLVED")", "creator": \#(task.by), "#
+                + #""created_on": "2026-11-12T15:10:00.000000+00:00""#
+                + (task.comment.map { #", "comment": {"id": \#($0)}"# } ?? "") + "}"
+        }
     }
 
     private static func commit(_ sha: String, _ message: String, _ date: String, parent: String) -> String {

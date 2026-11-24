@@ -84,6 +84,10 @@ struct BitbucketPullRequest: Decodable {
     /// Only a single pull request has them.
     var participants: [Participant]?
     var commentCount: Int?
+    var taskCount: Int?
+    var closeSourceBranch: Bool?
+    var closedBy: BitbucketAccount?
+    var mergeCommit: Endpoint.Commit?
     var createdOn: String?
     var updatedOn: String?
     var links: BitbucketLinks?
@@ -99,8 +103,9 @@ struct BitbucketPullRequest: Decodable {
 
         struct Branch: Decodable {
             var name: String?
-            /// The strategies the destination branch allows (`merge_commit`, `squash`, ...).
+            /// The strategies the destination branch allows (`merge_commit`, `squash`, ...), and its default.
             var mergeStrategies: [String]?
+            var defaultMergeStrategy: String?
         }
 
         struct Commit: Decodable { var hash: String? }
@@ -109,6 +114,8 @@ struct BitbucketPullRequest: Decodable {
     /// `state` is `approved`, `changes_requested` or null.
     struct Participant: Decodable {
         var user: BitbucketAccount?
+        /// `PARTICIPANT` or `REVIEWER`.
+        var role: String?
         var approved: Bool?
         var state: String?
         var participatedOn: String?
@@ -175,3 +182,49 @@ struct BitbucketCommitStatus: Decodable {
 struct BitbucketMergeTask: Decodable {
     var taskStatus: String?
 }
+
+/// One entry of a pull request's `/activity`: a comment (left out: the comments are read on their own), an `update`
+/// (a snapshot of the pull request after it changed), an `approval` or a `changes_requested`.
+struct BitbucketActivity: Decodable {
+    var update: Update?
+    var approval: Approval?
+    var changesRequested: Approval?
+
+    struct Update: Decodable {
+        var state: String?
+        var title: String?
+        var description: String?
+        var date: String?
+        var author: BitbucketAccount?
+        var source: BitbucketPullRequest.Endpoint?
+        var reviewers: [BitbucketAccount]?
+    }
+
+    struct Approval: Decodable {
+        var date: String?
+        var user: BitbucketAccount?
+    }
+}
+
+/// A pull request task: `state` is `RESOLVED` or `UNRESOLVED`; `comment` the one it was made on.
+struct BitbucketTask: Decodable {
+    var id: Int
+    var content: BitbucketContent?
+    var state: String?
+    var creator: BitbucketAccount?
+    var createdOn: String?
+    var comment: Comment?
+
+    struct Comment: Decodable { var id: Int? }
+}
+
+/// One merge check (`mergeability/checks`): `type`, `status`, `required`, `blocking`; a `name` when Bitbucket gives
+/// one (not in the spec).
+struct BitbucketMergeCheck: Decodable {
+    var type: String?
+    var name: String?
+    var status: String?
+    var required: Bool?
+    var blocking: Bool?
+}
+

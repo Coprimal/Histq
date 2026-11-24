@@ -89,7 +89,8 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     /// reopen (a declined pull request stays declined), and no reactions (the public API has no like endpoint).
     public var capabilities: HostingCapabilities {
         [.requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
-         .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments]
+         .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
+         .timelineEvents, .tasks, .mergeChecks]
     }
 
     /// `merge_commit`, `squash` and `rebase_merge`; `merge(_:in:method:sha:)` refuses one the destination branch does
@@ -471,6 +472,16 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     /// A 202 (a merge queue, or a slow merge) is polled through its task status, built from the task id at the end
     /// of `Location` (never requested as given), until `SUCCESS`.
     public func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws {
+        try await merge(number, in: repo, method: method, sha: sha, options: HostedMergeOptions())
+    }
+
+    /// Close source branch (`deleteSourceBranch`), sent only when set.
+    public var supportedMergeOptions: Set<HostedMergeOption> { [.deleteSourceBranch] }
+
+    /// `merge(_:in:method:sha:)` with `close_source_branch` when `options.deleteSourceBranch` is set.
+    public func merge(
+        _ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String, options: HostedMergeOptions
+    ) async throws {
         guard sha.count >= 7, sha.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { throw HostingError.headChanged }
         let path = try pullRequestPath(number, in: repo)
         let current: BitbucketPullRequest = try await get(url(path))
@@ -479,18 +490,26 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         guard head.count >= 7, head.hasPrefix(expected) || expected.hasPrefix(head) else {
             throw HostingError.headChanged
         }
-        let strategy = switch method {
-        case .merge: "merge_commit"
-        case .squash: "squash"
-        case .rebase: "rebase_merge"
+        guard let strategy = Self.strategy(of: method) else {
+            throw HostingError.validationFailed(message: "Bitbucket Cloud has no such merge strategy")
         }
         if let allowed = current.destination?.branch?.mergeStrategies, !allowed.contains(strategy) {
             throw HostingError.validationFailed(message: "this repository does not allow the \(strategy) strategy")
         }
+        struct Body: Encodable {
+            var strategy: String
+            /// Left out when nil: the pull request's own setting applies.
+            var closeSourceBranch: Bool?
+            enum CodingKeys: String, CodingKey {
+                case strategy = "merge_strategy"
+                case closeSourceBranch = "close_source_branch"
+            }
+        }
         let response: HTTPURLResponse
         do {
             (_, response) = try await perform(
-                "POST", url(path + ["merge"]), body: try JSONEncoder().encode(["merge_strategy": strategy]))
+                "POST", url(path + ["merge"]),
+                body: try JSONEncoder().encode(Body(strategy: strategy, closeSourceBranch: options.deleteSourceBranch)))
         } catch HostingError.http(status: 409, message: _) {
             throw HostingError.headChanged
         } catch HostingError.http(status: 400, let message) {
@@ -651,6 +670,161 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         return resolved
     }
 
+    // MARK: - Activity, tasks and merge checks
+
+    /// The history entries of `/activity` in Bitbucket's words, oldest first, from its `update` snapshots taken in
+    /// date order (the first "Opened the pull request"; then each change of the source commit "Updated the pull
+    /// request with N commits: <links>", the commits between the two from the pull request's commits; of the state
+    /// "Merged" / "Declined the pull request"; of the title or description "edited the title" / "edited the
+    /// description"; of the reviewers "added" / "removed N reviewer(s)"), and its `approval` and `changes_requested`
+    /// entries. Comments are left out (read on their own). Histq's words are escaped in `textHTML`.
+    public func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedTimelineEvent] {
+        guard case .pullRequest(let number) = item else { throw Self.noIssues }
+        async let commits = (try? await pullRequestCommits(number, in: repo)) ?? []
+        let activity: [BitbucketActivity] = try await list(url(try pullRequestPath(number, in: repo) + ["activity"]))
+        return Self.events(activity, commits: await commits) { [self] sha in
+            webURL(.commit(sha), in: repo)?.absoluteString
+        }
+    }
+
+    /// `timelineEvents`' entries from `activity`, with `commits` (oldest first) naming each update's commits.
+    static func events(
+        _ activity: [BitbucketActivity], commits: [HostedCommit], commitURL: (String) -> String?
+    ) -> [HostedTimelineEvent] {
+        var events: [HostedTimelineEvent] = []
+        func add(_ id: String, _ actor: BitbucketAccount?, _ date: String?, _ text: String, action: String,
+                 html: String? = nil) {
+            events.append(HostedTimelineEvent(
+                id: id, actor: actor?.hosted, createdAt: GitLabDate.parse(date), text: text,
+                textHTML: html ?? "<p>\(MarkdownHTML.escape(text))</p>", action: action))
+        }
+        let updates = activity.compactMap(\.update).enumerated()
+            .sorted { (GitLabDate.parse($0.element.date) ?? .distantPast, $0.offset)
+                < (GitLabDate.parse($1.element.date) ?? .distantPast, $1.offset) }
+            .map(\.element)
+        var previous: BitbucketActivity.Update?
+        for (index, update) in updates.enumerated() {
+            let id = "update-\(index)"
+            guard let before = previous else {
+                add(id, update.author, update.date, "Opened the pull request", action: "opened")
+                previous = update
+                continue
+            }
+            let old = before.source?.commit?.hash ?? "", new = update.source?.commit?.hash ?? ""
+            if !new.isEmpty, !old.isEmpty, !old.hasPrefix(new), !new.hasPrefix(old) {
+                let between = Self.commits(commits, after: old, upTo: new)
+                let noun = between.count == 1 ? "commit" : "commits"
+                let links = between.map { commit in
+                    let short = MarkdownHTML.escape(String(commit.sha.prefix(7)))
+                    return commitURL(commit.sha).map { "<a href=\"\(MarkdownHTML.escape($0))\">\(short)</a>" } ?? short
+                }
+                // Commits not found (a force push dropped the old head from the list): no count rather than a wrong one.
+                let text = between.isEmpty ? "Updated the pull request"
+                    : "Updated the pull request with \(between.count) \(noun)"
+                add(id + "-commits", update.author, update.date, text, action: "commit",
+                    html: "<p>\(text)" + (links.isEmpty ? "" : ": " + links.joined(separator: ", ")) + "</p>")
+            }
+            if update.state != before.state {
+                switch update.state {
+                case "MERGED": add(id + "-state", update.author, update.date, "Merged the pull request", action: "merged")
+                case "DECLINED":
+                    add(id + "-state", update.author, update.date, "Declined the pull request", action: "declined")
+                default: break
+                }
+            }
+            if let title = update.title, let was = before.title, title != was {
+                add(id + "-title", update.author, update.date, "edited the title", action: "title")
+            }
+            if let text = update.description, let was = before.description, text != was {
+                add(id + "-description", update.author, update.date, "edited the description", action: "description")
+            }
+            if let now = update.reviewers, let was = before.reviewers {
+                let nowIDs = Set(now.compactMap(\.uuid)), wasIDs = Set(was.compactMap(\.uuid))
+                let added = nowIDs.subtracting(wasIDs).count, removed = wasIDs.subtracting(nowIDs).count
+                func reviewers(_ n: Int) -> String { "\(n) \(n == 1 ? "reviewer" : "reviewers")" }
+                if added > 0 {
+                    add(id + "-added", update.author, update.date, "added \(reviewers(added))", action: "reviewer")
+                }
+                if removed > 0 {
+                    add(id + "-removed", update.author, update.date, "removed \(reviewers(removed))", action: "reviewer")
+                }
+            }
+            previous = update
+        }
+        for (index, entry) in activity.enumerated() {
+            if let approval = entry.approval {
+                add("approval-\(index)", approval.user, approval.date, "Approved the pull request", action: "approved")
+            }
+            if let request = entry.changesRequested {
+                add("changes-\(index)", request.user, request.date, "Requested changes", action: "changes_requested")
+            }
+        }
+        return events
+    }
+
+    /// The commits after `old` up to and with `new` in `commits` (oldest first), matched by prefix (Bitbucket's
+    /// snapshots abbreviate hashes); none when either is not there.
+    private static func commits(_ commits: [HostedCommit], after old: String, upTo new: String) -> [HostedCommit] {
+        func index(_ hash: String) -> Int? {
+            commits.firstIndex { $0.sha.hasPrefix(hash) || hash.hasPrefix($0.sha) }
+        }
+        guard let end = index(new) else { return [] }
+        let start = index(old).map { $0 + 1 } ?? 0
+        return start <= end ? Array(commits[start...end]) : []
+    }
+
+    /// The pull request's tasks, oldest first.
+    public func tasks(of number: Int, in repo: HostedRepository) async throws -> [HostedTask] {
+        let tasks: [BitbucketTask] = try await list(url(try pullRequestPath(number, in: repo) + ["tasks"]))
+        return tasks.map(Self.task)
+    }
+
+    /// `POST .../tasks` with the raw text.
+    public func createTask(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedTask {
+        struct Body: Encodable { var content: [String: String] }
+        let task: BitbucketTask = try await send(
+            "POST", url(try pullRequestPath(number, in: repo) + ["tasks"]), body: Body(content: ["raw": body]))
+        return Self.task(task)
+    }
+
+    /// `PUT .../tasks/{id}` with the state only.
+    public func setTask(_ id: Int, resolved: Bool, on number: Int, in repo: HostedRepository) async throws {
+        _ = try await perform(
+            "PUT", url(try pullRequestPath(number, in: repo) + ["tasks", String(id)]),
+            body: try JSONEncoder().encode(["state": resolved ? "RESOLVED" : "UNRESOLVED"]))
+    }
+
+    /// `DELETE .../tasks/{id}`.
+    public func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws {
+        _ = try await perform("DELETE", url(try pullRequestPath(number, in: repo) + ["tasks", String(id)]))
+    }
+
+    private static func task(_ task: BitbucketTask) -> HostedTask {
+        HostedTask(
+            id: task.id, body: task.content?.raw ?? "", isResolved: task.state == "RESOLVED",
+            creator: task.creator?.hosted, createdAt: GitLabDate.parse(task.createdOn), commentID: task.comment?.id)
+    }
+
+    /// `GET .../mergeability/checks`, each named by Bitbucket where it gives a name, else by its type.
+    public func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck] {
+        let checks: [BitbucketMergeCheck] = try await list(
+            url(try pullRequestPath(number, in: repo) + ["mergeability", "checks"]))
+        return checks.map { check in
+            HostedMergeCheck(
+                name: check.name ?? Self.checkNames[check.type ?? ""] ?? "Merge check",
+                status: check.status ?? "UNKNOWN", required: check.required ?? false,
+                blocking: check.blocking ?? false)
+        }
+    }
+
+    /// The merge checks' types in words, for a check Bitbucket gives no name.
+    private static let checkNames = [
+        "pullrequest_state_check": "Pull request is open", "current_user_permission_check": "You can merge",
+        "git_mergeability_check": "No conflicts", "standard_merge_check": "Merge check",
+        "custom_pre_merge_check": "Custom merge check", "custom_on_merge_check": "Runs on merge",
+        "merge_queue_check": "Merge queue",
+    ]
+
     // MARK: - Mapping
 
     /// The head's `owner:branch` label is set only for a branch of the same repository (nil for a fork's, or when
@@ -659,7 +833,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         let source = pr.source?.branch?.name ?? ""
         let target = pr.destination?.branch?.name ?? ""
         let merged = pr.state == "MERGED"
-        return HostedPullRequest(
+        var pull = HostedPullRequest(
             id: pr.id, number: pr.id, title: pr.title, state: pr.state == "OPEN" ? "open" : "closed", draft: pr.draft,
             user: pr.author?.hosted, body: pr.summary?.raw,
             bodyHTML: pr.rendered?.description?.html ?? pr.summary?.html,
@@ -672,6 +846,36 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
             requestedReviewers: pr.reviewers?.map(\.hosted), createdAt: GitLabDate.parse(pr.createdOn),
             updatedAt: GitLabDate.parse(pr.updatedOn), mergedAt: merged ? GitLabDate.parse(pr.updatedOn) : nil,
             merged: merged)
+        (pull.allowedMergeMethods, pull.defaultMergeMethod) = Self.mergeMethods(pr.destination?.branch)
+        pull.closesSourceBranch = pr.closeSourceBranch
+        pull.openTaskCount = pr.taskCount
+        pull.mergedBy = merged ? pr.closedBy?.hosted : nil
+        pull.mergeCommitSHA = merged ? pr.mergeCommit?.hash : nil
+        return pull
+    }
+
+    /// Bitbucket Cloud's strategy ids and the methods they are, in the merge dialog's order.
+    private static let strategies: [(id: String, method: HostedMergeMethod)] = [
+        ("merge_commit", .merge), ("squash", .squash), ("fast_forward", .fastForward),
+        ("squash_fast_forward", .squashFastForward), ("rebase_fast_forward", .rebaseFastForward),
+        ("rebase_merge", .rebase),
+    ]
+
+    /// The strategy id of `method`; nil for Data Center's `fastForwardIfPossible`.
+    static func strategy(of method: HostedMergeMethod) -> String? {
+        strategies.first { $0.method == method }?.id
+    }
+
+    /// The pull request's allowed methods from its destination branch, in the dialog's order (unknown ids left out;
+    /// none left reads as nil), and its default when that is one of them.
+    static func mergeMethods(_ branch: BitbucketPullRequest.Endpoint.Branch?)
+        -> (allowed: [HostedMergeMethod]?, default: HostedMergeMethod?)
+    {
+        guard let ids = branch?.mergeStrategies else { return (nil, nil) }
+        let allowed = strategies.filter { ids.contains($0.id) }.map(\.method)
+        guard !allowed.isEmpty else { return (nil, nil) }
+        let preferred = strategies.first { $0.id == branch?.defaultMergeStrategy }?.method
+        return (allowed, preferred.flatMap { allowed.contains($0) ? $0 : nil })
     }
 
     /// Whether the source branch is in the destination repository (by uuid, else by full name).

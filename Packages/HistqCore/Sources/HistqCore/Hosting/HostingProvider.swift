@@ -45,6 +45,10 @@ public enum HostedReviewEvent: String, Sendable {
 /// How a pull request is merged (`PUT .../merge` `merge_method`).
 public enum HostedMergeMethod: String, Sendable {
     case merge, squash, rebase
+    /// Bitbucket's own strategies, only ever in a pull request's own list (`HostedPullRequest.allowedMergeMethods`),
+    /// never in a client's `mergeMethods`: Cloud's `fast_forward`, `squash_fast_forward`, `rebase_fast_forward`, and
+    /// Data Center's `ff` ("Fast-forward if possible", Phase 18).
+    case fastForward, squashFastForward, rebaseFastForward, fastForwardIfPossible
 }
 
 /// A merge option a provider may take beside the method (`HostingProvider.supportedMergeOptions`).
@@ -183,6 +187,11 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let issueExtras = HostingCapabilities(rawValue: 1 << 22)
     /// The pull request page's projects and Development (the issues it closes) (`pullRequestExtras(_:in:)`).
     public static let pullRequestExtras = HostingCapabilities(rawValue: 1 << 23)
+    /// Pull request tasks: list, create, resolve or reopen, delete (`tasks(of:in:)`, `createTask`, `setTask`,
+    /// `deleteTask`).
+    public static let tasks = HostingCapabilities(rawValue: 1 << 24)
+    /// The merge checks of a pull request (`mergeChecks(of:in:)`).
+    public static let mergeChecks = HostingCapabilities(rawValue: 1 << 25)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -445,6 +454,16 @@ public protocol HostingProvider: Sendable {
     func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras
     /// Pull request `number`'s projects and the issues it closes (only with `pullRequestExtras`).
     func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras
+    /// Pull request `number`'s tasks, oldest first (only with `tasks`).
+    func tasks(of number: Int, in repo: HostedRepository) async throws -> [HostedTask]
+    /// Adds a task with `body` to pull request `number` (only with `tasks`).
+    func createTask(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedTask
+    /// Marks task `id` done (`resolved`) or not (only with `tasks`).
+    func setTask(_ id: Int, resolved: Bool, on number: Int, in repo: HostedRepository) async throws
+    /// Deletes task `id` (only with `tasks`).
+    func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws
+    /// Pull request `number`'s merge checks (only with `mergeChecks`).
+    func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck]
 }
 
 extension HostingProvider {
@@ -571,6 +590,28 @@ extension HostingProvider {
     /// A host without the `issueExtras` capability has none.
     public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
         throw HostingError.validationFailed(message: "this host has no issue extras")
+    }
+
+    /// A host without the `tasks` capability refuses these unsent.
+    public func tasks(of number: Int, in repo: HostedRepository) async throws -> [HostedTask] {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    public func createTask(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedTask {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    public func setTask(_ id: Int, resolved: Bool, on number: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    public func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    /// A host without the `mergeChecks` capability has none.
+    public func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck] {
+        throw HostingError.validationFailed(message: "this host has no merge checks")
     }
 
     /// A host without the `pullRequestExtras` capability has none.

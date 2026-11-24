@@ -65,6 +65,8 @@ struct PRPageLayout: Sendable, Equatable {
     /// A thread's resolve button says "Resolve thread" / "Reopen thread" (GitLab's) instead of "Resolve conversation"
     /// / "Unresolve conversation".
     var threadWords = false
+    /// A thread's resolve button says "Resolve" / "Reopen" (Bitbucket's).
+    var shortResolveWords = false
     /// Files changed lists the files as a folder tree (single-child folders joined, `.github/workflows`) in a wider
     /// column, instead of one row per file with its folder under its name (GitHub's).
     var filesTree = false
@@ -72,8 +74,21 @@ struct PRPageLayout: Sendable, Equatable {
     /// (GitLab's "Author" and "Owner").
     var authorBadgeOnly = false
     /// The description in a card of its own ("Created by <login> <time>"), then a "Comments" card with the filter
-    /// (All / Unresolved / Mine, `PRCommentFilter`) and the comment box above the comments (GitHub's new page).
+    /// (All / Unresolved / Mine, `PRCommentFilter`) and the comment box above the comments (GitHub's new page). With
+    /// an `activity`, that card is the Activity's (its title and filter; Bitbucket's).
     var commentsCard = false
+    /// With `commentsCard`: the description card's title, its text alone under it (Bitbucket's "Description"); nil
+    /// keeps GitHub's "Created by" header in the page.
+    var descriptionTitle: String? = nil
+    /// The comment box's prompt ("Leave a comment" when nil; Bitbucket's "What do you want to say?").
+    var composerPrompt: String? = nil
+    /// Approve and Request changes in the header, the comment box without its Review tab (Bitbucket's).
+    var reviewButtonsInHeader = false
+    /// The merge area first on the Overview: the state, the pull request's own strategies, Close source branch and
+    /// Merge, or "Merged pull request" (Bitbucket's), in place of the Actions card under the timeline.
+    var bitbucketMergeArea = false
+    /// Bitbucket's sidebar: Builds, Merge checks, Reviewers, Tasks, Jira work items.
+    var bitbucketSidebar = false
 
     static let `default` = PRPageLayout(name: "default")
     static let gitlab = PRPageLayout(
@@ -91,12 +106,21 @@ struct PRPageLayout: Sendable, Equatable {
     func title(of tab: PRTab) -> String { tabTitles[tab] ?? tab.title }
 
     /// A lookup, not a `switch`, so a new kind builds without a value of its own.
-    private static let byKind: [HostingKind: PRPageLayout] = [.gitlab: .gitlab, .github: .github]
+    private static let byKind: [HostingKind: PRPageLayout] = [
+        .gitlab: .gitlab, .github: .github, .bitbucketCloud: .bitbucket,
+    ]
 
     #if DEBUG
     /// DEBUG `-HistqPageLayout default`: every kind gets `.default`.
     private static let forcesDefault = AppState.launchFlag("-HistqPageLayout") == "default"
     #endif
+
+    static let bitbucket = PRPageLayout(
+        name: "bitbucket", tabs: [.conversation, .files, .commits], tabTitles: [.conversation: "Overview"],
+        mergeSentence: .bitbucket, activity: .bitbucketPullRequest, commitsByDay: true, commitVerb: "committed",
+        shortResolveWords: true, filesTree: true, commentsCard: true, descriptionTitle: "Description",
+        composerPrompt: "What do you want to say?", reviewButtonsInHeader: true, bitbucketMergeArea: true,
+        bitbucketSidebar: true)
 
     static func `for`(_ kind: HostingKind) -> PRPageLayout {
         #if DEBUG
@@ -118,6 +142,17 @@ struct PRActivity: Sendable, Equatable {
     let comments: String
     var byAction: [String: String] = [:]
     var history: String? = nil
+    /// The category of the viewer's own comments and threads ("My comments"); nil without one.
+    var mine: String? = nil
+    /// Each account as its name and `@login` (GitLab's); false: its name alone (Bitbucket's).
+    var handles = true
+    /// A diff thread's header: "started a thread on the diff" (GitLab's) when nil, else this verb then the file's name
+    /// ("commented on index.js", Bitbucket's); a general comment then always "commented".
+    var fileVerb: String? = nil
+    /// The order, fixed (Bitbucket's newest first, no sort toggle); nil: the user's sort (GitLab's).
+    var newestFirst: Bool? = nil
+    /// The entries under day headings ("Wednesday, November 19, 2025", Bitbucket's).
+    var dayHeadings = false
 
     /// The category of a history entry of `action`; nil when it has none.
     func category(ofEntry action: String?) -> String? {
@@ -143,6 +178,13 @@ struct PRActivity: Sendable, Equatable {
             categories: [approvals, people, comments, commits, edits, labels, lock, mentions, status, tracking],
             comments: comments, byAction: byAction)
     }()
+
+    /// Bitbucket Cloud's Activity: All activity, All comments, My comments, Commits (its Tasks and Statuses are not
+    /// in the API's activity), names without handles, "commented on <file>", newest first under day headings.
+    static let bitbucketPullRequest = PRActivity(
+        title: "Activity", categories: ["All comments", "My comments", "Commits"], comments: "All comments",
+        byAction: ["commit": "Commits"], mine: "My comments", handles: false, fileVerb: "commented on",
+        newestFirst: true, dayHeadings: true)
 
     static let gitLabIssue = PRActivity(
         title: "Activity", categories: ["Comments only", "History only"], comments: "Comments only",
@@ -178,6 +220,8 @@ enum PRMergeSentence: Sendable, Equatable {
     /// GitHub's "[Open] stub wants to merge 2 commits into [main] from [stub:feature]", the state badge first (merged:
     /// "<merged by> merged 2 commits into [main] from [stub:feature] <time>").
     case stateFirst
+    /// Bitbucket's "[avatar] stub [feature] → [main] [Open] · Created 1 week ago · Last updated 2 days ago".
+    case bitbucket
 }
 
 /// The issue header's sentence under the title.

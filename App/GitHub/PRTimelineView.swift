@@ -40,6 +40,9 @@ struct PRTimelineHTML: Sendable {
     /// The page folds each thread's replies under a summary (`PRPageLayout.collapsesReplies`): the collapse rule of its
     /// review threads (`PRTimeline.isCollapsed(_:expanded:collapsesReplies:)`).
     var collapsesReplies = false
+    /// Every thread shows whole, resolved or not (an Activity whose replies do not fold: Bitbucket's), so its reply
+    /// row (Reply, Reopen) stays.
+    var threadsStayOpen = false
     /// Each comment's Edit is an icon in its header, out of its "…" menu (`PRPageLayout.headerEdit`).
     var headerEdit = false
     /// The description has its reaction row (`creact-d`): the item's own reactions
@@ -72,6 +75,8 @@ struct PRActivityPage: Sendable {
     /// The badges of each comment's header (`PRPageLayout.roleBadges`): "Author" on the item author's, and the
     /// member role (`roles`, by user id: "Owner", "Developer") the host gave; nil draws none.
     var roles: [Int: String]? = nil
+    /// The token's user, whose comments the layout's `mine` category keeps; nil keeps none.
+    var viewerID: Int? = nil
 }
 
 /// The ids an optimistic page gives what the host has not answered yet (a reply, a new inline thread and its comment):
@@ -481,8 +486,12 @@ extension PRTimeline {
         expanded: [Int: Bool] = [:], general options: PRGeneralOptions = PRGeneralOptions(), now: Date,
         activity: PRActivityPage? = nil, roles pageRoles: [Int: String]? = nil, authorOnly: Bool = false,
         descriptionReactions: Bool = false, events pageEvents: [HostedTimelineEvent]? = nil,
-        commentFilter: PRCommentFilter? = nil, viewerID: Int? = nil, pin: HostedIssueExtras.Pin? = nil
+        commentFilter: PRCommentFilter? = nil, viewerID: Int? = nil, pin: HostedIssueExtras.Pin? = nil,
+        splitsDescription: Bool = false
     ) -> PRTimelineHTML {
+        // GitHub's "Comments" card (`commentFilter`), Bitbucket's Description and Activity cards (`splitsDescription`):
+        // the description's own page, then the rest's.
+        let splits = commentFilter != nil || splitsDescription
         let dates = PRPageDates(now: now)
         // The badges' roles: the Activity's (GitLab), else the page's (GitHub's `author_association`); nil draws none.
         let roles = activity?.roles ?? pageRoles
@@ -543,7 +552,8 @@ extension PRTimeline {
             let add = reactions.map { "<span class=\"slot-add\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
-            let who = named ? Self.named(user) : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
+            let who = named ? Self.named(user, handle: activity?.layout.handles ?? true)
+                : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
             if commentFilter != nil, slot == "avatar-d" {
                 // The description's own card (`commentsCard`): "Created by <login> <time>", no avatar.
                 return "<span>Created by</span> \(who)"
@@ -710,13 +720,14 @@ extension PRTimeline {
             var generalThread: PRGeneralThread?
             if options.replies || options.resolve, !PRPlaceholderID.isPlaceholder(root.id) {
                 generalThread = PRGeneralThread(root: root, resolvable: options.resolve && root.resolvable == true,
-                                                foldsReplies: folds ? !list.isEmpty : nil)
+                                                foldsReplies: folds && !list.isEmpty)
                 general[root.id] = generalThread
             }
             let menu = target(Self.target(root, options))
             let reactions = Self.reactions(root, options)
+            let started = root.resolvable == true && activity?.layout.fileVerb == nil
             let header = head("avatar-i\(root.id)", root.user,
-                              action: root.resolvable == true ? "started a thread" : "commented", date: root.createdAt,
+                              action: started ? "started a thread" : "commented", date: root.createdAt,
                               menu: menu, reactions: reactions, named: true)
             let resolved = generalThread?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
             let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
@@ -751,7 +762,9 @@ extension PRTimeline {
                 canEdit: root.viewerCanEdit, canDelete: root.viewerCanDelete, options: options))
             let reactions = PRReactionTarget(.review, id: root.id, hostKey: root.hostKey, reactions: root.reactions,
                                              user: root.user, options: options)
-            let header = head("avatar-c\(root.id)", root.user, action: "started a thread on the diff",
+            let file = thread.path.split(separator: "/").last.map(String.init) ?? thread.path
+            let verb = activity?.layout.fileVerb.map { "\($0) \(file)" } ?? "started a thread on the diff"
+            let header = head("avatar-c\(root.id)", root.user, action: verb,
                               date: root.createdAt, menu: menu, reactions: reactions, named: true)
             let resolved = thread.state?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt)
                 : ""
@@ -773,6 +786,7 @@ extension PRTimeline {
                                                                options: options)))
             }
             let tail = rows.isEmpty ? replyRow
+                : !folds ? "<div class=\"replies\">\(rows.map(\.html).joined())</div>" + replyRow
                 : fold(id: "thread-\(thread.id)", chevron: "chevron-\(thread.id)",
                        collapsed: isCollapsed(thread, expanded: expanded, collapsesReplies: true),
                        replies: Array(rows), slotPrefix: "avatar-c", reply: replyRow)
@@ -814,7 +828,18 @@ extension PRTimeline {
         }
         if let activity {
             let filter = activity.view.filter
-            if filter != PRActivity.all {
+            if filter != PRActivity.all, filter == activity.layout.mine {
+                // The viewer's own comments and threads (one of their comments in it).
+                let viewer = activity.viewerID
+                func mine(_ user: HostedUser?) -> Bool { viewer != nil && user?.id == viewer }
+                entries = entries.filter { entry in
+                    switch entry {
+                    case .comment(let root, let replies): mine(root.user) || replies.contains { mine($0.comment.user) }
+                    case .thread(let thread): thread.comments.contains { mine($0.user) }
+                    case .review, .event: false
+                    }
+                }
+            } else if filter != PRActivity.all {
                 entries = entries.filter { entry in
                     switch entry {
                     case .comment, .thread: activity.layout.comments == filter
@@ -823,7 +848,7 @@ extension PRTimeline {
                     }
                 }
             }
-            if activity.view.newestFirst { entries.reverse() }
+            if activity.layout.newestFirst ?? activity.view.newestFirst { entries.reverse() }
         }
         let sorted = entries.map { entry in
             if activity != nil {
@@ -871,7 +896,12 @@ extension PRTimeline {
         var description = item(
             "avatar-d", author, action, date: date, body: bodyHTML(html, markdown),
             emptyText: "No description provided.")
-        if commentFilter != nil, description.hasPrefix("<section class=\"item\"") {
+        if splitsDescription, commentFilter == nil {
+            // Under its card's own title (Bitbucket's "Description"): the text alone, no header or frame.
+            let text = bodyHTML(html, markdown).map { "<div class=\"body\">\($0)</div>" }
+                ?? "<div class=\"body empty\">No description provided.</div>"
+            description = "<section class=\"item desc bare\">\(text)</section>"
+        } else if splits, description.hasPrefix("<section class=\"item\"") {
             // Alone in its card: no gap under it.
             description = "<section class=\"item desc\"" + String(description.dropFirst("<section class=\"item\"".count))
         }
@@ -899,9 +929,29 @@ extension PRTimeline {
             end += "<p class=\"empty\">The inline review comments did not load: \(HostedHTML.escape(message))</p>"
         }
         var list = sorted.joined()
-        if let commentFilter, sorted.isEmpty {
+        if activity?.layout.dayHeadings == true {
+            // A day's heading before its first entry, in the order shown ("Wednesday, November 19, 2025").
+            list = ""
+            var day: String?
+            for (entry, html) in zip(entries, sorted) {
+                let date: Date? = switch entry {
+                case .comment(let root, _): root.createdAt
+                case .thread(let thread): thread.comments.first?.createdAt
+                case .event(let event): event.createdAt
+                case .review(let review, _): review.submittedAt
+                }
+                let name = date.map(Self.dayFormatter.string(from:))
+                if let name, name != day {
+                    list += "<div class=\"day\">\(HostedHTML.escape(name))</div>"
+                    day = name
+                }
+                list += html
+            }
+        }
+        if splits, sorted.isEmpty, activity == nil {
             list = "<p class=\"empty\">"
-                + (commentFilter == .all ? "No comments yet." : "Nothing to show with this filter.") + "</p>"
+                + (commentFilter == .all || commentFilter == nil ? "No comments yet." : "Nothing to show with this filter.")
+                + "</p>"
         }
         if activity != nil {
             if sorted.isEmpty { list = "<p class=\"empty\">Nothing to show with this filter.</p>" }
@@ -911,12 +961,21 @@ extension PRTimeline {
             list = "<div class=\"rail\">\(list)</div>"
         }
         return PRTimelineHTML(
-            html: description + (commentFilter == nil ? "" : commentsMarker) + list + end, avatars: avatars,
+            html: description + (splits ? commentsMarker : "") + list + end, avatars: avatars,
             count: comments.count + (activity?.events == nil ? shown.count : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
-            collapsesReplies: folds, headerEdit: activity?.headerEdit ?? false,
+            collapsesReplies: folds, threadsStayOpen: activity != nil && !folds,
+            headerEdit: activity?.headerEdit ?? false,
             descriptionReactions: descriptionReactions)
     }
+
+    /// A day heading's words, in the page's English: "Wednesday, November 19, 2025".
+    nonisolated static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.dateFormat = "EEEE, MMMM d, yyyy"
+        return formatter
+    }()
 
     /// `entry` as the "Comments" card's `filter` shows it, nil when it hides it: Unresolved keeps the review
     /// conversations not resolved (a review with only those of its threads, a thread of no shown review); Mine keeps
@@ -979,9 +1038,12 @@ extension PRTimeline {
     }
 
     /// A thread's resolve button: "Resolve thread" / "Reopen thread" where the host's layout words it so
-    /// (`PRPageLayout.threadWords`, GitLab's), else "Resolve conversation" / "Unresolve conversation".
+    /// (`PRPageLayout.threadWords`, GitLab's), "Resolve" / "Reopen" (`shortResolveWords`, Bitbucket's), else "Resolve
+    /// conversation" / "Unresolve conversation".
     static func resolveTitle(resolved: Bool, kind: HostingKind) -> String {
-        if PRPageLayout.for(kind).threadWords { return resolved ? "Reopen thread" : "Resolve thread" }
+        let layout = PRPageLayout.for(kind)
+        if layout.threadWords { return resolved ? "Reopen thread" : "Resolve thread" }
+        if layout.shortResolveWords { return resolved ? "Reopen" : "Resolve" }
         return resolved ? "Unresolve conversation" : "Resolve conversation"
     }
 
@@ -1273,7 +1335,8 @@ struct PRTimelinePage: View {
         // (`GitHubHTMLPage`).
         let folds = timeline.collapsesReplies
         let collapsed = Dictionary(uniqueKeysWithValues: threads.values.map { thread in
-            ("thread-\(thread.id)", PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: folds))
+            ("thread-\(thread.id)", !timeline.threadsStayOpen
+                && PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: folds))
         } + timeline.general.values.filter { $0.resolvable || $0.foldsReplies == true }.map { thread in
             ("gthread-\(thread.root.id)", PRTimeline.isCollapsed(thread, expanded: generalExpanded))
         })
@@ -1360,7 +1423,8 @@ struct PRTimelinePage: View {
                 thread, expanded: expanded, collapsesReplies: timeline.collapsesReplies),
                     fills: slot.frame.width > Self.chevronWidth)
         } else if let thread = Self.thread(of: slot, "reply-", in: threads),
-                  !PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: timeline.collapsesReplies) {
+                  timeline.threadsStayOpen
+                    || !PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: timeline.collapsesReplies) {
             measured(PRReplyRow(session: session, number: number, thread: thread,
                                 resolveUnavailable: self.threads?.resolveUnavailable, width: slot.frame.width),
                      slot: slot)

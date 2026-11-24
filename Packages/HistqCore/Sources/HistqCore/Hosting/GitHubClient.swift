@@ -565,6 +565,10 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             enum CodingKeys: String, CodingKey { case method = "merge_method", sha }
         }
         struct Result: Decodable { var merged: Bool? }
+        // A method GitHub has not (Bitbucket's) is refused unsent.
+        guard mergeMethods.contains(method) else {
+            throw HostingError.validationFailed(message: "GitHub has no such merge method")
+        }
         do {
             let _: Result = try await send(
                 "PUT", url(try repoPath(repo) + ["pulls", String(number), "merge"]),

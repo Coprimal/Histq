@@ -238,6 +238,16 @@ public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     public var mergedBy: HostedUser? = nil
     public var mergeCommitSHA: String? = nil
     public var viewerCanPush: Bool? = nil
+    /// The merge methods this pull request may use and the one it starts at, where the host sets them per pull
+    /// request (Bitbucket: the destination branch's strategies); nil falls back to the client's `mergeMethods`. Not
+    /// part of the JSON: the host's mapping sets them.
+    public var allowedMergeMethods: [HostedMergeMethod]? = nil
+    public var defaultMergeMethod: HostedMergeMethod? = nil
+    /// Whether merging closes (deletes) the source branch, as the pull request was created (Bitbucket's
+    /// `close_source_branch`); nil where the host has no such setting. Not part of the JSON.
+    public var closesSourceBranch: Bool? = nil
+    /// How many of its tasks are open (Bitbucket's `task_count`); nil where the host has none. Not part of the JSON.
+    public var openTaskCount: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, number, title, state, draft, user, body, head, base, labels, assignees, merged, mergeable
@@ -686,6 +696,46 @@ public struct HostedPullRequestExtras: Sendable, Equatable {
         self.projects = projects
         self.projectCount = projectCount
         self.closingIssues = closingIssues
+    }
+}
+
+/// A pull request task (Bitbucket's): its text, whether it is done, who made it, and the comment it hangs on.
+public struct HostedTask: Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var body: String
+    public var isResolved: Bool
+    public var creator: HostedUser?
+    public var createdAt: Date?
+    /// The comment it was made on; nil for one of the pull request itself.
+    public var commentID: Int?
+
+    public init(
+        id: Int, body: String, isResolved: Bool, creator: HostedUser? = nil, createdAt: Date? = nil,
+        commentID: Int? = nil
+    ) {
+        self.id = id
+        self.body = body
+        self.isResolved = isResolved
+        self.creator = creator
+        self.createdAt = createdAt
+        self.commentID = commentID
+    }
+}
+
+/// One of a pull request's merge checks (Bitbucket's `mergeability/checks`): what it checks (the host's words, or its
+/// type when the host names none), whether it passed (`PASSED`, `FAILED`, `PENDING`, `SKIPPED`, `UNKNOWN`), whether it
+/// must pass, and whether it blocks the merge now.
+public struct HostedMergeCheck: Sendable, Equatable {
+    public var name: String
+    public var status: String
+    public var required: Bool
+    public var blocking: Bool
+
+    public init(name: String, status: String, required: Bool = false, blocking: Bool = false) {
+        self.name = name
+        self.status = status
+        self.required = required
+        self.blocking = blocking
     }
 }
 

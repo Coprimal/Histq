@@ -313,16 +313,20 @@ final class AvatarStore {
         return fallback
     }
 
-    /// `avatar:<url>` for an https `url` on `host` (with its port, if any; gitlab.com's also on gravatar.com, its
-    /// default avatars), as given (paths are case-sensitive); nil for any other URL.
+    /// `avatar:<url>` for an https `url` on `host` (with its port, if any; gitlab.com's and bitbucket.org's also on
+    /// gravatar.com, bitbucket.org's on Atlassian's avatar service `*.atl-paas.net`), as given (paths are
+    /// case-sensitive); nil for any other URL.
     static func hostedIdentity(url: String?, host: String) -> String? {
         guard let url, let parsed = URL(string: url), parsed.scheme?.lowercased() == "https",
               let avatarHost = parsed.host()?.lowercased(), !avatarHost.isEmpty
         else { return nil }
         let host = host.lowercased()
         let authority = parsed.port.map { "\(avatarHost):\($0)" } ?? avatarHost
-        let gravatar = host == "gitlab.com" && (avatarHost == "gravatar.com" || avatarHost.hasSuffix(".gravatar.com"))
-        return authority == host || gravatar ? "avatar:" + url : nil
+        let isGravatar = avatarHost == "gravatar.com" || avatarHost.hasSuffix(".gravatar.com")
+        let gravatar = (host == "gitlab.com" || host == "bitbucket.org") && isGravatar
+        // Bitbucket Cloud's accounts: their avatars are on Atlassian's avatar service.
+        let atlassian = host == "bitbucket.org" && parsed.port == nil && avatarHost.hasSuffix(".atl-paas.net")
+        return authority == host || gravatar || atlassian ? "avatar:" + url : nil
     }
 
     // MARK: Provider logos

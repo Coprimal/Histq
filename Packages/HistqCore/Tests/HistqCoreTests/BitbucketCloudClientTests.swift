@@ -276,6 +276,117 @@ struct BitbucketCloudClientTests {
         #expect(Set(body.keys) == ["merge_strategy"] && body["merge_strategy"] as? String == "squash")
     }
 
+    @Test("strategies: the destination branch's ids map to methods in the dialog's order (unknown ids left out, none left is nil), the default only when allowed; a merge sends close_source_branch only when set, and a Data Center method is refused unsent", arguments: [
+        (["merge_commit", "squash", "fast_forward", "squash_fast_forward", "rebase_fast_forward", "rebase_merge"],
+         "squash", [HostedMergeMethod.merge, .squash, .fastForward, .squashFastForward, .rebaseFastForward, .rebase],
+         HostedMergeMethod?.some(.squash)),
+        (["rebase_merge", "fast_forward"], "merge_commit", [.fastForward, .rebase], nil),
+        (["octopus"], "octopus", nil, nil),
+    ] as [([String], String, [HostedMergeMethod]?, HostedMergeMethod?)])
+    func mergeStrategies(ids: [String], preferred: String, allowed: [HostedMergeMethod]?, chosen: HostedMergeMethod?)
+        async throws
+    {
+        let quoted = ids.map { "\"\($0)\"" }.joined(separator: ", ")
+        let json = Self.pullRequest().replacingOccurrences(
+            of: #""merge_strategies": ["merge_commit", "squash"]"#,
+            with: #""merge_strategies": [\#(quoted)], "default_merge_strategy": "\#(preferred)""#)
+        let read = StubServer { _ in .init(body: json) }
+        let pull = try await Self.client(read).pullRequest(5, in: Self.repo)
+        #expect(pull.allowedMergeMethods == allowed)
+        #expect(pull.defaultMergeMethod == chosen)
+
+        let stub = Self.mergeServer()
+        try await Self.client(stub).merge(
+            5, in: Self.repo, method: .merge, sha: "abc123def456", options: HostedMergeOptions(deleteSourceBranch: true))
+        let body = Self.json(stub.requests[1])
+        #expect(body["merge_strategy"] as? String == "merge_commit" && body["close_source_branch"] as? Bool == true)
+        let sent = stub.requests.count
+        await #expect(throws: HostingError.self) {
+            try await Self.client(stub).merge(5, in: Self.repo, method: .fastForwardIfPossible, sha: "abc123def456")
+        }
+        #expect(stub.requests.count == sent + 1, "only the head check: nothing merged")
+    }
+
+    @Test("activity: update snapshots in date order become Opened, Updated with the commits between (linked), Merged, edited the title and description, added and removed reviewers; approvals and change requests kept; comments left out")
+    func activityEvents() async throws {
+        let a = String(repeating: "a", count: 40), b = String(repeating: "b", count: 40)
+        let c = String(repeating: "c", count: 40)
+        func update(_ date: String, _ hash: String, state: String = "OPEN", title: String = "T",
+                    description: String = "D", reviewers: [String] = ["r1"]) -> String {
+            let list = reviewers.map { Self.account($0, $0) }.joined(separator: ", ")
+            return #"{"update": {"date": "\#(date)", "state": "\#(state)", "title": "\#(title)", "#
+                + #""description": "\#(description)", "author": \#(Self.account("u1", "me")), "#
+                + #""source": {"commit": {"hash": "\#(hash.prefix(12))"}}, "reviewers": [\#(list)]}}"#
+        }
+        let activity = "{\"values\": [" + [
+            update("2026-11-03T10:00:00+00:00", c, state: "MERGED", title: "T2", description: "D2", reviewers: ["r2"]),
+            #"{"comment": {"id": 9, "content": {"raw": "hi"}}}"#,
+            #"{"approval": {"date": "2026-11-02T12:00:00+00:00", "user": \#(Self.account("u2", "rev"))}}"#,
+            #"{"changes_requested": {"date": "2026-11-02T11:00:00+00:00", "user": \#(Self.account("u3", "other"))}}"#,
+            update("2026-11-02T10:00:00+00:00", c, title: "T2", description: "D2"),
+            update("2026-11-01T10:00:00+00:00", a),
+        ].joined(separator: ", ") + "]}"
+        let commits = "{\"values\": [" + [c, b, a].enumerated().map { index, hash in
+            let parent = index < 2 ? [c, b, a][index + 1] : ""
+            return #"{"hash": "\#(hash)", "message": "m", "date": "2026-11-01T10:00:00+00:00", "#
+                + #""parents": [\#(parent.isEmpty ? "" : #"{"hash": "\#(parent)"}"#)]}"#
+        }.joined(separator: ", ") + "]}"
+        let stub = StubServer { request in
+            request.url?.path().hasSuffix("/activity") == true ? .init(body: activity) : .init(body: commits)
+        }
+        let events = try await Self.client(stub).timelineEvents(of: .pullRequest(5), in: Self.repo)
+
+        #expect(events.map(\.text) == [
+            "Opened the pull request", "Updated the pull request with 2 commits", "edited the title",
+            "edited the description", "Merged the pull request", "added 1 reviewer", "removed 1 reviewer",
+            "Approved the pull request", "Requested changes",
+        ])
+        #expect(events.map(\.action) == ["opened", "commit", "title", "description", "merged", "reviewer", "reviewer",
+                                         "approved", "changes_requested"])
+        let html = try #require(events[1].textHTML)
+        #expect(html.contains(">bbbbbbb</a>, <a ") && html.contains(">ccccccc</a>"), "both commits after the first")
+        #expect(events.first?.actor?.login == "me" && events[7].actor?.login == "rev")
+        await #expect(throws: HostingError.self) { _ = try await Self.client(stub).timelineEvents(of: .issue(5), in: Self.repo) }
+    }
+
+    @Test("tasks: listed with state, creator and comment; create POSTs the raw text, resolve and reopen PUT the state, delete DELETEs; merge checks named by Bitbucket or by type", arguments: [
+        ("create", "POST", "/tasks", #"{"content":{"raw":"Do it"}}"#),
+        ("resolve", "PUT", "/tasks/7", #"{"state":"RESOLVED"}"#),
+        ("reopen", "PUT", "/tasks/7", #"{"state":"UNRESOLVED"}"#),
+        ("delete", "DELETE", "/tasks/7", ""),
+    ])
+    func tasksAndChecks(write: String, method: String, path: String, body: String) async throws {
+        let task = #"{"id": 7, "content": {"raw": "Do it"}, "state": "UNRESOLVED", "creator": \#(Self.account("u1", "me")), "#
+            + #""created_on": "2026-11-01T10:00:00+00:00", "comment": {"id": 9}}"#
+        let stub = StubServer { request in
+            if request.url?.path().hasSuffix("/checks") == true {
+                return .init(body: #"{"values": [{"type": "git_mergeability_check", "status": "PASSED", "required": true}, "#
+                    + #"{"type": "custom_pre_merge_check", "name": "Jira key", "status": "FAILED", "blocking": true}]}"#)
+            }
+            if request.httpMethod == "GET" { return .init(body: "{\"values\": [\(task)]}") }
+            return .init(body: request.httpMethod == "DELETE" ? "" : task)
+        }
+        let client = Self.client(stub)
+        let tasks = try await client.tasks(of: 5, in: Self.repo)
+        #expect(tasks == [HostedTask(id: 7, body: "Do it", isResolved: false, creator: tasks.first?.creator,
+                                     createdAt: ISO8601DateFormatter().date(from: "2026-11-01T10:00:00Z"), commentID: 9)])
+        #expect(tasks.first?.creator?.login == "me")
+        let checks = try await client.mergeChecks(of: 5, in: Self.repo)
+        #expect(checks == [HostedMergeCheck(name: "No conflicts", status: "PASSED", required: true),
+                           HostedMergeCheck(name: "Jira key", status: "FAILED", blocking: true)])
+
+        switch write {
+        case "create": _ = try await client.createTask(on: 5, in: Self.repo, body: "Do it")
+        case "resolve": try await client.setTask(7, resolved: true, on: 5, in: Self.repo)
+        case "reopen": try await client.setTask(7, resolved: false, on: 5, in: Self.repo)
+        default: try await client.deleteTask(7, on: 5, in: Self.repo)
+        }
+        let sent = try #require(stub.requests.last)
+        #expect(sent.httpMethod == method && sent.url?.path() == Self.prPath + path)
+        let text = String(data: sent.httpBody ?? Data(), encoding: .utf8) ?? ""
+        #expect(text == body)
+    }
+
     @Test("a merge is refused as headChanged when the source moved, before Bitbucket is asked to merge")
     func mergeRefusedWhenHeadMoved() async throws {
         let stub = Self.mergeServer(hash: "fff000fff000")
@@ -769,6 +880,7 @@ struct BitbucketCloudClientTests {
         #expect(client.capabilities == [
             .requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
             .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
+            .timelineEvents, .tasks, .mergeChecks,
         ])
         #expect(!client.capabilities.contains(.reactions) && client.reactionKinds.isEmpty)
     }

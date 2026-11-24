@@ -477,7 +477,9 @@ enum HostedHTML {
                 .body table { display: block; overflow-x: auto; } .body td, .body th { overflow-wrap: break-word; }
                 img { max-width: 100%; } hr { border: 0; border-top: 1px solid \(border); }
                 .item { border: 1px solid \(border); border-radius: 10px; margin: 0 0 10px; overflow: hidden; }
-                .item.desc { margin-bottom: 0; }
+                .item.desc { margin-bottom: 0; } .item.bare { border: 0; border-radius: 0; }
+                .item.bare > .body { padding: 0 0 4px; }
+                .day { font-weight: 600; color: \(text); margin: 14px 0 8px; } .rail > .day:first-child { margin-top: 2px; }
                 .pinned { border-top: 1px solid \(border); background: \(pinnedFill); padding: 8px 10px 10px; }
                 .pin-by { color: \(link); font-size: 12px; font-weight: 600; margin-bottom: 4px; }
                 .pin-by b { font-weight: 600; } .pin-head { color: \(secondary); font-size: 12px; margin-bottom: 4px; }
