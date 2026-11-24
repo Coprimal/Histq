@@ -121,9 +121,9 @@ struct RefBadge: Hashable {
 }
 
 /// The BRANCH / TAG column's cell: the row's badges from the left, as many as fit whole, then "+N" for the rest. When
-/// even the first does not fit whole it steps down (`Level`) in the room "+N" leaves: its name without ↑↓ and the pull
-/// request chip, cut with "…" (at least 3 characters), then its icons alone (HEAD's check, the laptop, the cloud
-/// and the worktree icon always stay); "+N" always stays. Nothing is drawn outside a badge, or past the cell. A line
+/// even the first does not fit whole it steps down (`Level`) in the room "+N" leaves: its name without the pull
+/// request chip, cut with "…" (at least 3 characters), then its icons alone (HEAD's check, the laptop, the cloud,
+/// the worktree icon and ↑↓ always stay); "+N" always stays. Nothing is drawn outside a badge, or past the cell. A line
 /// in the lane color runs from the last badge to the column's right edge, where the graph cell continues it to the
 /// node. With `stack` set it is the hover overlay instead (`GraphTableController`): every badge whole, one under the
 /// other; the table routes its clicks, menus, drags and drops to them.
@@ -287,6 +287,12 @@ final class RefBadgeCellView: NSView {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
+    /// The room ↑↓ take after the icons (their gap included): 0 without them.
+    private func countsWidth(_ badge: RefBadge) -> CGFloat {
+        guard let counts = Self.aheadBehind(badge) else { return 0 }
+        return Style.iconGap + ceil((counts as NSString).size(withAttributes: countAttributes).width)
+    }
+
     /// The pull request chip's width: its icon and "#N" ("!N" on GitLab).
     private func pullChipWidth(_ pull: PullRequestChip) -> CGFloat {
         2 * Style.chipPadding + Style.icon + Style.iconGap
@@ -326,9 +332,10 @@ final class RefBadgeCellView: NSView {
     fileprivate enum Level: Equatable {
         /// Icons, name, ↑↓ and the pull request chip.
         case full
-        /// The name (cut with "…" when short) without ↑↓, the pull request chip giving way to its icon.
+        /// The name (cut with "…" when short), the pull request chip giving way to its icon; ↑↓ stay, as the icons
+        /// do (user, 2026-11-24).
         case name
-        /// The icons it always keeps (`refIcons`) alone: one in a square.
+        /// The icons it always keeps (`refIcons`) and ↑↓ alone: one icon in a square.
         case icon
         /// HEAD's check alone in a square, when not even `refIcons` fit: the checked-out branch never loses it.
         case check
@@ -341,10 +348,12 @@ final class RefBadgeCellView: NSView {
         if size.chrome + size.name <= room { return (.full, size.chrome + size.name) }
         let (leading, trailing) = Self.refIcons(badge)
         let chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + Self.iconWidth($1) + Style.iconGap }
+            + countsWidth(badge)
         if chrome + minimumName(badge) <= room { return (.name, min(room, chrome + size.name)) }
         // As much room around the icons as a single one has in its square.
         for level in [Level.icon, .check] where level == .icon || leading.contains(Self.headIcon) {
             let width = Self.iconsWidth(Self.iconsAlone(badge, at: level)) + height - Style.refIcon
+                + (level == .icon ? countsWidth(badge) : 0)
             if width <= room { return (level, width) }
         }
         return nil
@@ -366,9 +375,7 @@ final class RefBadgeCellView: NSView {
     private func widths(_ badge: RefBadge) -> (chrome: CGFloat, name: CGFloat) {
         let (leading, trailing) = Self.icons(badge)
         var chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + Self.iconWidth($1) + Style.iconGap }
-        if let counts = Self.aheadBehind(badge) {
-            chrome += Style.iconGap + ceil((counts as NSString).size(withAttributes: countAttributes).width)
-        }
+        chrome += countsWidth(badge)
         if let pull = badge.pullRequest.map(PullRequestChip.init) {
             chrome += Style.iconGap + pullChipWidth(pull) + Style.chipInset - Style.padding
         }
@@ -638,10 +645,16 @@ final class RefBadgeCellView: NSView {
 
         if level == .icon || level == .check {
             let names = Self.iconsAlone(badge, at: level)
-            var x = rect.midX - Self.iconsWidth(names) / 2
+            let counts = level == .icon ? Self.aheadBehind(badge) : nil
+            var x = rect.midX - (Self.iconsWidth(names) + (counts == nil ? 0 : countsWidth(badge))) / 2
             for name in names {
                 drawIcon(name, of: badge, x: x, midY: rect.midY)
                 x += Self.iconWidth(name) + Style.iconGap
+            }
+            if let counts {
+                let size = (counts as NSString).size(withAttributes: countAttributes)
+                (counts as NSString).draw(at: CGPoint(x: x, y: rect.midY - size.height / 2),
+                                          withAttributes: countAttributes)
             }
             return
         }
@@ -662,7 +675,7 @@ final class RefBadgeCellView: NSView {
             drawIcon(name, of: badge, x: trailingX, midY: rect.midY)
             trailingX -= Style.iconGap
         }
-        if level == .full, let counts = Self.aheadBehind(badge) {
+        if let counts = Self.aheadBehind(badge) {
             let size = (counts as NSString).size(withAttributes: countAttributes)
             trailingX -= ceil(size.width)
             (counts as NSString).draw(at: CGPoint(x: trailingX, y: rect.midY - size.height / 2),
