@@ -680,11 +680,17 @@ enum GitHubStub {
                 + #""issueDependenciesSummary": {"blockedBy": 0, "blocking": 1}, "#
                 + #""issueFieldValues": {"nodes": [{"value": "High", "field": {"name": "Priority"}}]}}}}}"#)
         }
-        if query.contains("IssueProjects") {
+        // PR #1 closes issue #2 (`-HistqStubPageSeed YES`).
+        if query.contains("PullRequestExtras") {
+            let nodes = GitHubStub.seedsPage ? #"{"number": 2, "title": "Crash when opening an empty repository", "#
+                + #""state": "OPEN", "url": null, "repository": {"nameWithOwner": "stub/stub"}}"# : ""
+            return (200, #"{"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": [\#(nodes)]}}}}}"#)
+        }
+        if query.contains("ItemProjects") {
             return (200, #"{"errors": [{"type": "INSUFFICIENT_SCOPES", "message": "needs read:project"}]}"#)
         }
-        if query.contains("IssueProjectCount") {
-            return (200, #"{"data": {"repository": {"issue": {"projectItems": {"totalCount": 1}}}}}"#)
+        if query.contains("ItemProjectCount") {
+            return (200, #"{"data": {"repository": {"issueOrPullRequest": {"projectItems": {"totalCount": 1}}}}}"#)
         }
         // Neither name contains the other.
         if query.contains("AddReaction") || query.contains("RemoveReaction") {

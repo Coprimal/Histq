@@ -139,6 +139,9 @@ struct PullRequestDetail: Sendable {
     /// (`PRPageLayout.githubMergeBox`): nil when it was not read (not merged, a fork's branch, no push permission, no
     /// `deleteHeadBranch`) or the read failed, which shows neither.
     var headBranchExists: Bool? = nil
+    /// The sidebar's Projects and Development (`PRPageLayout.githubSidebar`, the provider's `pullRequestExtras`); nil
+    /// otherwise or when their read failed (no such cards).
+    var extras: HostedPullRequestExtras? = nil
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -1184,6 +1187,10 @@ final class PullRequestDetailModel {
         let asksLabels = sidebar && client.capabilities.contains(.labels)
         async let labelChoices: Loadable<[HostedLabel]> = !asksLabels ? .idle
             : await part(client.kind) { try await client.labels(in: repository) }
+        // GitHub's sidebar Projects and Development; a failure only leaves those cards out.
+        let asksExtras = layout.githubSidebar && client.capabilities.contains(.pullRequestExtras)
+        async let extras: Loadable<HostedPullRequestExtras> = !asksExtras ? .idle
+            : await part(client.kind) { try await client.pullRequestExtras(number, in: repository) }
         do {
             let pull = try await pullRequest
             let (comments, reviews) = try await (comments, reviews)
@@ -1232,7 +1239,7 @@ final class PullRequestDetailModel {
                 viewerApproved: viewerApproved, reactionKinds: reactions == nil ? [] : barKinds,
                 approvals: await approvals.value, repositoryInfo: await repositoryInfo.value,
                 reviewerCandidates: await candidates.value ?? [], labelChoices: await labelChoices.value ?? [],
-                events: events, memberRoles: roles, headBranchExists: headBranchExists))
+                events: events, memberRoles: roles, headBranchExists: headBranchExists, extras: await extras.value))
         } catch {
             return .failure(error)
         }
@@ -1995,6 +2002,8 @@ struct PRConversationTab: View {
     /// The scroll ids of the merge box and the Conversation (Activity) card, for DEBUG `-HistqPRScrollTo`.
     static let mergeID = "merge"
     static let activityID = "activity"
+    /// The "Comments" card's header row (`commentsCards`).
+    private static let commentsHeaderHeight: CGFloat = 44
 
     /// The description's reaction row (`PRPageLayout.descriptionReactions`): the pull request's own reactions, written
     /// through the detail's optimistic `itemReaction`; nil without the row or when they did not load.
@@ -2084,11 +2093,14 @@ struct PRConversationTab: View {
         SectionCard(nil) {
             page(split.description)
         }
-        SectionCard("Comments", systemImage: "text.bubble", count: detail.timelineCount) {
+        // A taller header, so the filter's tabs keep room above them and above the comment box (user, 2026-11-23).
+        SectionCard("Comments", systemImage: "text.bubble", count: detail.timelineCount,
+                    headerHeight: Self.commentsHeaderHeight) {
             VStack(spacing: 10) {
                 PRComposerCard(session: session, detail: detail, embedded: true)
                 page(split.comments)
             }
+            .padding(.top, 4)
         } accessory: {
             let model = session.pullDetail
             CapsuleTabs(selection: Binding(
@@ -2610,13 +2622,20 @@ private struct PRSideColumn: View {
                 }
             }
             if detail.layout.githubSidebar {
+                if let extras = detail.extras {
+                    HostProjectsCard(projects: extras.projects, count: extras.projectCount,
+                                     host: session.github.kind.name) { [session, number = detail.pull.number] in
+                        GitHubLinks.open(session.github.webURL(.pullRequest(number)))
+                    }
+                }
                 gitHubMilestoneAndParticipants(avatars: avatars)
             }
         }
     }
 
-    /// GitHub's sidebar after Labels: Milestone ("No milestone"), then Participants (their avatars, as Histq knows
-    /// them: `HostSidebar.participants`); Projects, Development and Notifications stay on GitHub.
+    /// GitHub's sidebar after Labels and Projects: Milestone ("No milestone"), Development (the issues it closes,
+    /// where `pullRequestExtras` read them), then Participants (their avatars, as Histq knows them:
+    /// `HostSidebar.participants`); Notifications stays on GitHub.
     @ViewBuilder private func gitHubMilestoneAndParticipants(avatars: HostAvatars) -> some View {
         let pull = detail.pull
         SectionCard("Milestone", systemImage: "flag") {
@@ -2629,6 +2648,7 @@ private struct PRSideColumn: View {
                 PRSideEmpty(text: "No milestone")
             }
         }
+        if let issues = detail.extras?.closingIssues { development(issues) }
         let participants = HostSidebar.participants(
             [pull.user] + (pull.assignees ?? []) + (pull.requestedReviewers ?? []) + detail.comments.map(\.user)
                 + detail.reviews.map(\.user) + (detail.threads.value?.all ?? []).flatMap { $0.comments.map(\.user) })
@@ -2643,6 +2663,93 @@ private struct PRSideColumn: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text("Participants: " + participants.map(\.login).joined(separator: ", ")))
+        }
+    }
+}
+
+extension PRSideColumn {
+    /// GitHub's Development card: the issues the pull request closes when merged, each a click target (one of this
+    /// repository opens in the detail, another's on the host); "No linked issues" without any.
+    fileprivate func development(_ issues: [HostedPullRequestExtras.ClosingIssue]) -> some View {
+        let repository = session.github.api?.repository.fullName
+        return SectionCard("Development", systemImage: "arrow.triangle.branch", count: issues.count) {
+            if issues.isEmpty {
+                PRSideEmpty(text: "No linked issues")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(issues, id: \.self) { issue in
+                        let local = issue.repository.lowercased() == repository?.lowercased()
+                        Button {
+                            if local {
+                                session.selectHosted(.issue(issue.number))
+                            } else if let url = issue.url.flatMap(URL.init(string:)),
+                                      url.host()?.lowercased() == session.github.api?.repository.host.lowercased() {
+                                // Only a link on the account's own host.
+                                GitHubLinks.open(url)
+                            }
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Image(systemName: issue.isOpen ? "circle.circle" : "checkmark.circle")
+                                    .font(.settingsCaption)
+                                    .foregroundStyle(issue.isOpen ? Color(nsColor: Palette.diffAddedSign)
+                                                     : Palette.mergedTone)
+                                    .accessibilityHidden(true)
+                                Text(verbatim: (local ? "" : issue.repository) + "#\(issue.number) \(issue.title)")
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(local ? "Open issue #\(issue.number)" : "Open on \(session.github.kind.name)")
+                        .accessibilityLabel(Text("Issue \(issue.number), \(issue.title), "
+                            + (issue.isOpen ? "open" : "closed")))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A Projects side card (GitHub's, pull request and issue): the projects' titles, only their count when the token may
+/// not read them (`read:project`), and a button that opens the item on the host, where projects are set.
+struct HostProjectsCard: View {
+    let projects: [String]?
+    let count: Int?
+    /// The host's name ("GitHub").
+    let host: String
+    let openOnHost: () -> Void
+
+    var body: some View {
+        SectionCard("Projects", systemImage: "tablecells", count: count ?? projects?.count) {
+            if let projects {
+                if projects.isEmpty {
+                    PRSideEmpty(text: "No projects")
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        // By position: two projects (an organization's, a user's) may share a title.
+                        ForEach(Array(projects.enumerated()), id: \.offset) { _, title in
+                            Text(title).lineLimit(1).truncationMode(.tail).help(title)
+                        }
+                    }
+                }
+            } else if let count {
+                PRSideEmpty(text: count == 0 ? "No projects"
+                            : "In \(count) \(count == 1 ? "project" : "projects") (names need the read:project "
+                                + "permission)")
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                PRSideEmpty(text: "Could not be read")
+            }
+        } accessory: {
+            Button(action: openOnHost) {
+                Image(systemName: "arrow.up.forward.square")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(RowIconButtonStyle())
+            .help("Set projects on \(host)")
+            .accessibilityLabel("Set projects on \(host)")
         }
     }
 }

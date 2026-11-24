@@ -1010,23 +1010,9 @@ private struct IssueSideColumn: View {
                 }
             }
         }
-        SectionCard("Projects", systemImage: "tablecells", count: extras.projectCount ?? extras.projects?.count) {
-            if let projects = extras.projects {
-                if projects.isEmpty {
-                    PRSideEmpty(text: "No projects")
-                } else {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(projects, id: \.self) { Text($0).lineLimit(1).truncationMode(.tail).help($0) }
-                    }
-                }
-            } else if let count = extras.projectCount {
-                PRSideEmpty(text: count == 0 ? "No projects"
-                            : "In \(count) \(count == 1 ? "project" : "projects") (names need the read:project "
-                                + "permission)")
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                PRSideEmpty(text: "Could not be read")
-            }
+        HostProjectsCard(projects: extras.projects, count: extras.projectCount,
+                         host: session.github.kind.name) { [session, number = detail.issue.number] in
+            GitHubLinks.open(session.github.webURL(.issue(number)))
         }
     }
 

@@ -656,3 +656,36 @@ public struct HostedIssueExtras: Sendable, Equatable {
     }
 }
 
+/// What GitHub's pull request sidebar shows beside the pull request's JSON (`HostingProvider.pullRequestExtras`): its
+/// projects and the issues it closes (Development).
+public struct HostedPullRequestExtras: Sendable, Equatable {
+    /// An issue the pull request closes when merged, maybe of another repository (`repository` is "owner/name").
+    public struct ClosingIssue: Sendable, Hashable {
+        public var number: Int
+        public var title: String
+        public var isOpen: Bool
+        public var repository: String
+        public var url: String?
+
+        public init(number: Int, title: String, isOpen: Bool, repository: String, url: String? = nil) {
+            self.number = number
+            self.title = title
+            self.isOpen = isOpen
+            self.repository = repository
+            self.url = url
+        }
+    }
+
+    /// As `HostedIssueExtras.projects` and `projectCount`.
+    public var projects: [String]?
+    public var projectCount: Int?
+    /// nil when they could not be read (the projects may still have been).
+    public var closingIssues: [ClosingIssue]?
+
+    public init(projects: [String]? = [], projectCount: Int? = 0, closingIssues: [ClosingIssue]? = []) {
+        self.projects = projects
+        self.projectCount = projectCount
+        self.closingIssues = closingIssues
+    }
+}
+

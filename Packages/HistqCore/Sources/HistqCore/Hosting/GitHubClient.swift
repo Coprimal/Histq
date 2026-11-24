@@ -126,7 +126,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
-            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras,
         ]
     }
 
@@ -804,7 +804,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         _ = try repoPath(repo)
         let variables = ItemVariables(owner: repo.owner, name: repo.name, number: number)
         // Beside the main query, so a token without `read:project` (two reads) adds no round trip after it.
-        async let projects = projects(of: number, in: repo)
+        async let projects = projects(of: .issue(number), in: repo)
         let answer: IssueExtrasAnswer = try await graphQL(Self.issueExtrasQuery, variables: variables)
         guard let issue = answer.repository?.issue else { throw HostingError.notFound }
         var extras = HostedIssueExtras(
@@ -833,45 +833,102 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         return extras
     }
 
-    /// The issue's projects: their titles, or without the `read:project` scope only how many (nil, the count); nil,
-    /// nil when neither could be read.
-    private func projects(of number: Int, in repo: HostedRepository) async -> ([String]?, Int?) {
+    /// The pull request's projects and the issues it closes: one GraphQL query for those issues (each with its
+    /// repository, which may be another one; nil when that query fails, so the projects still show), the projects
+    /// read beside it as for an issue.
+    public func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras {
+        _ = try repoPath(repo)
         struct Answer: Decodable {
             struct Repository: Decodable {
-                struct Issue: Decodable {
-                    struct Items: Decodable {
+                struct Pull: Decodable {
+                    struct Closing: Decodable {
                         struct Node: Decodable {
-                            struct Project: Decodable { var title: String }
-                            var project: Project?
+                            struct Owner: Decodable { var nameWithOwner: String }
+                            var number: Int
+                            var title: String
+                            var state: String?
+                            var url: String?
+                            var repository: Owner?
                         }
-                        var totalCount: Int
                         var nodes: [Node?]?
                     }
-                    var projectItems: Items?
+                    var closingIssuesReferences: Closing?
                 }
-                var issue: Issue?
+                var pullRequest: Pull?
             }
             var repository: Repository?
         }
-        let variables = ItemVariables(owner: repo.owner, name: repo.name, number: number)
-        let titled = """
-            query IssueProjects($owner: String!, $name: String!, $number: Int!) {
+        let query = """
+            query PullRequestExtras($owner: String!, $name: String!, $number: Int!) {
               repository(owner: $owner, name: $name) {
-                issue(number: $number) { projectItems(first: 20) { totalCount nodes { project { title } } } }
+                pullRequest(number: $number) {
+                  closingIssuesReferences(first: 20) {
+                    nodes { number title state url repository { nameWithOwner } }
+                  }
+                }
               }
             }
             """
-        if let answer: Answer = try? await graphQL(titled, variables: variables),
-           let items = answer.repository?.issue?.projectItems {
-            return ((items.nodes ?? []).compactMap { $0?.project?.title }, items.totalCount)
+        async let projects = projects(of: .pullRequest(number), in: repo)
+        let answer: Answer? = try? await graphQL(
+            query, variables: ItemVariables(owner: repo.owner, name: repo.name, number: number))
+        let closing = answer?.repository?.pullRequest.map { pull in
+            (pull.closingIssuesReferences?.nodes ?? []).compactMap { node -> HostedPullRequestExtras.ClosingIssue? in
+                guard let node else { return nil }
+                return .init(number: node.number, title: node.title, isOpen: node.state == "OPEN",
+                             repository: node.repository?.nameWithOwner ?? repo.fullName, url: node.url)
+            }
         }
-        let counted = """
-            query IssueProjectCount($owner: String!, $name: String!, $number: Int!) {
-              repository(owner: $owner, name: $name) { issue(number: $number) { projectItems { totalCount } } }
+        let (titles, count) = await projects
+        return HostedPullRequestExtras(projects: titles, projectCount: count, closingIssues: closing)
+    }
+
+    /// The item's projects: their titles, or without the `read:project` scope only how many (nil, the count); nil,
+    /// nil when neither could be read. `issueOrPullRequest`, so both kinds share the query. Both reads run at once,
+    /// so a token without the scope waits for no failed request first.
+    private func projects(of item: HostedItem, in repo: HostedRepository) async -> ([String]?, Int?) {
+        struct Items: Decodable {
+            struct Node: Decodable {
+                struct Project: Decodable { var title: String }
+                var project: Project?
+            }
+            var totalCount: Int
+            var nodes: [Node?]?
+        }
+        struct Answer: Decodable {
+            struct Repository: Decodable {
+                struct Item: Decodable { var projectItems: Items? }
+                var issueOrPullRequest: Item?
+            }
+            var repository: Repository?
+        }
+        let variables = ItemVariables(owner: repo.owner, name: repo.name, number: item.number)
+        let titled = """
+            query ItemProjects($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issueOrPullRequest(number: $number) {
+                  ... on Issue { projectItems(first: 20) { totalCount nodes { project { title } } } }
+                  ... on PullRequest { projectItems(first: 20) { totalCount nodes { project { title } } } }
+                }
+              }
             }
             """
-        let answer: Answer? = try? await graphQL(counted, variables: variables)
-        return (nil, answer?.repository?.issue?.projectItems?.totalCount)
+        let counted = """
+            query ItemProjectCount($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issueOrPullRequest(number: $number) {
+                  ... on Issue { projectItems { totalCount } }
+                  ... on PullRequest { projectItems { totalCount } }
+                }
+              }
+            }
+            """
+        async let titles: Answer? = try? await graphQL(titled, variables: variables)
+        async let count: Answer? = try? await graphQL(counted, variables: variables)
+        if let items = await titles?.repository?.issueOrPullRequest?.projectItems {
+            return ((items.nodes ?? []).compactMap { $0?.project?.title }, items.totalCount)
+        }
+        return (nil, await count?.repository?.issueOrPullRequest?.projectItems?.totalCount)
     }
 
     private struct ItemVariables: Encodable {

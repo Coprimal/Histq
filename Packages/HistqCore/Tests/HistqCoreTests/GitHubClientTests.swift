@@ -111,7 +111,7 @@ struct GitHubClientTests {
         #expect(client.capabilities == [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
-            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras,
         ])
         #expect(client.reactionKinds == ["+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"])
         await #expect(throws: HostingError.self) {
@@ -696,10 +696,10 @@ struct GitHubClientTests {
                        {"numberValue": 3.0, "field": {"name": "Points"}}, {}]}}}}}
                     """)
             }
-            if query.contains("IssueProjects") {
+            if query.contains("ItemProjects") {
                 return .init(body: #"{"errors": [{"type": "INSUFFICIENT_SCOPES", "message": "needs read:project"}]}"#)
             }
-            return .init(body: #"{"data": {"repository": {"issue": {"projectItems": {"totalCount": 2}}}}}"#)
+            return .init(body: #"{"data": {"repository": {"issueOrPullRequest": {"projectItems": {"totalCount": 2}}}}}"#)
         }
         let client = try GitHubClient(token: Self.token, session: stub.session)
         let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
@@ -726,6 +726,40 @@ struct GitHubClientTests {
             #expect(NSDictionary(dictionary: body["variables"] as? [String: Any] ?? [:])
                 .isEqual(to: ["owner": "octo", "name": "hello", "number": 4]), "values only in variables")
         }
+    }
+
+    @Test("pull request extras: the issues it closes (another repository's kept with its name, state read), and the projects' titles with their count")
+    func pullRequestSidebarExtras() async throws {
+        let stub = StubServer { request in
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+            let query = body?["query"] as? String ?? ""
+            if query.contains("PullRequestExtras") {
+                return .init(body: """
+                    {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": [
+                     {"number": 4, "title": "Crash", "state": "OPEN", "url": "https://github.com/octo/hello/issues/4",
+                      "repository": {"nameWithOwner": "octo/hello"}},
+                     {"number": 15, "title": "Elsewhere", "state": "CLOSED", "url": "https://github.com/octo/other/issues/15",
+                      "repository": {"nameWithOwner": "octo/other"}}, null]}}}}}
+                    """)
+            }
+            return .init(body: """
+                {"data": {"repository": {"issueOrPullRequest": {"projectItems": {"totalCount": 1,
+                 "nodes": [{"project": {"title": "Roadmap"}}]}}}}}
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let extras = try await client.pullRequestExtras(2, in: repo)
+
+        #expect(extras.closingIssues == [
+            .init(number: 4, title: "Crash", isOpen: true, repository: "octo/hello",
+                  url: "https://github.com/octo/hello/issues/4"),
+            .init(number: 15, title: "Elsewhere", isOpen: false, repository: "octo/other",
+                  url: "https://github.com/octo/other/issues/15"),
+        ])
+        #expect(extras.projects == ["Roadmap"] && extras.projectCount == 1)
+        #expect(stub.requests.count == 3, "the closing issues, then the projects' titles and count at once")
     }
 
     @Test("history entries from the REST timeline: comments and reviews left out, consecutive commits by one author grouped with links, GitHub's words escaped, a merged pull request's closed left out, an unknown or malformed event left out")

@@ -535,7 +535,7 @@ enum HostedHTML {
                 .head .date.near, .comment-head .date.near { margin-left: 0; }
                 .tools { margin-left: auto; display: flex; gap: 6px; align-items: center; align-self: center; flex: none; }
                 .role { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 9px; background: none;
-                  border: 1px solid \(secondary); color: \(text); font-weight: 500; }
+                  border: 0.5px solid \(secondary); color: \(text); font-weight: 500; }
                 .resolved-line { background: \(header); color: \(secondary); font-size: 12px; padding: 0 10px 6px 36px; }
                 .resolved-line b { color: \(text); font-weight: 600; }
                 .snippet { padding: 8px 10px 0; } .snippet .thread { margin-top: 0; }

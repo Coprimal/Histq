@@ -181,6 +181,8 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let deleteHeadBranch = HostingCapabilities(rawValue: 1 << 21)
     /// The issue page's pinned comment, type, fields, projects and relationships (`issueExtras(_:in:)`).
     public static let issueExtras = HostingCapabilities(rawValue: 1 << 22)
+    /// The pull request page's projects and Development (the issues it closes) (`pullRequestExtras(_:in:)`).
+    public static let pullRequestExtras = HostingCapabilities(rawValue: 1 << 23)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -441,6 +443,8 @@ public protocol HostingProvider: Sendable {
     func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws
     /// Issue `number`'s pinned comment, type, fields, projects and relationships (only with `issueExtras`).
     func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras
+    /// Pull request `number`'s projects and the issues it closes (only with `pullRequestExtras`).
+    func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras
 }
 
 extension HostingProvider {
@@ -567,5 +571,10 @@ extension HostingProvider {
     /// A host without the `issueExtras` capability has none.
     public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
         throw HostingError.validationFailed(message: "this host has no issue extras")
+    }
+
+    /// A host without the `pullRequestExtras` capability has none.
+    public func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras {
+        throw HostingError.validationFailed(message: "this host has no pull request extras")
     }
 }
