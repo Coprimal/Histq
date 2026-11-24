@@ -477,13 +477,15 @@ final class WelcomeModel {
 
     // MARK: GitHub repositories
 
-    /// The loaded repositories grouped by owner: the account's own login first, then the others alphabetically.
+    /// The loaded repositories grouped by owner (a namespace, workspace or project key): the account's own login (on
+    /// Bitbucket Data Center its personal project, `~login`) first, then the others alphabetically.
     var repoGroups: [(owner: String, repos: [HostedCloneRepository])] {
         guard case .loaded(let account, let repos) = repoList else { return [] }
         let groups = Dictionary(grouping: repos, by: \.owner.login)
+        let own = account.kind == .bitbucketDataCenter ? "~" + account.login : account.login
         let owners = groups.keys.sorted { lhs, rhs in
-            let lhsOwn = lhs.caseInsensitiveCompare(account.login) == .orderedSame
-            if lhsOwn != (rhs.caseInsensitiveCompare(account.login) == .orderedSame) { return lhsOwn }
+            let lhsOwn = lhs.caseInsensitiveCompare(own) == .orderedSame
+            if lhsOwn != (rhs.caseInsensitiveCompare(own) == .orderedSame) { return lhsOwn }
             return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
         }
         return owners.map { (owner: $0, repos: groups[$0] ?? []) }

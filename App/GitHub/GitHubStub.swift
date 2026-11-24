@@ -22,7 +22,9 @@
 // instead, the same data in GitLab's v4 shapes through `GitLabClient` (the repository `stub/stub` on gitlab.com), on
 // the same session (`GitHubStubProtocol` answers gitlab.com from `GitLabStub`). `-HistqHostingStubKind bitbucket`
 // does the same with `BitbucketStub` (Bitbucket's 2.0 shapes through `BitbucketCloudClient`, the repository `stub/stub`
-// on bitbucket.org, answered on api.bitbucket.org). The Welcome clone picker stays GitHub's.
+// on bitbucket.org, answered on api.bitbucket.org), and `-HistqHostingStubKind bbdc` with `BitbucketDCStub` (Data
+// Center's REST 1.0 shapes through `BitbucketDCClient`, the repository `PROJ/repo` of bitbucket.example.com under
+// `/bitbucket`, its comment writes kept in memory). The Welcome clone picker stays GitHub's.
 //
 // DEBUG `-HistqStubFailWrites YES`: every stub answers each write and GraphQL mutation with a 500 (reads still answer),
 // so a launch checks how an action's failure rolls back; GitLab's rebase alone is let through, and fails later through
@@ -77,23 +79,23 @@ enum GitHubStub {
         try? GitHubClient(host: repository.host, token: token, session: session)
     }
 
-    /// DEBUG `-HistqHostingStubKind gitlab|bitbucket`: the PRs tab's stub serves GitLab's JSON (`GitLabStub`) or
-    /// Bitbucket's (`BitbucketStub`), not GitHub's.
+    /// DEBUG `-HistqHostingStubKind gitlab|bitbucket|bbdc`: the PRs tab's stub serves GitLab's JSON (`GitLabStub`),
+    /// Bitbucket's (`BitbucketStub`) or Bitbucket Data Center's (`BitbucketDCStub`), not GitHub's.
     static let kind: HostingKind = switch AppState.launchFlag("-HistqHostingStubKind") {
     case "gitlab": .gitlab
     case "bitbucket": .bitbucketCloud
+    case "bbdc": .bitbucketDataCenter
     default: .github
     }
 
-    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's or Bitbucket's as `-HistqHostingStubKind`
-    /// says.
+    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's, Bitbucket's or Bitbucket Data Center's as
+    /// `-HistqHostingStubKind` says.
     static func hosting() -> (client: (any HostingProvider)?, repository: HostedRepository) {
         switch kind {
         case .github: (client(), repository)
         case .gitlab: (GitLabStub.client(), GitLabStub.repository)
         case .bitbucketCloud: (BitbucketStub.client(), BitbucketStub.repository)
-        // No stub of its own yet (`kind` never names it): no provider.
-        case .bitbucketDataCenter: (nil, repository)
+        case .bitbucketDataCenter: (BitbucketDCStub.shared, BitbucketDCStub.repository)
         }
     }
 
@@ -1948,7 +1950,7 @@ enum BitbucketStub {
     }
 
     /// `feature.txt`'s diff, the same patch as `GitHubStub`'s `files`, as the git diff Bitbucket serves.
-    private static let diff = """
+    static let diff = """
         diff --git a/feature.txt b/feature.txt
         index 2222222..4444444 100644
         --- a/feature.txt
@@ -1973,6 +1975,362 @@ enum BitbucketStub {
          End.
 
         """
+}
+
+/// DEBUG `-HistqHostingStubKind bbdc`: Bitbucket Data Center's REST 1.0 shapes (10.4) through `BitbucketDCClient`, the
+/// repository `PROJ/repo` of `bitbucket.example.com` under the context path `/bitbucket`. `stub` (the `X-AUSERNAME` of
+/// every answer) and `reviewer`, open #1 "Add feature" (`feature` into `main`, by `stub`, approved by `reviewer`, two
+/// commits, `feature.txt`'s diff, one successful build) with a general thread two replies deep, `stub`'s general
+/// comment, an open inline thread with `stub`'s reply and a resolved one, open #2 "Fix typo" from `reviewer`'s fork
+/// with `stub` asked to review, the repository's strategies, default branch and readers, and `/repos` (`PROJ/repo`,
+/// `~STUB/notes`). Only #1's comment writes are answered, in memory for the run (`write`); any other write is 404.
+/// With `-HistqStubPageSeed YES` #1 has the Data Center page's extras: `tester` asking for changes too (`NEEDS_WORK`,
+/// a `REVIEWED` activity), a `RESCOPED` activity adding the second commit, two tasks (`blocker-comments`: one open by
+/// `reviewer` on comment 806, one resolved by `stub`), a merge veto, and the strategies Merge commit, Fast-forward
+/// (the default) and Squash.
+enum BitbucketDCStub {
+    static let repository = HostedRepository(host: "bitbucket.example.com", path: ["PROJ", "repo"])
+    static let username = "stub"
+
+    /// One client for the run, its version read once: the Draft switch needs it, as `HostingStore.makeClient` reads it
+    /// for an account.
+    static let shared: BitbucketDCClient? = {
+        let client = try? BitbucketDCClient(
+            host: repository.host, basePath: "bitbucket", session: GitHubStub.session) { _ in GitHubStub.token }
+        if let client { Task { _ = try? await client.currentUser() } }
+        return client
+    }()
+
+    /// The status and JSON (or, for a diff, text) body for a request of the stub session to the Data Center host.
+    static func reply(method: String, url: URL, body: Data?) -> (status: Int, body: String) {
+        let api = "/bitbucket/rest/api/latest", repo = "\(api)/projects/PROJ/repos/repo"
+        let pr1 = "\(repo)/pull-requests/1", pr2 = "\(repo)/pull-requests/2"
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let value = { (name: String) in query.first { $0.name == name }?.value }
+        guard method == "GET" else {
+            return write(method, url.path(percentEncoded: false), body, pr1: pr1, version: value("version"))
+        }
+        switch url.path(percentEncoded: false) {
+        case "\(api)/application-properties":
+            return (200, #"{"version": "10.4.0", "buildNumber": "10004000", "buildDate": "1760000000000", "#
+                + #""displayName": "Bitbucket"}"#)
+        case "\(api)/users": return value("filter") == nil ? page(user, reviewer) : page(user)
+        case "\(api)/repos":
+            return page(repository(1, "PROJ", "repo"), repository(3, "~STUB", "notes"))
+        // All open has #1 and #2; `stub` opened #1 and is asked to review #2.
+        case "\(repo)/pull-requests": return page(pullRequest(1), pullRequest(2))
+        case "\(api)/dashboard/pull-requests":
+            return value("role") == "AUTHOR" ? page(pullRequest(1)) : page(pullRequest(2))
+        case pr1: return (200, pullRequest(1))
+        case pr2: return (200, pullRequest(2))
+        case "\(pr1)/activities": return page(activities)
+        case let path where path.hasPrefix("\(pr1)/comments/"):
+            let notes = store.withLock { $0.notes }
+            return Int(path.dropFirst("\(pr1)/comments/".count)).flatMap { id in notes.first { $0.id == id } }
+                .map { (200, comment($0, in: notes)) } ?? notFound
+        // Newest first, as Data Center lists them.
+        case "\(pr1)/commits":
+            return page(commit(GitHubStub.headSHA, "Finish the feature", at: minutes(16 * 60 + 20)),
+                        commit(startSHA, "Start the feature", at: minutes(-2 * 24 * 60 + 8 * 60 + 50)))
+        case "\(repo)/pull-requests/1.diff": return (200, diff)
+        case "\(pr1)/merge" where GitHubStub.seedsPage:
+            return (200, #"{"canMerge": false, "conflicted": false, "outcome": "CLEAN", "vetoes": [{"#
+                + #""summaryMessage": "Resolve all tasks", "#
+                + #""detailedMessage": "This pull request has 1 open task. Resolve it to merge."}]}"#)
+        case "\(pr1)/merge": return (200, #"{"canMerge": true, "conflicted": false, "outcome": "CLEAN", "vetoes": []}"#)
+        case "\(pr1)/blocker-comments" where GitHubStub.seedsPage: return page(tasks)
+        case "\(pr1)/blocker-comments", "\(pr2)/activities", "\(pr2)/blocker-comments": return page()
+        case "\(pr2)/commits": return page(commit(forkSHA, "Fix a typo", at: minutes(24 * 60 + 9 * 60)))
+        case "\(repo)/pull-requests/2.diff": return (200, "")
+        case "\(pr2)/merge": return (200, #"{"canMerge": false, "conflicted": false, "outcome": "CLEAN", "vetoes": []}"#)
+        case "\(repo)/settings/pull-requests" where GitHubStub.seedsPage:
+            return (200, """
+                {"mergeConfig": {"type": "REPOSITORY", "defaultStrategy": {"id": "ff", "name": "Fast-forward"},
+                 "strategies": [{"id": "no-ff", "name": "Merge commit", "enabled": true},
+                                {"id": "ff", "name": "Fast-forward", "enabled": true},
+                                {"id": "ff-only", "name": "Fast-forward only", "enabled": false},
+                                {"id": "squash", "name": "Squash", "enabled": true}]},
+                 "requiredApprovers": 0}
+                """)
+        case "\(repo)/settings/pull-requests":
+            return (200, """
+                {"mergeConfig": {"type": "REPOSITORY", "defaultStrategy": {"id": "no-ff", "name": "Merge commit"},
+                 "strategies": [{"id": "no-ff", "name": "Merge commit", "enabled": true},
+                                {"id": "squash", "name": "Squash", "enabled": true},
+                                {"id": "rebase-no-ff", "name": "Rebase, merge", "enabled": true}]},
+                 "requiredApprovers": 0}
+                """)
+        case "\(repo)/default-branch":
+            return (200, #"{"id": "refs/heads/main", "displayId": "main", "type": "BRANCH", "isDefault": true}"#)
+        case "/bitbucket/rest/build-status/latest/commits/stats/\(GitHubStub.headSHA)":
+            return (200, #"{"successful": 1, "failed": 0, "inProgress": 0, "cancelled": 0, "unknown": 0}"#)
+        case let path where path.hasPrefix("/bitbucket/rest/build-status/latest/commits/stats/"):
+            return (200, #"{"successful": 0, "failed": 0, "inProgress": 0, "cancelled": 0, "unknown": 0}"#)
+        default: return notFound
+        }
+    }
+
+    private static let notFound = (404, #"{"errors": [{"context": null, "message": "Not found", "#
+        + #""exceptionName": "com.atlassian.bitbucket.ServiceException"}]}"#)
+
+    /// The last page of a list.
+    private static func page(_ values: String...) -> (status: Int, body: String) {
+        page(values)
+    }
+
+    private static func page(_ values: [String]) -> (status: Int, body: String) {
+        (200, #"{"size": \#(values.count), "limit": 100, "start": 0, "isLastPage": true, "#
+            + #""values": [\#(values.joined(separator: ", "))]}"#)
+    }
+
+    /// 2026-11-12 00:00 UTC plus `minutes`, in milliseconds since 1970 (Data Center's dates).
+    private static func minutes(_ minutes: Int) -> Int {
+        1_794_441_600_000 + minutes * 60_000
+    }
+
+    private static func account(_ name: String, id: Int, _ displayName: String) -> String {
+        #"{"name": "\#(name)", "emailAddress": "\#(name)@histq.invalid", "id": \#(id), "#
+            + #""displayName": "\#(displayName)", "active": true, "slug": "\#(name)", "type": "NORMAL"}"#
+    }
+
+    private static let user = account(username, id: 1001, "Stub User")
+    private static let reviewer = account("reviewer", id: 1002, "Reviewer")
+    private static let tester = account("tester", id: 1003, "Tester")
+
+    /// A repository with its https and ssh clone links (Data Center lowercases the key in them).
+    private static func repository(_ id: Int, _ key: String, _ slug: String) -> String {
+        let path = "\(key.lowercased())/\(slug).git"
+        return """
+            {"slug": "\(slug)", "id": \(id), "name": "\(slug)", "public": false, "project": {"key": "\(key)", "id": \(id)},
+             "links": {"clone": [{"href": "https://bitbucket.example.com/bitbucket/scm/\(path)", "name": "http"},
+                                 {"href": "ssh://git@bitbucket.example.com:7999/\(path)", "name": "ssh"}]}}
+            """
+    }
+
+    /// The second commit of #1, and #2's head.
+    private static let startSHA = "3333333333333333333333333333333333333333"
+    private static let forkSHA = "7777777777777777777777777777777777777777"
+
+    /// #1 (from `feature` of this repository, by `stub`, approved by `reviewer`) or #2 (from `typo` of the fork
+    /// `~REVIEWER/repo`, by `reviewer`, `stub` asked to review).
+    private static func pullRequest(_ id: Int) -> String {
+        let fork = id == 2
+        let title = fork ? "Fix typo" : "Add feature"
+        let body = fork ? "Fixes a typo in the readme." : "Adds the feature branch's work."
+        let destination = #"{"slug": "repo", "id": 1, "name": "repo", "project": {"key": "PROJ", "id": 1}}"#
+        let source = fork ? #"{"slug": "repo", "id": 2, "name": "repo", "project": {"key": "~REVIEWER", "id": 2}}"#
+            : destination
+        let reviewerEntry = fork
+            ? #"{"user": \#(user), "role": "REVIEWER", "approved": false, "status": "UNAPPROVED"}"#
+            : #"{"user": \#(reviewer), "role": "REVIEWER", "approved": true, "status": "APPROVED"}"#
+                + (GitHubStub.seedsPage
+                    ? #", {"user": \#(tester), "role": "REVIEWER", "approved": false, "status": "NEEDS_WORK"}"# : "")
+        let seeded = GitHubStub.seedsPage && !fork
+        return """
+            {"id": \(id), "version": \(fork ? 0 : 3), "title": "\(title)", "description": "\(body)", "state": "OPEN",
+             "open": true, "closed": false, "draft": \(GitHubStub.servesDraft && !fork),
+             "createdDate": \(minutes(fork ? 24 * 60 + 9 * 60 : -2 * 24 * 60 + 9 * 60)),
+             "updatedDate": \(minutes(fork ? 24 * 60 + 9 * 60 : 16 * 60 + 30)), "locked": false,
+             "fromRef": {"id": "refs/heads/\(fork ? "typo" : "feature")", "displayId": "\(fork ? "typo" : "feature")",
+                         "latestCommit": "\(fork ? forkSHA : GitHubStub.headSHA)", "repository": \(source)},
+             "toRef": {"id": "refs/heads/main", "displayId": "main", "latestCommit": "\(GitHubStub.baseSHA)",
+                       "repository": \(destination)},
+             "author": {"user": \(fork ? reviewer : user), "role": "AUTHOR", "approved": false, "status": "UNAPPROVED"},
+             "reviewers": [\(reviewerEntry)], "participants": [],
+             "properties": {"commentCount": \(fork ? 0 : store.withLock { $0.notes.count }),
+                            "openTaskCount": \(seeded ? 1 : 0), "resolvedTaskCount": \(seeded ? 1 : 0)},
+             "links": {"self": [{"href": "https://bitbucket.example.com/bitbucket/projects/PROJ/repos/repo/pull-requests/\(id)"}]}}
+            """
+    }
+
+    /// A comment of #1: `stub`'s when `own` (only `stub` may edit and delete its own), at `minute` (see
+    /// `minutes(_:)`), edited at `updated`; its parent (nil for a root), its anchor's JSON (an inline root), its version
+    /// (each write bumps it) and, for a root, whether its thread is resolved (by `stub`, at `resolvedAt`).
+    private struct Note {
+        var id: Int
+        var own: Bool
+        var text: String
+        var minute: Int
+        var updated: Int?
+        var parent: Int?
+        var anchor: String?
+        var version = 0
+        var resolved: Bool?
+        var resolvedAt = 16 * 60 + 10
+    }
+
+    /// #1's comments as this run left them: the general thread two replies deep (801, 806, `stub`'s 807), `stub`'s
+    /// comment 805, the inline threads (811 on line 6 with `stub`'s reply 812, open; 813 on line 10, resolved), then
+    /// the written ones, numbered from `nextID`, written at 17:00 plus `ticks` minutes.
+    private struct Store {
+        var notes = [
+            Note(id: 801, own: false, text: "Nice work.", minute: 14 * 60, resolved: false),
+            Note(id: 806, own: false, text: "One more thing: a test for an empty input?", minute: 14 * 60 + 10,
+                 parent: 801),
+            Note(id: 807, own: true, text: "Added one in the second commit.", minute: 14 * 60 + 20, parent: 806),
+            Note(id: 811, own: false, text: "Could the three steps be one sentence?", minute: 14 * 60 + 55,
+                 anchor: BitbucketDCStub.anchor(line: 6), resolved: false),
+            Note(id: 812, own: true, text: "I kept the list: it reads better.", minute: 16 * 60, parent: 811),
+            Note(id: 813, own: false, text: "Show the output flag in the usage too.", minute: 14 * 60 + 57,
+                 anchor: BitbucketDCStub.anchor(line: 10), resolved: true),
+            Note(id: 805, own: true, text: "Rebased on main; the usage is in the readme too.", minute: 15 * 60 + 30,
+                 resolved: false),
+        ]
+        var nextID = 950
+        var ticks = 0
+
+        mutating func now() -> Int {
+            ticks += 1
+            return 17 * 60 + min(ticks, 59)
+        }
+    }
+
+    private static let store = OSAllocatedUnfairLock(uncheckedState: Store())
+
+    /// `note` as Data Center serves it: its replies nested (oldest first), its thread's state (a root's), its anchor.
+    private static func comment(_ note: Note, in notes: [Note]) -> String {
+        let replies = notes.filter { $0.parent == note.id }.sorted { $0.minute < $1.minute }.map { comment($0, in: notes) }
+        let state = note.resolved.map { resolved in
+            #", "threadResolved": \#(resolved)"#
+                + (resolved ? #", "threadResolvedDate": \#(minutes(note.resolvedAt)), "threadResolver": \#(user)"# : "")
+        } ?? ""
+        return """
+            {"properties": {"repositoryId": 1}, "id": \(note.id), "version": \(note.version),
+             "text": "\(GitHubStub.jsonText(note.text))", "author": \(note.own ? user : reviewer),
+             "createdDate": \(minutes(note.minute)), "updatedDate": \(minutes(note.updated ?? note.minute)),
+             "comments": [\(replies.joined(separator: ", "))],
+             "permittedOperations": {"editable": \(note.own), "deletable": \(note.own), "transitionable": true},
+             "severity": "NORMAL", "state": "OPEN"\(state)\(note.anchor.map { #", "anchor": \#($0)"# } ?? "")}
+            """
+    }
+
+    /// An added line of `feature.txt`'s new side.
+    private static func anchor(line: Int) -> String {
+        #"{"line": \#(line), "lineType": "ADDED", "fileType": "TO", "path": "feature.txt", "srcPath": "feature.txt", "#
+            + #""diffType": "EFFECTIVE", "orphaned": false}"#
+    }
+
+    /// An activity of #1 at `minute`: `action` by `actor`, with `extra` fields.
+    private static func activity(_ id: Int, _ action: String, by actor: String, at minute: Int, _ extra: String = "")
+        -> String
+    {
+        #"{"id": \#(id), "createdDate": \#(minutes(minute)), "user": \#(actor), "action": "\#(action)"\#(extra)}"#
+    }
+
+    /// #1's activities, newest first: each thread's root as it is now (replies nested, an inline one with its
+    /// `commentAnchor`), `reviewer`'s approval, and the opening.
+    private static var activities: [String] {
+        let notes = store.withLock { $0.notes }
+        let threads = notes.filter { $0.parent == nil }.map { root in
+            (minute: root.minute, json: activity(
+                10_000 + root.id, "COMMENTED", by: root.own ? user : reviewer, at: root.minute,
+                #", "commentAction": "ADDED", "comment": \#(comment(root, in: notes))"#
+                    + (root.anchor.map { #", "commentAnchor": \#($0)"# } ?? "")))
+        }
+        let others = [(minute: 15 * 60, json: activity(904, "APPROVED", by: reviewer, at: 15 * 60)),
+                      (minute: -2 * 24 * 60 + 9 * 60, json: activity(900, "OPENED", by: user, at: -2 * 24 * 60 + 9 * 60))]
+        return (threads + others + seededActivities).sorted { $0.minute > $1.minute }.map(\.json)
+    }
+
+    /// With `-HistqStubPageSeed YES`: `stub` adding the second commit (a rescope), then `tester` asking for changes.
+    private static let seededActivities: [(minute: Int, json: String)] = !GitHubStub.seedsPage ? [] : [
+        (minute: 16 * 60 + 20, json: activity(
+            905, "RESCOPED", by: user, at: 16 * 60 + 20,
+            #", "fromHash": "\#(GitHubStub.headSHA)", "previousFromHash": "\#(startSHA)", "added": {"commits": [{"#
+                + #""id": "\#(GitHubStub.headSHA)", "displayId": "\#(GitHubStub.headSHA.prefix(11))", "#
+                + #""message": "Finish the feature"}], "total": 1}, "removed": {"commits": [], "total": 0}"#)),
+        (minute: 16 * 60 + 40, json: activity(906, "REVIEWED", by: tester, at: 16 * 60 + 40)),
+    ]
+
+    /// #1's tasks with `-HistqStubPageSeed YES` (`blocker-comments`): an open one by `reviewer` on comment 806 and
+    /// one `stub` resolved.
+    private static let tasks: [String] = [
+        #"{"id": 901, "version": 0, "text": "Add a test for an empty input", "author": \#(reviewer), "#
+            + #""createdDate": \#(minutes(15 * 60 + 10)), "updatedDate": \#(minutes(15 * 60 + 10)), "#
+            + #""severity": "BLOCKER", "state": "OPEN", "parent": {"id": 806}}"#,
+        #"{"id": 902, "version": 1, "text": "Update the readme", "author": \#(user), "#
+            + #""createdDate": \#(minutes(15 * 60 + 12)), "updatedDate": \#(minutes(15 * 60 + 40)), "#
+            + #""severity": "BLOCKER", "state": "RESOLVED", "resolvedDate": \#(minutes(15 * 60 + 40)), "#
+            + #""resolver": \#(user)}"#,
+    ]
+
+    /// #1's comment writes, kept for the run: `POST .../comments` (`text`; with `parent` a reply at any depth, with
+    /// `anchor` a new inline thread), answered 201 with the comment by `stub`; and on a listed comment, `PUT
+    /// .../comments/<id>` with its current `version` and `threadResolved` (a root's) or `text` (`stub`'s), answered
+    /// with it, its version bumped, or `DELETE .../comments/<id>?version=N` of `stub`'s (204). A stale version or a
+    /// comment with replies is 409, another's edit or delete 403, anything else 404.
+    private static func write(_ method: String, _ path: String, _ body: Data?, pr1: String, version: String?)
+        -> (status: Int, body: String)
+    {
+        let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if method == "POST", path == "\(pr1)/comments", let text = json["text"] as? String, !text.isEmpty {
+            let parent = (json["parent"] as? [String: Any])?["id"] as? Int
+            var anchor: String?
+            if let sent = json["anchor"] as? [String: Any] {
+                guard (sent["path"] as? String)?.isEmpty == false, sent["line"] is Int,
+                      let data = try? JSONSerialization.data(
+                          withJSONObject: sent.merging(["orphaned": false]) { old, _ in old }, options: [.sortedKeys])
+                else { return error(400, "The anchor needs a path and a line.") }
+                anchor = String(decoding: data, as: UTF8.self)
+            }
+            return store.withLock { [anchor] store -> (status: Int, body: String) in
+                if let parent, !store.notes.contains(where: { $0.id == parent }) { return notFound }
+                store.nextID += 1
+                let note = Note(id: store.nextID, own: true, text: text, minute: store.now(), parent: parent,
+                                anchor: anchor, resolved: parent == nil ? false : nil)
+                store.notes.append(note)
+                return (201, comment(note, in: store.notes))
+            }
+        }
+        guard ["PUT", "DELETE"].contains(method), path.hasPrefix("\(pr1)/comments/"),
+              let id = Int(path.dropFirst("\(pr1)/comments/".count)) else { return notFound }
+        let sent = method == "DELETE" ? version.flatMap { Int($0) } : json["version"] as? Int
+        let resolved = json["threadResolved"] as? Bool, text = json["text"] as? String
+        return store.withLock { store -> (status: Int, body: String) in
+            guard let index = store.notes.firstIndex(where: { $0.id == id }) else { return notFound }
+            let note = store.notes[index]
+            guard sent == note.version else {
+                return error(409, "You are attempting to modify a comment based on out-of-date information.")
+            }
+            if method == "DELETE" {
+                guard note.own else { return error(403, "You are not permitted to delete this comment.") }
+                guard !store.notes.contains(where: { $0.parent == id }) else {
+                    return error(409, "The comment has replies")
+                }
+                store.notes.remove(at: index)
+                return (204, "")
+            }
+            if let resolved {
+                guard note.parent == nil else { return error(409, "Only a thread's first comment can be resolved.") }
+                store.notes[index].resolved = resolved
+                store.notes[index].resolvedAt = store.now()
+            } else if let text {
+                guard note.own else { return error(403, "You are not permitted to edit this comment.") }
+                store.notes[index].text = text
+                store.notes[index].updated = store.now()
+            } else {
+                return error(400, "Nothing to change.")
+            }
+            store.notes[index].version += 1
+            return (200, comment(store.notes[index], in: store.notes))
+        }
+    }
+
+    /// A Data Center error answer with `message`.
+    private static func error(_ status: Int, _ message: String) -> (status: Int, body: String) {
+        (status, #"{"errors": [{"context": null, "message": "\#(message)", "exceptionName": null}]}"#)
+    }
+
+    private static func commit(_ sha: String, _ message: String, at milliseconds: Int) -> String {
+        #"{"id": "\#(sha)", "displayId": "\#(sha.prefix(11))", "message": "\#(message)", "author": \#(user), "#
+            + #""authorTimestamp": \#(milliseconds), "parents": []}"#
+    }
+
+    /// `feature.txt`'s diff (`BitbucketStub`'s) with Data Center's `src://` and `dst://` path prefixes.
+    private static let diff = BitbucketStub.diff
+        .replacingOccurrences(of: "a/feature.txt b/feature.txt", with: "src://feature.txt dst://feature.txt")
+        .replacingOccurrences(of: "--- a/", with: "--- src://")
+        .replacingOccurrences(of: "+++ b/", with: "+++ dst://")
 }
 
 /// Answers every request of `GitHubStub.session` itself: never passes one on to the network.
@@ -2013,12 +2371,16 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
             return switch url.host() {
             case GitLabStub.repository.host: GitLabStub.reply(method: method, url: url, body: body)
             case BitbucketStub.apiHost: BitbucketStub.reply(method: method, url: url, body: body)
+            case BitbucketDCStub.repository.host: BitbucketDCStub.reply(method: method, url: url, body: body)
             default: GitHubStub.reply(method: method, url: url, body: body)
             }
         }
+        var headers = ["Content-Type": "application/json"]
+        // Data Center names the token's user on every answer (`currentUser()` reads it).
+        if request.url?.host() == BitbucketDCStub.repository.host { headers["X-AUSERNAME"] = BitbucketDCStub.username }
         guard let url = request.url, let reply,
               let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1",
-                                             headerFields: ["Content-Type": "application/json"])
+                                             headerFields: headers)
         else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return

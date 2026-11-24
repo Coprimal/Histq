@@ -397,9 +397,16 @@ extension HostedMergeMethod {
         }
     }
 
-    /// The title on `kind`'s merge area: Bitbucket's rebase is "Rebase, merge".
+    /// The title on `kind`'s merge area: Bitbucket's rebase is "Rebase, merge"; Data Center's own names for its
+    /// `ff-only`, `rebase-no-ff` and `rebase-ff-only`.
     func title(on kind: HostingKind) -> String {
-        kind == .bitbucketCloud && self == .rebase ? "Rebase, merge" : title
+        switch (kind, self) {
+        case (.bitbucketCloud, .rebase): "Rebase, merge"
+        case (.bitbucketDataCenter, .fastForward): "Fast-forward only"
+        case (.bitbucketDataCenter, .rebase): "Rebase and merge"
+        case (.bitbucketDataCenter, .rebaseFastForward): "Rebase and fast-forward"
+        default: title
+        }
     }
 
     var buttonTitle: String {
@@ -2051,8 +2058,8 @@ private struct PRMergeColumn: View {
 }
 
 /// Bitbucket's Approve and Request changes in the header (`PRPageLayout.reviewButtonsInHeader`): Approve, or
-/// "Approved" (a click revokes it) once the viewer approved; Request changes, or "Changes requested" once they did. A
-/// click acts at once; both are off while an action runs on the pull request.
+/// "Approved" (a click revokes it) once the viewer approved; Request changes, or "Changes requested" once they did
+/// (Data Center's "Requested changes"). A click acts at once; both are off while an action runs on the pull request.
 private struct PRHeaderReviewButtons: View {
     let session: RepoSession
     let detail: PullRequestDetail
@@ -2096,7 +2103,8 @@ private struct PRHeaderReviewButtons: View {
                             .foregroundStyle(requested ? Palette.conflictTone : .secondary)
                             .accessibilityHidden(true)
                     }
-                    Text(requested ? "Changes requested" : "Request changes")
+                    Text(!requested ? "Request changes"
+                        : session.github.kind == .bitbucketDataCenter ? "Requested changes" : "Changes requested")
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -2982,7 +2990,8 @@ extension PRSideColumn {
 }
 
 /// Bitbucket's sidebar (`PRPageLayout.bitbucketSidebar`), in its order: Builds (the head's statuses), Merge checks,
-/// Reviewers, Tasks (list, add, resolve or reopen, delete: each shown at once), Jira work items (on Bitbucket). A part
+/// Reviewers, Tasks (list, add, resolve or reopen, delete: each shown at once), Jira work items (on Bitbucket, with
+/// `jiraCard`). A part
 /// whose read failed shows that it could not be read; Merge checks and Tasks are left out where the host has none.
 private struct PRBitbucketSidebar<Reviewers: View>: View {
     let session: RepoSession
@@ -2996,10 +3005,12 @@ private struct PRBitbucketSidebar<Reviewers: View>: View {
             if let checks = detail.mergeChecks { mergeChecks(checks) }
             reviewers()
             if let tasks = detail.tasks { tasksCard(tasks) }
-            SectionCard("Jira work items", systemImage: "link") {
-                PRSideEmpty(text: "Shown on \(session.github.kind.name)")
-            } accessory: {
-                openOnHost(help: "Open the Jira work items on \(session.github.kind.name)")
+            if detail.layout.jiraCard {
+                SectionCard("Jira work items", systemImage: "link") {
+                    PRSideEmpty(text: "Shown on \(session.github.kind.name)")
+                } accessory: {
+                    openOnHost(help: "Open the Jira work items on \(session.github.kind.name)")
+                }
             }
         }
     }
@@ -3727,12 +3738,16 @@ private struct PRActionsCard: View {
     }
 
     /// Bitbucket's "Close source branch": only for a branch of this repository, set as the pull request was created
-    /// until the user changes it.
+    /// until the user changes it. Data Center's (`deleteSourceBranchTitle`): unchecked until the user checks it, where
+    /// its client deletes the branch.
     @ViewBuilder private var closeSourceBranchToggle: some View {
         let pull = detail.pull
-        if pull.isFromSameRepository, pull.closesSourceBranch != nil {
+        let title = detail.layout.deleteSourceBranchTitle
+        let offered = title == nil ? pull.closesSourceBranch != nil
+            : session.github.api?.client.supportedMergeOptions.contains(.deleteSourceBranch) == true
+        if pull.isFromSameRepository, offered {
             let model = session.pullDetail
-            Toggle("Close source branch", isOn: Binding(
+            Toggle(title ?? "Close source branch", isOn: Binding(
                 get: { model.closeSourceBranchChoice ?? pull.closesSourceBranch ?? false },
                 set: { model.closeSourceBranchChoice = $0 }))
                 .toggleStyle(.checkbox)

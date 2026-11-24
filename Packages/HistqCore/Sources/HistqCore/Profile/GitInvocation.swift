@@ -958,7 +958,7 @@ public struct GitCredential: Sendable, Equatable, CustomStringConvertible, Custo
 
     /// Printable ASCII without a space, `:`, `@`, `/`, quote, `$`, backslash or backquote, and not empty: nothing a
     /// shell, a URL or the credential protocol could read as more than a name.
-    static func isSafeUsername(_ username: String) -> Bool {
+    public static func isSafeUsername(_ username: String) -> Bool {
         !username.isEmpty && username.unicodeScalars.allSatisfy {
             (0x21...0x7E).contains($0.value) && !":@/'\"$\\`".unicodeScalars.contains($0)
         }

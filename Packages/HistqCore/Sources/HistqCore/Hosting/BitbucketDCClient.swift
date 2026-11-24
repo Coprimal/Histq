@@ -15,14 +15,6 @@ import Synchronization
 public struct BitbucketDCClient: HostingProvider, CustomStringConvertible, CustomDebugStringConvertible,
     CustomReflectable
 {
-    /// What the app throws or shows where a Data Center account would need the client this version does not have yet.
-    public struct UnsupportedError: Error, LocalizedError, CustomStringConvertible {
-        public init() {}
-
-        public var description: String { "Bitbucket Data Center is not supported in this version." }
-        public var errorDescription: String? { description }
-    }
-
     /// Hands out the access token: `rejected` is the token a 401 just refused (a constant HTTP access token ignores
     /// it); nil otherwise.
     public typealias TokenProvider = @Sendable (_ rejected: String?) async throws -> String

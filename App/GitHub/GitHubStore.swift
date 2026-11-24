@@ -399,14 +399,19 @@ final class HostingStore {
         profileID: UUID, account: HostingAccount
     ) async -> (any HostingProvider)? {
         guard let token = await HostingTokens.token(for: account, profileID: profileID) else { return nil }
-        return try? client(for: account, profileID: profileID, token: token)
+        let client = try? client(for: account, profileID: profileID, token: token)
+        // Data Center offers drafts only once `currentUser()` read its version (copies share it), and `capabilities`
+        // is not observed: read it before the tab connects, so Create PR's Draft switch is right from the start.
+        if let dataCenter = client as? BitbucketDCClient { _ = try? await dataCenter.currentUser() }
+        return client
     }
 
     /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab and Bitbucket ask
     /// `HostingTokens.accessToken` on each request (off the main actor; an OAuth sign-in through the refresher, else
     /// cached, read again after a 401), so a token saved again in Settings or renewed is used at once. A sign-in that
     /// cannot be renewed reads as a refused token, so every list and the detail offer Reconnect. Throws `HostingError`
-    /// for a bad host or token (a Bitbucket account on another host than bitbucket.org).
+    /// for a bad host or token (a Bitbucket account on another host than bitbucket.org, a GitLab or Data Center host or
+    /// base path that is not plain).
     nonisolated static func client(
         for account: HostingAccount, profileID: UUID, token: String
     ) throws -> any HostingProvider {
@@ -433,7 +438,7 @@ final class HostingStore {
         case .gitlab:
             return try GitLabClient(host: account.host, basePath: account.basePath, token: accessToken)
         case .bitbucketDataCenter:
-            throw BitbucketDCClient.UnsupportedError()
+            return try BitbucketDCClient(host: account.host, basePath: account.basePath, token: accessToken)
         }
     }
 

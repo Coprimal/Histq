@@ -26,9 +26,10 @@ struct IntegrationsSettings: View {
     @Environment(WindowModel.self) private var model
     /// The account being added (Add Account), nil when no connect form shows.
     @State private var adding: AddKind?
-    /// The GitHub Enterprise Server or GitLab Self-Managed host typed for the next connection.
+    /// The GitHub Enterprise Server, GitLab Self-Managed or Bitbucket Data Center host typed for the next connection.
     @State private var hostDraft = ""
-    /// The GitLab Self-Managed base path typed for the next connection (`gitlab` for `https://example.com/gitlab`).
+    /// The GitLab Self-Managed base path or Bitbucket Data Center context path typed for the next connection (`gitlab`
+    /// for `https://example.com/gitlab`).
     @State private var basePathDraft = ""
     /// The Application ID of the GitLab Self-Managed instance's own OAuth application, typed for "Sign in with GitLab".
     @State private var applicationIDDraft = ""
@@ -68,7 +69,7 @@ struct IntegrationsSettings: View {
 
     /// The entries of the Add Account menu.
     private enum AddKind: CaseIterable {
-        case github, enterprise, gitlab, gitlabSelfManaged, bitbucket
+        case github, enterprise, gitlab, gitlabSelfManaged, bitbucket, bitbucketDataCenter
 
         var title: String {
             switch self {
@@ -77,6 +78,7 @@ struct IntegrationsSettings: View {
             case .gitlab: "GitLab"
             case .gitlabSelfManaged: "GitLab Self-Managed"
             case .bitbucket: "Bitbucket"
+            case .bitbucketDataCenter: "Bitbucket Data Center"
             }
         }
 
@@ -85,6 +87,7 @@ struct IntegrationsSettings: View {
             case .github, .enterprise: .github
             case .gitlab, .gitlabSelfManaged: .gitlab
             case .bitbucket: .bitbucketCloud
+            case .bitbucketDataCenter: .bitbucketDataCenter
             }
         }
     }
@@ -295,6 +298,22 @@ struct IntegrationsSettings: View {
             }
             SettingsHint("Connected to \(account.address)")
             tokenStatus(tokenStored[account.host] ?? .idle, expired: signInExpired.contains(account.host))
+            unsafeGitUsername(account)
+        }
+    }
+
+    /// A Bitbucket Data Center token goes to git with the account's own username, which core drops when the helper
+    /// can't pass it safely (`GitCredential.isSafeUsername`, e.g. an email-style `jdoe@corp.com`): say so here.
+    @ViewBuilder
+    private func unsafeGitUsername(_ account: HostingAccount) -> some View {
+        if account.kind == .bitbucketDataCenter, case let username = account.gitUsername ?? account.login,
+           !GitCredential.isSafeUsername(username)
+        {
+            Text("Git over HTTPS won't use this token: Histq can't pass the username \"\(username)\" to git. "
+                + "Use an SSH remote for fetch and push.")
+                .font(.settingsCaption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -320,7 +339,7 @@ struct IntegrationsSettings: View {
     }
 
     /// The Add Account menu: GitHub (github.com), a GitHub Enterprise Server host, GitLab (gitlab.com), a GitLab
-    /// Self-Managed host or Bitbucket (bitbucket.org).
+    /// Self-Managed host, Bitbucket (bitbucket.org) or a Bitbucket Data Center host.
     private func addAccountRow(_ profile: Profile) -> some View {
         LabeledContent {
             Menu {
@@ -399,23 +418,23 @@ struct IntegrationsSettings: View {
     }
 
     /// The host of the account being added, lowercased: github.com for GitHub, gitlab.com for GitLab, bitbucket.org
-    /// for Bitbucket, the typed host for GitHub Enterprise Server and GitLab Self-Managed; nil when nothing is added or
-    /// the typed text is empty or not a host name.
+    /// for Bitbucket, the typed host for GitHub Enterprise Server, GitLab Self-Managed and Bitbucket Data Center; nil
+    /// when nothing is added or the typed text is empty or not a host name.
     private var draftHost: String? {
         switch adding {
         case .github: return "github.com"
         case .gitlab: return "gitlab.com"
         case .bitbucket: return BitbucketCloudClient.host
-        case .enterprise, .gitlabSelfManaged:
+        case .enterprise, .gitlabSelfManaged, .bitbucketDataCenter:
             return HostingHTTP.validatedHost(hostDraft.trimmingCharacters(in: .whitespacesAndNewlines))
         case nil: return nil
         }
     }
 
-    /// The GitLab Self-Managed base path as GitLab's client reads it (outer `/` trimmed, "" at the root); "" for the
-    /// other kinds, nil when the typed text is not a plain path.
+    /// The GitLab Self-Managed base path or Bitbucket Data Center context path as their clients read it (outer `/`
+    /// trimmed, "" at the root); "" for the other kinds, nil when the typed text is not a plain path.
     private var draftBasePath: String? {
-        guard adding == .gitlabSelfManaged else { return "" }
+        guard adding == .gitlabSelfManaged || adding == .bitbucketDataCenter else { return "" }
         let text = basePathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         return (try? GitLabClient(basePath: text) { _ in "" })?.basePath.joined(separator: "/")
     }
@@ -442,7 +461,7 @@ struct IntegrationsSettings: View {
         case .gitlab: Self.gitLabClientID
         case .gitlabSelfManaged: draftApplicationID ?? ""
         case .bitbucket: Self.bitbucketClientSecret.isEmpty ? "" : Self.bitbucketClientID
-        case .enterprise: ""
+        case .enterprise, .bitbucketDataCenter: ""
         }
         return id.isEmpty ? nil : id
     }
@@ -450,11 +469,12 @@ struct IntegrationsSettings: View {
     /// Histq's OAuth App exists on github.com only (without a client ID its row says how to set one); Enterprise hosts
     /// connect with a token or the GitHub CLI. GitLab hosts connect with a token, or sign in when there is an
     /// application ID (Histq's on gitlab.com, the typed one on Self-Managed). Bitbucket connects with an API token, or
-    /// signs in when the build has Histq's client.
+    /// signs in when the build has Histq's client. Bitbucket Data Center connects with an HTTP access token.
     private func methods(_ kind: AddKind) -> [ConnectMethod] {
         switch kind {
         case .github: ConnectMethod.allCases
         case .enterprise: [.token, .cli]
+        case .bitbucketDataCenter: [.token]
         case .gitlab, .gitlabSelfManaged, .bitbucket: signInClientID(kind) == nil ? [.token] : [.signIn, .token]
         }
     }
@@ -500,13 +520,15 @@ struct IntegrationsSettings: View {
                 Text("Method")
             }
             SettingsDivider()
-            if kind == .enterprise || kind == .gitlabSelfManaged {
+            if kind == .enterprise || kind == .gitlabSelfManaged || kind == .bitbucketDataCenter {
                 hostRow(kind)
                 SettingsDivider()
             }
-            if kind == .gitlabSelfManaged {
-                basePathRow
+            if kind == .gitlabSelfManaged || kind == .bitbucketDataCenter {
+                basePathRow(kind)
                 SettingsDivider()
+            }
+            if kind == .gitlabSelfManaged {
                 applicationIDRow
                 SettingsDivider()
             }
@@ -523,7 +545,11 @@ struct IntegrationsSettings: View {
     }
 
     private func hostRow(_ kind: AddKind) -> some View {
-        let example = kind == .gitlabSelfManaged ? "gitlab.example.com" : "github.example.com"
+        let example = switch kind {
+        case .gitlabSelfManaged: "gitlab.example.com"
+        case .bitbucketDataCenter: "bitbucket.example.com"
+        default: "github.example.com"
+        }
         return LabeledContent {
             TextField("Host", text: $hostDraft, prompt: Text(verbatim: example))
                 .textFieldStyle(.settings)
@@ -542,22 +568,26 @@ struct IntegrationsSettings: View {
         }
     }
 
-    private var basePathRow: some View {
-        LabeledContent {
-            TextField("Base path", text: $basePathDraft, prompt: Text(verbatim: "gitlab"))
+    /// GitLab's base path, or Bitbucket Data Center's context path.
+    private func basePathRow(_ kind: AddKind) -> some View {
+        let label = kind == .bitbucketDataCenter ? "Context path" : "Base path"
+        let name = kind == .bitbucketDataCenter ? "bitbucket" : "gitlab"
+        let product = kind == .bitbucketDataCenter ? "Bitbucket" : "GitLab"
+        return LabeledContent {
+            TextField(label, text: $basePathDraft, prompt: Text(verbatim: name))
                 .textFieldStyle(.settings)
                 .frame(maxWidth: 240)
                 .labelsHidden()
                 .disabled(isBusy)
         } label: {
-            Text("Base path")
+            Text(label)
             if draftBasePath == nil {
-                Text("Enter only the path, such as gitlab or tools/gitlab: letters, digits, -, _, . and ~.")
+                Text("Enter only the path, such as \(name) or tools/\(name): letters, digits, -, _, . and ~.")
                     .font(.settingsCaption)
                     .foregroundStyle(.red)
             } else {
-                SettingsHint("Optional: only when GitLab lives under a path, such as gitlab for "
-                    + "https://example.com/gitlab.")
+                SettingsHint("Optional: only when \(product) lives under a path, such as \(name) for "
+                    + "https://example.com/\(name).")
             }
         }
     }
@@ -604,7 +634,8 @@ struct IntegrationsSettings: View {
                 SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
                     + "read and write.")
             case .bitbucketDataCenter:
-                SettingsHint(BitbucketDCClient.UnsupportedError().description)
+                SettingsHint("Create one in Bitbucket: your avatar › Manage account › HTTP access tokens, with "
+                    + "Project read and Repository write.")
             }
         }
     }
@@ -985,7 +1016,8 @@ struct IntegrationsSettings: View {
             guard host.lowercased() == BitbucketCloudClient.host else { throw HostingError.invalidHost(host) }
             return try await BitbucketCloudClient { _ in token }.currentUser().login
         case .bitbucketDataCenter:
-            throw BitbucketDCClient.UnsupportedError()
+            // The account takes the token's own user (`X-AUSERNAME`).
+            return try await BitbucketDCClient(host: host, basePath: basePath) { _ in token }.currentUser().login
         }
     }
 
@@ -1085,14 +1117,21 @@ struct IntegrationsSettings: View {
         case .forbidden(let message):
             "\(name) refused the token: " + (message.isEmpty ? "access denied (403)." : message)
         case .notFound:
-            kind == .gitlab ? "GitLab's API was not found there: check the host and the base path."
-                : "\(name)'s API was not found."
+            switch kind {
+            case .gitlab: "GitLab's API was not found there: check the host and the base path."
+            case .bitbucketDataCenter: "\(name)'s API was not found there: check the host and the context path."
+            default: "\(name)'s API was not found."
+            }
         case .rateLimited, .secondaryRateLimited: "\(name) asks to slow down: try again in a minute."
         case .http(let status, let message): "\(name) answered \(status)" + (message.isEmpty ? "." : ": \(message)")
         case .invalidResponse(let detail): "Unexpected answer from \(name): \(detail)"
         case .transport(let detail): "Could not reach \(name): \(detail)"
         case .invalidHost(let host):
-            kind == .gitlab ? "Not a valid GitLab host or base path: \(host)" : "Not a \(name) host: \(host)"
+            switch kind {
+            case .gitlab: "Not a valid GitLab host or base path: \(host)"
+            case .bitbucketDataCenter: "Not a valid \(name) host or context path: \(host)"
+            default: "Not a \(name) host: \(host)"
+            }
         default: nil
         }
     }

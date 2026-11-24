@@ -14,7 +14,8 @@
 // mode too, the GitHub avatar of an account of github.com (the pull request and issue pages); only its id or login
 // leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in every mode too, the avatar a GitLab API
 // gives for an account (`avatar_url`), over https and only from the repository's own host (gitlab.com also from
-// gravatar.com); a remote on a GitLab Self-Managed host the profiles have an account for shows GitLab's bundled logo.
+// gravatar.com); a remote on a GitLab Self-Managed or Bitbucket Data Center host the profiles have an account for
+// shows GitLab's or Bitbucket's bundled logo.
 import AppKit
 import CryptoKit
 import HistqCore
@@ -189,8 +190,8 @@ final class AvatarStore {
     func ownerAvatar(ofRemoteURL url: String, pixels: Int) -> NSImage? {
         guard let remote = Self.remoteOwner(url) else { return nil }
         guard AvatarLoader.ownerHosts.contains(remote.host) else {
-            // A GitLab Self-Managed host: GitLab's bundled logo, no request.
-            return Self.isGitLabHost(remote.host) ? providerAvatar(.gitlab) : nil
+            // A GitLab Self-Managed or Bitbucket Data Center host: its bundled logo, no request.
+            return Self.selfHostedProvider(remote.host).flatMap { providerAvatar($0) }
         }
         if remote.host == "github.com", remote.owner.lowercased() == "github" { return gitHubOwnerLogo() }
         let identity = Self.ownerIdentity(host: remote.host, owner: remote.owner)
@@ -200,9 +201,11 @@ final class AvatarStore {
         return nil
     }
 
-    /// Whether a profile has a GitLab account on `host`.
-    private static func isGitLabHost(_ host: String) -> Bool {
-        ProfileLibrary.shared.store?.profiles.contains { $0.account(forHost: host)?.kind == .gitlab } ?? false
+    /// GitLab or Bitbucket when a profile has a GitLab or Bitbucket Data Center account on `host`, else nil.
+    private static func selfHostedProvider(_ host: String) -> Provider? {
+        let kinds = ProfileLibrary.shared.store?.profiles.compactMap { $0.account(forHost: host)?.kind } ?? []
+        if kinds.contains(.gitlab) { return .gitlab }
+        return kinds.contains(.bitbucketDataCenter) ? .bitbucket : nil
     }
 
     /// The `github` organization's logo, and GitHub's default avatar: a white mark on light gray is hard to read at 16 pt, so

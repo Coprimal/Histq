@@ -87,8 +87,15 @@ struct PRPageLayout: Sendable, Equatable {
     /// The merge area first on the Overview: the state, the pull request's own strategies, Close source branch and
     /// Merge, or "Merged pull request" (Bitbucket's), in place of the Actions card under the timeline.
     var bitbucketMergeArea = false
-    /// Bitbucket's sidebar: Builds, Merge checks, Reviewers, Tasks, Jira work items.
+    /// Bitbucket's sidebar: Builds, Merge checks, Reviewers, Tasks, then Jira work items with `jiraCard`.
     var bitbucketSidebar = false
+    /// With `bitbucketSidebar`: the Jira work items card, opening the host (Bitbucket Cloud's).
+    var jiraCard = false
+    /// With `bitbucketMergeArea`: the merge area's checkbox that deletes the source branch once merged, always shown
+    /// under this title for a branch of this repository, unchecked first (Data Center's "Delete source branch after
+    /// merging": its pull request carries no choice); nil keeps Cloud's "Close source branch", shown where the pull
+    /// request says its choice.
+    var deleteSourceBranchTitle: String? = nil
 
     static let `default` = PRPageLayout(name: "default")
     static let gitlab = PRPageLayout(
@@ -107,7 +114,7 @@ struct PRPageLayout: Sendable, Equatable {
 
     /// A lookup, not a `switch`, so a new kind builds without a value of its own.
     private static let byKind: [HostingKind: PRPageLayout] = [
-        .gitlab: .gitlab, .github: .github, .bitbucketCloud: .bitbucket,
+        .gitlab: .gitlab, .github: .github, .bitbucketCloud: .bitbucket, .bitbucketDataCenter: .bitbucketDataCenter,
     ]
 
     #if DEBUG
@@ -120,7 +127,16 @@ struct PRPageLayout: Sendable, Equatable {
         mergeSentence: .bitbucket, activity: .bitbucketPullRequest, commitsByDay: true, commitVerb: "committed",
         shortResolveWords: true, filesTree: true, commentsCard: true, descriptionTitle: "Description",
         composerPrompt: "What do you want to say?", reviewButtonsInHeader: true, bitbucketMergeArea: true,
-        bitbucketSidebar: true)
+        bitbucketSidebar: true, jiraCard: true)
+
+    /// Bitbucket Data Center's page: Cloud's (`.bitbucket`) with Data Center's Activity filter, "Delete source branch
+    /// after merging", and no Jira card (no core REST endpoint).
+    static let bitbucketDataCenter = PRPageLayout(
+        name: "bitbucketDataCenter", tabs: [.conversation, .files, .commits], tabTitles: [.conversation: "Overview"],
+        mergeSentence: .bitbucket, activity: .bitbucketDataCenterPullRequest, commitsByDay: true,
+        commitVerb: "committed", shortResolveWords: true, filesTree: true, commentsCard: true,
+        descriptionTitle: "Description", composerPrompt: "What do you want to say?", reviewButtonsInHeader: true,
+        bitbucketMergeArea: true, bitbucketSidebar: true, deleteSourceBranchTitle: "Delete source branch after merging")
 
     static func `for`(_ kind: HostingKind) -> PRPageLayout {
         #if DEBUG
@@ -185,6 +201,14 @@ struct PRActivity: Sendable, Equatable {
         title: "Activity", categories: ["All comments", "My comments", "Commits", "Tasks"], comments: "All comments",
         byAction: ["commit": "Commits", "task": "Tasks"], mine: "My comments", handles: false, fileVerb: "commented on",
         newestFirst: true, dayHeadings: true)
+
+    /// Bitbucket Data Center's Activity: Cloud's, its filter All activity, All comments, My comments, Commits (the
+    /// rescopes), Reviews (approved, removed approval, requested changes); no Tasks (its tasks are blocker comments,
+    /// not activities: the Tasks card lists them) and no Statuses.
+    static let bitbucketDataCenterPullRequest = PRActivity(
+        title: "Activity", categories: ["All comments", "My comments", "Commits", "Reviews"], comments: "All comments",
+        byAction: ["commit": "Commits", "approved": "Reviews", "unapproved": "Reviews", "changes_requested": "Reviews"],
+        mine: "My comments", handles: false, fileVerb: "commented on", newestFirst: true, dayHeadings: true)
 
     static let gitLabIssue = PRActivity(
         title: "Activity", categories: ["Comments only", "History only"], comments: "Comments only",

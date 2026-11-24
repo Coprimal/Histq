@@ -417,7 +417,9 @@ enum HostingTokens {
     /// itself that has a token, for the account's host (an OAuth one renewed first when it is about to expire; one that
     /// cannot be had is left out, logged); empty without a profile. The username is the account's
     /// `gitUsername`, else `x-access-token` for GitHub, `oauth2` for GitLab (any name works with a personal access
-    /// token; OAuth tokens need `oauth2`), `x-token-auth` for Bitbucket Cloud and the login for Bitbucket Data Center.
+    /// token; OAuth tokens need `oauth2`), `x-token-auth` for Bitbucket Cloud and the login for Bitbucket Data Center
+    /// (the username its server names the token's user with, `X-AUSERNAME`; one `GitCredential.isSafeUsername`
+    /// rejects, such as `jdoe@corp.com`, gets the credential dropped by `GitInvocation`, and Settings says so).
     @concurrent
     static func credentials(for profile: Profile?) async -> [GitCredential] {
         guard let profile else { return [] }
@@ -436,7 +438,7 @@ enum HostingTokens {
             case .github: "x-access-token"
             case .gitlab: "oauth2"
             case .bitbucketCloud: "x-token-auth"
-            // HTTP access tokens go with the user's own name.
+            // HTTP access tokens go with the user's own name: the login, which Settings took from `X-AUSERNAME`.
             case .bitbucketDataCenter: account.login
             }
             let username = account.gitUsername ?? kindUsername
