@@ -472,8 +472,8 @@ private struct FileSizeText: View {
 // MARK: - Tree
 
 /// The tree view's rows: each folder once (a chain of single-child folders joined as `a/b/c`), then its files, sorted
-/// folders first and by name.
-private enum FileTree {
+/// folders first and by name. Also the pull request's Files changed list (`PRPageLayout.filesTree`).
+enum FileTree {
     struct Row: Identifiable {
         enum Content {
             /// Its label (single-child folders joined) and its root-relative path.

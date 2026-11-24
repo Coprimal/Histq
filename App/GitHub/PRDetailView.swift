@@ -135,6 +135,20 @@ struct PullRequestDetail: Sendable {
     /// The commenters' member roles by user id (`PRPageLayout.roleBadges`): nil without badges; empty when their read
     /// failed (only "Author" shows).
     var memberRoles: [Int: String]? = nil
+    /// Whether a merged pull request's head branch still exists, for the merged box's Delete branch / Restore branch
+    /// (`PRPageLayout.githubMergeBox`): nil when it was not read (not merged, a fork's branch, no push permission, no
+    /// `deleteHeadBranch`) or the read failed, which shows neither.
+    var headBranchExists: Bool? = nil
+    /// The sidebar's Projects and Development (`PRPageLayout.githubSidebar`, the provider's `pullRequestExtras`); nil
+    /// otherwise or when their read failed (no such cards).
+    var extras: HostedPullRequestExtras? = nil
+    /// Bitbucket's Tasks and Merge checks cards (`PRPageLayout.bitbucketSidebar`, the provider's `tasks` and
+    /// `mergeChecks`); nil otherwise or when their read failed (no card).
+    var tasks: [HostedTask]? = nil
+    var mergeChecks: [HostedMergeCheck]? = nil
+    /// Bitbucket's Reports card (the head's Code Insights reports, the provider's `reports`): loading until read,
+    /// idle where the layout or host has none (no card).
+    var reports: Loadable<[HostedReport]> = .idle
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -174,6 +188,18 @@ enum PullRequestAction: Equatable, Sendable {
     case addAssignees([HostedUser])
     /// Adds the labels named (the sidebar's Labels: Edit); adds only.
     case addLabels([String])
+    /// Merges the base into the out-of-date head on the host, while the head is still `sha` (GitHub's Update branch).
+    case updateBranch(sha: String)
+    /// Deletes the merged pull request's head branch on the host (GitHub's merged box), shown gone at once.
+    case deleteBranch(String)
+    /// Makes the deleted head branch again at `sha` (Restore branch), shown back at once.
+    case restoreBranch(String, sha: String)
+    /// Adds a task with this text (Bitbucket's Tasks card), shown at once.
+    case createTask(String)
+    /// Marks task `id` done or not, shown at once.
+    case setTask(id: Int, resolved: Bool)
+    /// Deletes task `id`, shown gone at once.
+    case deleteTask(id: Int)
 
     var progressTitle: String {
         switch self {
@@ -192,6 +218,12 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "Assigning the reviewer…"
         case .addAssignees: "Assigning…"
         case .addLabels: "Adding the label…"
+        case .updateBranch: "Updating the branch…"
+        case .deleteBranch: "Deleting the branch…"
+        case .restoreBranch: "Restoring the branch…"
+        case .createTask: "Adding the task…"
+        case .setTask(_, let resolved): resolved ? "Resolving the task…" : "Reopening the task…"
+        case .deleteTask: "Deleting the task…"
         }
     }
 
@@ -212,6 +244,12 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "The reviewer was not assigned"
         case .addAssignees: "The assignee was not added"
         case .addLabels: "The label was not added"
+        case .updateBranch: "The branch was not updated"
+        case .deleteBranch: "The branch was not deleted"
+        case .restoreBranch: "The branch was not restored"
+        case .createTask: "The task was not added"
+        case .setTask(_, let resolved): resolved ? "The task was not resolved" : "The task was not reopened"
+        case .deleteTask: "The task was not deleted"
         }
     }
 
@@ -234,6 +272,13 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "The reviewer of \(number) was not assigned"
         case .addAssignees: "The assignee of \(number) was not added"
         case .addLabels: "The label of \(number) was not added"
+        case .updateBranch: "The branch of \(number) was not updated"
+        case .deleteBranch: "The branch of \(number) was not deleted"
+        case .restoreBranch: "The branch of \(number) was not restored"
+        case .createTask: "The task on \(number) was not added"
+        case .setTask(_, let resolved): resolved ? "The task on \(number) was not resolved"
+            : "The task on \(number) was not reopened"
+        case .deleteTask: "The task on \(number) was not deleted"
         }
     }
 
@@ -255,6 +300,12 @@ enum PullRequestAction: Equatable, Sendable {
         case .requestReviewers: "assign-reviewer"
         case .addAssignees: "assign"
         case .addLabels: "add-label"
+        case .updateBranch: "update-branch"
+        case .deleteBranch: "delete-branch"
+        case .restoreBranch: "restore-branch"
+        case .createTask: "task"
+        case .setTask(_, let resolved): resolved ? "task-resolve" : "task-reopen"
+        case .deleteTask: "task-delete"
         }
     }
 }
@@ -328,19 +379,32 @@ struct PRInlineComposer: Equatable {
 }
 
 extension HostedMergeMethod {
-    static let all: [HostedMergeMethod] = [.merge, .squash, .rebase]
+    /// Every method, the hosts' common three first; a client lists only its own (`GitHubStore.mergeMethods`), and a
+    /// pull request may list Bitbucket's (`HostedPullRequest.allowedMergeMethods`).
+    static let all: [HostedMergeMethod] = [
+        .merge, .squash, .rebase, .fastForward, .squashFastForward, .rebaseFastForward, .fastForwardIfPossible,
+    ]
 
     var title: String {
         switch self {
         case .merge: "Merge commit"
         case .squash: "Squash"
         case .rebase: "Rebase"
+        case .fastForward: "Fast forward"
+        case .squashFastForward: "Squash, fast-forward only"
+        case .rebaseFastForward: "Rebase, fast-forward"
+        case .fastForwardIfPossible: "Fast-forward if possible"
         }
+    }
+
+    /// The title on `kind`'s merge area: Bitbucket's rebase is "Rebase, merge".
+    func title(on kind: HostingKind) -> String {
+        kind == .bitbucketCloud && self == .rebase ? "Rebase, merge" : title
     }
 
     var buttonTitle: String {
         switch self {
-        case .merge: "Merge"
+        case .merge, .fastForward, .squashFastForward, .rebaseFastForward, .fastForwardIfPossible: "Merge"
         case .squash: "Squash and Merge"
         case .rebase: "Rebase and Merge"
         }
@@ -391,8 +455,19 @@ final class PullRequestDetailModel {
     /// The Activity's filter and sort (`PRPageLayout.activity`): the filter is the detail's, the sort the app's
     /// (`PRActivityView.newestFirstKey`, read again by each load).
     private(set) var activityView = PRActivityView()
+    /// A reload asked from the header's button (`reload`) is running: its icon spins until the detail is in.
+    private(set) var reloading = false
     var reviewEvent: HostedReviewEvent = .approve
-    var mergeMethod: HostedMergeMethod = .merge
+    /// The merge method the user picked last, kept across pull requests where the client's methods apply
+    /// (`shownMergeMethod`); nil: a merge commit.
+    var mergeMethod: HostedMergeMethod?
+    /// The method picked for this pull request where it has its own list (Bitbucket's), reset for each one; nil: its
+    /// default.
+    var ownMergeMethod: HostedMergeMethod?
+    /// Bitbucket's Close source branch as the user set it for this pull request; nil: the pull request's own.
+    var closeSourceBranchChoice: Bool?
+    /// The Tasks card's new task as typed: cleared when it is sent, put back when the write fails.
+    var taskDraft = ""
     /// GitLab's merge box (`PRPageLayout.mergeBoxes`): its details shown (open at first), and the user's squash and
     /// delete-source-branch choices, nil until they click one (the merge request's own setting then).
     var mergeDetailsExpanded = true
@@ -446,7 +521,8 @@ final class PullRequestDetailModel {
     private static let launchTab = AppState.launchFlag("-HistqPRTab").flatMap(PRTab.init(rawValue:))
     #if DEBUG
     /// DEBUG `-HistqPRAction <action>` (`comment`, `start-thread`, `approve`, `request-changes`, `unapprove`, `merge`, `merge-stale`,
-    /// `merge-stale-closed`, `close`, `reopen`, `rebase`): runs that action once, on the first load, without its confirmation
+    /// `merge-stale-closed`, `close`, `reopen`, `rebase`, `update-branch`, `delete-branch`, `restore-branch`): runs
+    /// that action once, on the first load, without its confirmation
     /// (the stub answers it), so a launch exercises the action path and its reload. Only with `-HistqGitHubStub YES`:
     /// never an unconfirmed action on a real account.
     /// `resolve-manual` is the merge box's own (`PRActionsCard.launchResolve`): a local merge, not a GitHub action.
@@ -463,6 +539,13 @@ final class PullRequestDetailModel {
     case "close": .setOpen(false)
     case "reopen": .setOpen(true)
     case "rebase": .rebase(sha: GitHubStub.headSHA)
+    case "update-branch": .updateBranch(sha: GitHubStub.headSHA)
+    case "delete-branch": .deleteBranch("feature")
+    case "restore-branch": .restoreBranch("feature", sha: GitHubStub.headSHA)
+    // Bitbucket's Tasks card (`-HistqHostingStubKind bitbucket -HistqStubPageSeed YES`): a new task, and seeded task 701
+    // resolved.
+    case "task": .createTask("Check the usage text")
+    case "task-resolve": .setTask(id: 701, resolved: true)
     default: nil
     }
     /// DEBUG `-HistqPRAction reply|resolve|unresolve|greply|gresolve|edit|edit-save|delete|delete-confirm|react|`
@@ -546,10 +629,19 @@ final class PullRequestDetailModel {
     }
     #endif
 
+    /// The header's reload: the shown detail loaded again from the host, kept on screen (with its drafts, open
+    /// editors and tab) until the new one is in; a failure shows above the cards.
+    func reload(github: HostingStore) {
+        guard let number, state.value != nil else { return }
+        load(number, github: github, quiet: true)
+        reloading = true
+    }
+
     /// Loads pull request `number`; `quiet` keeps the shown detail until the new one is in (after an action).
     func load(_ number: Int, github: HostingStore, quiet: Bool = false) {
         task?.cancel()
         generation &+= 1
+        reloading = false
         if number != self.number {
             // Another pull request: its own tab, file and box. The same one opened again keeps them (and the draft).
             tab = Self.launchTab ?? .conversation
@@ -562,6 +654,9 @@ final class PullRequestDetailModel {
             mergeDetailsExpanded = true
             squashChoice = nil
             deleteSourceBranchChoice = nil
+            ownMergeMethod = nil
+            closeSourceBranchChoice = nil
+            taskDraft = ""
             replyDrafts = [:]
             threadExpanded = [:]
             generalReplyDrafts = [:]
@@ -617,16 +712,22 @@ final class PullRequestDetailModel {
                     group.cancelAll()
                     return
                 }
+                reloading = false
                 switch result {
                 case .success(var detail):
                     let sha = detail.pull.head.sha
                     if sha != rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: sha) } }
+                    if detail.layout.bitbucketSidebar, client.capabilities.contains(.reports) {
+                        detail.reports = .loading
+                        group.addTask { await Self.fetchReports(client, repository, sha: sha) }
+                    }
                     // The parts shown for the same head stay until this load's arrive (a revisit, a reload after an
                     // action), so their tabs do not go back to loading.
                     if let shown = state.value, shown.pull.number == number, shown.pull.head.sha == sha {
                         detail.commits = shown.commits
                         detail.files = Self.joined(shown.files, detail.threads)
                         detail.checks = shown.checks
+                        if detail.reports.value == nil, shown.reports.value != nil { detail.reports = shown.reports }
                     }
                     state = .loaded(detail)
                     UITiming.content("pr \(number) layout \(detail.layout.name)")
@@ -689,6 +790,9 @@ final class PullRequestDetailModel {
                             #if DEBUG || HISTQ_PERF
                             UITiming.content("pr \(number) checks loaded")
                             #endif
+                        case .reports(let sha, let reports):
+                            guard sha == shown.pull.head.sha else { continue }
+                            shown.reports = reports
                         }
                         state = .loaded(shown)
                         #if DEBUG
@@ -873,6 +977,44 @@ final class PullRequestDetailModel {
             state = .loaded(shown)
             UITiming.content("pr \(number) action \(action.timingName) patched")
         }
+        // Delete branch and Restore branch change the merged box at once; a failure puts it back, on the same load only.
+        var branchShown: (loadID: Int, exists: Bool?)?
+        let branchTarget: Bool? = switch action {
+        case .deleteBranch: false
+        case .restoreBranch: true
+        default: nil
+        }
+        if let branchTarget, self.number == number, case .loaded(var shown) = state {
+            branchShown = (shown.loadID, shown.headBranchExists)
+            shown.headBranchExists = branchTarget
+            state = .loaded(shown)
+            UITiming.content("pr \(number) action \(action.timingName) patched")
+        }
+        // A task written shows at once in the Tasks card; a failure puts the tasks back, on the same load only.
+        var tasksShown: (loadID: Int, tasks: [HostedTask]?)?
+        if self.number == number, case .loaded(var shown) = state, let tasks = shown.tasks {
+            var changed: [HostedTask]?
+            switch action {
+            case .createTask(let body):
+                optimisticID &+= 1
+                changed = tasks + [HostedTask(id: optimisticID, body: body, isResolved: false, creator: shown.viewer,
+                                              createdAt: .now)]
+            case .setTask(let id, let resolved):
+                changed = tasks.map { task in
+                    var task = task
+                    if task.id == id { task.isResolved = resolved }
+                    return task
+                }
+            case .deleteTask(let id): changed = tasks.filter { $0.id != id }
+            default: break
+            }
+            if let changed {
+                tasksShown = (shown.loadID, tasks)
+                shown.tasks = changed
+                state = .loaded(shown)
+                UITiming.content("pr \(number) action \(action.timingName) patched")
+            }
+        }
         let expanded = threadExpanded
         // "#12 Merging…" in the footer.
         let reference = github.kind.reference(.pullRequest(number))
@@ -906,6 +1048,18 @@ final class PullRequestDetailModel {
                     detail.pull.reactions = reactionsShown.reactions
                     state = .loaded(detail)
                 }
+                if let branchShown, self.number == number, case .loaded(var detail) = state,
+                   detail.loadID == branchShown.loadID {
+                    detail.headBranchExists = branchShown.exists
+                    state = .loaded(detail)
+                }
+                if let tasksShown, self.number == number, case .loaded(var detail) = state,
+                   detail.loadID == tasksShown.loadID {
+                    detail.tasks = tasksShown.tasks
+                    state = .loaded(detail)
+                }
+                // The new task's text comes back, unless another one was typed meanwhile.
+                if case .createTask(let body) = action, self.number == number, taskDraft.isEmpty { taskDraft = body }
                 if case .general(.edit(let target, let body)) = action, self.number == number {
                     reopenEdit(target.key, body: body)
                     if editingComments.contains(target.key) {
@@ -944,7 +1098,9 @@ final class PullRequestDetailModel {
                 return
             }
             switch action {
-            case .comment, .review, .startThread: if self.number == number { draft = "" }
+            case .comment, .startThread: if self.number == number { draft = "" }
+            // The header's Approve and Request changes send no text: the box keeps what is typed in it.
+            case .review(_, let body): if self.number == number, !body.isEmpty { draft = "" }
             case .reply(let rootID, _): if self.number == number { replyDrafts[rootID] = nil }
             case .resolve(let thread, let resolved):
                 // A thread just resolved collapses at once, and the reload builds it collapsed; one just unresolved
@@ -971,7 +1127,8 @@ final class PullRequestDetailModel {
                     let result = shown.isMerged ? "merged" : shown.isOpen ? "open" : "closed"
                     UITiming.content("pr \(number) state \(result)")
                 }
-            case .unapprove, .newInline, .itemReaction, .rebase, .requestReviewers, .addAssignees, .addLabels:
+            case .unapprove, .newInline, .itemReaction, .rebase, .requestReviewers, .addAssignees, .addLabels,
+                 .updateBranch, .deleteBranch, .restoreBranch, .createTask, .setTask, .deleteTask:
                 break
             }
             afterSuccess?()
@@ -1012,16 +1169,20 @@ final class PullRequestDetailModel {
         timeline(detail.pull, noun: noun, comments: comments, reviews: detail.reviews, threads: threads,
                  expanded: expanded, general: general, now: detail.now,
                  activity: activityPage(detail.layout, events: detail.events, view: activity,
-                                        roles: detail.memberRoles))
+                                        roles: detail.memberRoles, viewerID: detail.viewer?.id),
+                 layout: detail.layout, roles: detail.memberRoles, events: detail.events, view: activity,
+                 viewerID: detail.viewer?.id)
     }
 
     /// The Activity of a page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
     private nonisolated static func activityPage(
-        _ layout: PRPageLayout, events: [HostedTimelineEvent]?, view: PRActivityView, roles: [Int: String]?
+        _ layout: PRPageLayout, events: [HostedTimelineEvent]?, view: PRActivityView, roles: [Int: String]?,
+        viewerID: Int?
     ) -> PRActivityPage? {
         layout.activity.map {
             PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies,
-                           headerEdit: layout.headerEdit, roles: layout.roleBadges ? roles ?? [:] : nil)
+                           headerEdit: layout.headerEdit, roles: layout.roleBadges ? roles ?? [:] : nil,
+                           viewerID: viewerID)
         }
     }
 
@@ -1030,12 +1191,18 @@ final class PullRequestDetailModel {
     private nonisolated static func timeline(
         _ pull: HostedPullRequest, noun: String, comments: [HostedComment], reviews: [HostedReview],
         threads: Loadable<PRThreads>, expanded: [Int: Bool], general: PRGeneralOptions, now: Date,
-        activity: PRActivityPage?
+        activity: PRActivityPage?, layout: PRPageLayout, roles: [Int: String]?, events: [HostedTimelineEvent]?,
+        view: PRActivityView, viewerID: Int?
     ) -> PRTimelineHTML {
         PRTimeline.page(
-            author: pull.user, action: "opened this \(noun.lowercased())", date: pull.createdAt, html: pull.bodyHTML,
-            markdown: pull.body, comments: comments, reviews: reviews, threads: threads, expanded: expanded,
-            general: general, now: now, activity: activity)
+            author: pull.user, action: layout.descriptionVerb ?? "opened this \(noun.lowercased())",
+            date: pull.createdAt, html: pull.bodyHTML, markdown: pull.body, comments: comments, reviews: reviews,
+            threads: threads, expanded: expanded, general: general, now: now, activity: activity,
+            roles: layout.roleBadges ? roles ?? [:] : nil, authorOnly: layout.authorBadgeOnly,
+            descriptionReactions: layout.descriptionReactions,
+            events: layout.timelineEvents ? events : nil,
+            commentFilter: layout.commentsCard && layout.activity == nil ? PRCommentFilter(filter: view.filter) : nil,
+            viewerID: viewerID, splitsDescription: layout.commentsCard && layout.activity != nil)
     }
 
     /// The Activity's filter or sort changed (`view`): it shows at once in its controls, the page is rebuilt off the
@@ -1047,9 +1214,9 @@ final class PullRequestDetailModel {
             Preferences.defaults.set(view.newestFirst, forKey: PRActivityView.newestFirstKey)
         }
         activityView = view
-        guard let number, case .loaded(let shown) = state, shown.layout.activity != nil, let api = github.api else {
-            return
-        }
+        guard let number, case .loaded(let shown) = state, shown.layout.activity != nil || shown.layout.commentsCard,
+              let api = github.api
+        else { return }
         let general = PRGeneralOptions(api.client, expanded: generalExpanded)
         let expanded = threadExpanded
         Task { [weak self] in
@@ -1084,7 +1251,8 @@ final class PullRequestDetailModel {
         // The Activity's history entries, only where the layout has an Activity and the provider reads them; started
         // with the comments, so a host that reads both in one request (GitLab's discussions) shares it. A failure only
         // leaves them out.
-        let readsEvents = layout.activity != nil && client.capabilities.contains(.timelineEvents)
+        let readsEvents = (layout.activity != nil || layout.timelineEvents)
+            && client.capabilities.contains(.timelineEvents)
         async let events: Loadable<[HostedTimelineEvent]> = !readsEvents ? .idle
             : await part(client.kind) { try await client.timelineEvents(of: .pullRequest(number), in: repository) }
         async let reviews = client.reviews(of: number, in: repository)
@@ -1092,12 +1260,14 @@ final class PullRequestDetailModel {
         async let threadStates = part(client.kind) { try await client.reviewThreadStates(of: number, in: repository) }
         // Only a provider that can revoke an approval or reply to general comments asks who the token's user is; a
         // failure only hides the button (or draws an optimistic reply as "you").
-        let asksViewer = !client.capabilities.isDisjoint(with: [.unapprove, .generalReplies])
+        // The "Comments" card's Mine filter needs it too.
+        let asksViewer = !client.capabilities.isDisjoint(with: [.unapprove, .generalReplies]) || layout.commentsCard
         async let viewer = asksViewer ? try? await client.currentUser() : nil
         // The award bar's reactions, only where the layout has the bar and the provider reads them; started with the
         // comments, so a host that reads both in one request (GitLab's GraphQL note states) shares it. A failure only
         // hides the bar.
-        let barKinds = layout.reactionBar && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
+        let showsReactions = layout.reactionBar || layout.descriptionReactions
+        let barKinds = showsReactions && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
         async let itemReactions: Loadable<[HostedReaction]> = barKinds.isEmpty ? .idle
             : await part(client.kind) { try await client.itemReactions(of: .pullRequest(number), in: repository) }
         // The approval and merge boxes' reads, only where the layout has them; started with the reviews, so a host that
@@ -1117,6 +1287,17 @@ final class PullRequestDetailModel {
         let asksLabels = sidebar && client.capabilities.contains(.labels)
         async let labelChoices: Loadable<[HostedLabel]> = !asksLabels ? .idle
             : await part(client.kind) { try await client.labels(in: repository) }
+        // Bitbucket's sidebar Tasks and Merge checks; a failure only leaves that card out.
+        let bitbucketSide = layout.bitbucketSidebar
+        async let tasks: Loadable<[HostedTask]> = !(bitbucketSide && client.capabilities.contains(.tasks)) ? .idle
+            : await part(client.kind) { try await client.tasks(of: number, in: repository) }
+        async let mergeChecks: Loadable<[HostedMergeCheck]> = !(bitbucketSide
+            && client.capabilities.contains(.mergeChecks)) ? .idle
+            : await part(client.kind) { try await client.mergeChecks(of: number, in: repository) }
+        // GitHub's sidebar Projects and Development; a failure only leaves those cards out.
+        let asksExtras = layout.githubSidebar && client.capabilities.contains(.pullRequestExtras)
+        async let extras: Loadable<HostedPullRequestExtras> = !asksExtras ? .idle
+            : await part(client.kind) { try await client.pullRequestExtras(number, in: repository) }
         do {
             let pull = try await pullRequest
             let (comments, reviews) = try await (comments, reviews)
@@ -1124,16 +1305,34 @@ final class PullRequestDetailModel {
             let viewer = await viewer
             // The badges' roles: read once the commenters are known (the author, the viewer for an optimistic reply,
             // every general and diff comment's author). A failure only leaves the roles out.
-            let users = [pull.user, viewer] + comments.map(\.user) + (threads.value?.all ?? []).flatMap(\.comments).map(\.user)
-            let roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
+            let threadComments = (threads.value?.all ?? []).flatMap(\.comments)
+            let users = [pull.user, viewer] + comments.map(\.user) + threadComments.map(\.user)
+            var roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
                 try await client.memberRoles(of: users.compactMap { $0?.id }, in: repository)
             }.value
+            if layout.roleBadges {
+                // A host that says each author's relation on the comment itself (GitHub's `author_association`).
+                let said = comments.map { ($0.user, $0.authorAssociation) }
+                    + reviews.map { ($0.user, $0.authorAssociation) }
+                    + threadComments.map { ($0.user, $0.authorAssociation) }
+                roles = PRTimeline.associationRoles(said).merging(roles ?? [:]) { _, member in member }
+            }
             let events = await events.value
             let timeline = timeline(
                 pull, noun: client.kind.pullRequestNoun, comments: comments, reviews: reviews, threads: threads,
                 expanded: expanded, general: general, now: now,
-                activity: activityPage(layout, events: events, view: activityView, roles: roles))
+                activity: activityPage(layout, events: events, view: activityView, roles: roles,
+                                       viewerID: viewer?.id), layout: layout,
+                roles: roles, events: events, view: activityView, viewerID: viewer?.id)
             let reviewers = reviewers(pull, reviews)
+            // The merged box's Delete branch / Restore branch: only a merged pull request's own branch (not a fork's)
+            // of a repository the token's user may push to.
+            let merged = pull.mergedAt != nil || pull.merged == true
+            let readsBranch = layout.githubMergeBox && client.capabilities.contains(.deleteHeadBranch) && merged
+                && pull.isFromSameRepository && pull.viewerCanPush == true && pull.head.ref != pull.base.ref
+            let headBranchExists: Bool? = !readsBranch ? nil : await part(client.kind) {
+                try await client.headBranchExists(pull.head.ref, in: repository)
+            }.value
             let viewerApproved = viewer.map { viewer in
                 client.capabilities.contains(.unapprove)
                     && reviewers.contains { $0.userID == viewer.id && $0.state == "APPROVED" }
@@ -1148,7 +1347,8 @@ final class PullRequestDetailModel {
                 viewerApproved: viewerApproved, reactionKinds: reactions == nil ? [] : barKinds,
                 approvals: await approvals.value, repositoryInfo: await repositoryInfo.value,
                 reviewerCandidates: await candidates.value ?? [], labelChoices: await labelChoices.value ?? [],
-                events: events, memberRoles: roles))
+                events: events, memberRoles: roles, headBranchExists: headBranchExists, extras: await extras.value,
+                tasks: await tasks.value, mergeChecks: await mergeChecks.value))
         } catch {
             return .failure(error)
         }
@@ -1160,6 +1360,8 @@ final class PullRequestDetailModel {
         case files(Loadable<[PRFile]>)
         /// The check runs of head `sha`.
         case checks(sha: String, Loadable<[HostedCheckRun]>)
+        /// The reports on head `sha` (Bitbucket's).
+        case reports(sha: String, Loadable<[HostedReport]>)
     }
 
     @concurrent
@@ -1187,6 +1389,13 @@ final class PullRequestDetailModel {
         _ client: any HostingProvider, _ repository: HostedRepository, sha: String
     ) async -> Part? {
         .checks(sha: sha, await part(client.kind) { try await client.checkRuns(for: sha, in: repository) })
+    }
+
+    @concurrent
+    private nonisolated static func fetchReports(
+        _ client: any HostingProvider, _ repository: HostedRepository, sha: String
+    ) async -> Part? {
+        .reports(sha: sha, await part(client.kind) { try await client.reports(commit: sha, in: repository) })
     }
 
     /// Joins the threads' comments (REST) and states (GraphQL): without the comments there are no threads, so their
@@ -1314,6 +1523,12 @@ final class PullRequestDetailModel {
             case .requestReviewers(let users): try await client.requestReviewers(users, on: number, in: repository)
             case .addAssignees(let users): try await client.addAssignees(users, to: .pullRequest(number), in: repository)
             case .addLabels(let names): try await client.addLabels(names, to: .pullRequest(number), in: repository)
+            case .updateBranch(let sha): try await client.updateBranch(number, in: repository, expectedHeadSHA: sha)
+            case .deleteBranch(let branch): try await client.deleteHeadBranch(branch, in: repository)
+            case .restoreBranch(let branch, let sha): try await client.restoreHeadBranch(branch, sha: sha, in: repository)
+            case .createTask(let body): _ = try await client.createTask(on: number, in: repository, body: body)
+            case .setTask(let id, let resolved): try await client.setTask(id, resolved: resolved, on: number, in: repository)
+            case .deleteTask(let id): try await client.deleteTask(id, on: number, in: repository)
             }
             return nil
         } catch {
@@ -1424,6 +1639,7 @@ struct PRDetailView: View {
         let detail = session.pullDetail
         VStack(spacing: SectionCardMetrics.spacing) {
             PRHeaderCard(session: session, number: number)
+            PRTabsRow(session: session)
             if let error = detail.actionError {
                 PRActionErrorCard(message: error) { detail.actionError = nil }
                     .onAppear { UITiming.content("pr \(number) action-error shown") }
@@ -1455,8 +1671,8 @@ struct PRDetailView: View {
     }
 }
 
-/// Back, the title and number, the state pill and Open on GitHub; the "wants to merge" line; the tabs with their
-/// counts. The title comes from the PRs tab's row until the pull request is in.
+/// Back, the title and number, the state pill and Open on GitHub; the "wants to merge" line (the tabs are
+/// `PRTabsRow`'s, under it). The title comes from the PRs tab's row until the pull request is in.
 private struct PRHeaderCard: View {
     let session: RepoSession
     let number: Int
@@ -1512,6 +1728,13 @@ private struct PRHeaderCard: View {
                             PRStatePill(detail: value)
                                 .fixedSize()
                         }
+                        if layout.reviewButtonsInHeader, value.isOpen {
+                            PRHeaderReviewButtons(session: session, detail: value)
+                        }
+                        PRReloadButton(reloading: session.pullDetail.reloading,
+                                       noun: kind.pullRequestNoun.lowercased()) { [session] in
+                            session.pullDetail.reload(github: session.github)
+                        }
                         if narrow {
                             Button {
                                 GitHubLinks.open(session.github.webURL(.pullRequest(value.pull.number)))
@@ -1547,6 +1770,8 @@ private struct PRHeaderCard: View {
                         switch layout.mergeSentence {
                         case .wantsToMerge: summary(value)
                         case .requestedToMerge: requestedSummary(value)
+                        case .stateFirst: summary(value, stateFirst: true)
+                        case .bitbucket: bitbucketSummary(value)
                         }
                     } else {
                         SkeletonLine(width: 260, height: 12)
@@ -1557,15 +1782,6 @@ private struct PRHeaderCard: View {
                 // it comes.
                 .frame(height: narrow ? 46 : 20, alignment: .topLeading)
                 .padding(.leading, 8)
-                // At its own width, scrolled sideways in a panel narrower than it, never wider than the card.
-                ViewThatFits(in: .horizontal) {
-                    tabs(value, layout)
-                    ScrollView(.horizontal) {
-                        tabs(value, layout)
-                    }
-                    .scrollIndicators(.never)
-                }
-                .padding(.leading, 4)
             }
             // The card's width, never its rows': a row wider than the card neither widens it nor hides the switch.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -1577,15 +1793,24 @@ private struct PRHeaderCard: View {
     /// "wanted to merge"), on one line, or on two before "into" in a narrow card. The two branches are blue chips, so
     /// which one goes into which reads at a glance (user, 2026-11-17); the words keep their width and the chips give
     /// way first.
-    private func summary(_ value: PullRequestDetail) -> some View {
+    /// `stateFirst`: GitHub's order, the state pill first on the row (not by the title).
+    private func summary(_ value: PullRequestDetail, stateFirst: Bool = false) -> some View {
         let pull = value.pull
         let count = pull.commits ?? value.commits.value?.count ?? 0
         let verb = value.isMerged ? "merged" : value.isOpen ? "wants to merge" : "wanted to merge"
+        // GitHub's merged sentence names who merged it (not the author) and ends with when.
+        let actor = stateFirst && value.isMerged ? pull.mergedBy?.login ?? pull.user?.login : pull.user?.login
+        let dates = PRPageDates(now: value.now)
+        let mergedWhen = stateFirst && value.isMerged ? pull.mergedAt : nil
         let layout = narrow
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 6))
         return layout {
             HStack(spacing: 6) {
-                Text(pull.user?.login ?? "ghost")
+                if stateFirst {
+                    PRStatePill(detail: value)
+                        .fixedSize()
+                }
+                Text(actor ?? "ghost")
                     .fontWeight(.semibold)
                 Text("\(verb) \(count) \(count == 1 ? "commit" : "commits")")
                     .foregroundStyle(.secondary)
@@ -1601,6 +1826,12 @@ private struct PRHeaderCard: View {
                     .foregroundStyle(.secondary)
                     .layoutPriority(1)
                 branchChip(headName(pull))
+                if let mergedWhen {
+                    Text(verbatim: dates.relative(mergedWhen))
+                        .foregroundStyle(.secondary)
+                        .help(dates.absolute(mergedWhen))
+                        .layoutPriority(1)
+                }
             }
         }
         .font(.body)
@@ -1659,6 +1890,52 @@ private struct PRHeaderCard: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// Bitbucket's "[avatar] stub [feature] → [main] [Open] · Created 1 week ago · Last updated 2 days ago", on one line,
+    /// or on two before the dates in a narrow card.
+    private func bitbucketSummary(_ value: PullRequestDetail) -> some View {
+        let pull = value.pull
+        let dates = PRPageDates(now: value.now)
+        let layout = narrow
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 6))
+        return layout {
+            HStack(spacing: 6) {
+                if let user = pull.user {
+                    GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 18,
+                                     avatars: .of(session.github))
+                        .help(user.name ?? user.login)
+                }
+                Text(pull.user?.name ?? pull.user?.login ?? "ghost")
+                    .fontWeight(.semibold)
+                    .layoutPriority(1)
+                branchChip(headName(pull))
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("into")
+                branchChip(pull.base.ref)
+                PRStatePill(detail: value)
+                    .fixedSize()
+            }
+            .frame(height: 20)
+            .layoutPriority(1)
+            HStack(spacing: 6) {
+                if let created = pull.createdAt {
+                    Text(verbatim: "· Created \(dates.relative(created))")
+                        .help(dates.absolute(created))
+                }
+                if let updated = pull.updatedAt {
+                    Text(verbatim: "· Last updated \(dates.relative(updated))")
+                        .help(dates.absolute(updated))
+                }
+            }
+            .foregroundStyle(.secondary)
+            .layoutPriority(1)
+        }
+        .font(.body)
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+
     /// The head as the sentence names it: GitHub's `owner:branch`; on GitLab and Bitbucket the branch alone when it is
     /// in the same repository (its label's owner is the base's), as they write it.
     private func headName(_ pull: HostedPullRequest) -> String {
@@ -1693,11 +1970,32 @@ private struct PRHeaderCard: View {
             subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
         }
     }
+}
+
+/// The tabs with their counts, on their own row under the header card: only their track, standing on the panel as
+/// a card does, a card's gap from the cards around it (user, 2026-11-24).
+private struct PRTabsRow: View {
+    let session: RepoSession
+
+    var body: some View {
+        let value = session.pullDetail.state.value
+        // The kind's, not the load's: the same value, known before the load, so the tabs never change title.
+        let layout = PRPageLayout.for(session.github.kind)
+        // At its own width, scrolled sideways in a panel narrower than it.
+        ViewThatFits(in: .horizontal) {
+            tabs(value, layout)
+            ScrollView(.horizontal) {
+                tabs(value, layout)
+            }
+            .scrollIndicators(.never)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+    }
 
     private func tabs(_ value: PullRequestDetail?, _ layout: PRPageLayout) -> some View {
         @Bindable var detail = session.pullDetail
         return CapsuleTabs(selection: $detail.tab, tabs: layout.tabs, title: { tab in tabTitle(tab, value, layout) },
-                           compact: true, raisedTrack: true)
+                           compact: true, cardTrack: true)
             .fixedSize()
     }
 
@@ -1711,6 +2009,125 @@ private struct PRHeaderCard: View {
         let title = layout.title(of: tab)
         guard let count else { return Text(title) }
         return Text(title) + Text(" \(count)").monospacedDigit()
+    }
+}
+
+/// One column of GitHub's merge box (`gitHubColumns`): its word, what stands and a thin bar of how far it got, in
+/// its tone (gray without one, no bar without a measure).
+private struct PRMergeColumn: View {
+    typealias Column = (title: String, note: String, tone: Color?, fraction: Double?)
+    let column: Column
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(column.title)
+                .font(.body.weight(.semibold))
+            Text(column.note)
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Palette.surfaceBorder)
+                    if let fraction = column.fraction {
+                        Capsule()
+                            .fill(column.tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+                            .frame(width: proxy.size.width * min(max(fraction, 0), 1))
+                    }
+                }
+            }
+            .frame(height: 4)
+            .accessibilityHidden(true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+            .fill(Palette.tabFill))
+        .overlay(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+            .strokeBorder(Palette.surfaceBorder, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Bitbucket's Approve and Request changes in the header (`PRPageLayout.reviewButtonsInHeader`): Approve, or
+/// "Approved" (a click revokes it) once the viewer approved; Request changes, or "Changes requested" once they did. A
+/// click acts at once; both are off while an action runs on the pull request.
+private struct PRHeaderReviewButtons: View {
+    let session: RepoSession
+    let detail: PullRequestDetail
+
+    var body: some View {
+        let model = session.pullDetail
+        let number = detail.pull.number
+        let busy = model.busy[number]
+        let viewerState = detail.viewer.flatMap { viewer in
+            detail.reviewers.first { $0.userID == viewer.id }?.state
+        }
+        let approved = detail.viewerApproved || viewerState == "APPROVED"
+        let requested = viewerState == "CHANGES_REQUESTED"
+        HStack(spacing: 6) {
+            Button {
+                model.perform(approved ? .unapprove : .review(.approve, body: ""), on: number, github: session.github)
+            } label: {
+                HStack(spacing: 6) {
+                    if busy == .unapprove || busy == .review(.approve, body: "") {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: approved ? "checkmark.circle.fill" : "checkmark.circle")
+                            .foregroundStyle(approved ? Color(nsColor: Palette.diffAddedSign) : .secondary)
+                            .accessibilityHidden(true)
+                    }
+                    Text(approved ? "Approved" : "Approve")
+                }
+            }
+            .buttonStyle(RowTextButtonStyle(formRow: true))
+            .fixedSize()
+            .disabled(busy != nil)
+            .help(approved ? "Revoke your approval" : "Approve this pull request")
+            Button {
+                model.perform(.review(.requestChanges, body: ""), on: number, github: session.github)
+            } label: {
+                HStack(spacing: 6) {
+                    if busy == .review(.requestChanges, body: "") {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "exclamationmark.circle")
+                            .foregroundStyle(requested ? Palette.conflictTone : .secondary)
+                            .accessibilityHidden(true)
+                    }
+                    Text(requested ? "Changes requested" : "Request changes")
+                }
+            }
+            .buttonStyle(RowTextButtonStyle(formRow: true))
+            .fixedSize()
+            .disabled(busy != nil || requested)
+            .help(requested ? "You requested changes" : "Ask for changes before this is merged")
+        }
+    }
+}
+
+/// The header's reload button, beside "Open on <host>": a click reloads the page from the host at once (its icon
+/// turns into a spinner until the new detail is in), the shown one staying until then.
+struct PRReloadButton: View {
+    let reloading: Bool
+    /// "pull request", "merge request", "issue".
+    let noun: String
+    let reload: () -> Void
+
+    var body: some View {
+        Button(action: reload) {
+            ZStack {
+                Image(systemName: "arrow.clockwise")
+                    .foregroundStyle(.secondary)
+                    .opacity(reloading ? 0 : 1)
+                if reloading { ProgressView().controlSize(.mini) }
+            }
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .disabled(reloading)
+        .help("Reload the \(noun)")
+        .accessibilityLabel(reloading ? "Reloading the \(noun)" : "Reload the \(noun)")
     }
 }
 
@@ -1781,7 +2198,7 @@ private struct PRContent: View {
                 .onAppear { UITiming.content("pr \(number) conversation \(detail.timelineCount)") }
         case .commits:
             PRCommitsTab(commits: detail.commits, now: detail.now, github: session.github,
-                         byDay: detail.layout.commitsByDay)
+                         byDay: detail.layout.commitsByDay, verb: detail.layout.commitVerb)
                 .onAppear { UITiming.content("pr \(number) commits \(Self.count(detail.commits))") }
         case .files:
             PRFilesTab(session: session, detail: detail)
@@ -1826,6 +2243,20 @@ struct PRConversationTab: View {
     /// The scroll ids of the merge box and the Conversation (Activity) card, for DEBUG `-HistqPRScrollTo`.
     static let mergeID = "merge"
     static let activityID = "activity"
+    /// The "Comments" card's header row (`commentsCards`).
+    private static let commentsHeaderHeight: CGFloat = 44
+
+    /// The description's reaction row (`PRPageLayout.descriptionReactions`): the pull request's own reactions, written
+    /// through the detail's optimistic `itemReaction`; nil without the row or when they did not load.
+    private var itemReactions: PRItemReactions? {
+        guard detail.layout.descriptionReactions, !detail.reactionKinds.isEmpty else { return nil }
+        let number = detail.pull.number
+        return PRItemReactions(
+            kinds: detail.reactionKinds, given: detail.pull.reactions, busy: session.pullDetail.isBusy(number),
+            noun: session.github.kind.pullRequestNoun.lowercased()) { [session] kind, add in
+            session.pullDetail.perform(.itemReaction(kind: kind, add: add), on: number, github: session.github)
+        }
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -1860,7 +2291,7 @@ struct PRConversationTab: View {
     /// instead of sharing the panel's height with them.
     private func main(sideCards: Bool) -> some View {
         VStack(spacing: SectionCardMetrics.spacing) {
-            if !detail.reactionKinds.isEmpty {
+            if detail.layout.reactionBar, !detail.reactionKinds.isEmpty {
                 let model = session.pullDetail
                 let number = detail.pull.number
                 PRAwardBarCard(kinds: detail.reactionKinds, given: detail.pull.reactions, busy: model.isBusy(number),
@@ -1873,33 +2304,100 @@ struct PRConversationTab: View {
                 PRApprovalBoxCard(session: session, detail: detail)
                 PRActionsCard(session: session, detail: detail)
                     .id(Self.mergeID)
-            }
-            SectionCard(detail.layout.activity?.title ?? "Conversation", systemImage: "text.bubble",
-                        count: detail.timelineCount) {
-                // The page fits its content and never scrolls itself: a wheel over the text or over a native view on
-                // the page scrolls this column.
-                PRTimelinePage(session: session, number: detail.pull.number, timeline: detail.timeline,
-                               loadID: detail.loadID, threads: detail.threads.value,
-                               avatars: .of(session.github), general: session.pullDetail)
-                    .frame(maxWidth: .infinity)
-            } accessory: {
-                if let activity = detail.layout.activity {
-                    let model = session.pullDetail
-                    PRActivityControls(activity: activity, view: model.activityView) { [session] view in
-                        session.pullDetail.setActivity(view, github: session.github)
-                    }
-                }
-            }
-            .id(Self.activityID)
-            if !detail.layout.mergeBoxes {
+            } else if detail.layout.githubMergeBox || detail.layout.bitbucketMergeArea {
+                // GitHub's merge box and Bitbucket's merge area first, above the description.
                 PRActionsCard(session: session, detail: detail)
                     .id(Self.mergeID)
             }
-            PRComposerCard(session: session, detail: detail)
+            if detail.layout.commentsCard, let split = detail.timeline.split {
+                commentsCards(split)
+            } else {
+                conversationCard
+            }
+            if !detail.layout.mergeBoxes, !detail.layout.githubMergeBox, !detail.layout.bitbucketMergeArea {
+                PRActionsCard(session: session, detail: detail)
+                    .id(Self.mergeID)
+            }
+            if !detail.layout.commentsCard {
+                PRComposerCard(session: session, detail: detail)
+            }
             if sideCards {
                 PRSideColumn(session: session, detail: detail)
             }
         }
+    }
+
+    /// GitHub's new page (`PRPageLayout.commentsCard`): the description in its own card, then "Comments" with its
+    /// filter, the comment box first and the comments under it, each part its own page.
+    @ViewBuilder private func commentsCards(_ split: (description: PRTimelineHTML, comments: PRTimelineHTML))
+        -> some View {
+        if let title = detail.layout.descriptionTitle {
+            SectionCard(title, systemImage: "doc.text") {
+                page(split.description)
+            }
+        } else {
+            SectionCard(nil) {
+                page(split.description)
+            }
+        }
+        // A taller header, so the filter's tabs keep room above them and above the comment box (user, 2026-11-23).
+        SectionCard(detail.layout.activity?.title ?? "Comments", systemImage: "text.bubble",
+                    count: detail.timelineCount, headerHeight: Self.commentsHeaderHeight) {
+            VStack(spacing: 10) {
+                PRComposerCard(session: session, detail: detail, embedded: true)
+                page(split.comments)
+            }
+            .padding(.top, 4)
+        } accessory: {
+            let model = session.pullDetail
+            if let activity = detail.layout.activity {
+                PRActivityControls(activity: activity, view: model.activityView) { [session] view in
+                    session.pullDetail.setActivity(view, github: session.github)
+                }
+            } else {
+                commentFilterTabs(model)
+            }
+        }
+        .id(Self.activityID)
+    }
+
+    /// GitHub's All / Unresolved / Mine tabs of the "Comments" card.
+    private func commentFilterTabs(_ model: PullRequestDetailModel) -> some View {
+        CapsuleTabs(selection: Binding(
+            get: { PRCommentFilter(filter: model.activityView.filter) },
+            set: { [session] filter in
+                var view = session.pullDetail.activityView
+                view.filter = filter.rawValue
+                session.pullDetail.setActivity(view, github: session.github)
+            }), tabs: PRCommentFilter.allCases, title: { Text($0.rawValue) }, compact: true, small: true,
+            raisedTrack: true)
+            .fixedSize()
+    }
+
+    /// One page of the Conversation: the whole timeline, or one part of GitHub's new page.
+    private func page(_ timeline: PRTimelineHTML) -> some View {
+        // The page fits its content and never scrolls itself: a wheel over the text or over a native view on the
+        // page scrolls this column.
+        PRTimelinePage(session: session, number: detail.pull.number, timeline: timeline, loadID: detail.loadID,
+                       threads: detail.threads.value, avatars: .of(session.github), general: session.pullDetail,
+                       itemReactions: itemReactions)
+            .frame(maxWidth: .infinity)
+    }
+
+    /// The Conversation (Activity) card: the whole timeline in one page.
+    private var conversationCard: some View {
+        SectionCard(detail.layout.activity?.title ?? "Conversation", systemImage: "text.bubble",
+                    count: detail.timelineCount) {
+            page(detail.timeline)
+        } accessory: {
+            if let activity = detail.layout.activity {
+                let model = session.pullDetail
+                PRActivityControls(activity: activity, view: model.activityView) { [session] view in
+                    session.pullDetail.setActivity(view, github: session.github)
+                }
+            }
+        }
+        .id(Self.activityID)
     }
 }
 
@@ -1924,17 +2422,20 @@ struct PRActivityControls: View {
             ) {
                 ForEach([PRActivity.all] + activity.categories, id: \.self) { Text($0).tag($0) }
             }
-            Button {
-                var changed = view
-                changed.newestFirst.toggle()
-                set(changed)
-            } label: {
-                Image(systemName: view.newestFirst ? "arrow.down" : "arrow.up")
-                    .font(.system(size: 11, weight: .semibold))
+            // A host whose order is fixed (Bitbucket's newest first) has no toggle.
+            if activity.newestFirst == nil {
+                Button {
+                    var changed = view
+                    changed.newestFirst.toggle()
+                    set(changed)
+                } label: {
+                    Image(systemName: view.newestFirst ? "arrow.down" : "arrow.up")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 9))
+                .help(view.newestFirst ? "Newest first: show oldest first" : "Oldest first: show newest first")
+                .accessibilityLabel(view.newestFirst ? "Sorted newest first" : "Sorted oldest first")
             }
-            .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 9))
-            .help(view.newestFirst ? "Newest first: show oldest first" : "Oldest first: show newest first")
-            .accessibilityLabel(view.newestFirst ? "Sorted newest first" : "Sorted oldest first")
         }
         .fixedSize()
     }
@@ -2136,12 +2637,40 @@ private struct PRApprovalBoxCard: View {
 private struct PRComposerCard: View {
     let session: RepoSession
     let detail: PullRequestDetail
+    /// Inside the "Comments" card (`PRPageLayout.commentsCard`): no card of its own, the Comment / Review choice on
+    /// the button row.
+    var embedded = false
 
     var body: some View {
         @Bindable var model = session.pullDetail
         let isReview = model.composer == .review
-        SectionCard(isReview ? "Review" : "Comment", systemImage: isReview ? "checkmark.bubble" : "square.and.pencil") {
-            VStack(alignment: .leading, spacing: 8) {
+        if embedded {
+            // Bitbucket reviews from the header's Approve and Request changes: a plain comment box.
+            form(model, tabs: !detail.layout.reviewButtonsInHeader)
+        } else {
+            SectionCard(isReview ? "Review" : "Comment",
+                        systemImage: isReview ? "checkmark.bubble" : "square.and.pencil") {
+                form(model, tabs: false)
+                    // Room between the header (with its Comment / Review choice) and the text box (user, 2026-11-17).
+                    .padding(.top, 8)
+            } accessory: {
+                tabs(model)
+            }
+        }
+    }
+
+    private func tabs(_ model: PullRequestDetailModel) -> some View {
+        @Bindable var model = model
+        return CapsuleTabs(selection: $model.composer, tabs: PullRequestDetailModel.Composer.allCases,
+                           title: { Text($0.title) }, compact: true, small: true, raisedTrack: true)
+            .fixedSize()
+    }
+
+    /// The text box and its buttons; `tabs`: the Comment / Review choice first on the button row.
+    private func form(_ model: PullRequestDetailModel, tabs showsTabs: Bool) -> some View {
+        @Bindable var model = model
+        let isReview = model.composer == .review
+        return VStack(alignment: .leading, spacing: 8) {
                 TextEditor(text: $model.draft)
                     .font(.body)
                     .settingsTextEditor()
@@ -2156,6 +2685,7 @@ private struct PRComposerCard: View {
                         }
                     }
                 HStack(spacing: 8) {
+                    if showsTabs { tabs(model) }
                     if isReview {
                         CapsuleMenuPicker(label: "Review", selection: Binding(
                             get: { event(model) }, set: { model.reviewEvent = $0 }),
@@ -2200,13 +2730,6 @@ private struct PRComposerCard: View {
                           ? "A review that requests changes or comments needs a text" : "")
                 }
             }
-            // Room between the header (with its Comment / Review choice) and the text box (user, 2026-11-17).
-            .padding(.top, 8)
-        } accessory: {
-            CapsuleTabs(selection: $model.composer, tabs: PullRequestDetailModel.Composer.allCases,
-                        title: { Text($0.title) }, compact: true, small: true, raisedTrack: true)
-                .fixedSize()
-        }
     }
 
     /// The review events the provider takes: Request changes only where it has them; Approve not where the approval
@@ -2232,7 +2755,7 @@ private struct PRComposerCard: View {
     }
 
     private func placeholder(_ model: PullRequestDetailModel) -> String {
-        guard model.composer == .review else { return "Leave a comment" }
+        guard model.composer == .review else { return detail.layout.composerPrompt ?? "Leave a comment" }
         return event(model) == .approve ? "Approve, with an optional comment" : "Say what to change"
     }
 
@@ -2272,8 +2795,27 @@ private struct PRSideColumn: View {
     var body: some View {
         if detail.layout.sidebar {
             hostSidebar
+        } else if detail.layout.bitbucketSidebar {
+            PRBitbucketSidebar(session: session, detail: detail) { reviewersCard(HostAvatars.of(session.github)) }
         } else {
             sideCards
+        }
+    }
+
+    /// Each reviewer with the state of their latest review.
+    private func reviewersCard(_ avatars: HostAvatars) -> some View {
+        SectionCard("Reviewers", systemImage: "person.2", count: detail.reviewers.count) {
+            if detail.reviewers.isEmpty {
+                PRSideEmpty(text: "No reviews")
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(detail.reviewers) { reviewer in
+                        PRPersonRow(login: reviewer.login, userID: reviewer.userID,
+                                    avatarURL: reviewer.avatarURL, avatars: avatars,
+                                    state: reviewer.state, showsState: true)
+                    }
+                }
+            }
         }
     }
 
@@ -2320,19 +2862,7 @@ private struct PRSideColumn: View {
     private var sideCards: some View {
         let avatars = HostAvatars.of(session.github)
         return VStack(spacing: SectionCardMetrics.spacing) {
-            SectionCard("Reviewers", systemImage: "person.2", count: detail.reviewers.count) {
-                if detail.reviewers.isEmpty {
-                    PRSideEmpty(text: "No reviews")
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(detail.reviewers) { reviewer in
-                            PRPersonRow(login: reviewer.login, userID: reviewer.userID,
-                                        avatarURL: reviewer.avatarURL, avatars: avatars,
-                                        state: reviewer.state, showsState: true)
-                        }
-                    }
-                }
-            }
+            reviewersCard(avatars)
             if session.github.offers(.assignees) {
                 SectionCard("Assignees", systemImage: "person.crop.circle", count: detail.pull.assignees?.count ?? 0) {
                     let assignees = detail.pull.assignees ?? []
@@ -2360,6 +2890,345 @@ private struct PRSideColumn: View {
                     }
                 }
             }
+            if detail.layout.githubSidebar {
+                if let extras = detail.extras {
+                    HostProjectsCard(projects: extras.projects, count: extras.projectCount,
+                                     host: session.github.kind.name) { [session, number = detail.pull.number] in
+                        GitHubLinks.open(session.github.webURL(.pullRequest(number)))
+                    }
+                }
+                gitHubMilestoneAndParticipants(avatars: avatars)
+            }
+        }
+    }
+
+    /// GitHub's sidebar after Labels and Projects: Milestone ("No milestone"), Development (the issues it closes,
+    /// where `pullRequestExtras` read them), then Participants (their avatars, as Histq knows them:
+    /// `HostSidebar.participants`); Notifications stays on GitHub.
+    @ViewBuilder private func gitHubMilestoneAndParticipants(avatars: HostAvatars) -> some View {
+        let pull = detail.pull
+        SectionCard("Milestone", systemImage: "flag") {
+            if let milestone = pull.milestone {
+                Text(milestone.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(milestone.title)
+            } else {
+                PRSideEmpty(text: "No milestone")
+            }
+        }
+        if let issues = detail.extras?.closingIssues { development(issues) }
+        let participants = HostSidebar.participants(
+            [pull.user] + (pull.assignees ?? []) + (pull.requestedReviewers ?? []) + detail.comments.map(\.user)
+                + detail.reviews.map(\.user) + (detail.threads.value?.all ?? []).flatMap { $0.comments.map(\.user) })
+        SectionCard("Participants", systemImage: "person.3", count: participants.count) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 22, maximum: 22), spacing: 6)], alignment: .leading,
+                      spacing: 6) {
+                ForEach(participants, id: \.login) { user in
+                    GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 22,
+                                     avatars: avatars)
+                        .help(user.login)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Participants: " + participants.map(\.login).joined(separator: ", ")))
+        }
+    }
+}
+
+extension PRSideColumn {
+    /// GitHub's Development card: the issues the pull request closes when merged, each a click target (one of this
+    /// repository opens in the detail, another's on the host); "No linked issues" without any.
+    fileprivate func development(_ issues: [HostedPullRequestExtras.ClosingIssue]) -> some View {
+        let repository = session.github.api?.repository.fullName
+        return SectionCard("Development", systemImage: "arrow.triangle.branch", count: issues.count) {
+            if issues.isEmpty {
+                PRSideEmpty(text: "No linked issues")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(issues, id: \.self) { issue in
+                        let local = issue.repository.lowercased() == repository?.lowercased()
+                        Button {
+                            if local {
+                                session.selectHosted(.issue(issue.number))
+                            } else if let url = issue.url.flatMap(URL.init(string:)),
+                                      url.host()?.lowercased() == session.github.api?.repository.host.lowercased() {
+                                // Only a link on the account's own host.
+                                GitHubLinks.open(url)
+                            }
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Image(systemName: issue.isOpen ? "circle.circle" : "checkmark.circle")
+                                    .font(.settingsCaption)
+                                    .foregroundStyle(issue.isOpen ? Color(nsColor: Palette.diffAddedSign)
+                                                     : Palette.mergedTone)
+                                    .accessibilityHidden(true)
+                                Text(verbatim: (local ? "" : issue.repository) + "#\(issue.number) \(issue.title)")
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(local ? "Open issue #\(issue.number)" : "Open on \(session.github.kind.name)")
+                        .accessibilityLabel(Text("Issue \(issue.number), \(issue.title), "
+                            + (issue.isOpen ? "open" : "closed")))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Bitbucket's sidebar (`PRPageLayout.bitbucketSidebar`), in its order: Builds (the head's statuses), Merge checks,
+/// Reviewers, Tasks (list, add, resolve or reopen, delete: each shown at once), Jira work items (on Bitbucket). A part
+/// whose read failed shows that it could not be read; Merge checks and Tasks are left out where the host has none.
+private struct PRBitbucketSidebar<Reviewers: View>: View {
+    let session: RepoSession
+    let detail: PullRequestDetail
+    @ViewBuilder let reviewers: () -> Reviewers
+
+    var body: some View {
+        VStack(spacing: SectionCardMetrics.spacing) {
+            builds
+            if detail.reports != .idle { reports }
+            if let checks = detail.mergeChecks { mergeChecks(checks) }
+            reviewers()
+            if let tasks = detail.tasks { tasksCard(tasks) }
+            SectionCard("Jira work items", systemImage: "link") {
+                PRSideEmpty(text: "Shown on \(session.github.kind.name)")
+            } accessory: {
+                openOnHost(help: "Open the Jira work items on \(session.github.kind.name)")
+            }
+        }
+    }
+
+    private var builds: some View {
+        let runs = detail.checks.value ?? []
+        let passed = runs.count { $0.status == "completed" && $0.conclusion == "success" }
+        return SectionCard("Builds", systemImage: "hammer", count: runs.count) {
+            switch detail.checks {
+            case .loaded(let runs) where runs.isEmpty: PRSideEmpty(text: "No builds")
+            case .loaded(let runs):
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(passed) of \(runs.count) \(runs.count == 1 ? "build" : "builds") passed")
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                    ForEach(runs) { run in
+                        Button { GitHubLinks.open(run.htmlURL) } label: {
+                            PRSideStatusRow(symbol: Self.symbol(run), tone: Self.tone(run), text: run.name)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(run.htmlURL == nil)
+                        .help(run.htmlURL == nil ? run.name : "Open \(run.name)")
+                    }
+                }
+            case .failed: PRSideEmpty(text: "Could not be read")
+            case .loading, .idle: PRSideEmpty(text: "Loading…")
+            }
+        }
+    }
+
+    /// Bitbucket's Reports (Code Insights on the head): "N of M reports passed", each report's result and title, a
+    /// click opening its page.
+    private var reports: some View {
+        let list = detail.reports.value ?? []
+        let passed = list.count { $0.result == "PASSED" }
+        return SectionCard("Reports", systemImage: "doc.text.magnifyingglass", count: list.count) {
+            switch detail.reports {
+            case .loaded(let list) where list.isEmpty: PRSideEmpty(text: "No reports")
+            case .loaded(let list):
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(passed) of \(list.count) \(list.count == 1 ? "report" : "reports") passed")
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                    ForEach(list) { report in
+                        let (symbol, tone): (String, Color?) = switch report.result {
+                        case "PASSED": ("checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
+                        case "FAILED": ("xmark.circle.fill", Color(nsColor: Palette.diffRemovedSign))
+                        case "PENDING": ("circle.dotted", Palette.conflictTone)
+                        default: ("minus.circle", nil)
+                        }
+                        Button { GitHubLinks.open(report.link) } label: {
+                            PRSideStatusRow(symbol: symbol, tone: tone, text: report.title)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(report.link == nil)
+                        .help(report.link == nil ? report.title : "Open \(report.title)")
+                    }
+                }
+            case .failed: PRSideEmpty(text: "Could not be read")
+            case .loading, .idle: PRSideEmpty(text: "Loading…")
+            }
+        }
+    }
+
+    private func mergeChecks(_ checks: [HostedMergeCheck]) -> some View {
+        let passed = checks.count { $0.status == "PASSED" }
+        return SectionCard("Merge checks", systemImage: "checklist", count: checks.count) {
+            if checks.isEmpty {
+                PRSideEmpty(text: "No merge checks")
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(passed) of \(checks.count) \(checks.count == 1 ? "check" : "checks") passed")
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(checks.enumerated()), id: \.offset) { _, check in
+                        let (symbol, tone): (String, Color?) = switch check.status {
+                        case "PASSED": ("checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
+                        case "FAILED": ("xmark.circle.fill", Color(nsColor: Palette.diffRemovedSign))
+                        case "PENDING": ("circle.dotted", Palette.conflictTone)
+                        default: ("minus.circle", nil)
+                        }
+                        PRSideStatusRow(symbol: symbol, tone: tone, text: check.name)
+                            .help(check.blocking ? "Blocks the merge" : check.required ? "Required" : check.name)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tasks, each with its box (a click resolves or reopens it) and a delete button, then a field that adds one.
+    private func tasksCard(_ tasks: [HostedTask]) -> some View {
+        let model = session.pullDetail
+        let number = detail.pull.number
+        let busy = model.isBusy(number)
+        let open = tasks.count { !$0.isResolved }
+        return SectionCard("Tasks", systemImage: "checkmark.square", count: open) {
+            VStack(alignment: .leading, spacing: 6) {
+                if tasks.isEmpty { PRSideEmpty(text: "No tasks") }
+                ForEach(tasks) { task in
+                    let pending = PRPlaceholderID.isPlaceholder(task.id)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Button {
+                            model.perform(.setTask(id: task.id, resolved: !task.isResolved), on: number,
+                                          github: session.github)
+                        } label: {
+                            Image(systemName: task.isResolved ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(task.isResolved ? Color(nsColor: Palette.diffAddedSign) : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(busy || pending)
+                        .accessibilityLabel(task.isResolved ? "Reopen the task" : "Resolve the task")
+                        Text(task.body)
+                            .font(.callout)
+                            .strikethrough(task.isResolved)
+                            .foregroundStyle(task.isResolved ? .secondary : .primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            model.perform(.deleteTask(id: task.id), on: number, github: session.github)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(RowIconButtonStyle())
+                        .disabled(busy || pending)
+                        .help("Delete the task")
+                        .accessibilityLabel("Delete the task")
+                    }
+                }
+                @Bindable var model = model
+                // Typing stays open while another action runs; only sending waits for it.
+                TextField("Create a task", text: $model.taskDraft, prompt: Text("Create a task"))
+                    .textFieldStyle(.settings)
+                    .onSubmit {
+                        let text = model.taskDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty, !model.isBusy(number) else { return }
+                        model.taskDraft = ""
+                        model.perform(.createTask(text), on: number, github: session.github)
+                    }
+            }
+        }
+    }
+
+    private func openOnHost(help: String) -> some View {
+        Button {
+            GitHubLinks.open(session.github.webURL(.pullRequest(detail.pull.number)))
+        } label: {
+            Image(systemName: "arrow.up.forward.square")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(RowIconButtonStyle())
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private static func symbol(_ run: HostedCheckRun) -> String {
+        guard run.status == "completed" else { return "circle.dotted" }
+        return run.conclusion == "success" ? "checkmark.circle.fill"
+            : ["failure", "timed_out", "cancelled"].contains(run.conclusion ?? "") ? "xmark.circle.fill" : "minus.circle"
+    }
+
+    private static func tone(_ run: HostedCheckRun) -> Color? {
+        guard run.status == "completed" else { return Palette.conflictTone }
+        return run.conclusion == "success" ? Color(nsColor: Palette.diffAddedSign)
+            : ["failure", "timed_out", "cancelled"].contains(run.conclusion ?? "")
+                ? Color(nsColor: Palette.diffRemovedSign) : nil
+    }
+}
+
+/// A side card's status row: a symbol in its tone (gray without one) and a line of text.
+private struct PRSideStatusRow: View {
+    let symbol: String
+    let tone: Color?
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: symbol)
+                .font(.settingsCaption)
+                .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+                .accessibilityHidden(true)
+            Text(text)
+                .font(.callout)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+/// A Projects side card (GitHub's, pull request and issue): the projects' titles, only their count when the token may
+/// not read them (`read:project`), and a button that opens the item on the host, where projects are set.
+struct HostProjectsCard: View {
+    let projects: [String]?
+    let count: Int?
+    /// The host's name ("GitHub").
+    let host: String
+    let openOnHost: () -> Void
+
+    var body: some View {
+        SectionCard("Projects", systemImage: "tablecells", count: count ?? projects?.count) {
+            if let projects {
+                if projects.isEmpty {
+                    PRSideEmpty(text: "No projects")
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        // By position: two projects (an organization's, a user's) may share a title.
+                        ForEach(Array(projects.enumerated()), id: \.offset) { _, title in
+                            Text(title).lineLimit(1).truncationMode(.tail).help(title)
+                        }
+                    }
+                }
+            } else if let count {
+                PRSideEmpty(text: count == 0 ? "No projects"
+                            : "In \(count) \(count == 1 ? "project" : "projects") (names need the read:project "
+                                + "permission)")
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                PRSideEmpty(text: "Could not be read")
+            }
+        } accessory: {
+            Button(action: openOnHost) {
+                Image(systemName: "arrow.up.forward.square")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(RowIconButtonStyle())
+            .help("Set projects on \(host)")
+            .accessibilityLabel("Set projects on \(host)")
         }
     }
 }
@@ -2617,6 +3486,10 @@ private struct PRActionsCard: View {
     var body: some View {
         if detail.layout.mergeBoxes {
             mergeBoxCard
+        } else if detail.layout.githubMergeBox {
+            gitHubMergeCard
+        } else if detail.layout.bitbucketMergeArea {
+            bitbucketMergeCard
         } else {
             actionsCard
         }
@@ -2799,6 +3672,340 @@ private struct PRActionsCard: View {
     }
 
     private typealias Status = (tone: Color?, symbol: String, title: String, note: String?)
+
+    // MARK: Bitbucket's merge area
+
+    /// Bitbucket's merge area first on the Overview: for an open pull request, its state (conflicts, draft…), then
+    /// the pull request's own strategies, Close source branch (a branch of this repository only) and Merge, with the
+    /// other buttons; for a merged one, "Merged pull request"; for a declined one, its state.
+    @ViewBuilder private var bitbucketMergeCard: some View {
+        let pull = detail.pull
+        let busy = session.pullDetail.busy[pull.number]
+        SectionCard(nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                if detail.isMerged {
+                    bitbucketMergedBox
+                } else if detail.isOpen {
+                    statusBox(status)
+                } else {
+                    statusBox((Color(nsColor: Palette.diffRemovedSign), "xmark.circle.fill", "Declined",
+                               "This pull request was declined."))
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        if detail.isOpen {
+                            mergeControls(busy: busy)
+                            closeSourceBranchToggle
+                            Spacer(minLength: 8)
+                        }
+                        otherButtons(busy: busy)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if detail.isOpen {
+                            HStack(spacing: 8) { mergeControls(busy: busy) }
+                            closeSourceBranchToggle
+                        }
+                        HStack(spacing: 8) { otherButtons(busy: busy) }
+                    }
+                }
+                if case .unavailable(let reason) = checkoutWay {
+                    Text(reason)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let busy {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text(busy.progressTitle)
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bitbucket's "Close source branch": only for a branch of this repository, set as the pull request was created
+    /// until the user changes it.
+    @ViewBuilder private var closeSourceBranchToggle: some View {
+        let pull = detail.pull
+        if pull.isFromSameRepository, pull.closesSourceBranch != nil {
+            let model = session.pullDetail
+            Toggle("Close source branch", isOn: Binding(
+                get: { model.closeSourceBranchChoice ?? pull.closesSourceBranch ?? false },
+                set: { model.closeSourceBranchChoice = $0 }))
+                .toggleStyle(.checkbox)
+                .fixedSize()
+                .help("Delete \(pull.head.ref) on \(session.github.kind.name) once merged")
+        }
+    }
+
+    /// Bitbucket's "Merged pull request": "Merged in <source> (pull request #N)", then the merge commit's short hash,
+    /// the builds, the author, who closed it and when, in the merged purple.
+    private var bitbucketMergedBox: some View {
+        let pull = detail.pull
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        let dates = PRPageDates(now: detail.now)
+        var facts: [String] = []
+        if let sha = pull.mergeCommitSHA { facts.append(String(sha.prefix(7))) }
+        if let runs = detail.checks.value, !runs.isEmpty { facts.append("\(runs.count) \(runs.count == 1 ? "build" : "builds")") }
+        if let author = pull.user { facts.append("Author: \(author.name ?? author.login)") }
+        if let closer = pull.mergedBy { facts.append("Closed by: \(closer.name ?? closer.login)") }
+        if let date = pull.mergedAt { facts.append(dates.relative(date)) }
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "arrow.triangle.merge")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Palette.mergedTone)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Merged pull request")
+                    .font(.body.weight(.semibold))
+                Text(verbatim: "Merged in \(pull.head.ref) (pull request #\(pull.number))")
+                    .font(.callout)
+                Text(verbatim: facts.joined(separator: " · "))
+                    .font(.settingsCaption)
+                    .foregroundStyle(.secondary)
+                    .help(pull.mergedAt.map(dates.absolute) ?? "")
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(shape.fill(Palette.mergedTone.opacity(0.14)))
+        .overlay(shape.strokeBorder(Palette.mergedTone.opacity(0.35), lineWidth: 1))
+    }
+
+    // MARK: GitHub's merge box
+
+    /// GitHub's merge box after the timeline: for an open pull request, the reviews and checks rows over the merge
+    /// state (Update branch under an out-of-date one), then the merge method, Merge and the other buttons as in the
+    /// Actions card; for a merged one, GitHub's merged box with Delete branch / Restore branch.
+    @ViewBuilder private var gitHubMergeCard: some View {
+        let pull = detail.pull
+        let busy = session.pullDetail.busy[pull.number]
+        SectionCard(nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                if detail.isMerged {
+                    gitHubMergedBox(busy: busy)
+                } else if detail.isOpen {
+                    statusBox(status, details: pull.mergeableState == "behind"
+                        && session.github.offers(.updateBranch) ? AnyView(updateBranchButton(busy: busy)) : nil)
+                    gitHubColumns
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        if detail.isOpen {
+                            mergeControls(busy: busy)
+                            Spacer(minLength: 8)
+                        }
+                        otherButtons(busy: busy)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if detail.isOpen { HStack(spacing: 8) { mergeControls(busy: busy) } }
+                        HStack(spacing: 8) { otherButtons(busy: busy) }
+                    }
+                }
+                if case .unavailable(let reason) = checkoutWay {
+                    Text(reason)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let busy {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text(busy.progressTitle)
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// GitHub's three columns under the merge state: Checks, Comments and Approvals, each its word, a line of what
+    /// stands and a bar of how far it got (the checks that passed, the conversations resolved, the reviewers who
+    /// approved), side by side, under each other when the column is narrow.
+    private var gitHubColumns: some View {
+        let columns = [checksColumn, commentsColumn, approvalsColumn]
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(columns.indices, id: \.self) { PRMergeColumn(column: columns[$0]).frame(minWidth: 150) }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(columns.indices, id: \.self) { PRMergeColumn(column: columns[$0]) }
+            }
+        }
+    }
+
+    /// The checks of the head: how many are done (passed, skipped or neutral) of those that ran; "No checks" without
+    /// runs, "Loading…" while they load, "Could not be read" when their read failed.
+    private var checksColumn: PRMergeColumn.Column {
+        let title = "Checks"
+        let runs: [HostedCheckRun]
+        switch detail.checks {
+        case .loaded(let loaded) where !loaded.isEmpty: runs = loaded
+        case .loaded: return (title, "No checks", nil, nil)
+        case .failed: return (title, "Could not be read", nil, nil)
+        case .loading, .idle: return (title, "Loading…", nil, nil)
+        }
+        let status = checksStatus
+        // Skipped and neutral runs are done, as the status line counts them.
+        let done = runs.count {
+            $0.status == "completed" && ["success", "skipped", "neutral"].contains($0.conclusion ?? "")
+        }
+        return (title, status?.note ?? "", status?.tone, Double(done) / Double(runs.count))
+    }
+
+    /// The review conversations: how many are left to resolve; "No conversations" without threads.
+    private var commentsColumn: PRMergeColumn.Column {
+        let threads = detail.threads.value?.all ?? []
+        guard !threads.isEmpty else { return ("Comments", "No conversations", nil, nil) }
+        if detail.threads.value?.statesFailed == true {
+            return ("Comments", "\(threads.count) \(threads.count == 1 ? "conversation" : "conversations"), "
+                + "resolution unknown", nil, nil)
+        }
+        let resolved = threads.count { $0.state?.isResolved == true }
+        let open = threads.count - resolved
+        let tone = open == 0 ? Color(nsColor: Palette.diffAddedSign) : Palette.conflictTone
+        return ("Comments", open == 0 ? "All conversations resolved" : "\(open) unresolved", tone,
+                Double(resolved) / Double(threads.count))
+    }
+
+    /// The reviewers: how many approved and how many are pending (requested, no review yet), changes requested first.
+    private var approvalsColumn: PRMergeColumn.Column {
+        let reviewers = detail.reviewers
+        guard !reviewers.isEmpty else { return ("Approvals", "No reviewers", nil, nil) }
+        let approved = reviewers.count { $0.state == "APPROVED" }
+        let changes = reviewers.count { $0.state == "CHANGES_REQUESTED" }
+        let pending = reviewers.count { $0.state == nil }
+        var parts: [String] = []
+        if changes > 0 { parts.append("\(changes) requested changes") }
+        if approved > 0 { parts.append("\(approved) approved") }
+        if pending > 0 { parts.append("\(pending) pending") }
+        let tone: Color? = changes > 0 ? Color(nsColor: Palette.diffRemovedSign)
+            : approved > 0 ? Color(nsColor: Palette.diffAddedSign) : nil
+        return ("Approvals", parts.isEmpty ? "Reviewed" : parts.joined(separator: ", "), tone,
+                Double(approved) / Double(reviewers.count))
+    }
+
+    /// The checks row from the head's check runs: failures first, then runs not finished, then all passed; nil while
+    /// they load, when they failed to load or without runs.
+    private var checksStatus: Status? {
+        guard let runs = detail.checks.value, !runs.isEmpty else { return nil }
+        let failedConclusions: Set<String> = ["failure", "timed_out", "cancelled", "action_required", "startup_failure"]
+        let failed = runs.count { $0.status == "completed" && failedConclusions.contains($0.conclusion ?? "") }
+        let pending = runs.count { $0.status != "completed" }
+        let passed = runs.count { $0.status == "completed" && $0.conclusion == "success" }
+        let skipped = runs.count { $0.status == "completed" && ["skipped", "neutral"].contains($0.conclusion ?? "") }
+        func plural(_ count: Int, _ word: String) -> String { "\(count) \(word) \(count == 1 ? "check" : "checks")" }
+        if failed > 0 {
+            return (Color(nsColor: Palette.diffRemovedSign), "xmark.circle.fill", "Some checks were not successful",
+                    "\(plural(failed, "failing")), \(plural(passed, "successful"))")
+        }
+        if pending > 0 {
+            return (Palette.conflictTone, "circle.dotted", "Some checks haven't completed yet",
+                    "\(plural(pending, "pending")), \(plural(passed, "successful"))")
+        }
+        return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill", "All checks have passed",
+                plural(passed, "successful") + (skipped > 0 ? ", \(skipped) skipped" : ""))
+    }
+
+    /// Update branch: GitHub merges the base into the head, the head pinned to the shown one; busy from the click
+    /// until GitHub accepted it.
+    private func updateBranchButton(busy: PullRequestAction?) -> some View {
+        let pull = detail.pull
+        let updating = { if case .updateBranch = busy { true } else { false } }()
+        return Button {
+            session.pullDetail.perform(.updateBranch(sha: pull.head.sha), on: pull.number, github: session.github)
+        } label: {
+            HStack(spacing: 6) {
+                if updating { ProgressView().controlSize(.mini) }
+                Text("Update branch")
+            }
+        }
+        .buttonStyle(RowTextButtonStyle())
+        .fixedSize()
+        .disabled(busy != nil)
+        .help("Merge \(pull.base.ref) into \(pull.head.ref) on \(session.github.kind.name)")
+    }
+
+    /// GitHub's merged box, in the merged purple: "Merged", "<who> merged commit <short sha> into <base> <time>",
+    /// then "Delete the <head> branch to tidy up." with Delete branch while the branch exists, or "The <head> branch
+    /// was deleted." with Restore branch once it is gone (only where the head branch was read:
+    /// `PullRequestDetail.headBranchExists`).
+    private func gitHubMergedBox(busy: PullRequestAction?) -> some View {
+        let pull = detail.pull
+        let shape = RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+        let dates = PRPageDates(now: detail.now)
+        let who = pull.mergedBy?.login ?? "Someone"
+        let commit = pull.mergeCommitSHA.map { " commit \($0.prefix(7))" } ?? ""
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "arrow.triangle.merge")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Palette.mergedTone)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Merged")
+                        .font(.body.weight(.semibold))
+                    Text(verbatim: "\(who) merged\(commit) into \(pull.base.ref)"
+                        + (pull.mergedAt.map { " " + dates.relative($0) } ?? ""))
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .help(pull.mergedAt.map(dates.absolute) ?? "")
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+                if let exists = detail.headBranchExists {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(exists ? "Delete the \(pull.head.ref) branch to tidy up."
+                             : "The \(pull.head.ref) branch was deleted.")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        if exists {
+                            Button { confirmDeleteBranch() } label: {
+                                Text("Delete branch")
+                            }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .fixedSize()
+                            .disabled(busy != nil)
+                        } else {
+                            Button {
+                                session.pullDetail.perform(.restoreBranch(pull.head.ref, sha: pull.head.sha),
+                                                           on: pull.number, github: session.github)
+                            } label: {
+                                Text("Restore branch")
+                            }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .fixedSize()
+                            .disabled(busy != nil)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(shape.fill(Palette.mergedTone.opacity(0.14)))
+        .overlay(shape.strokeBorder(Palette.mergedTone.opacity(0.35), lineWidth: 1))
+    }
+
+    /// Delete branch's confirmation, in the window's modal: its button deletes the branch (shown gone at once).
+    private func confirmDeleteBranch() {
+        let pull = detail.pull
+        let kind = session.github.kind
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Delete branch \(pull.head.ref)?",
+            message: "The branch is deleted on \(kind.name). Restore branch brings it back at its last commit.",
+            button: "Delete Branch", isDestructive: true,
+            perform: { [session, number = pull.number, branch = pull.head.ref] in
+                session.pullDetail.perform(.deleteBranch(branch), on: number, github: session.github)
+            })))
+    }
 
     // MARK: GitLab's merge box
 
@@ -3131,13 +4338,19 @@ private struct PRActionsCard: View {
     /// checking, off with conflicts, for a draft or while an action runs.
     @ViewBuilder
     private func mergeControls(busy: PullRequestAction?) -> some View {
-        @Bindable var pullDetail = session.pullDetail
+        let pullDetail = session.pullDetail
         let pull = detail.pull
-        CapsuleMenuPicker(label: "Merge method", selection: $pullDetail.mergeMethod,
-                          title: Text(pullDetail.mergeMethod.title)) {
-            ForEach(session.github.mergeMethods, id: \.self) { Text($0.title).tag($0) }
+        let methods = mergeMethods
+        let kind = session.github.kind
+        let shown = shownMergeMethod
+        let ownList = detail.layout != .default && detail.pull.allowedMergeMethods?.isEmpty == false
+        CapsuleMenuPicker(label: "Merge method", selection: Binding(get: { shown }, set: { method in
+            if ownList { pullDetail.ownMergeMethod = method } else { pullDetail.mergeMethod = method }
+        }),
+                          title: Text(detail.layout == .default ? shown.title : shown.title(on: kind))) {
+            ForEach(methods, id: \.self) { Text(detail.layout == .default ? $0.title : $0.title(on: kind)).tag($0) }
         }
-        Button("Merge") { confirmMerge(pullDetail.mergeMethod) }
+        Button("Merge") { confirmMerge(shown, options: mergeOptions) }
             .buttonStyle(RowTextButtonStyle(
                 formRow: true,
                 fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
@@ -3187,6 +4400,39 @@ private struct PRActionsCard: View {
         }
     }
 
+    /// The methods the picker offers: the pull request's own (Bitbucket's destination branch) where the host gives
+    /// them, on every layout but `.default`, else the client's.
+    private var mergeMethods: [HostedMergeMethod] {
+        guard detail.layout != .default, let own = detail.pull.allowedMergeMethods, !own.isEmpty else {
+            return session.github.mergeMethods
+        }
+        return own
+    }
+
+    /// The method the picker shows. A pull request with its own list (Bitbucket's): the user's choice for it, else
+    /// its default, else a merge commit, else the first offered. Otherwise: the user's last choice (kept across pull
+    /// requests, as before), else a merge commit.
+    private var shownMergeMethod: HostedMergeMethod {
+        let methods = mergeMethods
+        let model = session.pullDetail
+        if detail.layout != .default, detail.pull.allowedMergeMethods?.isEmpty == false {
+            if let chosen = model.ownMergeMethod, methods.contains(chosen) { return chosen }
+            if let preferred = detail.pull.defaultMergeMethod, methods.contains(preferred) { return preferred }
+        } else if let chosen = model.mergeMethod, methods.contains(chosen) {
+            return chosen
+        }
+        return methods.contains(.merge) ? .merge : methods.first ?? .merge
+    }
+
+    /// Bitbucket's Close source branch, where the merge area shows it (`bitbucketMergeArea`); none elsewhere.
+    private var mergeOptions: HostedMergeOptions {
+        guard detail.layout.bitbucketMergeArea, session.github.api?.client.supportedMergeOptions
+            .contains(.deleteSourceBranch) == true, detail.pull.isFromSameRepository
+        else { return HostedMergeOptions() }
+        return HostedMergeOptions(deleteSourceBranch: session.pullDetail.closeSourceBranchChoice
+            ?? detail.pull.closesSourceBranch ?? false)
+    }
+
     /// Merges the head this detail shows: the sha goes with the merge, so a push after this confirmation fails it.
     /// `options`: GitLab's merge box choices (none from the Actions card).
     private func confirmMerge(_ method: HostedMergeMethod, options: HostedMergeOptions = HostedMergeOptions()) {
@@ -3196,6 +4442,10 @@ private struct PRActionsCard: View {
         case .merge: "with a merge commit"
         case .squash: "squashed into one commit"
         case .rebase: "rebased onto \(pull.base.ref)"
+        case .fastForward: "fast-forwarded"
+        case .squashFastForward: "squashed into one commit, fast-forward only"
+        case .rebaseFastForward: "rebased onto \(pull.base.ref) and fast-forwarded"
+        case .fastForwardIfPossible: "fast-forwarded if it can be, else with a merge commit"
         }
         let kind = session.github.kind
         model.presentModal(.confirmation(ModalConfirmation(
@@ -3332,8 +4582,8 @@ enum HostAvatars: Equatable {
     case drawn
     /// The account's GitHub avatar whatever the commit avatars' mode (user, 2026-11-17): github.com.
     case github
-    /// The API's `avatar_url` of the account, in the real avatar mode only, from the repository's `host`
-    /// (`AvatarStore.hostedAvatar`): GitLab.
+    /// The API's `avatar_url` of the account whatever the commit avatars' mode, from the repository's `host`
+    /// (`AvatarStore.hostedAvatar`): GitLab and Bitbucket Cloud.
     case gitlab(host: String)
 
     /// The avatars of `store`'s repository. Drawn in a stub run, whose repository names a real host but must not
@@ -3346,9 +4596,9 @@ enum HostAvatars: Equatable {
         switch store.kind {
         case .github: return repository.host == "github.com" ? .github : .drawn
         case .gitlab: return .gitlab(host: repository.host)
-        // `AvatarStore.hostedIdentity` loads only from the repository's own host, and Bitbucket's `links.avatar.href`
-        // is expected on another one (Atlassian's avatar service or Gravatar; not yet seen on a real account).
-        case .bitbucketCloud: return .drawn
+        // `AvatarStore.hostedIdentity` takes Bitbucket's `links.avatar.href` on bitbucket.org, Atlassian's avatar
+        // service or Gravatar, whatever the commit avatars' mode (as GitLab's).
+        case .bitbucketCloud: return .gitlab(host: repository.host)
         }
     }
 
@@ -3448,8 +4698,10 @@ private struct PRCommitsTab: View {
     /// The detail load's "now" (`PullRequestDetail.now`).
     let now: Date
     let github: HostingStore
-    /// GitLab's list (`PRPageLayout.commitsByDay`): the commits under day headings, each row with a copy button.
+    /// The host's list (`PRPageLayout.commitsByDay`): the commits under day headings, each row with a copy button.
     var byDay = false
+    /// "authored" (GitLab) or "committed" (GitHub), with `byDay`.
+    var verb = "authored"
 
     var body: some View {
         switch commits {
@@ -3481,7 +4733,8 @@ private struct PRCommitsTab: View {
 
     private func row(_ commit: HostedCommit, dates: PRPageDates) -> some View {
         PRCommitRow(commit: commit, url: github.webURL(.commit(commit.sha)), hostName: github.kind.name, dates: dates,
-                     gitLabStyle: byDay)
+                     gitLabStyle: byDay, verb: byDay ? verb : "committed",
+                     idLength: byDay && github.kind == .gitlab ? 8 : 7)
     }
 
     /// The day headings' format, GitLab's ("Nov 20, 2026"), in the pages' English.
@@ -3534,8 +4787,12 @@ private struct PRCommitRow: View {
     /// The host's product name ("GitHub", "GitLab").
     let hostName: String
     let dates: PRPageDates
-    /// GitLab's row: "<author> authored <time>", the 8-character short id with a copy button beside it.
+    /// The host's own row (`commitsByDay`): a copy button beside the short id.
     var gitLabStyle = false
+    /// "<author> <verb> <time>".
+    var verb = "committed"
+    /// The short id's length, the host's (GitLab 8, GitHub 7).
+    var idLength = 7
     @State private var hovered = false
 
     var body: some View {
@@ -3551,7 +4808,7 @@ private struct PRCommitRow: View {
                     .truncationMode(.tail)
                 Group {
                     if let date = commit.commit.author?.date {
-                        Text(verbatim: "\(author) \(gitLabStyle ? "authored" : "committed") \(dates.relative(date))")
+                        Text(verbatim: "\(author) \(verb) \(dates.relative(date))")
                             .help(dates.absolute(date))
                     } else {
                         Text(verbatim: author)
@@ -3565,7 +4822,7 @@ private struct PRCommitRow: View {
             Button {
                 GitHubLinks.open(url)
             } label: {
-                Text(String(commit.sha.prefix(gitLabStyle ? 8 : 7)))
+                Text(String(commit.sha.prefix(idLength)))
                     .font(.settingsCaption.monospaced())
             }
             .buttonStyle(RowTextButtonStyle())
@@ -3601,6 +4858,8 @@ private struct PRFilesTab: View {
     let detail: PullRequestDetail
 
     private static let listWidth: CGFloat = 240
+    /// The tree's column (`PRPageLayout.filesTree`): its rows indent, so it takes more room.
+    private static let treeWidth: CGFloat = 300
 
     var body: some View {
         switch detail.files {
@@ -3612,16 +4871,20 @@ private struct PRFilesTab: View {
                 SectionCard("Files", systemImage: PRTab.files.systemImage, count: files.count, contentPadding: 6) {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(files) { file in
-                                PRFileRow(file: file, selected: file.id == session.pullDetail.selectedFile) {
-                                    session.pullDetail.selectedFile = file.id
+                            if detail.layout.filesTree {
+                                tree(files)
+                            } else {
+                                ForEach(files) { file in
+                                    PRFileRow(file: file, selected: file.id == session.pullDetail.selectedFile) {
+                                        session.pullDetail.selectedFile = file.id
+                                    }
                                 }
                             }
                         }
                     }
                     .frame(maxHeight: .infinity, alignment: .top)
                 }
-                .frame(width: Self.listWidth)
+                .frame(width: detail.layout.filesTree ? Self.treeWidth : Self.listWidth)
                 .frame(maxHeight: .infinity)
                 if let file = files.first(where: { $0.id == session.pullDetail.selectedFile }) ?? files.first {
                     diffCard(file)
@@ -3633,6 +4896,24 @@ private struct PRFilesTab: View {
             PRPartLoading(tab: .files)
         case .idle:
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: "Not loaded.")
+        }
+    }
+
+    /// The files as a folder tree (`FileTree`): each folder once, then its files indented under it, sorted as the
+    /// commit detail's tree.
+    @ViewBuilder private func tree(_ files: [PRFile]) -> some View {
+        let byPath = Dictionary(files.map { ($0.change.path, $0) }, uniquingKeysWith: { first, _ in first })
+        ForEach(FileTree.rows(for: files.map(\.change))) { row in
+            switch row.content {
+            case .folder(let name, _):
+                PRFolderRow(name: name, depth: row.depth)
+            case .file(let change):
+                if let file = byPath[change.path] {
+                    PRFileRow(file: file, selected: file.id == session.pullDetail.selectedFile, depth: row.depth) {
+                        session.pullDetail.selectedFile = file.id
+                    }
+                }
+            }
         }
     }
 
@@ -3731,6 +5012,9 @@ private struct PRFilesTab: View {
 private struct PRFileRow: View {
     let file: PRFile
     let selected: Bool
+    /// Its level in the tree (`PRPageLayout.filesTree`), which also leaves out the folder under the name; nil in the
+    /// flat list.
+    var depth: Int?
     let onSelect: () -> Void
     @State private var hovered = false
 
@@ -3745,7 +5029,7 @@ private struct PRFileRow: View {
                 Text(file.change.name)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if !file.change.folder.isEmpty {
+                if depth == nil, !file.change.folder.isEmpty {
                     Text(file.change.folder)
                         .font(.settingsCaption)
                         .foregroundStyle(.secondary)
@@ -3765,6 +5049,7 @@ private struct PRFileRow: View {
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
         .contentShape(Capsule())
+        .padding(.leading, CGFloat(depth ?? 0) * PRFolderRow.indent)
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .onTapGesture(perform: onSelect)
@@ -3778,6 +5063,33 @@ private struct PRFileRow: View {
     private var accessibilityText: String {
         let counts = "\(file.file.additions) added, \(file.file.deletions) removed"
         return "\(file.file.filename), \(file.change.kindName), \(counts)"
+    }
+}
+
+/// A folder of the Files changed tree: its icon and name (single-child folders joined, `docs/help`), not a target.
+private struct PRFolderRow: View {
+    /// Each level's indent.
+    static let indent: CGFloat = 14
+    let name: String
+    let depth: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "folder.fill")
+                .font(.settingsCaption)
+                .frame(width: 14)
+                .accessibilityHidden(true)
+            Text(name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .frame(minHeight: SidebarItemStyle.height)
+        .padding(.leading, CGFloat(depth) * Self.indent)
+        .help(name)
+        .accessibilityElement(children: .combine)
     }
 }
 

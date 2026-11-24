@@ -125,7 +125,8 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     public var capabilities: HostingCapabilities {
         [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
-            .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments,
+            .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras,
         ]
     }
 
@@ -187,8 +188,42 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         try await list(url(try repoPath(repo) + ["pulls"], query: ["state": state.rawValue]))
     }
 
+    /// The single pull request, with what the merge box and the sidebar read beside `HostedPullRequest`'s JSON keys:
+    /// who merged it and its merge commit, whether the token's user may push to the base repository (`permissions`,
+    /// only on a single pull request), and its milestone.
     public func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequest {
-        try await get(url(try repoPath(repo) + ["pulls", String(number)]))
+        let (data, _) = try await perform(request("GET", url(try repoPath(repo) + ["pulls", String(number)])))
+        var pull: HostedPullRequest = try HostingHTTP.decode(data)
+        struct Extra: Decodable {
+            struct Base: Decodable {
+                struct Repo: Decodable {
+                    struct Permissions: Decodable { var push: Bool? }
+                    var permissions: Permissions?
+                }
+                var repo: Repo?
+            }
+            struct Milestone: Decodable {
+                var title: String
+                var dueOn: String?
+                enum CodingKeys: String, CodingKey { case title, dueOn = "due_on" }
+            }
+            var mergedBy: HostedUser?
+            var mergeCommitSHA: String?
+            var base: Base?
+            var milestone: Milestone?
+            enum CodingKeys: String, CodingKey {
+                case base, milestone
+                case mergedBy = "merged_by"
+                case mergeCommitSHA = "merge_commit_sha"
+            }
+        }
+        if let extra = try? HostingHTTP.decode(data) as Extra {
+            pull.mergedBy = extra.mergedBy
+            pull.mergeCommitSHA = extra.mergeCommitSHA
+            pull.viewerCanPush = extra.base?.repo?.permissions?.push
+            pull.milestone = extra.milestone.map { HostedMilestone(title: $0.title, dueDate: $0.dueOn) }
+        }
+        return pull
     }
 
     public func issues(in repo: HostedRepository, state: HostedListState) async throws -> [HostedIssue] {
@@ -208,8 +243,22 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         try await search(["is:issue", "is:open", "assignee:@me"], in: repo)
     }
 
+    /// The single issue, with its milestone (the sidebar's) read beside `HostedIssue`'s JSON keys.
     public func issue(_ number: Int, in repo: HostedRepository) async throws -> HostedIssue {
-        try await get(url(try repoPath(repo) + ["issues", String(number)]))
+        let (data, _) = try await perform(request("GET", url(try repoPath(repo) + ["issues", String(number)])))
+        var issue: HostedIssue = try HostingHTTP.decode(data)
+        struct Extra: Decodable {
+            struct Milestone: Decodable {
+                var title: String
+                var dueOn: String?
+                enum CodingKeys: String, CodingKey { case title, dueOn = "due_on" }
+            }
+            var milestone: Milestone?
+        }
+        if let milestone = (try? HostingHTTP.decode(data) as Extra)?.milestone {
+            issue.milestone = HostedMilestone(title: milestone.title, dueDate: milestone.dueOn)
+        }
+        return issue
     }
 
     /// A pull request's conversation comments are its issue's. The reaction counts come from each comment's REST
@@ -516,6 +565,10 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             enum CodingKeys: String, CodingKey { case method = "merge_method", sha }
         }
         struct Result: Decodable { var merged: Bool? }
+        // A method GitHub has not (Bitbucket's) is refused unsent.
+        guard mergeMethods.contains(method) else {
+            throw HostingError.validationFailed(message: "GitHub has no such merge method")
+        }
         do {
             let _: Result = try await send(
                 "PUT", url(try repoPath(repo) + ["pulls", String(number), "merge"]),
@@ -596,6 +649,464 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         // The token's user wrote it: theirs to edit and delete (the REST answer does not say).
         (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
         return comment
+    }
+
+    // MARK: - History entries
+
+    /// `GET /repos/{o}/{r}/issues/{n}/timeline`, every page: the item's events that are not comments or reviews (read
+    /// elsewhere), each in Histq's words (`text`, its HTML escaped: a label, title or branch is plain text) with
+    /// GitHub's event name as `action`. Consecutive commits by the same author are one "added N commits" entry with
+    /// a list of their short ids (links to the commits) and subjects. An event GitHub adds later is left out.
+    public func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws
+        -> [HostedTimelineEvent]
+    {
+        let read: [Lossy<GitHubTimelineEvent>] = try await list(url(try repoPath(repo)
+            + ["issues", String(item.number), "timeline"]))
+        let events = read.compactMap(\.value)
+        var entries: [HostedTimelineEvent] = []
+        var commits: [GitHubTimelineEvent] = []
+        func flushCommits() {
+            guard let first = commits.first else { return }
+            let count = commits.count
+            let text = "added \(count) \(count == 1 ? "commit" : "commits")"
+            let items = commits.map { commit -> String in
+                let sha = commit.sha ?? ""
+                let short = MarkdownHTML.escape(String(sha.prefix(7)))
+                let link = webURL(.commit(sha), in: repo).map {
+                    "<a href=\"\(MarkdownHTML.escape($0.absoluteString))\"><code>\(short)</code></a>"
+                } ?? "<code>\(short)</code>"
+                let subject = (commit.message ?? "").split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
+                return "<li>\(link) \(MarkdownHTML.escape(subject))</li>"
+            }
+            // The commits' git author by name only (not an account: no id, avatar or role is looked up for it; the
+            // entry shows the name alone).
+            let author = first.author?.name.map { HostedUser(id: 0, login: $0) }
+            entries.append(HostedTimelineEvent(
+                id: "commits-\(first.sha ?? "")", actor: author, createdAt: first.author?.date,
+                text: text, textHTML: "<p>\(text)</p><ul>\(items.joined())</ul>", action: "committed",
+                icon: "commit"))
+            commits = []
+        }
+        for (index, event) in events.enumerated() {
+            if event.event == "committed" {
+                if let last = commits.last, last.author?.name != event.author?.name { flushCommits() }
+                commits.append(event)
+                continue
+            }
+            flushCommits()
+            guard let text = Self.wording(event, item: item) else { continue }
+            entries.append(HostedTimelineEvent(
+                id: "event-\(event.id.map(String.init) ?? "at\(index)")", actor: event.actor,
+                createdAt: event.createdAt, text: text,
+                textHTML: "<p>\(MarkdownHTML.escape(text))</p>", action: event.event, icon: event.event))
+        }
+        flushCommits()
+        // GitHub lists a merged pull request's `closed` beside its `merged`, at the same time; its page shows only
+        // the merge. An earlier close (closed, reopened, then merged) stays.
+        let mergedAt = Set(entries.filter { $0.action == "merged" }.compactMap(\.createdAt))
+        entries.removeAll { $0.action == "closed" && $0.createdAt.map(mergedAt.contains) == true }
+        return entries
+    }
+
+    /// An event in GitHub's words, without its actor ("added the bug label"); nil for comments, reviews and events
+    /// Histq does not word.
+    static func wording(_ event: GitHubTimelineEvent, item: HostedItem) -> String? {
+        let noun = if case .pullRequest = item { "pull request" } else { "issue" }
+        let someone = event.assignee?.login ?? event.requestedReviewer?.login ?? event.requestedTeam?.name
+        switch event.event {
+        case "labeled": return event.label.map { "added the \($0.name) label" }
+        case "unlabeled": return event.label.map { "removed the \($0.name) label" }
+        case "assigned":
+            guard let someone else { return nil }
+            return someone == event.actor?.login ? "self-assigned this" : "assigned \(someone)"
+        case "unassigned":
+            guard let someone else { return nil }
+            return someone == event.actor?.login ? "removed their assignment" : "unassigned \(someone)"
+        case "review_requested": return someone.map { "requested a review from \($0)" }
+        case "review_request_removed": return someone.map { "removed the request for review from \($0)" }
+        case "milestoned": return event.milestone.map { "added this to the \($0.title) milestone" }
+        case "demilestoned": return event.milestone.map { "removed this from the \($0.title) milestone" }
+        case "renamed":
+            guard let rename = event.rename else { return nil }
+            return "changed the title from \"\(rename.from)\" to \"\(rename.to)\""
+        case "closed": return "closed this \(noun)"
+        case "reopened": return "reopened this \(noun)"
+        case "merged": return event.commitID.map { "merged commit \($0.prefix(7))" } ?? "merged this pull request"
+        case "head_ref_force_pushed": return "force-pushed the branch"
+        case "head_ref_deleted": return "deleted the branch"
+        case "head_ref_restored": return "restored the branch"
+        case "ready_for_review": return "marked this pull request as ready for review"
+        case "convert_to_draft": return "marked this pull request as draft"
+        case "base_ref_changed": return "changed the base branch"
+        case "referenced": return event.commitID.map { "added a commit that referenced this \(noun): \($0.prefix(7))" }
+        case "cross-referenced":
+            guard let source = event.source?.issue else { return nil }
+            return "mentioned this \(noun) in #\(source.number) \(source.title)"
+        default: return nil
+        }
+    }
+
+    // MARK: - Merge box: update and head branch
+
+    /// `PUT …/pulls/{n}/update-branch` with `expected_head_sha`: GitHub merges the base into the head and answers 202
+    /// at once (it finishes later). A 422 that names the expected sha is `headChanged` (pushed to since it was shown);
+    /// any other 422 stays `validationFailed`.
+    public func updateBranch(_ number: Int, in repo: HostedRepository, expectedHeadSHA sha: String) async throws {
+        struct Body: Encodable {
+            var sha: String
+            enum CodingKeys: String, CodingKey { case sha = "expected_head_sha" }
+        }
+        struct Result: Decodable { var message: String? }
+        do {
+            let _: Result = try await send(
+                "PUT", url(try repoPath(repo) + ["pulls", String(number), "update-branch"]), body: Body(sha: sha))
+        } catch HostingError.validationFailed(let message) where message.localizedCaseInsensitiveContains("sha") {
+            throw HostingError.headChanged
+        }
+    }
+
+    /// `GET git/ref/heads/<branch>`: whether the branch still exists (404: deleted).
+    public func headBranchExists(_ branch: String, in repo: HostedRepository) async throws -> Bool {
+        struct Ref: Decodable { var ref: String }
+        do {
+            let found: Ref = try await get(url(try repoPath(repo) + ["git", "ref"] + Self.headsPath(branch)))
+            return found.ref == "refs/heads/\(branch)"
+        } catch HostingError.notFound {
+            return false
+        }
+    }
+
+    /// `DELETE git/refs/heads/<branch>`, answered 204 without a body.
+    public func deleteHeadBranch(_ branch: String, in repo: HostedRepository) async throws {
+        _ = try await perform(request("DELETE", url(try repoPath(repo) + ["git", "refs"] + Self.headsPath(branch))))
+    }
+
+    /// `POST git/refs` with `refs/heads/<branch>` at `sha`: the deleted branch made again where it was.
+    public func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws {
+        _ = try Self.headsPath(branch)
+        struct Result: Decodable { var ref: String }
+        let _: Result = try await send(
+            "POST", url(try repoPath(repo) + ["git", "refs"]), body: ["ref": "refs/heads/\(branch)", "sha": sha])
+    }
+
+    /// `heads` then the branch's segments (`feature/x` is two), each percent-encoded by `url`; a branch with an
+    /// empty, `.` or `..` segment is refused, so the path never leaves `git/refs`.
+    private static func headsPath(_ branch: String) throws -> [String] {
+        let segments = branch.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !segments.isEmpty, !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            throw HostingError.validationFailed(message: "not a branch name: \(branch)")
+        }
+        return ["heads"] + segments
+    }
+
+    // MARK: - Issue extras
+
+    /// The issue page's extras from GraphQL: the pinned comment, the type, the fields (the type's pinned ones, else
+    /// the repository's, each with its value, then any other field with a value), the relationships, and in a second
+    /// query the projects (their titles need the `read:project` scope: without it, only how many).
+    public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
+        _ = try repoPath(repo)
+        let variables = ItemVariables(owner: repo.owner, name: repo.name, number: number)
+        // Beside the main query, so a token without `read:project` (two reads) adds no round trip after it.
+        async let projects = projects(of: .issue(number), in: repo)
+        let answer: IssueExtrasAnswer = try await graphQL(Self.issueExtrasQuery, variables: variables)
+        guard let issue = answer.repository?.issue else { throw HostingError.notFound }
+        var extras = HostedIssueExtras(
+            type: issue.issueType?.name, subIssues: issue.subIssuesSummary?.total ?? 0,
+            subIssuesCompleted: issue.subIssuesSummary?.completed ?? 0,
+            blockedBy: issue.issueDependenciesSummary?.blockedBy ?? 0,
+            blocking: issue.issueDependenciesSummary?.blocking ?? 0)
+        if let parent = issue.parent { extras.parent = .init(number: parent.number, title: parent.title) }
+        if let pinned = issue.pinnedIssueComment, let id = pinned.issueComment?.databaseId {
+            let by = pinned.pinnedBy.map {
+                HostedUser(id: $0.databaseId ?? 0, login: $0.login, avatarURL: $0.avatarUrl)
+            }
+            extras.pin = .init(commentID: id, pinnedBy: by,
+                               pinnedAt: pinned.pinnedAt.flatMap { ISO8601DateFormatter().date(from: $0) })
+        }
+        let values = (issue.issueFieldValues?.nodes ?? []).compactMap { $0 }
+        let pinned = (issue.issueType?.pinnedFields?.compactMap(\.name)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (answer.repository?.pinnedIssueFields?.nodes ?? []).compactMap { $0?.name }
+        func value(of name: String) -> String? { values.first { $0.field?.name == name }?.text }
+        extras.fields = pinned.map { .init(name: $0, value: value(of: $0)) }
+            + values.compactMap { node in
+                guard let name = node.field?.name, !pinned.contains(name) else { return nil }
+                return .init(name: name, value: node.text)
+            }
+        (extras.projects, extras.projectCount) = await projects
+        return extras
+    }
+
+    /// The pull request's projects and the issues it closes: one GraphQL query for those issues (each with its
+    /// repository, which may be another one; nil when that query fails, so the projects still show), the projects
+    /// read beside it as for an issue.
+    public func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras {
+        _ = try repoPath(repo)
+        struct Answer: Decodable {
+            struct Repository: Decodable {
+                struct Pull: Decodable {
+                    struct Closing: Decodable {
+                        struct Node: Decodable {
+                            struct Owner: Decodable { var nameWithOwner: String }
+                            var number: Int
+                            var title: String
+                            var state: String?
+                            var url: String?
+                            var repository: Owner?
+                        }
+                        var nodes: [Node?]?
+                    }
+                    var closingIssuesReferences: Closing?
+                }
+                var pullRequest: Pull?
+            }
+            var repository: Repository?
+        }
+        let query = """
+            query PullRequestExtras($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  closingIssuesReferences(first: 20) {
+                    nodes { number title state url repository { nameWithOwner } }
+                  }
+                }
+              }
+            }
+            """
+        async let projects = projects(of: .pullRequest(number), in: repo)
+        let answer: Answer? = try? await graphQL(
+            query, variables: ItemVariables(owner: repo.owner, name: repo.name, number: number))
+        let closing = answer?.repository?.pullRequest.map { pull in
+            (pull.closingIssuesReferences?.nodes ?? []).compactMap { node -> HostedPullRequestExtras.ClosingIssue? in
+                guard let node else { return nil }
+                return .init(number: node.number, title: node.title, isOpen: node.state == "OPEN",
+                             repository: node.repository?.nameWithOwner ?? repo.fullName, url: node.url)
+            }
+        }
+        let (titles, count) = await projects
+        return HostedPullRequestExtras(projects: titles, projectCount: count, closingIssues: closing)
+    }
+
+    /// The item's projects: their titles, or without the `read:project` scope only how many (nil, the count); nil,
+    /// nil when neither could be read. `issueOrPullRequest`, so both kinds share the query. Both reads run at once,
+    /// so a token without the scope waits for no failed request first.
+    private func projects(of item: HostedItem, in repo: HostedRepository) async -> ([String]?, Int?) {
+        struct Items: Decodable {
+            struct Node: Decodable {
+                struct Project: Decodable { var title: String }
+                var project: Project?
+            }
+            var totalCount: Int
+            var nodes: [Node?]?
+        }
+        struct Answer: Decodable {
+            struct Repository: Decodable {
+                struct Item: Decodable { var projectItems: Items? }
+                var issueOrPullRequest: Item?
+            }
+            var repository: Repository?
+        }
+        let variables = ItemVariables(owner: repo.owner, name: repo.name, number: item.number)
+        let titled = """
+            query ItemProjects($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issueOrPullRequest(number: $number) {
+                  ... on Issue { projectItems(first: 20) { totalCount nodes { project { title } } } }
+                  ... on PullRequest { projectItems(first: 20) { totalCount nodes { project { title } } } }
+                }
+              }
+            }
+            """
+        let counted = """
+            query ItemProjectCount($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issueOrPullRequest(number: $number) {
+                  ... on Issue { projectItems { totalCount } }
+                  ... on PullRequest { projectItems { totalCount } }
+                }
+              }
+            }
+            """
+        async let titles: Answer? = try? await graphQL(titled, variables: variables)
+        async let count: Answer? = try? await graphQL(counted, variables: variables)
+        if let items = await titles?.repository?.issueOrPullRequest?.projectItems {
+            return ((items.nodes ?? []).compactMap { $0?.project?.title }, items.totalCount)
+        }
+        return (nil, await count?.repository?.issueOrPullRequest?.projectItems?.totalCount)
+    }
+
+    private struct ItemVariables: Encodable {
+        var owner, name: String
+        var number: Int
+    }
+
+    private static let issueExtrasQuery = """
+        query IssueExtras($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pinnedIssueFields(first: 20) { nodes { ...FieldName } }
+            issue(number: $number) {
+              issueType { name pinnedFields { ...FieldName } }
+              pinnedIssueComment {
+                pinnedAt
+                pinnedBy { login avatarUrl ... on User { databaseId } }
+                issueComment { databaseId }
+              }
+              parent { number title }
+              subIssuesSummary { total completed }
+              issueDependenciesSummary { blockedBy blocking }
+              issueFieldValues(first: 20) {
+                nodes {
+                  ... on IssueFieldDateValue { value field { ...FieldName } }
+                  ... on IssueFieldTextValue { value field { ...FieldName } }
+                  ... on IssueFieldNumberValue { numberValue: value field { ...FieldName } }
+                  ... on IssueFieldSingleSelectValue { value field { ...FieldName } }
+                  ... on IssueFieldMultiSelectValue { value field { ...FieldName } }
+                }
+              }
+            }
+          }
+        }
+        fragment FieldName on IssueFields {
+          ... on IssueFieldDate { name } ... on IssueFieldText { name } ... on IssueFieldNumber { name }
+          ... on IssueFieldSingleSelect { name } ... on IssueFieldMultiSelect { name }
+        }
+        """
+
+    private struct IssueExtrasAnswer: Decodable {
+        struct FieldName: Decodable { var name: String? }
+        struct Repository: Decodable {
+            struct Fields: Decodable { var nodes: [FieldName?]? }
+            struct Issue: Decodable {
+                struct IssueType: Decodable {
+                    var name: String
+                    var pinnedFields: [FieldName]?
+                }
+                struct Pinned: Decodable {
+                    struct Actor: Decodable {
+                        var login: String
+                        var avatarUrl: String?
+                        var databaseId: Int?
+                    }
+                    struct Comment: Decodable { var databaseId: Int? }
+                    var pinnedAt: String?
+                    var pinnedBy: Actor?
+                    var issueComment: Comment?
+                }
+                struct Parent: Decodable {
+                    var number: Int
+                    var title: String
+                }
+                struct SubIssues: Decodable {
+                    var total: Int?
+                    var completed: Int?
+                }
+                struct Dependencies: Decodable {
+                    var blockedBy: Int?
+                    var blocking: Int?
+                }
+                struct Values: Decodable {
+                    struct Node: Decodable {
+                        var value: String?
+                        var numberValue: Double?
+                        var field: FieldName?
+                        /// The value as the page shows it: a number without a trailing ".0".
+                        var text: String? {
+                            value ?? numberValue.map {
+                                $0.rounded() == $0 && abs($0) < 1e15 ? String(Int64($0)) : String($0)
+                            }
+                        }
+                    }
+                    var nodes: [Node?]?
+                }
+                var issueType: IssueType?
+                var pinnedIssueComment: Pinned?
+                var parent: Parent?
+                var subIssuesSummary: SubIssues?
+                var issueDependenciesSummary: Dependencies?
+                var issueFieldValues: Values?
+            }
+            var pinnedIssueFields: Fields?
+            var issue: Issue?
+        }
+        var repository: Repository?
+    }
+
+    // MARK: - Reactions on the item itself
+
+    /// The pull request's or issue's own reactions, from GraphQL `reactionGroups` (REST's `reactions` rollup has no
+    /// viewer state): each kind with a reaction, in `reactionKinds` order, the token's user's marked.
+    public func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction] {
+        let groups = try await itemNode(item, in: repo).reactionGroups ?? []
+        return Self.reactionContents.compactMap { content in
+            guard let group = groups.first(where: { $0.content == content.graphQL }),
+                  let count = group.reactors?.totalCount, count > 0 else { return nil }
+            return HostedReaction(kind: content.rest, count: count, viewerReacted: group.viewerHasReacted == true)
+        }
+    }
+
+    /// GraphQL `addReaction` on the item's node id, read first (`itemNode`).
+    public func addItemReaction(_ kind: String, to item: HostedItem, in repo: HostedRepository) async throws {
+        try await setItemReaction(kind, on: item, in: repo, added: true)
+    }
+
+    /// GraphQL `removeReaction` on the item's node id, read first (`itemNode`).
+    public func removeItemReaction(_ kind: String, from item: HostedItem, in repo: HostedRepository) async throws {
+        try await setItemReaction(kind, on: item, in: repo, added: false)
+    }
+
+    private func setItemReaction(_ kind: String, on item: HostedItem, in repo: HostedRepository, added: Bool)
+        async throws
+    {
+        guard Self.reactionContents.contains(where: { $0.rest == kind }) else {
+            throw HostingError.validationFailed(message: "not a GitHub reaction: \(kind)")
+        }
+        let node = try await itemNode(item, in: repo)
+        try await setReaction(kind, on: HostedCommentRef(kind: .general, id: item.number, hostKey: node.id), in: repo,
+                              added: added)
+    }
+
+    /// The item's node id and reaction groups: `repository.issueOrPullRequest(number:)`, so a pull request and an
+    /// issue share one query. A number that names the other kind of item is refused.
+    private func itemNode(_ item: HostedItem, in repo: HostedRepository) async throws -> ItemNode {
+        _ = try repoPath(repo)
+        struct Variables: Encodable { var owner, name: String; var number: Int }
+        struct Answer: Decodable {
+            struct Repository: Decodable { var issueOrPullRequest: ItemNode? }
+            var repository: Repository?
+        }
+        let query = """
+            query ItemReactions($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issueOrPullRequest(number: $number) {
+                  __typename
+                  ... on Issue { id reactionGroups { content viewerHasReacted reactors { totalCount } } }
+                  ... on PullRequest { id reactionGroups { content viewerHasReacted reactors { totalCount } } }
+                }
+              }
+            }
+            """
+        let answer: Answer = try await graphQL(
+            query, variables: Variables(owner: repo.owner, name: repo.name, number: item.number))
+        let isPullRequest = if case .pullRequest = item { true } else { false }
+        guard let node = answer.repository?.issueOrPullRequest,
+              node.typename == (isPullRequest ? "PullRequest" : "Issue"), !node.id.isEmpty
+        else { throw HostingError.notFound }
+        return node
+    }
+
+    private struct ItemNode: Decodable {
+        struct Group: Decodable {
+            struct Reactors: Decodable { var totalCount: Int }
+            var content: String
+            var viewerHasReacted: Bool?
+            var reactors: Reactors?
+        }
+        var typename: String
+        var id: String
+        var reactionGroups: [Group]?
+        enum CodingKeys: String, CodingKey {
+            case typename = "__typename", id, reactionGroups
+        }
     }
 
     // MARK: - Requests
@@ -807,4 +1318,59 @@ extension HostedComment: GitHubViewerStateful {
 
 extension HostedReviewComment: GitHubViewerStateful {
     fileprivate static var graphQLTypename: String { "PullRequestReviewComment" }
+}
+
+/// An entry of GitHub's issue timeline (`GET …/issues/{n}/timeline`), only the fields Histq words; every one is
+/// optional, as the shape differs per event (a `committed` entry has `sha`, `message` and `author` instead of an
+/// `id`, `actor` and `created_at`).
+struct GitHubTimelineEvent: Decodable {
+    struct Label: Decodable { var name: String }
+    struct Milestone: Decodable { var title: String }
+    struct Rename: Decodable { var from, to: String }
+    struct Team: Decodable { var name: String }
+    struct Person: Decodable {
+        var name: String?
+        var date: Date?
+    }
+    struct Source: Decodable {
+        struct Issue: Decodable {
+            var number: Int
+            var title: String
+        }
+        var issue: Issue?
+    }
+
+    var id: Int?
+    var event: String?
+    var actor: HostedUser?
+    var createdAt: Date?
+    var label: Label?
+    var milestone: Milestone?
+    var rename: Rename?
+    var assignee: HostedUser?
+    var requestedReviewer: HostedUser?
+    var requestedTeam: Team?
+    var commitID: String?
+    var sha: String?
+    var message: String?
+    var author: Person?
+    var source: Source?
+
+    enum CodingKeys: String, CodingKey {
+        case id, event, actor, label, milestone, rename, assignee, sha, message, author, source
+        case createdAt = "created_at"
+        case requestedReviewer = "requested_reviewer"
+        case requestedTeam = "requested_team"
+        case commitID = "commit_id"
+    }
+}
+
+/// A list element that decodes to nil instead of failing the whole list: one event of a shape Histq does not expect
+/// leaves only itself out.
+struct Lossy<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: any Decoder) throws {
+        value = try? Value(from: decoder)
+    }
 }

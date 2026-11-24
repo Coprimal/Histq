@@ -270,12 +270,13 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// (`PRTimeline`: `avatar-d`, `avatar-c|i|r<n>`, `chevron-<n>`, `reply-<n>` for a slot, `thread-<n>` for
         /// `collapsed`, a general thread's `gchevron-<n>`, `greply-<n>` and `gthread-<n>`, and a comment's menu,
         /// editor, reaction row, add-reaction button and header Edit icon, `cmenu-<g|r><n>`, `cedit-<g|r><n>`,
-        /// `creact-<g|r><n>`, `cadd-<g|r><n>` and `cpen-<g|r><n>`, the editor open as `editing` says), in case GitHub's HTML
+        /// `creact-<g|r><n>`, `cadd-<g|r><n>` and `cpen-<g|r><n>`, the description's reaction row `creact-d`, the
+        /// editor open as `editing` says), in case GitHub's HTML
         /// ever left `.body` unbalanced. `width` is the page's own, for the DEBUG slot probe. Runs in the app's own content world
         /// (`.defaultClient`), apart from the page, which still has no JavaScript of its own: the page's settings and
         /// policy stay as they are.
         private static let measureScript = """
-            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen)-[gr][0-9]+)$/;
+            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen)-[gr][0-9]+|creact-d)$/;
             for (const slot of document.querySelectorAll('[data-slot]')) {
               if (slot.closest('.body') || !own.test(slot.dataset.slot)) continue;
               const height = heights[slot.dataset.slot];
@@ -453,6 +454,7 @@ enum HostedHTML {
             let header = rgba(NSColor(Palette.tabFill))
             let code = rgba(NSColor(Palette.inputSurface))
             let link = rgba(Palette.linkText)
+            let pinnedFill = rgba(Palette.linkText.withAlphaComponent(0.08))
             let added = rgba(Palette.diffAddedSign)
             let removed = rgba(Palette.diffRemovedSign)
             let addedFill = rgba(Palette.diffAddedFill)
@@ -475,6 +477,14 @@ enum HostedHTML {
                 .body table { display: block; overflow-x: auto; } .body td, .body th { overflow-wrap: break-word; }
                 img { max-width: 100%; } hr { border: 0; border-top: 1px solid \(border); }
                 .item { border: 1px solid \(border); border-radius: 10px; margin: 0 0 10px; overflow: hidden; }
+                .item.desc { margin-bottom: 0; } .item.bare { border: 0; border-radius: 0; }
+                .item.bare > .body { padding: 0 0 4px; }
+                .day { font-weight: 600; color: \(text); margin: 14px 0 8px; } .day:first-child { margin-top: 2px; }
+                .pinned { border-top: 1px solid \(border); background: \(pinnedFill); padding: 8px 10px 10px; }
+                .pin-by { color: \(link); font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+                .pin-by b { font-weight: 600; } .pin-head { color: \(secondary); font-size: 12px; margin-bottom: 4px; }
+                .pin-head b { color: \(text); } .item.pinned-item { border-color: \(link); }
+                .pin-tag { color: \(secondary); } .pin-tag b { font-weight: 500; } .pinned > .body { padding: 0; }
                 .head { background: \(header); padding: 6px 10px; color: \(secondary); display: flex; gap: 6px;
                   align-items: baseline; flex-wrap: wrap; }
                 .head b { color: \(text); font-weight: 600; } .head .date { margin-left: auto; }
@@ -524,9 +534,10 @@ enum HostedHTML {
                 .handle { color: \(secondary); font-weight: 400; }
                 .gl .head .date, .gl .comment-head .date { margin-left: 0; }
                 .gl .date + .slot-add, .gl .date + .slot-menu { margin-left: auto; }
+                .head .date.near, .comment-head .date.near { margin-left: 0; }
                 .tools { margin-left: auto; display: flex; gap: 6px; align-items: center; align-self: center; flex: none; }
-                .role { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 9px; background: \(code);
-                  color: \(text); font-weight: 500; }
+                .role { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 9px; background: none;
+                  border: 0.5px solid \(secondary); color: \(text); font-weight: 500; }
                 .resolved-line { background: \(header); color: \(secondary); font-size: 12px; padding: 0 10px 6px 36px; }
                 .resolved-line b { color: \(text); font-weight: 600; }
                 .snippet { padding: 8px 10px 0; } .snippet .thread { margin-top: 0; }
@@ -547,6 +558,7 @@ enum HostedHTML {
                 .event b { color: \(text); font-weight: 600; }
                 .event .body { display: inline; padding: 0; } .event .body > p { display: inline; margin: 0; }
                 .event .date { margin-left: 4px; }
+                .event .detail { margin: 6px 0 2px; } .event .detail p { margin: 0; } .event .detail .task.done { color: \(secondary); }
                 /* An atomic box on its own line, not a block inside the inline body: WebKit lays a block-in-inline's lines out
                    again when a link in it gets its hover underline, and the entry moved by 2 px each time. */
                 .event .body > ul { display: inline-block; width: 100%; box-sizing: border-box; vertical-align: top;

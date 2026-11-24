@@ -375,7 +375,8 @@ final class HostingStore {
 
     /// The connected provider's merge methods in the picker's order; all of them while none is connected.
     var mergeMethods: [HostedMergeMethod] {
-        HostedMergeMethod.all.filter { api?.client.mergeMethods.contains($0) ?? true }
+        // Without a client, the methods every host shares; Bitbucket's own only ever come per pull request.
+        HostedMergeMethod.all.filter { api?.client.mergeMethods.contains($0) ?? [.merge, .squash, .rebase].contains($0) }
     }
 
     /// The web page of `target` in the connected repository; nil while not connected.

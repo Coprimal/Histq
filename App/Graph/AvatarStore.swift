@@ -12,7 +12,7 @@
 // repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows and the graph's remote badges), the
 // same way; only the owner's name leaves the Mac, to its own host. `gitHubAvatar(login:id:pixels:)` loads, in every
 // mode too, the GitHub avatar of an account of github.com (the pull request and issue pages); only its id or login
-// leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in real mode only, the avatar a GitLab API
+// leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in every mode too, the avatar a GitLab API
 // gives for an account (`avatar_url`), over https and only from the repository's own host (gitlab.com also from
 // gravatar.com); a remote on a GitLab Self-Managed host the profiles have an account for shows GitLab's bundled logo.
 import AppKit
@@ -39,9 +39,9 @@ final class AvatarStore {
     /// The authors' emojis by identity: a mirror of `PrefKey.authorEmojis`, read while drawing rows.
     private(set) var emojis: [String: String]
     /// Loaded real avatars, by `cacheKey`.
-    private let images = NSCache<NSString, NSImage>()
+    private let images = AvatarImages()
     /// Generated and initials avatars, by kind and identity: resolution-independent drawings.
-    private let drawn = NSCache<NSString, NSImage>()
+    private let drawn = AvatarImages()
     /// Keys whose real load ended without an image (404, offline, error): they keep the generated avatar this session.
     private var missing: Set<String> = []
     /// Keys being loaded: one request per email and size.
@@ -301,28 +301,33 @@ final class AvatarStore {
     // MARK: Hosted accounts
 
     /// The avatar at `url`, the `avatar_url` a GitLab API gave for the account `name` of a repository on `host`, at
-    /// `pixels`: only in real mode, and only when `hostedIdentity(url:host:)` accepts the URL. Never blocks: the
+    /// `pixels`, whatever the commit avatars' mode (as `gitHubAvatar`), only when `hostedIdentity(url:host:)` accepts
+    /// the URL. Never blocks: the
     /// mode's drawn avatar of `name` stands in until it is loaded, and stays when it cannot be; its arrival posts
     /// `didChange` with that identity. Only the request for the image leaves the Mac, to that host (or gravatar.com).
     func hostedAvatar(url: String?, host: String, name: String, pixels: Int) -> NSImage? {
         let fallback = avatar(email: "", name: name, pixels: pixels)
-        guard mode == .real, let identity = Self.hostedIdentity(url: url, host: host) else { return fallback }
+        guard let identity = Self.hostedIdentity(url: url, host: host) else { return fallback }
         let key = "\(identity)|\(pixels)"
         if let image = images.object(forKey: key as NSString) { return image }
         if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
         return fallback
     }
 
-    /// `avatar:<url>` for an https `url` on `host` (with its port, if any; gitlab.com's also on gravatar.com, its
-    /// default avatars), as given (paths are case-sensitive); nil for any other URL.
+    /// `avatar:<url>` for an https `url` on `host` (with its port, if any; gitlab.com's and bitbucket.org's also on
+    /// gravatar.com, bitbucket.org's on Atlassian's avatar service `*.atl-paas.net`), as given (paths are
+    /// case-sensitive); nil for any other URL.
     static func hostedIdentity(url: String?, host: String) -> String? {
         guard let url, let parsed = URL(string: url), parsed.scheme?.lowercased() == "https",
               let avatarHost = parsed.host()?.lowercased(), !avatarHost.isEmpty
         else { return nil }
         let host = host.lowercased()
         let authority = parsed.port.map { "\(avatarHost):\($0)" } ?? avatarHost
-        let gravatar = host == "gitlab.com" && (avatarHost == "gravatar.com" || avatarHost.hasSuffix(".gravatar.com"))
-        return authority == host || gravatar ? "avatar:" + url : nil
+        let isGravatar = avatarHost == "gravatar.com" || avatarHost.hasSuffix(".gravatar.com")
+        let gravatar = (host == "gitlab.com" || host == "bitbucket.org") && isGravatar
+        // Bitbucket Cloud's accounts: their avatars are on Atlassian's avatar service.
+        let atlassian = host == "bitbucket.org" && parsed.port == nil && avatarHost.hasSuffix(".atl-paas.net")
+        return authority == host || gravatar || atlassian ? "avatar:" + url : nil
     }
 
     // MARK: Provider logos
@@ -661,5 +666,24 @@ private final class HTTPSOnly: NSObject, URLSessionTaskDelegate, Sendable {
         newRequest request: URLRequest
     ) async -> URLRequest? {
         request.url?.scheme == "https" ? request : nil
+    }
+}
+
+/// The avatars' in-memory cache. Not an `NSCache`: under memory pressure ("warn", common with VMs running) an
+/// `NSCache` drops an image right after it is stored, so the redraw its arrival causes misses it, loads it again from
+/// disk and redraws again, endlessly (thousands of loads a second, the generated avatar on screen, every click
+/// late). Images stay until `limit` is reached, then the cache starts over: each avatar on screen loads once more,
+/// with no loop as long as fewer than `limit` are drawn at once.
+@MainActor
+private final class AvatarImages {
+    /// Avatars are small (tens of KB decoded at most): a few tens of MB at the limit.
+    private static let limit = 1_000
+    private var images: [NSString: NSImage] = [:]
+
+    func object(forKey key: NSString) -> NSImage? { images[key] }
+
+    func setObject(_ image: NSImage, forKey key: NSString) {
+        if images.count >= Self.limit, images[key] == nil { images.removeAll(keepingCapacity: true) }
+        images[key] = image
     }
 }

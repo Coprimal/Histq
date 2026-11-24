@@ -232,6 +232,22 @@ public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     /// mapping sets them.
     public var milestone: HostedMilestone? = nil
     public var timeStats: HostedTimeStats? = nil
+    /// The merged box's "<mergedBy> merged commit <mergeCommitSHA>", and whether the token's user may push to the
+    /// base repository (Delete branch), where the host gives them (GitHub); not part of the JSON: the host's mapping
+    /// sets them.
+    public var mergedBy: HostedUser? = nil
+    public var mergeCommitSHA: String? = nil
+    public var viewerCanPush: Bool? = nil
+    /// The merge methods this pull request may use and the one it starts at, where the host sets them per pull
+    /// request (Bitbucket: the destination branch's strategies); nil falls back to the client's `mergeMethods`. Not
+    /// part of the JSON: the host's mapping sets them.
+    public var allowedMergeMethods: [HostedMergeMethod]? = nil
+    public var defaultMergeMethod: HostedMergeMethod? = nil
+    /// Whether merging closes (deletes) the source branch, as the pull request was created (Bitbucket's
+    /// `close_source_branch`); nil where the host has no such setting. Not part of the JSON.
+    public var closesSourceBranch: Bool? = nil
+    /// How many of its tasks are open (Bitbucket's `task_count`); nil where the host has none. Not part of the JSON.
+    public var openTaskCount: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, number, title, state, draft, user, body, head, base, labels, assignees, merged, mergeable
@@ -324,6 +340,10 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     /// The host's own key that writes on the comment take, where its id is not enough: GitLab's discussion id,
     /// Bitbucket Data Center's comment version, Azure DevOps' thread id, GitHub's `node_id` (JSON `node_id`).
     public var hostKey: String?
+    /// The author's relation to the repository where the host gives it (GitHub's `author_association`: `OWNER`,
+    /// `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `NONE`…), for the comment's
+    /// badge; nil elsewhere.
+    public var authorAssociation: String?
     /// Not part of the JSON (GitHub's `reactions` rollup is another shape): the host's mapping sets these.
     public var viewerCanEdit = false
     public var viewerCanDelete = false
@@ -339,6 +359,7 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
         case htmlURL = "html_url"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case authorAssociation = "author_association"
     }
 }
 
@@ -358,10 +379,12 @@ public struct HostedTimelineEvent: Sendable, Equatable, Identifiable {
     public var textHTML: String?
     public var action: String?
     public var icon: String?
+    /// Sanitized HTML under the entry's line (Bitbucket's task text or the reviewers added), or nil.
+    public var detailHTML: String?
 
     public init(
         id: String, actor: HostedUser?, createdAt: Date?, text: String, textHTML: String? = nil,
-        action: String? = nil, icon: String? = nil
+        action: String? = nil, icon: String? = nil, detailHTML: String? = nil
     ) {
         self.id = id
         self.actor = actor
@@ -370,6 +393,7 @@ public struct HostedTimelineEvent: Sendable, Equatable, Identifiable {
         self.textHTML = textHTML
         self.action = action
         self.icon = icon
+        self.detailHTML = detailHTML
     }
 }
 
@@ -389,12 +413,15 @@ public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
     public var bodyHTML: String?
     public var htmlURL: String?
     public var submittedAt: Date?
+    /// As in `HostedComment`.
+    public var authorAssociation: String?
 
     enum CodingKeys: String, CodingKey {
         case id, user, state, body
         case bodyHTML = "body_html"
         case htmlURL = "html_url"
         case submittedAt = "submitted_at"
+        case authorAssociation = "author_association"
     }
 }
 
@@ -427,6 +454,8 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     public var htmlURL: String?
     /// As in `HostedComment`: the host's own key for writes (GitHub's `node_id`).
     public var hostKey: String?
+    /// As in `HostedComment`.
+    public var authorAssociation: String?
     /// As in `HostedComment`: not part of the JSON, the host's mapping sets these.
     public var viewerCanEdit = false
     public var viewerCanDelete = false
@@ -447,6 +476,7 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
         case bodyHTML = "body_html"
         case createdAt = "created_at"
         case htmlURL = "html_url"
+        case authorAssociation = "author_association"
     }
 }
 
@@ -568,3 +598,175 @@ public struct HostedCheckRun: Codable, Sendable, Equatable, Identifiable {
         case completedAt = "completed_at"
     }
 }
+
+/// What GitHub's issue page shows beside the issue's JSON (`HostingProvider.issueExtras`): the pinned comment, the
+/// issue type, the custom fields, the projects and the relationships.
+public struct HostedIssueExtras: Sendable, Equatable {
+    /// The comment pinned on top of the issue: its REST id (`HostedComment.id`), who pinned it and when.
+    public struct Pin: Sendable, Equatable {
+        public var commentID: Int
+        public var pinnedBy: HostedUser?
+        public var pinnedAt: Date?
+
+        public init(commentID: Int, pinnedBy: HostedUser? = nil, pinnedAt: Date? = nil) {
+            self.commentID = commentID
+            self.pinnedBy = pinnedBy
+            self.pinnedAt = pinnedAt
+        }
+    }
+
+    /// A custom field shown on the issue: the repository's pinned ones, then any other with a value; `value` nil
+    /// when not set.
+    public struct Field: Sendable, Equatable {
+        public var name: String
+        public var value: String?
+
+        public init(name: String, value: String? = nil) {
+            self.name = name
+            self.value = value
+        }
+    }
+
+    public var pin: Pin?
+    /// The issue type's name ("Bug"); nil without one.
+    public var type: String?
+    public var fields: [Field]
+    /// The projects' titles; nil when the token may not read them (GitHub's `read:project` scope), `projectCount`
+    /// then says how many there are (nil when that could not be read either).
+    public var projects: [String]?
+    public var projectCount: Int?
+    /// The parent issue.
+    public var parent: Parent?
+    public var subIssues: Int
+    public var subIssuesCompleted: Int
+    public var blockedBy: Int
+    public var blocking: Int
+
+    public struct Parent: Sendable, Equatable {
+        public var number: Int
+        public var title: String
+
+        public init(number: Int, title: String) {
+            self.number = number
+            self.title = title
+        }
+    }
+
+    public init(
+        pin: Pin? = nil, type: String? = nil, fields: [Field] = [], projects: [String]? = [], projectCount: Int? = 0,
+        parent: Parent? = nil, subIssues: Int = 0, subIssuesCompleted: Int = 0, blockedBy: Int = 0, blocking: Int = 0
+    ) {
+        self.pin = pin
+        self.type = type
+        self.fields = fields
+        self.projects = projects
+        self.projectCount = projectCount
+        self.parent = parent
+        self.subIssues = subIssues
+        self.subIssuesCompleted = subIssuesCompleted
+        self.blockedBy = blockedBy
+        self.blocking = blocking
+    }
+}
+
+/// What GitHub's pull request sidebar shows beside the pull request's JSON (`HostingProvider.pullRequestExtras`): its
+/// projects and the issues it closes (Development).
+public struct HostedPullRequestExtras: Sendable, Equatable {
+    /// An issue the pull request closes when merged, maybe of another repository (`repository` is "owner/name").
+    public struct ClosingIssue: Sendable, Hashable {
+        public var number: Int
+        public var title: String
+        public var isOpen: Bool
+        public var repository: String
+        public var url: String?
+
+        public init(number: Int, title: String, isOpen: Bool, repository: String, url: String? = nil) {
+            self.number = number
+            self.title = title
+            self.isOpen = isOpen
+            self.repository = repository
+            self.url = url
+        }
+    }
+
+    /// As `HostedIssueExtras.projects` and `projectCount`.
+    public var projects: [String]?
+    public var projectCount: Int?
+    /// nil when they could not be read (the projects may still have been).
+    public var closingIssues: [ClosingIssue]?
+
+    public init(projects: [String]? = [], projectCount: Int? = 0, closingIssues: [ClosingIssue]? = []) {
+        self.projects = projects
+        self.projectCount = projectCount
+        self.closingIssues = closingIssues
+    }
+}
+
+/// A pull request task (Bitbucket's): its text, whether it is done, who made it, and the comment it hangs on.
+public struct HostedTask: Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var body: String
+    public var isResolved: Bool
+    public var creator: HostedUser?
+    public var createdAt: Date?
+    /// The comment it was made on; nil for one of the pull request itself.
+    public var commentID: Int?
+    /// When and by whom it was last marked done (nil while open).
+    public var resolvedAt: Date?
+    public var resolvedBy: HostedUser?
+
+    public init(
+        id: Int, body: String, isResolved: Bool, creator: HostedUser? = nil, createdAt: Date? = nil,
+        commentID: Int? = nil, resolvedAt: Date? = nil, resolvedBy: HostedUser? = nil
+    ) {
+        self.id = id
+        self.body = body
+        self.isResolved = isResolved
+        self.creator = creator
+        self.createdAt = createdAt
+        self.commentID = commentID
+        self.resolvedAt = resolvedAt
+        self.resolvedBy = resolvedBy
+    }
+}
+
+/// A report on a commit (Bitbucket's Code Insights): its title, `result` (`PASSED`, `FAILED`, `PENDING`, or nil when
+/// the reporter gave none), its type (`SECURITY`, `COVERAGE`, `TEST`, `BUG`), who reported it and its page.
+public struct HostedReport: Sendable, Equatable, Identifiable {
+    public var id: String
+    public var title: String
+    public var result: String?
+    public var reportType: String?
+    public var reporter: String?
+    public var link: URL?
+
+    public init(
+        id: String, title: String, result: String? = nil, reportType: String? = nil, reporter: String? = nil,
+        link: URL? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.result = result
+        self.reportType = reportType
+        self.reporter = reporter
+        self.link = link
+    }
+}
+
+/// One of a pull request's merge checks (Bitbucket's `mergeability/checks`): what it checks (the host's words, or its
+/// type when the host names none), whether it passed (`PASSED`, `FAILED`, `PENDING`, `SKIPPED`, `UNKNOWN`), whether it
+/// must pass, and whether it blocks the merge now.
+public struct HostedMergeCheck: Sendable, Equatable {
+    public var name: String
+    public var status: String
+    public var required: Bool
+    public var blocking: Bool
+
+    public init(name: String, status: String, required: Bool = false, blocking: Bool = false) {
+        self.name = name
+        self.status = status
+        self.required = required
+        self.blocking = blocking
+    }
+}
+

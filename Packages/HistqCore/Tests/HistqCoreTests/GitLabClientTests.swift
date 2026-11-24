@@ -1497,7 +1497,7 @@ struct GitLabClientTests {
              "discussions": {"nodes": [
               {"id": "gid://gitlab/Discussion/\(Self.threadID)", "resolved": true,
                "resolvedAt": "2026-11-04T08:00:00Z", "resolvedBy": {"id": "gid://gitlab/User/8", "username": "u8",
-               "name": "User 8", "avatarUrl": "https://git.example.com/a/8.png"},
+               "name": "User 8", "avatarUrl": "/gitlab/uploads/a/8.png"},
                "notes": {"nodes": [
                 {"id": "gid://gitlab/DiscussionNote/200", "userPermissions": {"adminNote": false}},
                 {"id": "gid://gitlab/Note/202", "systemNoteIconName": "comment",
@@ -1561,6 +1561,8 @@ struct GitLabClientTests {
         let comments = try await client.comments(on: .pullRequest(5), in: Self.writeRepo)
         #expect(comments.map(\.id) == [200, 201], "system notes stay out of the comments")
         #expect(comments[0].resolvedBy?.login == "u8" && comments[0].resolvedBy?.id == 8, "GraphQL's resolver")
+        #expect(comments[0].resolvedBy?.avatarURL == "https://git.example.com/gitlab/uploads/a/8.png",
+                "GraphQL's avatar path on the host")
         #expect(comments[0].resolvedAt == ISO8601DateFormatter().date(from: "2026-11-04T08:00:00Z"))
         #expect(comments[1].resolvedBy == nil, "only the root")
         let reviewComments = try await client.reviewComments(of: 5, in: Self.writeRepo)

@@ -39,6 +39,9 @@ struct IssueDetail: Sendable {
     var labelChoices: [HostedLabel] = []
     /// The commenters' member roles by user id (`PullRequestDetail.memberRoles`).
     var memberRoles: [Int: String]? = nil
+    /// The pinned comment, type, fields, projects and relationships (`PRPageLayout.githubSidebar`, the provider's
+    /// `issueExtras`); nil otherwise or when their read failed (no pinned block, no such side cards).
+    var extras: HostedIssueExtras? = nil
 
     var isOpen: Bool { issue.state == "open" }
 }
@@ -129,6 +132,8 @@ final class IssueDetailModel {
     /// The Activity's filter and sort (`PRPageLayout.issueActivity`), as `PullRequestDetailModel.activityView`: the
     /// filter is the issue's, the sort the app's.
     private(set) var activityView = PRActivityView()
+    /// A reload asked from the header's button (`reload`) is running: its icon spins until the detail is in.
+    private(set) var reloading = false
     #if DEBUG
     var launchDelete: (target: PRCommentTarget, confirm: Bool)?
     #endif
@@ -183,10 +188,19 @@ final class IssueDetailModel {
     }
     #endif
 
+    /// The header's reload: the shown detail loaded again from the host, kept on screen (with its drafts, open
+    /// editors and tab) until the new one is in; a failure shows above the cards.
+    func reload(github: HostingStore) {
+        guard let number, state.value != nil else { return }
+        load(number, github: github, quiet: true)
+        reloading = true
+    }
+
     /// Loads issue `number`; `quiet` keeps the shown detail until the new one is in (after an action).
     func load(_ number: Int, github: HostingStore, quiet: Bool = false) {
         task?.cancel()
         generation &+= 1
+        reloading = false
         if number != self.number {
             // Another issue: its own box. The same one opened again keeps its draft.
             draft = ""
@@ -213,6 +227,7 @@ final class IssueDetailModel {
             let result = await Self.fetch(api.client, api.repository, number: number, loadID: generation,
                                           general: general, now: now, activityView: activityView)
             guard let self, generation == self.generation, !Task.isCancelled else { return }
+            reloading = false
             switch result {
             case .success(let detail):
                 state = .loaded(detail)
@@ -369,9 +384,10 @@ final class IssueDetailModel {
     private nonisolated static func page(
         _ detail: IssueDetail, comments: [HostedComment], general: PRGeneralOptions, activity: PRActivityView
     ) async -> PRTimelineHTML {
-        timeline(detail.issue, comments: comments, general: general, now: detail.now,
+        timeline(detail.issue, comments: comments, general: general, now: detail.now, layout: detail.layout,
+                 roles: detail.memberRoles, events: detail.events,
                  activity: activityPage(detail.layout, events: detail.events, view: activity,
-                                        roles: detail.memberRoles))
+                                        roles: detail.memberRoles), pin: detail.extras?.pin)
     }
 
     /// The Activity of an issue page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
@@ -386,12 +402,16 @@ final class IssueDetailModel {
 
     /// The page of `issue`: its body, then `comments`, dated against `now`, with the layout's Activity (`activity`).
     private nonisolated static func timeline(
-        _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions, now: Date,
-        activity: PRActivityPage?
+        _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions, now: Date, layout: PRPageLayout,
+        roles: [Int: String]?, events: [HostedTimelineEvent]?, activity: PRActivityPage?,
+        pin: HostedIssueExtras.Pin?
     ) -> PRTimelineHTML {
         PRTimeline.page(
-            author: issue.user, action: "opened this issue", date: issue.createdAt, html: issue.bodyHTML,
-            markdown: issue.body, comments: comments, general: general, now: now, activity: activity)
+            author: issue.user, action: layout.descriptionVerb ?? "opened this issue", date: issue.createdAt,
+            html: issue.bodyHTML, markdown: issue.body, comments: comments, general: general, now: now,
+            activity: activity, roles: layout.roleBadges ? roles ?? [:] : nil, authorOnly: layout.authorBadgeOnly,
+            descriptionReactions: layout.descriptionReactions, events: layout.timelineEvents ? events : nil,
+            pin: pin)
     }
 
     /// The Activity's filter or sort changed (`view`): it shows at once in its controls, the page is rebuilt off the
@@ -432,10 +452,12 @@ final class IssueDetailModel {
         async let issue = client.issue(number, in: repository)
         async let comments = client.comments(on: .issue(number), in: repository)
         async let viewer = general.replies ? try? await client.currentUser() : nil
-        let readsEvents = layout.issueActivity != nil && client.capabilities.contains(.timelineEvents)
+        let readsEvents = (layout.issueActivity != nil || layout.timelineEvents)
+            && client.capabilities.contains(.timelineEvents)
         async let events: Loadable<[HostedTimelineEvent]> = !readsEvents ? .idle
             : await part(client.kind) { try await client.timelineEvents(of: .issue(number), in: repository) }
-        let barKinds = layout.reactionBar && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
+        let showsReactions = layout.reactionBar || layout.descriptionReactions
+        let barKinds = showsReactions && client.capabilities.contains(.itemReactions) ? client.reactionKinds : []
         async let itemReactions: Loadable<[HostedReaction]> = barKinds.isEmpty ? .idle
             : await part(client.kind) { try await client.itemReactions(of: .issue(number), in: repository) }
         let asksCandidates = layout.sidebar && client.capabilities.contains(.assignees)
@@ -444,17 +466,30 @@ final class IssueDetailModel {
         let asksLabels = layout.sidebar && client.capabilities.contains(.labels)
         async let labelChoices: Loadable<[HostedLabel]> = !asksLabels ? .idle
             : await part(client.kind) { try await client.labels(in: repository) }
+        // The pinned comment and the side cards' type, fields, projects and relationships; a failure only leaves
+        // them out.
+        let asksExtras = layout.githubSidebar && client.capabilities.contains(.issueExtras)
+        async let extras: Loadable<HostedIssueExtras> = !asksExtras ? .idle
+            : await part(client.kind) { try await client.issueExtras(number, in: repository) }
         do {
             let (issue, comments) = try await (issue, comments)
             let viewer = await viewer
             // The badges' roles, once the commenters are known (`PullRequestDetailModel.fetch`'s rule).
             let users = [issue.user, viewer] + comments.map(\.user)
-            let roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
+            var roles: [Int: String]? = !layout.roleBadges ? nil : await part(client.kind) {
                 try await client.memberRoles(of: users.compactMap { $0?.id }, in: repository)
             }.value
+            if layout.roleBadges {
+                // GitHub's `author_association` on each comment (`PullRequestDetailModel.fetch`'s rule).
+                roles = PRTimeline.associationRoles(comments.map { ($0.user, $0.authorAssociation) })
+                    .merging(roles ?? [:]) { _, member in member }
+            }
             let events = await events.value
-            let timeline = timeline(issue, comments: comments, general: general, now: now,
-                                    activity: activityPage(layout, events: events, view: activityView, roles: roles))
+            let extras = await extras.value
+            let timeline = timeline(issue, comments: comments, general: general, now: now, layout: layout,
+                                    roles: roles, events: events,
+                                    activity: activityPage(layout, events: events, view: activityView, roles: roles),
+                                    pin: extras?.pin)
             let reactions = await itemReactions.value
             var shown = issue
             if let reactions { shown.reactions = reactions }
@@ -462,7 +497,8 @@ final class IssueDetailModel {
                                         commentCount: comments.count, timeline: timeline, comments: comments,
                                         viewer: viewer, reactionKinds: reactions == nil ? [] : barKinds,
                                         events: events, candidates: await candidates.value ?? [],
-                                        labelChoices: await labelChoices.value ?? [], memberRoles: roles))
+                                        labelChoices: await labelChoices.value ?? [], memberRoles: roles,
+                                        extras: extras))
         } catch {
             return .failure(error)
         }
@@ -595,6 +631,9 @@ private struct IssueHeaderCard: View {
                         if value.layout.issueSentence == .openedThisIssue {
                             IssueStatePill(isOpen: value.isOpen)
                         }
+                        PRReloadButton(reloading: session.issueDetail.reloading, noun: "issue") { [session] in
+                            session.issueDetail.reload(github: session.github)
+                        }
                         Button {
                             GitHubLinks.open(session.github.webURL(.issue(value.issue.number)))
                         } label: {
@@ -612,6 +651,16 @@ private struct IssueHeaderCard: View {
                 Group {
                     if let value, value.layout.issueSentence == .created {
                         createdSummary(value)
+                    } else if let value, value.layout.issueSentence == .openedStateFirst {
+                        HStack(spacing: 6) {
+                            IssueStatePill(isOpen: value.isOpen)
+                                .fixedSize()
+                            summary(value)
+                                .font(.settingsCaption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     } else if let value {
                         summary(value)
                             .font(.settingsCaption)
@@ -707,12 +756,22 @@ private struct IssueContent: View {
         }
     }
 
+    /// The description's reaction row (`PRPageLayout.descriptionReactions`), as on the pull request page.
+    private var itemReactions: PRItemReactions? {
+        guard detail.layout.descriptionReactions, !detail.reactionKinds.isEmpty else { return nil }
+        let number = detail.issue.number
+        return PRItemReactions(kinds: detail.reactionKinds, given: detail.issue.reactions,
+                               busy: session.issueDetail.isBusy(number), noun: "issue") { [session] kind, add in
+            session.issueDetail.perform(.itemReaction(kind: kind, add: add), on: number, github: session.github)
+        }
+    }
+
     /// The column's cards, each as tall as its content: a long conversation pushes the comment box down. Where the
     /// layout has them, the award bar first and the host's Activity (title, filter and sort) in place of the
     /// Conversation.
     private func main(sideCards: Bool) -> some View {
         VStack(spacing: SectionCardMetrics.spacing) {
-            if !detail.reactionKinds.isEmpty {
+            if detail.layout.reactionBar, !detail.reactionKinds.isEmpty {
                 let number = detail.issue.number
                 PRAwardBarCard(kinds: detail.reactionKinds, given: detail.issue.reactions,
                                busy: session.issueDetail.isBusy(number), noun: "issue") { [session] kind, add in
@@ -725,7 +784,8 @@ private struct IssueContent: View {
                 // The page fits its content and never scrolls itself: a wheel over it scrolls this column.
                 PRTimelinePage(session: session, number: detail.issue.number, timeline: detail.timeline,
                                loadID: detail.loadID, kind: "issue",
-                               avatars: .of(session.github), general: session.issueDetail)
+                               avatars: .of(session.github), general: session.issueDetail,
+                               itemReactions: itemReactions)
                     .frame(maxWidth: .infinity)
             } accessory: {
                 if let activity = detail.layout.issueActivity {
@@ -883,6 +943,96 @@ private struct IssueSideColumn: View {
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
+                    }
+                }
+            }
+        }
+        if detail.layout.githubSidebar {
+            // GitHub's issue sidebar after Labels, in its order: Type, Fields, Projects (where `issueExtras` read
+            // them), Milestone, Relationships, Participants (Development and Notifications stay on GitHub).
+            if let extras = detail.extras { typeFieldsProjects(extras) }
+            SectionCard("Milestone", systemImage: "flag") {
+                if let milestone = detail.issue.milestone {
+                    Text(milestone.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(milestone.title)
+                } else {
+                    PRSideEmpty(text: "No milestone")
+                }
+            }
+            if let extras = detail.extras { relationships(extras) }
+            let participants = HostSidebar.participants(
+                [detail.issue.user] + (detail.issue.assignees ?? []) + detail.comments.map(\.user))
+            SectionCard("Participants", systemImage: "person.3", count: participants.count) {
+                let avatars = HostAvatars.of(session.github)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 22, maximum: 22), spacing: 6)], alignment: .leading,
+                          spacing: 6) {
+                    ForEach(participants, id: \.login) { user in
+                        GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 22,
+                                         avatars: avatars)
+                            .help(user.login)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text("Participants: " + participants.map(\.login).joined(separator: ", ")))
+            }
+        }
+    }
+
+    /// GitHub's Type, Fields and Projects cards: the type's name, each field with its value ("Not set" without
+    /// one), the projects' titles (only their count when the token may not read them, `read:project`).
+    @ViewBuilder private func typeFieldsProjects(_ extras: HostedIssueExtras) -> some View {
+        SectionCard("Type", systemImage: "circle.grid.2x2") {
+            if let type = extras.type {
+                Text(type).lineLimit(1).truncationMode(.tail).help(type)
+            } else {
+                PRSideEmpty(text: "No type")
+            }
+        }
+        if !extras.fields.isEmpty {
+            SectionCard("Fields", systemImage: "list.bullet.rectangle") {
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                    ForEach(extras.fields, id: \.name) { field in
+                        GridRow {
+                            Text(field.name)
+                                .font(.settingsCaption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Text(field.value ?? "Not set")
+                                .font(.settingsCaption)
+                                .foregroundStyle(field.value == nil ? .tertiary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .help(field.value ?? "")
+                        }
+                    }
+                }
+            }
+        }
+        HostProjectsCard(projects: extras.projects, count: extras.projectCount,
+                         host: session.github.kind.name) { [session, number = detail.issue.number] in
+            GitHubLinks.open(session.github.webURL(.issue(number)))
+        }
+    }
+
+    /// GitHub's Relationships card: the parent issue, the sub-issues done, and what blocks it or it blocks; "None
+    /// yet" without any.
+    private func relationships(_ extras: HostedIssueExtras) -> some View {
+        var lines: [String] = []
+        if let parent = extras.parent { lines.append("Parent: #\(parent.number) \(parent.title)") }
+        if extras.subIssues > 0 {
+            lines.append("Sub-issues: \(extras.subIssuesCompleted) of \(extras.subIssues) done")
+        }
+        if extras.blockedBy > 0 { lines.append("Blocked by \(extras.blockedBy)") }
+        if extras.blocking > 0 { lines.append("Blocking \(extras.blocking)") }
+        return SectionCard("Relationships", systemImage: "point.3.connected.trianglepath.dotted") {
+            if lines.isEmpty {
+                PRSideEmpty(text: "None yet")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(lines, id: \.self) {
+                        Text($0).font(.settingsCaption).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

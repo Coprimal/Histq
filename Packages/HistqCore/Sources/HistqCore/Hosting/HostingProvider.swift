@@ -45,6 +45,10 @@ public enum HostedReviewEvent: String, Sendable {
 /// How a pull request is merged (`PUT .../merge` `merge_method`).
 public enum HostedMergeMethod: String, Sendable {
     case merge, squash, rebase
+    /// Bitbucket's own strategies, only ever in a pull request's own list (`HostedPullRequest.allowedMergeMethods`),
+    /// never in a client's `mergeMethods`: Cloud's `fast_forward`, `squash_fast_forward`, `rebase_fast_forward`, and
+    /// Data Center's `ff` ("Fast-forward if possible", Phase 18).
+    case fastForward, squashFastForward, rebaseFastForward, fastForwardIfPossible
 }
 
 /// A merge option a provider may take beside the method (`HostingProvider.supportedMergeOptions`).
@@ -173,6 +177,23 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let startThreads = HostingCapabilities(rawValue: 1 << 18)
     /// Reads the history entries of a pull request or an issue (`timelineEvents(of:in:)`).
     public static let timelineEvents = HostingCapabilities(rawValue: 1 << 19)
+    /// The merge box's Update branch: the base merged into an out-of-date head on the host
+    /// (`updateBranch(_:in:expectedHeadSHA:)`).
+    public static let updateBranch = HostingCapabilities(rawValue: 1 << 20)
+    /// The merged box's Delete branch and Restore branch (`headBranchExists`, `deleteHeadBranch`,
+    /// `restoreHeadBranch`).
+    public static let deleteHeadBranch = HostingCapabilities(rawValue: 1 << 21)
+    /// The issue page's pinned comment, type, fields, projects and relationships (`issueExtras(_:in:)`).
+    public static let issueExtras = HostingCapabilities(rawValue: 1 << 22)
+    /// The pull request page's projects and Development (the issues it closes) (`pullRequestExtras(_:in:)`).
+    public static let pullRequestExtras = HostingCapabilities(rawValue: 1 << 23)
+    /// Pull request tasks: list, create, resolve or reopen, delete (`tasks(of:in:)`, `createTask`, `setTask`,
+    /// `deleteTask`).
+    public static let tasks = HostingCapabilities(rawValue: 1 << 24)
+    /// The merge checks of a pull request (`mergeChecks(of:in:)`).
+    public static let mergeChecks = HostingCapabilities(rawValue: 1 << 25)
+    /// The reports on a commit (`reports(commit:in:)`).
+    public static let reports = HostingCapabilities(rawValue: 1 << 26)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -422,6 +443,31 @@ public protocol HostingProvider: Sendable {
     /// The role on the repository of each of `userIDs` who is a member, by user id, in the host's words ("Owner",
     /// "Developer"), the badge GitLab's page puts on their comments; a user who is not a member is left out.
     func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String]
+    /// Merges the base into pull request `number`'s head on the host while the head is still `expectedHeadSHA`
+    /// (`HostingError.headChanged` otherwise); returns once the host accepted it (only with `updateBranch`).
+    func updateBranch(_ number: Int, in repo: HostedRepository, expectedHeadSHA: String) async throws
+    /// Whether branch `branch` of `repo` exists (only with `deleteHeadBranch`).
+    func headBranchExists(_ branch: String, in repo: HostedRepository) async throws -> Bool
+    /// Deletes branch `branch` of `repo` (only with `deleteHeadBranch`).
+    func deleteHeadBranch(_ branch: String, in repo: HostedRepository) async throws
+    /// Makes branch `branch` of `repo` again at `sha` (only with `deleteHeadBranch`).
+    func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws
+    /// Issue `number`'s pinned comment, type, fields, projects and relationships (only with `issueExtras`).
+    func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras
+    /// Pull request `number`'s projects and the issues it closes (only with `pullRequestExtras`).
+    func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras
+    /// Pull request `number`'s tasks, oldest first (only with `tasks`).
+    func tasks(of number: Int, in repo: HostedRepository) async throws -> [HostedTask]
+    /// Adds a task with `body` to pull request `number` (only with `tasks`).
+    func createTask(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedTask
+    /// Marks task `id` done (`resolved`) or not (only with `tasks`).
+    func setTask(_ id: Int, resolved: Bool, on number: Int, in repo: HostedRepository) async throws
+    /// Deletes task `id` (only with `tasks`).
+    func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws
+    /// Pull request `number`'s merge checks (only with `mergeChecks`).
+    func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck]
+    /// The reports on commit `sha` (only with `reports`).
+    func reports(commit sha: String, in repo: HostedRepository) async throws -> [HostedReport]
 }
 
 extension HostingProvider {
@@ -526,4 +572,59 @@ extension HostingProvider {
 
     /// A host without member roles knows none.
     public func memberRoles(of userIDs: [Int], in repo: HostedRepository) async throws -> [Int: String] { [:] }
+
+    /// A host without the `updateBranch` capability refuses it unsent.
+    public func updateBranch(_ number: Int, in repo: HostedRepository, expectedHeadSHA: String) async throws {
+        throw HostingError.validationFailed(message: "this host cannot update the branch")
+    }
+
+    /// A host without the `deleteHeadBranch` capability refuses these unsent.
+    public func headBranchExists(_ branch: String, in repo: HostedRepository) async throws -> Bool {
+        throw HostingError.validationFailed(message: "this host cannot read branches")
+    }
+
+    public func deleteHeadBranch(_ branch: String, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot delete the branch")
+    }
+
+    public func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot restore the branch")
+    }
+
+    /// A host without the `issueExtras` capability has none.
+    public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
+        throw HostingError.validationFailed(message: "this host has no issue extras")
+    }
+
+    /// A host without the `tasks` capability refuses these unsent.
+    public func tasks(of number: Int, in repo: HostedRepository) async throws -> [HostedTask] {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    public func createTask(on number: Int, in repo: HostedRepository, body: String) async throws -> HostedTask {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    public func setTask(_ id: Int, resolved: Bool, on number: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    public func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    /// A host without the `reports` capability has none.
+    public func reports(commit sha: String, in repo: HostedRepository) async throws -> [HostedReport] {
+        throw HostingError.validationFailed(message: "this host has no reports")
+    }
+
+    /// A host without the `mergeChecks` capability has none.
+    public func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck] {
+        throw HostingError.validationFailed(message: "this host has no merge checks")
+    }
+
+    /// A host without the `pullRequestExtras` capability has none.
+    public func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras {
+        throw HostingError.validationFailed(message: "this host has no pull request extras")
+    }
 }

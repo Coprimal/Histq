@@ -29,6 +29,8 @@ struct SectionCard<Content: View, Accessory: View>: View {
     let tone: Color?
     /// The title's font; nil: the text size's semibold body.
     let titleFont: Font?
+    /// The header row's height: taller for an accessory that is a full-size control (the Comments card's tabs).
+    let headerHeight: CGFloat
     @ViewBuilder let content: () -> Content
     @ViewBuilder let accessory: () -> Accessory
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -40,7 +42,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
     init(
         _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
         isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding, tone: Color? = nil,
-        titleFont: Font? = nil,
+        titleFont: Font? = nil, headerHeight: CGFloat = SectionCardMetrics.headerHeight,
         @ViewBuilder content: @escaping () -> Content, @ViewBuilder accessory: @escaping () -> Accessory
     ) {
         self.title = title
@@ -51,6 +53,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
         self.contentPadding = contentPadding
         self.tone = tone
         self.titleFont = titleFont
+        self.headerHeight = headerHeight
         self.content = content
         self.accessory = accessory
     }
@@ -132,7 +135,7 @@ struct SectionCard<Content: View, Accessory: View>: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, (isExpanded == nil ? SettingsMetrics.cardPadding : 10) + extraPadding)
-        .frame(height: SectionCardMetrics.headerHeight)
+        .frame(height: headerHeight)
         .padding(headerInsets(bodyShown: expanded ?? true))
         .contentShape(Rectangle())
     }
