@@ -1639,6 +1639,7 @@ struct PRDetailView: View {
         let detail = session.pullDetail
         VStack(spacing: SectionCardMetrics.spacing) {
             PRHeaderCard(session: session, number: number)
+            PRTabsRow(session: session)
             if let error = detail.actionError {
                 PRActionErrorCard(message: error) { detail.actionError = nil }
                     .onAppear { UITiming.content("pr \(number) action-error shown") }
@@ -1670,8 +1671,8 @@ struct PRDetailView: View {
     }
 }
 
-/// Back, the title and number, the state pill and Open on GitHub; the "wants to merge" line; the tabs with their
-/// counts. The title comes from the PRs tab's row until the pull request is in.
+/// Back, the title and number, the state pill and Open on GitHub; the "wants to merge" line (the tabs are
+/// `PRTabsRow`'s, under it). The title comes from the PRs tab's row until the pull request is in.
 private struct PRHeaderCard: View {
     let session: RepoSession
     let number: Int
@@ -1781,17 +1782,6 @@ private struct PRHeaderCard: View {
                 // it comes.
                 .frame(height: narrow ? 46 : 20, alignment: .topLeading)
                 .padding(.leading, 8)
-                // At its own width, scrolled sideways in a panel narrower than it, never wider than the card.
-                ViewThatFits(in: .horizontal) {
-                    tabs(value, layout)
-                    ScrollView(.horizontal) {
-                        tabs(value, layout)
-                    }
-                    .scrollIndicators(.never)
-                }
-                .padding(.leading, 4)
-                // A little more room above the tabs than between the rows over them, on every host (user, 2026-11-24).
-                .padding(.top, 4)
             }
             // The card's width, never its rows': a row wider than the card neither widens it nor hides the switch.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -1980,11 +1970,32 @@ private struct PRHeaderCard: View {
             subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
         }
     }
+}
+
+/// The tabs with their counts, on their own row under the header card: only their track, standing on the panel as
+/// a card does, a card's gap from the cards around it (user, 2026-11-24).
+private struct PRTabsRow: View {
+    let session: RepoSession
+
+    var body: some View {
+        let value = session.pullDetail.state.value
+        // The kind's, not the load's: the same value, known before the load, so the tabs never change title.
+        let layout = PRPageLayout.for(session.github.kind)
+        // At its own width, scrolled sideways in a panel narrower than it.
+        ViewThatFits(in: .horizontal) {
+            tabs(value, layout)
+            ScrollView(.horizontal) {
+                tabs(value, layout)
+            }
+            .scrollIndicators(.never)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+    }
 
     private func tabs(_ value: PullRequestDetail?, _ layout: PRPageLayout) -> some View {
         @Bindable var detail = session.pullDetail
         return CapsuleTabs(selection: $detail.tab, tabs: layout.tabs, title: { tab in tabTitle(tab, value, layout) },
-                           compact: true, raisedTrack: true)
+                           compact: true, cardTrack: true)
             .fixedSize()
     }
 
