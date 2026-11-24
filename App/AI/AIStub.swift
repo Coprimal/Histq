@@ -15,6 +15,7 @@
 // `-HistqAI <hook>[,apply][,cancel][,regenerate][,undo]` (stub runs only) clicks one AI button once it can run:
 // `generate` (commit box), `explain-wip` (commit box), `explain` (commit details), `improve-message` (a reword row
 // of the rebase sheet, with `-HistqRewordRow <n>`; its prompt is a commit message's, so it gets the same answer),
+// `squash-message` (the squash sheet's Generate, with `-HistqOpenSquash`; a commit message's answer too),
 // `pr-describe` (Create Pull Request form, Generate; a title line, a blank line and a short Markdown body),
 // `pr-resolve-ai` (a conflicting pull request's merge box, Resolve with AI: merges the base into the head branch, then
 // starts Suggest All in the first conflicted file that both sides still have, UU or AA),

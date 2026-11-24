@@ -21,6 +21,9 @@ enum AIJob: Equatable, Sendable {
     /// A reword row's Improve (interactive rebase): `message` is the row's message at the click; Apply (the row's
     /// `onApply`) replaces it with the whole answer.
     case improveMessage(hash: String, message: String)
+    /// The squash sheet's Generate: `messages` are the squashed commits' full messages, oldest first; Apply (the
+    /// sheet's `onApply`) fills its summary and description.
+    case squashMessage(messages: [String])
     case resolution(AIResolutionTarget)
     /// The Create Pull Request form's Generate: `base` and `head` are the remote-tracking refs GitHub compares (full
     /// refs); the template is read at `templateRef` (the default branch's, else the base), where `kind`'s host looks
@@ -33,6 +36,7 @@ enum AIJob: Equatable, Sendable {
         case .explainCommit(let hash, _): "Explain commit \(hash.prefix(7))"
         case .explainWorkingChanges: "Explain the uncommitted changes"
         case .improveMessage: "Improve message"
+        case .squashMessage(let messages): "Message of \(messages.count) squashed commits"
         case .resolution(let target): "Resolve conflict \(target.conflict + 1) of \(target.path)"
         case .pullRequest(_, _, _, let kind): "\(kind.pullRequestNoun) description"
         }
@@ -45,6 +49,7 @@ enum AIJob: Equatable, Sendable {
         case .explainCommit: "explain-commit"
         case .explainWorkingChanges: "explain-wip"
         case .improveMessage: "improve-message"
+        case .squashMessage: "squash-message"
         case .resolution: "resolution"
         case .pullRequest: "pull-request"
         }
@@ -53,7 +58,7 @@ enum AIJob: Equatable, Sendable {
     /// Whether the answer can be applied (an explanation is only shown and copied).
     var canApply: Bool {
         switch self {
-        case .commitMessage, .resolution, .improveMessage, .pullRequest: true
+        case .commitMessage, .resolution, .improveMessage, .squashMessage, .pullRequest: true
         case .explainCommit, .explainWorkingChanges: false
         }
     }
@@ -280,6 +285,7 @@ struct AIResultSheet: View {
             summaryOnly ? "Fill the commit box's summary" : "Fill the commit box's summary and description"
         case .resolution: "Replace this conflict's Output (not saved until you click Save)"
         case .improveMessage: "Replace the row's new message"
+        case .squashMessage: "Fill the squash's summary and description"
         case .pullRequest(_, _, _, let kind): "Fill the \(kind.pullRequestNoun.lowercased())'s title and description"
         default: ""
         }
@@ -347,7 +353,7 @@ struct AIResultSheet: View {
         case .explainCommit, .explainWorkingChanges:
             Text(Self.markdown(text))
                 .textSelection(.enabled)
-        case .commitMessage, .improveMessage, .pullRequest:
+        case .commitMessage, .improveMessage, .squashMessage, .pullRequest:
             Text(verbatim: text)
                 .textSelection(.enabled)
         }
@@ -402,7 +408,7 @@ struct AIResultSheet: View {
             } else {
                 onClose()
             }
-        case .explainCommit, .explainWorkingChanges, .improveMessage, .pullRequest:
+        case .explainCommit, .explainWorkingChanges, .improveMessage, .squashMessage, .pullRequest:
             break
         }
     }
@@ -440,7 +446,7 @@ struct AIResultSheet: View {
                 AIStub.log("resolution conflict \(target.conflict) region \(target.region) manual-regions \(manual) "
                     + "changed-regions \(changed) unresolved \(before.unresolvedCount)->\(after.unresolvedCount) "
                     + "line-break \(AIStub.quoted(target.lineBreak)) output \(AIStub.quoted(after.outputLines[region.output].joined()))")
-            case .explainCommit, .explainWorkingChanges, .improveMessage, .pullRequest:
+            case .explainCommit, .explainWorkingChanges, .improveMessage, .squashMessage, .pullRequest:
                 break
             }
         case .failed(let message):

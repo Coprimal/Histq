@@ -2,7 +2,8 @@
 // and every later one of the current branch, oldest first (the order git replays them): each row has an action
 // (pick, reword, edit, squash, fixup, drop), rows drag to a new order, and a reword row edits its message in place.
 // "Squash N Commits…" on a run of selected commits shows the message the squashed commit gets, editable as the commit
-// box's two fields: the summary (the oldest commit's subject) and the description (every commit's message, oldest first). The sheet opens in the click's frame with skeleton rows; `RebaseTodo` reads the commits off the
+// box's two fields: the summary ("Squash N commits with detailed messages in body") and the description (every
+// commit's message, oldest first); Generate asks the AI for both from the commits' messages. The sheet opens in the click's frame with skeleton rows; `RebaseTodo` reads the commits off the
 // main actor. Start runs the todo as a write (`RepoSession.startRebase`): a conflict or an `edit` stop leaves the rebase
 // in progress, and the operation banner and the conflict editor take over.
 import HistqCore
@@ -158,6 +159,11 @@ struct InteractiveRebaseView: View {
                         }
                     }
             }
+            .padding(.top, SectionCardMetrics.accessoryGap)
+        } accessory: {
+            AIHookButton(title: "Generate", systemImage: "sparkles",
+                         help: "Write the squash's message from the squashed commits' messages with AI",
+                         seam: "squash-message", small: true, action: generate)
         }
     }
 
@@ -211,7 +217,7 @@ struct InteractiveRebaseView: View {
             items = loaded.items
             if isSquash {
                 let squashed = items.prefix(squashCount)
-                summary = squashed.first?.subject ?? ""
+                summary = "Squash \(squashCount) commits with detailed messages in body"
                 description = Self.squashDescription(squashed)
             }
             if !isSquash, let reword = request.reword, let index = items.firstIndex(where: { $0.commit == reword }) {
@@ -239,6 +245,19 @@ struct InteractiveRebaseView: View {
         session.startAI(.improveMessage(hash: item.commit, message: message)) { answer in
             guard let index = items.firstIndex(where: { $0.id == id }), items[index].action == .reword else { return }
             items[index].newMessage = answer
+        }
+    }
+
+    /// The Message card's Generate: the AI card opens over the sheet with the squashed commits' original messages
+    /// (never the fields, whose default summary would only be echoed); Apply puts the answer's first line in the
+    /// summary and the rest, after the blank line, in the description.
+    private func generate() {
+        session.startAI(.squashMessage(messages: items.prefix(squashCount).map(\.message))) { answer in
+            var lines = answer.split(separator: "\n", omittingEmptySubsequences: false).map {
+                $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            }
+            summary = lines.isEmpty ? "" : lines.removeFirst().trimmingCharacters(in: .whitespaces)
+            description = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 

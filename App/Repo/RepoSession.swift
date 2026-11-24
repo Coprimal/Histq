@@ -4474,7 +4474,7 @@ final class RepoSession: Identifiable {
         let url = url
         let languages = Self.aiLanguages()
         let instructionsKey: PrefKey = switch job {
-        case .commitMessage, .improveMessage: .aiCommitInstructions
+        case .commitMessage, .improveMessage, .squashMessage: .aiCommitInstructions
         case .explainCommit, .explainWorkingChanges: .aiExplainInstructions
         case .resolution: .aiConflictInstructions
         case .pullRequest: .aiPullRequestInstructions
@@ -4563,6 +4563,10 @@ final class RepoSession: Identifiable {
             return AIPrompts.commitMessage(
                 stagedDiff: try aiFiltered(diff, worktree: worktree), language: languages.commit, summaryOnly: false,
                 instructions: instructions, currentMessage: message)
+        case .squashMessage(let messages):
+            // The messages only (no diff, so nothing for `.aiignore` to leave out).
+            return AIPrompts.squashMessage(commitMessages: messages, language: languages.commit,
+                                           instructions: instructions)
         case .explainWorkingChanges:
             // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
             let env = try await backend.readEnvironment(cwd: cwd)

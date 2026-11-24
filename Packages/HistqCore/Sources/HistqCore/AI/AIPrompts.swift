@@ -314,6 +314,31 @@ public enum AIPrompts {
             data: data, languageRule: languageRule(language, answer: "the title and description"), token: token)
     }
 
+    /// The message of a squash: the full messages of the commits being squashed, oldest first (each cut to 2,000
+    /// characters, the whole block to 4 × `maxMessageCharacters`), as for a pull request; no diff is sent. The answer
+    /// is a commit message: a summary line, a blank line and a body. `instructions` are the commit messages' own
+    /// (Settings › AI); blank adds nothing.
+    public static func squashMessage(
+        commitMessages: [String], language: AIResponseLanguage = .english, instructions: String = "",
+        token: () -> String = randomToken
+    ) -> AIPrompt {
+        let messages = commitMessages.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2_000)) }
+            .filter { !$0.isEmpty }
+        let task = """
+            Write a git commit message for one commit that replaces the commits whose messages are in the data \
+            block below (oldest first).
+            - First line: a summary of the combined change in the imperative mood, at most 72 characters.
+            - Then a blank line and a short body wrapped at 72 columns that covers every change the messages describe.
+            - Use only what the messages say; never invent changes, issue numbers or links.
+            - Plain text only: no Markdown headings, no code fences, no quotes around the message.
+            """ + instructionsRule(instructions, for: "their commit messages")
+        return make(
+            kind: .commitMessage, task: task, request: "Write the commit message of the squashed commit.",
+            data: [("commit messages",
+                    String(messages.joined(separator: "\n\n---\n\n").prefix(maxMessageCharacters * 4)))],
+            languageRule: languageRule(language, answer: "the commit message"), token: token)
+    }
+
     private static let explainRules = """
         Explain the change in the data blocks below to a developer who is about to review it.
         - Start with one sentence that sums it up, then a few short bullet points: what changed, why it seems to \
