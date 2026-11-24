@@ -1770,6 +1770,8 @@ private struct PRHeaderCard: View {
                     .scrollIndicators(.never)
                 }
                 .padding(.leading, 4)
+                // A little more room above the tabs than between the rows over them, on every host (user, 2026-11-24).
+                .padding(.top, 4)
             }
             // The card's width, never its rows': a row wider than the card neither widens it nor hides the switch.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
