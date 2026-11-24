@@ -4516,7 +4516,7 @@ enum HostAvatars: Equatable {
     case drawn
     /// The account's GitHub avatar whatever the commit avatars' mode (user, 2026-11-17): github.com.
     case github
-    /// The API's `avatar_url` of the account, in the real avatar mode only, from the repository's `host`
+    /// The API's `avatar_url` of the account whatever the commit avatars' mode, from the repository's `host`
     /// (`AvatarStore.hostedAvatar`): GitLab and Bitbucket Cloud.
     case gitlab(host: String)
 
@@ -4531,7 +4531,7 @@ enum HostAvatars: Equatable {
         case .github: return repository.host == "github.com" ? .github : .drawn
         case .gitlab: return .gitlab(host: repository.host)
         // `AvatarStore.hostedIdentity` takes Bitbucket's `links.avatar.href` on bitbucket.org, Atlassian's avatar
-        // service or Gravatar, in the real avatar mode only (as GitLab's).
+        // service or Gravatar, whatever the commit avatars' mode (as GitLab's).
         case .bitbucketCloud: return .gitlab(host: repository.host)
         }
     }

@@ -1426,7 +1426,8 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                 if discussion.resolvedBy != nil || discussion.resolvedAt != nil {
                     let user = discussion.resolvedBy.flatMap { by in
                         Int(Self.lastSegment(by.id)).map { id in
-                            HostedUser(id: id, login: by.username, avatarURL: by.avatarUrl, htmlURL: by.webUrl,
+                            HostedUser(id: id, login: by.username, avatarURL: absoluteAvatarURL(by.avatarUrl),
+                                       htmlURL: by.webUrl,
                                        name: by.name, reviewerID: String(id))
                         }
                     }
@@ -1449,6 +1450,14 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         }
         memo.globalIDs.withLock { $0.merge(globalIDs) { _, new in new } }
         return (notes, resolved, resolution, itemAwards ?? [])
+    }
+
+    /// GraphQL's `avatarUrl` is a path on the host for an uploaded avatar (`/uploads/-/system/user/avatar/...`,
+    /// the relative URL root included) and absolute for Gravatar: the path becomes `https://<host><path>`, as REST's
+    /// `avatar_url` gives it.
+    private func absoluteAvatarURL(_ url: String?) -> String? {
+        guard let url, url.hasPrefix("/"), !url.hasPrefix("//") else { return url }
+        return "https://\(host)" + url
     }
 
     /// The text after a global id's last `/` (`gid://gitlab/DiffNote/12` is `12`).

@@ -12,7 +12,7 @@
 // repository on github.com, gitlab.com or bitbucket.org (the sidebar's remote rows and the graph's remote badges), the
 // same way; only the owner's name leaves the Mac, to its own host. `gitHubAvatar(login:id:pixels:)` loads, in every
 // mode too, the GitHub avatar of an account of github.com (the pull request and issue pages); only its id or login
-// leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in real mode only, the avatar a GitLab API
+// leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in every mode too, the avatar a GitLab API
 // gives for an account (`avatar_url`), over https and only from the repository's own host (gitlab.com also from
 // gravatar.com); a remote on a GitLab Self-Managed host the profiles have an account for shows GitLab's bundled logo.
 import AppKit
@@ -301,12 +301,13 @@ final class AvatarStore {
     // MARK: Hosted accounts
 
     /// The avatar at `url`, the `avatar_url` a GitLab API gave for the account `name` of a repository on `host`, at
-    /// `pixels`: only in real mode, and only when `hostedIdentity(url:host:)` accepts the URL. Never blocks: the
+    /// `pixels`, whatever the commit avatars' mode (as `gitHubAvatar`), only when `hostedIdentity(url:host:)` accepts
+    /// the URL. Never blocks: the
     /// mode's drawn avatar of `name` stands in until it is loaded, and stays when it cannot be; its arrival posts
     /// `didChange` with that identity. Only the request for the image leaves the Mac, to that host (or gravatar.com).
     func hostedAvatar(url: String?, host: String, name: String, pixels: Int) -> NSImage? {
         let fallback = avatar(email: "", name: name, pixels: pixels)
-        guard mode == .real, let identity = Self.hostedIdentity(url: url, host: host) else { return fallback }
+        guard let identity = Self.hostedIdentity(url: url, host: host) else { return fallback }
         let key = "\(identity)|\(pixels)"
         if let image = images.object(forKey: key as NSString) { return image }
         if !missing.contains(key) { load(identity: identity, key: key, pixels: pixels) }
