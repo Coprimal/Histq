@@ -165,7 +165,8 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
 
     /// With `participants`, and `bodyHTML` from Bitbucket's rendered description.
     public func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequest {
-        let pr: BitbucketPullRequest = try await get(url(try pullRequestPath(number, in: repo)))
+        let path = try pullRequestPath(number, in: repo)
+        let pr: BitbucketPullRequest = try await get(url(path, query: Self.strategyFields))
         return pullRequest(pr, in: repo)
     }
 
@@ -484,7 +485,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     ) async throws {
         guard sha.count >= 7, sha.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { throw HostingError.headChanged }
         let path = try pullRequestPath(number, in: repo)
-        let current: BitbucketPullRequest = try await get(url(path))
+        let current: BitbucketPullRequest = try await get(url(path, query: Self.strategyFields))
         let head = (current.source?.commit?.hash ?? "").lowercased()
         let expected = sha.lowercased()
         guard head.count >= 7, head.hasPrefix(expected) || expected.hasPrefix(head) else {
@@ -859,6 +860,12 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         ("merge_commit", .merge), ("squash", .squash), ("fast_forward", .fastForward),
         ("squash_fast_forward", .squashFastForward), ("rebase_fast_forward", .rebaseFastForward),
         ("rebase_merge", .rebase),
+    ]
+
+    /// The destination branch's strategies and default, which a pull request's response leaves out unless asked for
+    /// (the rest of the response stays as it is).
+    private static let strategyFields = [
+        ("fields", "+destination.branch.merge_strategies,+destination.branch.default_merge_strategy"),
     ]
 
     /// The strategy id of `method`; nil for Data Center's `fastForwardIfPossible`.

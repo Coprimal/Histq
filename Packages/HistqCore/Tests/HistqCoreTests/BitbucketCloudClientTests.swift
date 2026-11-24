@@ -294,10 +294,13 @@ struct BitbucketCloudClientTests {
         let pull = try await Self.client(read).pullRequest(5, in: Self.repo)
         #expect(pull.allowedMergeMethods == allowed)
         #expect(pull.defaultMergeMethod == chosen)
+        let fields = ["+destination.branch.merge_strategies,+destination.branch.default_merge_strategy"]
+        #expect(Self.query(read.requests[0], "fields") == fields, "the strategies are left out unless asked for")
 
         let stub = Self.mergeServer()
         try await Self.client(stub).merge(
             5, in: Self.repo, method: .merge, sha: "abc123def456", options: HostedMergeOptions(deleteSourceBranch: true))
+        #expect(Self.query(stub.requests[0], "fields") == fields)
         let body = Self.json(stub.requests[1])
         #expect(body["merge_strategy"] as? String == "merge_commit" && body["close_source_branch"] as? Bool == true)
         let sent = stub.requests.count
@@ -480,9 +483,8 @@ struct BitbucketCloudClientTests {
         await #expect(throws: HostingError.validationFailed(message: "Bitbucket queued the merge: reload to see when it is done")) {
             try await Self.client(stub).merge(5, in: Self.repo, method: .merge, sha: "abc123def456")
         }
-        #expect(stub.requests.map { $0.url?.absoluteString } == [
-            "https://api.bitbucket.org" + Self.prPath, "https://api.bitbucket.org" + Self.prPath + "/merge",
-        ])
+        #expect(stub.requests.map { $0.url?.path(percentEncoded: true) } == [Self.prPath, Self.prPath + "/merge"])
+        #expect(stub.requests.allSatisfy { $0.url?.host() == "api.bitbucket.org" })
     }
 
     // MARK: - Mapping
