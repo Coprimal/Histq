@@ -377,9 +377,11 @@ enum ModalFooterMetrics {
 /// A small text button of a card row: a capsule of the input color, lighter on hover, darker while pressed.
 /// `formRow`: as tall as a compact `CapsuleTabs` item, for a form row; in a modal's footer, the footer's size
 /// (`ModalFooterMetrics`). `prominent`: `Palette.primaryFill` with white text (`PrimaryLabelShadow`).
-/// `compact`: a smaller monospaced badge (a commit's parents).
+/// `compact`: a smaller monospaced badge (a commit's parents). `circle`: with `formRow`, a round icon-only button as
+/// tall as the text ones beside it (a header's reload).
 struct RowTextButtonStyle: ButtonStyle {
     var formRow = false
+    var circle = false
     var prominent = false
     /// With `prominent`: the red `Palette.destructiveFill` (a confirmation's Delete), not the blue.
     var destructive = false
@@ -388,13 +390,14 @@ struct RowTextButtonStyle: ButtonStyle {
     var fill: Color?
 
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration, formRow: formRow, prominent: prominent || fill != nil,
+        Highlight(configuration: configuration, formRow: formRow, circle: circle, prominent: prominent || fill != nil,
                   destructive: destructive, compact: compact, fill: fill)
     }
 
     private struct Highlight: View {
         let configuration: ButtonStyleConfiguration
         let formRow: Bool
+        let circle: Bool
         let prominent: Bool
         let destructive: Bool
         let compact: Bool
@@ -410,9 +413,9 @@ struct RowTextButtonStyle: ButtonStyle {
                       : compact ? .caption.monospaced().weight(.medium) : .callout.weight(.medium))
                 .foregroundStyle(prominent ? AnyShapeStyle(Palette.onAccent) : AnyShapeStyle(.primary))
                 .modifier(PrimaryLabelShadow(isOn: prominent))
-                .padding(.horizontal, footer ? ModalFooterMetrics.buttonPadding : formRow ? 12 : compact ? 6 : 8)
+                .padding(.horizontal, circle ? 0 : footer ? ModalFooterMetrics.buttonPadding : formRow ? 12 : compact ? 6 : 8)
                 .padding(.vertical, formRow ? 0 : compact ? 2 : 4)
-                .frame(height: footer ? ModalFooterMetrics.buttonHeight : formRow ? 24 : nil)
+                .frame(width: circle ? 24 : nil, height: footer ? ModalFooterMetrics.buttonHeight : formRow ? 24 : nil)
                 .background(
                     Capsule()
                         .fill(prominent
