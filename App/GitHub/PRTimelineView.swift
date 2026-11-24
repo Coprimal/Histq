@@ -23,7 +23,7 @@ enum PRTimeline {
 
 /// The Conversation's page and what its slots show.
 struct PRTimelineHTML: Sendable {
-    let html: String
+    var html: String
     /// The account drawn on each avatar slot, by slot id; a deleted account (ghost) has none.
     let avatars: [String: HostedUser]
     /// The comments and reviews it shows, the description aside.
@@ -45,6 +45,19 @@ struct PRTimelineHTML: Sendable {
     /// The description has its reaction row (`creact-d`): the item's own reactions
     /// (`PRPageLayout.descriptionReactions`).
     var descriptionReactions = false
+
+    /// The description's page and the comments' page (`PRPageLayout.commentsCard`), split at the page's
+    /// `PRTimeline.commentsMarker`; nil for a page without it. Each keeps every map: a page draws only its own slots.
+    var split: (description: PRTimelineHTML, comments: PRTimelineHTML)? {
+        // The last one: the page's own marker comes after the description's body, so a body that carried one could
+        // not move its tail to the comments.
+        guard let range = html.range(of: PRTimeline.commentsMarker, options: .backwards) else { return nil }
+        var description = self
+        description.html = String(html[..<range.lowerBound])
+        var comments = self
+        comments.html = String(html[range.upperBound...])
+        return (description, comments)
+    }
 }
 
 /// What a host's Activity page adds to the timeline (`PRPageLayout.activity`): its history entries (nil when their
@@ -448,6 +461,8 @@ extension PRGeneralThreadModel {
 extension PRTimeline {
     /// How many levels replies indent at most; deeper ones stay at the last level.
     private nonisolated static let maxReplyDepth = 4
+    /// Between the description and the comments on a page with `commentFilter` (`PRTimelineHTML.split`).
+    nonisolated static let commentsMarker = "<!--histq-comments-->"
 
     /// The page: the description (`author` did `action` on `date`, its `html` or else its `markdown`), then the
     /// comments, reviews and threads of no shown review oldest first (`HostedTimelineOrder`), each review with its
@@ -464,8 +479,9 @@ extension PRTimeline {
         author: HostedUser?, action: String, date: Date?, html: String?, markdown: String?,
         comments: [HostedComment], reviews: [HostedReview] = [], threads: Loadable<PRThreads> = .idle,
         expanded: [Int: Bool] = [:], general options: PRGeneralOptions = PRGeneralOptions(), now: Date,
-        activity: PRActivityPage? = nil, roles pageRoles: [Int: String]? = nil, descriptionReactions: Bool = false,
-        events pageEvents: [HostedTimelineEvent]? = nil
+        activity: PRActivityPage? = nil, roles pageRoles: [Int: String]? = nil, authorOnly: Bool = false,
+        descriptionReactions: Bool = false, events pageEvents: [HostedTimelineEvent]? = nil,
+        commentFilter: PRCommentFilter? = nil, viewerID: Int? = nil, pin: HostedIssueExtras.Pin? = nil
     ) -> PRTimelineHTML {
         let dates = PRPageDates(now: now)
         // The badges' roles: the Activity's (GitLab), else the page's (GitHub's `author_association`); nil draws none.
@@ -528,6 +544,11 @@ extension PRTimeline {
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             let who = named ? Self.named(user) : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
+            if commentFilter != nil, slot == "avatar-d" {
+                // The description's own card (`commentsCard`): "Created by <login> <time>", no avatar.
+                return "<span>Created by</span> \(who)"
+                    + whenHTML.replacingOccurrences(of: "class=\"date\"", with: "class=\"date near\"")
+            }
             let start = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)\(whenHTML)"
             if !named, activity == nil, roles != nil {
                 // GitHub's header (a page without an Activity): the date by the words, the badges and buttons at the
@@ -543,12 +564,16 @@ extension PRTimeline {
             return tools.isEmpty ? start : start + "<span class=\"tools\">\(tools)</span>"
         }
 
-        /// A comment header's badges (`roles`): "Author" when `user` wrote the item, then their role.
+        /// A comment header's badges (`roles`): "Author" when `user` wrote the item, then their role (not with
+        /// "Author" where `authorOnly`, GitHub's).
         func badges(_ user: HostedUser?) -> String {
             guard let roles, let user else { return "" }
             var html = ""
-            if let author, author.id == user.id { html += "<span class=\"role\">Author</span>" }
-            if let role = roles[user.id] { html += "<span class=\"role\">\(HostedHTML.escape(role))</span>" }
+            let isAuthor = author.map { $0.id == user.id } ?? false
+            if isAuthor { html += "<span class=\"role\">Author</span>" }
+            if !(isAuthor && authorOnly), let role = roles[user.id] {
+                html += "<span class=\"role\">\(HostedHTML.escape(role))</span>"
+            }
             return html
         }
 
@@ -608,9 +633,10 @@ extension PRTimeline {
         /// Resolved capsule and an id the patch collapses it by. `menu`: a general comment's menu and editor target;
         /// `reactions`: its add-reaction button's and reaction row's.
         func item(
-            _ slot: String, _ user: HostedUser?, _ action: String, badge: String? = nil, date: Date?, body: String?,
-            emptyText: String? = nil, threads: [HostedReviewThread] = [], replies: String = "",
-            generalThread: PRGeneralThread? = nil, menu: PRCommentTarget? = nil, reactions: PRReactionTarget? = nil
+            _ slot: String, _ user: HostedUser?, _ action: String, badge: String? = nil, extra: String = "",
+            date: Date?, body: String?, emptyText: String? = nil, threads: [HostedReviewThread] = [],
+            replies: String = "", generalThread: PRGeneralThread? = nil, menu: PRCommentTarget? = nil,
+            reactions: PRReactionTarget? = nil, pinned: Bool = false
         ) -> String {
             let content: String
             if let body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -623,10 +649,10 @@ extension PRTimeline {
             let list = threads.isEmpty ? "" : "<div class=\"threads\">\(threads.map(thread).joined())</div>"
             let edit = editSlot(menu) + reactionSlot(reactions)
             guard let generalThread else {
-                let header = head(slot, user, action: action, badge: badge, date: date, menu: menu,
+                let header = head(slot, user, action: action, badge: badge, extra: extra, date: date, menu: menu,
                                   reactions: reactions)
-                return "<section class=\"item\"><div class=\"head\">\(header)</div>\(content)\(edit)\(replies)"
-                    + "\(list)</section>"
+                return "<section class=\"item\(pinned ? " pinned-item" : "")\"><div class=\"head\">\(header)</div>"
+                    + "\(content)\(edit)\(replies)\(list)</section>"
             }
             // The root's id is an integer: it goes in unescaped (a String id would need `HostedHTML.escape`).
             let id = generalThread.root.id
@@ -764,6 +790,10 @@ extension PRTimeline {
                 + "<div class=\"body\">\(text)</div> \(when(event.createdAt))</div></div>"
         }
 
+        /// "· Pinned by <login>" in the pinned comment's header (GitHub's).
+        let pinnedTag = pin.map { pin in
+            " <span class=\"pin-tag\">· Pinned by <b>\(HostedHTML.escape(pin.pinnedBy?.login ?? "ghost"))</b></span>"
+        } ?? ""
         let replyOnly = threads.value?.replyOnlyReviewIDs ?? []
         // Only a commented one: an approval or a change request submitted with a reply and no text still shows.
         let shown = reviews.filter { review in
@@ -777,6 +807,11 @@ extension PRTimeline {
         var entries = HostedTimelineOrder.entries(
             comments: comments, reviews: activity?.events == nil ? shown : [], threads: threads.value?.all ?? [],
             events: activity?.events ?? pageEvents ?? [])
+        if let commentFilter, commentFilter != .all {
+            entries = entries.compactMap { entry in
+                Self.filtered(entry, commentFilter, viewerID: viewerID)
+            }
+        }
         if let activity {
             let filter = activity.view.filter
             if filter != PRActivity.all {
@@ -808,16 +843,17 @@ extension PRTimeline {
                     generalThread = PRGeneralThread(root: root, resolvable: options.resolve && root.resolvable == true)
                     general[root.id] = generalThread
                 }
+                let isPinned = pin?.commentID == root.id
                 return item(
-                    "avatar-i\(root.id)", root.user, "commented", date: root.createdAt,
-                    body: bodyHTML(root.bodyHTML, root.body), replies: replies(list.map { reply in
+                    "avatar-i\(root.id)", root.user, "commented", extra: isPinned ? pinnedTag : "",
+                    date: root.createdAt, body: bodyHTML(root.bodyHTML, root.body), replies: replies(list.map { reply in
                         (reply.depth, commentHTML("avatar-i\(reply.comment.id)", reply.comment.user,
                                                   date: reply.comment.createdAt,
                                                   body: bodyHTML(reply.comment.bodyHTML, reply.comment.body),
                                                   menu: target(Self.target(reply.comment, options)),
                                                   reactions: Self.reactions(reply.comment, options)))
                     }), generalThread: generalThread, menu: target(Self.target(root, options)),
-                    reactions: Self.reactions(root, options))
+                    reactions: Self.reactions(root, options), pinned: isPinned)
             case .review(let review, let threads):
                 let (action, badge): (String, String?) = switch review.state {
                 case "APPROVED": ("approved these changes", "approved")
@@ -835,6 +871,10 @@ extension PRTimeline {
         var description = item(
             "avatar-d", author, action, date: date, body: bodyHTML(html, markdown),
             emptyText: "No description provided.")
+        if commentFilter != nil, description.hasPrefix("<section class=\"item\"") {
+            // Alone in its card: no gap under it.
+            description = "<section class=\"item desc\"" + String(description.dropFirst("<section class=\"item\"".count))
+        }
         if descriptionReactions {
             // The item's own reactions under the description, always a row (picker and chips), so adding the first
             // or removing the last never changes the page's HTML; its views read the detail's reactions.
@@ -842,11 +882,27 @@ extension PRTimeline {
                 of: "</section>", with: "<div class=\"slot-react\" data-slot=\"creact-d\"></div></section>",
                 options: .backwards, range: description.range(of: "</section>", options: .backwards))
         }
+        if let pin, let pinned = comments.first(where: { $0.id == pin.commentID }) {
+            // The pinned comment again at the end of the description's card, on its own background (GitHub's):
+            // "Pinned by X", its author and time, its text.
+            let by = HostedHTML.escape(pin.pinnedBy?.login ?? "ghost")
+            let author = "<b>\(HostedHTML.escape(pinned.user?.login ?? "ghost"))</b>"
+            let body = bodyHTML(pinned.bodyHTML, pinned.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
+            let block = "<div class=\"pinned\"><div class=\"pin-by\">📌 Pinned by <b>\(by)</b></div>"
+                + "<div class=\"pin-head\">\(author) \(when(pinned.createdAt))</div>\(body)</div>"
+            if let range = description.range(of: "</section>", options: .backwards) {
+                description.replaceSubrange(range, with: block + "</section>")
+            }
+        }
         var end = ""
         if case .failed(let message) = threads {
             end += "<p class=\"empty\">The inline review comments did not load: \(HostedHTML.escape(message))</p>"
         }
         var list = sorted.joined()
+        if let commentFilter, sorted.isEmpty {
+            list = "<p class=\"empty\">"
+                + (commentFilter == .all ? "No comments yet." : "Nothing to show with this filter.") + "</p>"
+        }
         if activity != nil {
             if sorted.isEmpty { list = "<p class=\"empty\">Nothing to show with this filter.</p>" }
             list = "<div class=\"rail\">\(list)</div>"
@@ -855,11 +911,39 @@ extension PRTimeline {
             list = "<div class=\"rail\">\(list)</div>"
         }
         return PRTimelineHTML(
-            html: description + list + end, avatars: avatars,
+            html: description + (commentFilter == nil ? "" : commentsMarker) + list + end, avatars: avatars,
             count: comments.count + (activity?.events == nil ? shown.count : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
             collapsesReplies: folds, headerEdit: activity?.headerEdit ?? false,
             descriptionReactions: descriptionReactions)
+    }
+
+    /// `entry` as the "Comments" card's `filter` shows it, nil when it hides it: Unresolved keeps the review
+    /// conversations not resolved (a review with only those of its threads, a thread of no shown review); Mine keeps
+    /// what `viewerID` wrote (a comment or one of its replies, a review, a thread with one of their comments). Neither
+    /// keeps history entries; without a viewer, Mine keeps nothing.
+    private nonisolated static func filtered(
+        _ entry: HostedTimelineOrder.Entry, _ filter: PRCommentFilter, viewerID: Int?
+    ) -> HostedTimelineOrder.Entry? {
+        func mine(_ user: HostedUser?) -> Bool { viewerID != nil && user?.id == viewerID }
+        switch (filter, entry) {
+        case (.all, _): return entry
+        case (_, .event): return nil
+        case (.unresolved, .comment): return nil
+        // A thread whose state did not load (`PRThreads.statesFailed`) counts as not resolved: Unresolved then shows
+        // every thread, as the merge box's Comments column says the resolution is unknown.
+        case (.unresolved, .review(let review, let threads)):
+            let open = threads.filter { $0.state?.isResolved != true }
+            return open.isEmpty ? nil : .review(review, threads: open)
+        case (.unresolved, .thread(let thread)):
+            return thread.state?.isResolved == true ? nil : entry
+        case (.mine, .comment(let root, let replies)):
+            return mine(root.user) || replies.contains { mine($0.comment.user) } ? entry : nil
+        case (.mine, .review(let review, _)):
+            return mine(review.user) ? entry : nil
+        case (.mine, .thread(let thread)):
+            return thread.comments.contains { mine($0.user) } ? entry : nil
+        }
     }
 
     /// A general comment's reaction row target, when `options` offer reactions.

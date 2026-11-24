@@ -454,6 +454,7 @@ enum HostedHTML {
             let header = rgba(NSColor(Palette.tabFill))
             let code = rgba(NSColor(Palette.inputSurface))
             let link = rgba(Palette.linkText)
+            let pinnedFill = rgba(Palette.linkText.withAlphaComponent(0.08))
             let added = rgba(Palette.diffAddedSign)
             let removed = rgba(Palette.diffRemovedSign)
             let addedFill = rgba(Palette.diffAddedFill)
@@ -476,6 +477,12 @@ enum HostedHTML {
                 .body table { display: block; overflow-x: auto; } .body td, .body th { overflow-wrap: break-word; }
                 img { max-width: 100%; } hr { border: 0; border-top: 1px solid \(border); }
                 .item { border: 1px solid \(border); border-radius: 10px; margin: 0 0 10px; overflow: hidden; }
+                .item.desc { margin-bottom: 0; }
+                .pinned { border-top: 1px solid \(border); background: \(pinnedFill); padding: 8px 10px 10px; }
+                .pin-by { color: \(link); font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+                .pin-by b { font-weight: 600; } .pin-head { color: \(secondary); font-size: 12px; margin-bottom: 4px; }
+                .pin-head b { color: \(text); } .item.pinned-item { border-color: \(link); }
+                .pin-tag { color: \(secondary); } .pin-tag b { font-weight: 500; } .pinned > .body { padding: 0; }
                 .head { background: \(header); padding: 6px 10px; color: \(secondary); display: flex; gap: 6px;
                   align-items: baseline; flex-wrap: wrap; }
                 .head b { color: \(text); font-weight: 600; } .head .date { margin-left: auto; }
@@ -527,8 +534,8 @@ enum HostedHTML {
                 .gl .date + .slot-add, .gl .date + .slot-menu { margin-left: auto; }
                 .head .date.near, .comment-head .date.near { margin-left: 0; }
                 .tools { margin-left: auto; display: flex; gap: 6px; align-items: center; align-self: center; flex: none; }
-                .role { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 9px; background: \(code);
-                  color: \(text); font-weight: 500; }
+                .role { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 9px; background: none;
+                  border: 1px solid \(secondary); color: \(text); font-weight: 500; }
                 .resolved-line { background: \(header); color: \(secondary); font-size: 12px; padding: 0 10px 6px 36px; }
                 .resolved-line b { color: \(text); font-weight: 600; }
                 .snippet { padding: 8px 10px 0; } .snippet .thread { margin-top: 0; }

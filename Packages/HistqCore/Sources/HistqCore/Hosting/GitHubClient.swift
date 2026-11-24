@@ -126,7 +126,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
-            .timelineEvents, .updateBranch, .deleteHeadBranch,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras,
         ]
     }
 
@@ -793,6 +793,181 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             throw HostingError.validationFailed(message: "not a branch name: \(branch)")
         }
         return ["heads"] + segments
+    }
+
+    // MARK: - Issue extras
+
+    /// The issue page's extras from GraphQL: the pinned comment, the type, the fields (the type's pinned ones, else
+    /// the repository's, each with its value, then any other field with a value), the relationships, and in a second
+    /// query the projects (their titles need the `read:project` scope: without it, only how many).
+    public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
+        _ = try repoPath(repo)
+        let variables = ItemVariables(owner: repo.owner, name: repo.name, number: number)
+        // Beside the main query, so a token without `read:project` (two reads) adds no round trip after it.
+        async let projects = projects(of: number, in: repo)
+        let answer: IssueExtrasAnswer = try await graphQL(Self.issueExtrasQuery, variables: variables)
+        guard let issue = answer.repository?.issue else { throw HostingError.notFound }
+        var extras = HostedIssueExtras(
+            type: issue.issueType?.name, subIssues: issue.subIssuesSummary?.total ?? 0,
+            subIssuesCompleted: issue.subIssuesSummary?.completed ?? 0,
+            blockedBy: issue.issueDependenciesSummary?.blockedBy ?? 0,
+            blocking: issue.issueDependenciesSummary?.blocking ?? 0)
+        if let parent = issue.parent { extras.parent = .init(number: parent.number, title: parent.title) }
+        if let pinned = issue.pinnedIssueComment, let id = pinned.issueComment?.databaseId {
+            let by = pinned.pinnedBy.map {
+                HostedUser(id: $0.databaseId ?? 0, login: $0.login, avatarURL: $0.avatarUrl)
+            }
+            extras.pin = .init(commentID: id, pinnedBy: by,
+                               pinnedAt: pinned.pinnedAt.flatMap { ISO8601DateFormatter().date(from: $0) })
+        }
+        let values = (issue.issueFieldValues?.nodes ?? []).compactMap { $0 }
+        let pinned = (issue.issueType?.pinnedFields?.compactMap(\.name)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (answer.repository?.pinnedIssueFields?.nodes ?? []).compactMap { $0?.name }
+        func value(of name: String) -> String? { values.first { $0.field?.name == name }?.text }
+        extras.fields = pinned.map { .init(name: $0, value: value(of: $0)) }
+            + values.compactMap { node in
+                guard let name = node.field?.name, !pinned.contains(name) else { return nil }
+                return .init(name: name, value: node.text)
+            }
+        (extras.projects, extras.projectCount) = await projects
+        return extras
+    }
+
+    /// The issue's projects: their titles, or without the `read:project` scope only how many (nil, the count); nil,
+    /// nil when neither could be read.
+    private func projects(of number: Int, in repo: HostedRepository) async -> ([String]?, Int?) {
+        struct Answer: Decodable {
+            struct Repository: Decodable {
+                struct Issue: Decodable {
+                    struct Items: Decodable {
+                        struct Node: Decodable {
+                            struct Project: Decodable { var title: String }
+                            var project: Project?
+                        }
+                        var totalCount: Int
+                        var nodes: [Node?]?
+                    }
+                    var projectItems: Items?
+                }
+                var issue: Issue?
+            }
+            var repository: Repository?
+        }
+        let variables = ItemVariables(owner: repo.owner, name: repo.name, number: number)
+        let titled = """
+            query IssueProjects($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                issue(number: $number) { projectItems(first: 20) { totalCount nodes { project { title } } } }
+              }
+            }
+            """
+        if let answer: Answer = try? await graphQL(titled, variables: variables),
+           let items = answer.repository?.issue?.projectItems {
+            return ((items.nodes ?? []).compactMap { $0?.project?.title }, items.totalCount)
+        }
+        let counted = """
+            query IssueProjectCount($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) { issue(number: $number) { projectItems { totalCount } } }
+            }
+            """
+        let answer: Answer? = try? await graphQL(counted, variables: variables)
+        return (nil, answer?.repository?.issue?.projectItems?.totalCount)
+    }
+
+    private struct ItemVariables: Encodable {
+        var owner, name: String
+        var number: Int
+    }
+
+    private static let issueExtrasQuery = """
+        query IssueExtras($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pinnedIssueFields(first: 20) { nodes { ...FieldName } }
+            issue(number: $number) {
+              issueType { name pinnedFields { ...FieldName } }
+              pinnedIssueComment {
+                pinnedAt
+                pinnedBy { login avatarUrl ... on User { databaseId } }
+                issueComment { databaseId }
+              }
+              parent { number title }
+              subIssuesSummary { total completed }
+              issueDependenciesSummary { blockedBy blocking }
+              issueFieldValues(first: 20) {
+                nodes {
+                  ... on IssueFieldDateValue { value field { ...FieldName } }
+                  ... on IssueFieldTextValue { value field { ...FieldName } }
+                  ... on IssueFieldNumberValue { numberValue: value field { ...FieldName } }
+                  ... on IssueFieldSingleSelectValue { value field { ...FieldName } }
+                  ... on IssueFieldMultiSelectValue { value field { ...FieldName } }
+                }
+              }
+            }
+          }
+        }
+        fragment FieldName on IssueFields {
+          ... on IssueFieldDate { name } ... on IssueFieldText { name } ... on IssueFieldNumber { name }
+          ... on IssueFieldSingleSelect { name } ... on IssueFieldMultiSelect { name }
+        }
+        """
+
+    private struct IssueExtrasAnswer: Decodable {
+        struct FieldName: Decodable { var name: String? }
+        struct Repository: Decodable {
+            struct Fields: Decodable { var nodes: [FieldName?]? }
+            struct Issue: Decodable {
+                struct IssueType: Decodable {
+                    var name: String
+                    var pinnedFields: [FieldName]?
+                }
+                struct Pinned: Decodable {
+                    struct Actor: Decodable {
+                        var login: String
+                        var avatarUrl: String?
+                        var databaseId: Int?
+                    }
+                    struct Comment: Decodable { var databaseId: Int? }
+                    var pinnedAt: String?
+                    var pinnedBy: Actor?
+                    var issueComment: Comment?
+                }
+                struct Parent: Decodable {
+                    var number: Int
+                    var title: String
+                }
+                struct SubIssues: Decodable {
+                    var total: Int?
+                    var completed: Int?
+                }
+                struct Dependencies: Decodable {
+                    var blockedBy: Int?
+                    var blocking: Int?
+                }
+                struct Values: Decodable {
+                    struct Node: Decodable {
+                        var value: String?
+                        var numberValue: Double?
+                        var field: FieldName?
+                        /// The value as the page shows it: a number without a trailing ".0".
+                        var text: String? {
+                            value ?? numberValue.map {
+                                $0.rounded() == $0 && abs($0) < 1e15 ? String(Int64($0)) : String($0)
+                            }
+                        }
+                    }
+                    var nodes: [Node?]?
+                }
+                var issueType: IssueType?
+                var pinnedIssueComment: Pinned?
+                var parent: Parent?
+                var subIssuesSummary: SubIssues?
+                var issueDependenciesSummary: Dependencies?
+                var issueFieldValues: Values?
+            }
+            var pinnedIssueFields: Fields?
+            var issue: Issue?
+        }
+        var repository: Repository?
     }
 
     // MARK: - Reactions on the item itself

@@ -665,6 +665,27 @@ enum GitHubStub {
         if query.contains("ItemReactions") {
             return itemReactions((request?["variables"] as? [String: Any])?["number"] as? Int ?? 0)
         }
+        // The issue page's extras (`-HistqStubPageSeed YES`: issue #2 with comment 820 pinned, a type, a field set and
+        // one unset, two sub-issues); the projects' titles refused as without `read:project`, their count read.
+        if query.contains("IssueExtras") {
+            guard GitHubStub.seedsPage else {
+                return (200, #"{"data": {"repository": {"pinnedIssueFields": {"nodes": []}, "issue": {}}}}"#)
+            }
+            return (200, #"{"data": {"repository": {"pinnedIssueFields": {"nodes": [{"name": "Priority"}]}, "#
+                + #""issue": {"issueType": {"name": "Bug", "pinnedFields": [{"name": "Priority"}, {"name": "Effort"}]}, "#
+                + #""pinnedIssueComment": {"pinnedAt": "2026-11-13T09:00:00Z", "#
+                + #""pinnedBy": {"login": "stub", "avatarUrl": null, "databaseId": 1}, "#
+                + #""issueComment": {"databaseId": 820}}, "parent": null, "#
+                + #""subIssuesSummary": {"total": 2, "completed": 1}, "#
+                + #""issueDependenciesSummary": {"blockedBy": 0, "blocking": 1}, "#
+                + #""issueFieldValues": {"nodes": [{"value": "High", "field": {"name": "Priority"}}]}}}}}"#)
+        }
+        if query.contains("IssueProjects") {
+            return (200, #"{"errors": [{"type": "INSUFFICIENT_SCOPES", "message": "needs read:project"}]}"#)
+        }
+        if query.contains("IssueProjectCount") {
+            return (200, #"{"data": {"repository": {"issue": {"projectItems": {"totalCount": 1}}}}}"#)
+        }
         // Neither name contains the other.
         if query.contains("AddReaction") || query.contains("RemoveReaction") {
             return setReaction(request?["variables"] as? [String: Any], added: query.contains("AddReaction"))

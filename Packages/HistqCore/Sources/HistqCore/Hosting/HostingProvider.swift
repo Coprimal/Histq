@@ -179,6 +179,8 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     /// The merged box's Delete branch and Restore branch (`headBranchExists`, `deleteHeadBranch`,
     /// `restoreHeadBranch`).
     public static let deleteHeadBranch = HostingCapabilities(rawValue: 1 << 21)
+    /// The issue page's pinned comment, type, fields, projects and relationships (`issueExtras(_:in:)`).
+    public static let issueExtras = HostingCapabilities(rawValue: 1 << 22)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -437,6 +439,8 @@ public protocol HostingProvider: Sendable {
     func deleteHeadBranch(_ branch: String, in repo: HostedRepository) async throws
     /// Makes branch `branch` of `repo` again at `sha` (only with `deleteHeadBranch`).
     func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws
+    /// Issue `number`'s pinned comment, type, fields, projects and relationships (only with `issueExtras`).
+    func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras
 }
 
 extension HostingProvider {
@@ -558,5 +562,10 @@ extension HostingProvider {
 
     public func restoreHeadBranch(_ branch: String, sha: String, in repo: HostedRepository) async throws {
         throw HostingError.validationFailed(message: "this host cannot restore the branch")
+    }
+
+    /// A host without the `issueExtras` capability has none.
+    public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
+        throw HostingError.validationFailed(message: "this host has no issue extras")
     }
 }

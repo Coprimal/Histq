@@ -111,7 +111,7 @@ struct GitHubClientTests {
         #expect(client.capabilities == [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
-            .timelineEvents, .updateBranch, .deleteHeadBranch,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras,
         ])
         #expect(client.reactionKinds == ["+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"])
         await #expect(throws: HostingError.self) {
@@ -676,6 +676,56 @@ struct GitHubClientTests {
         }
         #expect(stub.requests.count == sent, "an unknown kind is refused unsent")
         await #expect(throws: HostingError.self) { _ = try await client.itemReactions(of: .issue(7), in: repo) }
+    }
+
+    @Test("issue extras: one query for the pin, type, fields and relationships (the type's pinned fields first, then other valued ones; numbers without .0), then the projects' titles, or only their count when the token lacks read:project")
+    func issueExtras() async throws {
+        let stub = StubServer { request in
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+            let query = body?["query"] as? String ?? ""
+            if query.contains("IssueExtras") {
+                return .init(body: """
+                    {"data": {"repository": {"pinnedIssueFields": {"nodes": [{"name": "Priority"}]},
+                     "issue": {"issueType": {"name": "Bug", "pinnedFields": [{"name": "Priority"}, {"name": "Effort"}]},
+                      "pinnedIssueComment": {"pinnedAt": "2026-11-24T02:50:32Z",
+                       "pinnedBy": {"login": "octo", "avatarUrl": "https://avatars.githubusercontent.com/u/7", "databaseId": 7},
+                       "issueComment": {"databaseId": 9001}},
+                      "parent": {"number": 3, "title": "Epic"}, "subIssuesSummary": {"total": 4, "completed": 1},
+                      "issueDependenciesSummary": {"blockedBy": 2, "blocking": 0},
+                      "issueFieldValues": {"nodes": [{"value": "High", "field": {"name": "Priority"}},
+                       {"numberValue": 3.0, "field": {"name": "Points"}}, {}]}}}}}
+                    """)
+            }
+            if query.contains("IssueProjects") {
+                return .init(body: #"{"errors": [{"type": "INSUFFICIENT_SCOPES", "message": "needs read:project"}]}"#)
+            }
+            return .init(body: #"{"data": {"repository": {"issue": {"projectItems": {"totalCount": 2}}}}}"#)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let extras = try await client.issueExtras(4, in: repo)
+
+        #expect(client.capabilities.contains(.issueExtras))
+        #expect(extras.pin == .init(commentID: 9001,
+                                    pinnedBy: HostedUser(id: 7, login: "octo",
+                                                         avatarURL: "https://avatars.githubusercontent.com/u/7"),
+                                    pinnedAt: ISO8601DateFormatter().date(from: "2026-11-24T02:50:32Z")))
+        #expect(extras.type == "Bug")
+        #expect(extras.fields == [.init(name: "Priority", value: "High"), .init(name: "Effort"),
+                                  .init(name: "Points", value: "3")])
+        #expect(extras.parent == .init(number: 3, title: "Epic"))
+        #expect(extras.subIssues == 4 && extras.subIssuesCompleted == 1)
+        #expect(extras.blockedBy == 2 && extras.blocking == 0)
+        #expect(extras.projects == nil && extras.projectCount == 2, "titles refused: the count alone")
+        let bodies = try stub.requests.map { request in
+            try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+        }
+        #expect(bodies.count == 3)
+        for body in bodies {
+            #expect(NSDictionary(dictionary: body["variables"] as? [String: Any] ?? [:])
+                .isEqual(to: ["owner": "octo", "name": "hello", "number": 4]), "values only in variables")
+        }
     }
 
     @Test("history entries from the REST timeline: comments and reviews left out, consecutive commits by one author grouped with links, GitHub's words escaped, a merged pull request's closed left out, an unknown or malformed event left out")

@@ -39,6 +39,9 @@ struct IssueDetail: Sendable {
     var labelChoices: [HostedLabel] = []
     /// The commenters' member roles by user id (`PullRequestDetail.memberRoles`).
     var memberRoles: [Int: String]? = nil
+    /// The pinned comment, type, fields, projects and relationships (`PRPageLayout.githubSidebar`, the provider's
+    /// `issueExtras`); nil otherwise or when their read failed (no pinned block, no such side cards).
+    var extras: HostedIssueExtras? = nil
 
     var isOpen: Bool { issue.state == "open" }
 }
@@ -129,6 +132,8 @@ final class IssueDetailModel {
     /// The Activity's filter and sort (`PRPageLayout.issueActivity`), as `PullRequestDetailModel.activityView`: the
     /// filter is the issue's, the sort the app's.
     private(set) var activityView = PRActivityView()
+    /// A reload asked from the header's button (`reload`) is running: its icon spins until the detail is in.
+    private(set) var reloading = false
     #if DEBUG
     var launchDelete: (target: PRCommentTarget, confirm: Bool)?
     #endif
@@ -183,10 +188,19 @@ final class IssueDetailModel {
     }
     #endif
 
+    /// The header's reload: the shown detail loaded again from the host, kept on screen (with its drafts, open
+    /// editors and tab) until the new one is in; a failure shows above the cards.
+    func reload(github: HostingStore) {
+        guard let number, state.value != nil else { return }
+        load(number, github: github, quiet: true)
+        reloading = true
+    }
+
     /// Loads issue `number`; `quiet` keeps the shown detail until the new one is in (after an action).
     func load(_ number: Int, github: HostingStore, quiet: Bool = false) {
         task?.cancel()
         generation &+= 1
+        reloading = false
         if number != self.number {
             // Another issue: its own box. The same one opened again keeps its draft.
             draft = ""
@@ -213,6 +227,7 @@ final class IssueDetailModel {
             let result = await Self.fetch(api.client, api.repository, number: number, loadID: generation,
                                           general: general, now: now, activityView: activityView)
             guard let self, generation == self.generation, !Task.isCancelled else { return }
+            reloading = false
             switch result {
             case .success(let detail):
                 state = .loaded(detail)
@@ -372,7 +387,7 @@ final class IssueDetailModel {
         timeline(detail.issue, comments: comments, general: general, now: detail.now, layout: detail.layout,
                  roles: detail.memberRoles, events: detail.events,
                  activity: activityPage(detail.layout, events: detail.events, view: activity,
-                                        roles: detail.memberRoles))
+                                        roles: detail.memberRoles), pin: detail.extras?.pin)
     }
 
     /// The Activity of an issue page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
@@ -388,13 +403,15 @@ final class IssueDetailModel {
     /// The page of `issue`: its body, then `comments`, dated against `now`, with the layout's Activity (`activity`).
     private nonisolated static func timeline(
         _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions, now: Date, layout: PRPageLayout,
-        roles: [Int: String]?, events: [HostedTimelineEvent]?, activity: PRActivityPage?
+        roles: [Int: String]?, events: [HostedTimelineEvent]?, activity: PRActivityPage?,
+        pin: HostedIssueExtras.Pin?
     ) -> PRTimelineHTML {
         PRTimeline.page(
             author: issue.user, action: layout.descriptionVerb ?? "opened this issue", date: issue.createdAt,
             html: issue.bodyHTML, markdown: issue.body, comments: comments, general: general, now: now,
-            activity: activity, roles: layout.roleBadges ? roles ?? [:] : nil,
-            descriptionReactions: layout.descriptionReactions, events: layout.timelineEvents ? events : nil)
+            activity: activity, roles: layout.roleBadges ? roles ?? [:] : nil, authorOnly: layout.authorBadgeOnly,
+            descriptionReactions: layout.descriptionReactions, events: layout.timelineEvents ? events : nil,
+            pin: pin)
     }
 
     /// The Activity's filter or sort changed (`view`): it shows at once in its controls, the page is rebuilt off the
@@ -449,6 +466,11 @@ final class IssueDetailModel {
         let asksLabels = layout.sidebar && client.capabilities.contains(.labels)
         async let labelChoices: Loadable<[HostedLabel]> = !asksLabels ? .idle
             : await part(client.kind) { try await client.labels(in: repository) }
+        // The pinned comment and the side cards' type, fields, projects and relationships; a failure only leaves
+        // them out.
+        let asksExtras = layout.githubSidebar && client.capabilities.contains(.issueExtras)
+        async let extras: Loadable<HostedIssueExtras> = !asksExtras ? .idle
+            : await part(client.kind) { try await client.issueExtras(number, in: repository) }
         do {
             let (issue, comments) = try await (issue, comments)
             let viewer = await viewer
@@ -463,9 +485,11 @@ final class IssueDetailModel {
                     .merging(roles ?? [:]) { _, member in member }
             }
             let events = await events.value
+            let extras = await extras.value
             let timeline = timeline(issue, comments: comments, general: general, now: now, layout: layout,
                                     roles: roles, events: events,
-                                    activity: activityPage(layout, events: events, view: activityView, roles: roles))
+                                    activity: activityPage(layout, events: events, view: activityView, roles: roles),
+                                    pin: extras?.pin)
             let reactions = await itemReactions.value
             var shown = issue
             if let reactions { shown.reactions = reactions }
@@ -473,7 +497,8 @@ final class IssueDetailModel {
                                         commentCount: comments.count, timeline: timeline, comments: comments,
                                         viewer: viewer, reactionKinds: reactions == nil ? [] : barKinds,
                                         events: events, candidates: await candidates.value ?? [],
-                                        labelChoices: await labelChoices.value ?? [], memberRoles: roles))
+                                        labelChoices: await labelChoices.value ?? [], memberRoles: roles,
+                                        extras: extras))
         } catch {
             return .failure(error)
         }
@@ -605,6 +630,9 @@ private struct IssueHeaderCard: View {
                     if let value {
                         if value.layout.issueSentence == .openedThisIssue {
                             IssueStatePill(isOpen: value.isOpen)
+                        }
+                        PRReloadButton(reloading: session.issueDetail.reloading, noun: "issue") { [session] in
+                            session.issueDetail.reload(github: session.github)
                         }
                         Button {
                             GitHubLinks.open(session.github.webURL(.issue(value.issue.number)))
@@ -920,8 +948,9 @@ private struct IssueSideColumn: View {
             }
         }
         if detail.layout.githubSidebar {
-            // GitHub's issue sidebar after Labels: Milestone and Participants (Projects, Relationships, Development
-            // and Notifications stay on GitHub).
+            // GitHub's issue sidebar after Labels, in its order: Type, Fields, Projects (where `issueExtras` read
+            // them), Milestone, Relationships, Participants (Development and Notifications stay on GitHub).
+            if let extras = detail.extras { typeFieldsProjects(extras) }
             SectionCard("Milestone", systemImage: "flag") {
                 if let milestone = detail.issue.milestone {
                     Text(milestone.title)
@@ -932,6 +961,7 @@ private struct IssueSideColumn: View {
                     PRSideEmpty(text: "No milestone")
                 }
             }
+            if let extras = detail.extras { relationships(extras) }
             let participants = HostSidebar.participants(
                 [detail.issue.user] + (detail.issue.assignees ?? []) + detail.comments.map(\.user))
             SectionCard("Participants", systemImage: "person.3", count: participants.count) {
@@ -946,6 +976,79 @@ private struct IssueSideColumn: View {
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Text("Participants: " + participants.map(\.login).joined(separator: ", ")))
+            }
+        }
+    }
+
+    /// GitHub's Type, Fields and Projects cards: the type's name, each field with its value ("Not set" without
+    /// one), the projects' titles (only their count when the token may not read them, `read:project`).
+    @ViewBuilder private func typeFieldsProjects(_ extras: HostedIssueExtras) -> some View {
+        SectionCard("Type", systemImage: "circle.grid.2x2") {
+            if let type = extras.type {
+                Text(type).lineLimit(1).truncationMode(.tail).help(type)
+            } else {
+                PRSideEmpty(text: "No type")
+            }
+        }
+        if !extras.fields.isEmpty {
+            SectionCard("Fields", systemImage: "list.bullet.rectangle") {
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                    ForEach(extras.fields, id: \.name) { field in
+                        GridRow {
+                            Text(field.name)
+                                .font(.settingsCaption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Text(field.value ?? "Not set")
+                                .font(.settingsCaption)
+                                .foregroundStyle(field.value == nil ? .tertiary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .help(field.value ?? "")
+                        }
+                    }
+                }
+            }
+        }
+        SectionCard("Projects", systemImage: "tablecells", count: extras.projectCount ?? extras.projects?.count) {
+            if let projects = extras.projects {
+                if projects.isEmpty {
+                    PRSideEmpty(text: "No projects")
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(projects, id: \.self) { Text($0).lineLimit(1).truncationMode(.tail).help($0) }
+                    }
+                }
+            } else if let count = extras.projectCount {
+                PRSideEmpty(text: count == 0 ? "No projects"
+                            : "In \(count) \(count == 1 ? "project" : "projects") (names need the read:project "
+                                + "permission)")
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                PRSideEmpty(text: "Could not be read")
+            }
+        }
+    }
+
+    /// GitHub's Relationships card: the parent issue, the sub-issues done, and what blocks it or it blocks; "None
+    /// yet" without any.
+    private func relationships(_ extras: HostedIssueExtras) -> some View {
+        var lines: [String] = []
+        if let parent = extras.parent { lines.append("Parent: #\(parent.number) \(parent.title)") }
+        if extras.subIssues > 0 {
+            lines.append("Sub-issues: \(extras.subIssuesCompleted) of \(extras.subIssues) done")
+        }
+        if extras.blockedBy > 0 { lines.append("Blocked by \(extras.blockedBy)") }
+        if extras.blocking > 0 { lines.append("Blocking \(extras.blocking)") }
+        return SectionCard("Relationships", systemImage: "point.3.connected.trianglepath.dotted") {
+            if lines.isEmpty {
+                PRSideEmpty(text: "None yet")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(lines, id: \.self) {
+                        Text($0).font(.settingsCaption).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
     }

@@ -65,6 +65,15 @@ struct PRPageLayout: Sendable, Equatable {
     /// A thread's resolve button says "Resolve thread" / "Reopen thread" (GitLab's) instead of "Resolve conversation"
     /// / "Unresolve conversation".
     var threadWords = false
+    /// Files changed lists the files as a folder tree (single-child folders joined, `.github/workflows`) in a wider
+    /// column, instead of one row per file with its folder under its name (GitHub's).
+    var filesTree = false
+    /// A comment by the item's author has only the "Author" badge, not also their role (GitHub's); else both
+    /// (GitLab's "Author" and "Owner").
+    var authorBadgeOnly = false
+    /// The description in a card of its own ("Created by <login> <time>"), then a "Comments" card with the filter
+    /// (All / Unresolved / Mine, `PRCommentFilter`) and the comment box above the comments (GitHub's new page).
+    var commentsCard = false
 
     static let `default` = PRPageLayout(name: "default")
     static let gitlab = PRPageLayout(
@@ -74,10 +83,10 @@ struct PRPageLayout: Sendable, Equatable {
         issueActivity: .gitLabIssue, issueSentence: .created, sidebar: true, collapsesReplies: true,
         startThread: true, headerEdit: true, roleBadges: true, commitsByDay: true, threadWords: true)
     static let github = PRPageLayout(
-        name: "github", tabs: [.conversation, .commits, .checks, .files], mergeSentence: .stateFirst,
-        issueSentence: .openedStateFirst, roleBadges: true, commitsByDay: true, commitVerb: "committed",
-        descriptionReactions: true, descriptionVerb: "commented", timelineEvents: true, githubMergeBox: true,
-        githubSidebar: true)
+        name: "github", tabs: [.conversation, .commits, .checks, .files], tabTitles: [.conversation: "Overview"],
+        mergeSentence: .stateFirst, issueSentence: .openedStateFirst, roleBadges: true, commitsByDay: true,
+        commitVerb: "committed", descriptionReactions: true, descriptionVerb: "commented", timelineEvents: true,
+        githubMergeBox: true, githubSidebar: true, filesTree: true, authorBadgeOnly: true, commentsCard: true)
 
     func title(of tab: PRTab) -> String { tabTitles[tab] ?? tab.title }
 
@@ -138,6 +147,17 @@ struct PRActivity: Sendable, Equatable {
     static let gitLabIssue = PRActivity(
         title: "Activity", categories: ["Comments only", "History only"], comments: "Comments only",
         history: "History only")
+}
+
+/// The "Comments" card's filter (`PRPageLayout.commentsCard`, GitHub's): every comment, review and history entry;
+/// only the review conversations not resolved; or only what the viewer wrote. Kept in `PRActivityView.filter`, whose
+/// rebuilds it shares; any other value reads as `all`.
+enum PRCommentFilter: String, CaseIterable, Sendable {
+    case all = "All"
+    case unresolved = "Unresolved"
+    case mine = "Mine"
+
+    init(filter: String) { self = Self(rawValue: filter) ?? .all }
 }
 
 /// What the Activity shows now: the filter's choice (`PRActivity.all` or a category) and the order.

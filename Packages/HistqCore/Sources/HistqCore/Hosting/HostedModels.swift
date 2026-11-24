@@ -585,3 +585,74 @@ public struct HostedCheckRun: Codable, Sendable, Equatable, Identifiable {
         case completedAt = "completed_at"
     }
 }
+
+/// What GitHub's issue page shows beside the issue's JSON (`HostingProvider.issueExtras`): the pinned comment, the
+/// issue type, the custom fields, the projects and the relationships.
+public struct HostedIssueExtras: Sendable, Equatable {
+    /// The comment pinned on top of the issue: its REST id (`HostedComment.id`), who pinned it and when.
+    public struct Pin: Sendable, Equatable {
+        public var commentID: Int
+        public var pinnedBy: HostedUser?
+        public var pinnedAt: Date?
+
+        public init(commentID: Int, pinnedBy: HostedUser? = nil, pinnedAt: Date? = nil) {
+            self.commentID = commentID
+            self.pinnedBy = pinnedBy
+            self.pinnedAt = pinnedAt
+        }
+    }
+
+    /// A custom field shown on the issue: the repository's pinned ones, then any other with a value; `value` nil
+    /// when not set.
+    public struct Field: Sendable, Equatable {
+        public var name: String
+        public var value: String?
+
+        public init(name: String, value: String? = nil) {
+            self.name = name
+            self.value = value
+        }
+    }
+
+    public var pin: Pin?
+    /// The issue type's name ("Bug"); nil without one.
+    public var type: String?
+    public var fields: [Field]
+    /// The projects' titles; nil when the token may not read them (GitHub's `read:project` scope), `projectCount`
+    /// then says how many there are (nil when that could not be read either).
+    public var projects: [String]?
+    public var projectCount: Int?
+    /// The parent issue.
+    public var parent: Parent?
+    public var subIssues: Int
+    public var subIssuesCompleted: Int
+    public var blockedBy: Int
+    public var blocking: Int
+
+    public struct Parent: Sendable, Equatable {
+        public var number: Int
+        public var title: String
+
+        public init(number: Int, title: String) {
+            self.number = number
+            self.title = title
+        }
+    }
+
+    public init(
+        pin: Pin? = nil, type: String? = nil, fields: [Field] = [], projects: [String]? = [], projectCount: Int? = 0,
+        parent: Parent? = nil, subIssues: Int = 0, subIssuesCompleted: Int = 0, blockedBy: Int = 0, blocking: Int = 0
+    ) {
+        self.pin = pin
+        self.type = type
+        self.fields = fields
+        self.projects = projects
+        self.projectCount = projectCount
+        self.parent = parent
+        self.subIssues = subIssues
+        self.subIssuesCompleted = subIssuesCompleted
+        self.blockedBy = blockedBy
+        self.blocking = blocking
+    }
+}
+
