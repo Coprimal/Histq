@@ -1,6 +1,6 @@
 // A file's diff in panel2, in place of the graph (Esc or close returns to it): a controls card (Follow renames in a
-// file history, Diff / Split / Full file / Edit, Checkout This Version, Previous / Next Change, Ignore Whitespace, Wrap
-// Lines, close), then each part in its own card: one card per side of the change (a WIP file's Unstaged and Staged
+// file history, Diff / Split / Full file / Edit, File History and Blame, Checkout This Version, Previous / Next Change,
+// Ignore Whitespace, Wrap Lines, close), then each part in its own card: one card per side of the change (a WIP file's Unstaged and Staged
 // changes, a commit's changes), or a card that says why there are no lines (binary, too large, no change). The first
 // card's header is the file's row (its status, folder / name, +N −M). An image whose diff is binary shows its versions
 // before and after the change instead of lines. The diff loads off the main actor; until then the card's body is a skeleton.
@@ -352,21 +352,24 @@ struct ActionPanelRow: ViewModifier {
     /// An icon button's frame and glyph size.
     static let iconSize: CGFloat = 18
     static let iconFont: CGFloat = 12
+    /// False: the capsule hugs its buttons (the diff's History / Blame toggles) instead of filling the row.
+    var fills = true
 
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, (Self.height - Self.iconSize) / 2)
             .padding(.vertical, (Self.height - Self.rowHeight) / 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: fills ? .infinity : nil, alignment: .leading)
             .modifier(GlassCard(cornerRadius: Self.height / 2))
     }
 }
 
 /// The row above the open file's diff: the mode tabs in their own track (Diff / Split / Full file, and Edit for an
-/// editable file; none for a submodule or an image's versions), then the action panel (`ActionPanelRow`) with Follow
-/// renames (while a file history shows), Checkout This Version (a commit's file), then Previous / Next Change, Ignore
-/// Whitespace, Wrap Lines and close (Esc). As the panel narrows, Checkout This Version turns into an icon. File History and Blame are in the file's context menu and the
-/// command palette. `target` nil (a file history with no diff open yet): Follow renames and close, at the same height.
+/// editable file; none for a submodule or an image's versions), the File History and Blame toggles in a capsule of
+/// their own (a tracked file), Checkout This Version on its own (a commit's file), the action panel (`ActionPanelRow`)
+/// with Follow renames (while a file history shows), Previous / Next Change, Ignore Whitespace and Wrap Lines, then
+/// close (Esc) in its own round card (user 2026-11-24). As the row narrows, Checkout This Version turns into an icon.
+/// `target` nil (a file history with no diff open yet): Follow renames and close, at the same height.
 struct DiffControlsCard: View {
     let session: RepoSession
     let target: FileTarget?
@@ -378,30 +381,31 @@ struct DiffControlsCard: View {
     private static let buttonSpacing: CGFloat = 12
 
     var body: some View {
-        HStack(spacing: SectionCardMetrics.spacing) {
-            if let target, hasModes(target) {
-                FileModeTabs(session: session, target: target)
-                    .fixedSize()
-            }
-            ViewThatFits(in: .horizontal) {
-                row(checkoutAsIcon: false)
-                row(checkoutAsIcon: true)
-            }
-            .frame(height: ActionPanelRow.rowHeight)
-            .modifier(ActionPanelRow())
+        ViewThatFits(in: .horizontal) {
+            row(checkoutAsIcon: false)
+            row(checkoutAsIcon: true)
         }
     }
 
     private func row(checkoutAsIcon: Bool) -> some View {
-        HStack(spacing: Self.groupSpacing) {
-            followRenames
+        HStack(spacing: SectionCardMetrics.spacing) {
             if let target {
+                if hasModes(target) {
+                    FileModeTabs(session: session, target: target)
+                        .fixedSize()
+                }
+                toolToggles(target)
                 checkout(target, asIcon: checkoutAsIcon)
             }
-            Spacer(minLength: 0)
-            if target != nil {
-                viewControls
+            HStack(spacing: Self.groupSpacing) {
+                followRenames
+                Spacer(minLength: 0)
+                if target != nil {
+                    viewControls
+                }
             }
+            .frame(height: ActionPanelRow.rowHeight)
+            .modifier(ActionPanelRow())
             closeButton
         }
     }
@@ -429,13 +433,45 @@ struct DiffControlsCard: View {
         }
     }
 
-    /// Checkout This Version (a commit's file that the commit did not delete), as a button or an icon.
+    /// File History and Blame (a tracked file, not a submodule), toggles in their own capsule. History is on while the
+    /// diff shows a file history's commit; switching it off closes the history and keeps the diff. Blame replaces the
+    /// diff (its header's close comes back), so it is off here; disabled for a deleted file or an image.
+    @ViewBuilder private func toolToggles(_ target: FileTarget) -> some View {
+        let file = target.file
+        if file.kind != .untracked, !file.isSubmodule {
+            let rev = RepoSession.blameRev(of: target.source)
+            let historyOn = session.historyTool != nil
+            HStack(spacing: Self.buttonSpacing) {
+                Self.iconButton("clock.arrow.circlepath", help: historyOn ? "Close File History" : "File History",
+                                isOn: historyOn) {
+                    if historyOn {
+                        session.closeFileHistory()
+                    } else {
+                        session.selectTool(.fileHistory(path: file.path, rev: rev, follow: false))
+                    }
+                }
+                Self.iconButton("person.text.rectangle", help: "Blame", isOn: false) {
+                    session.selectTool(.blame(path: file.path, rev: rev))
+                }
+                .disabled(file.kind == .deleted || target.isImage)
+            }
+            .frame(height: ActionPanelRow.rowHeight)
+            .modifier(ActionPanelRow(fills: false))
+        }
+    }
+
+    /// Checkout This Version (a commit's file that the commit did not delete), on its own beside the action panel, as
+    /// a button or a round icon.
     @ViewBuilder private func checkout(_ target: FileTarget, asIcon: Bool) -> some View {
         if case .commit = target.source, target.file.kind != .deleted {
             if asIcon {
-                Self.iconButton("arrow.down.doc", help: "Checkout This Version") {
-                    session.checkoutVersion(of: target)
+                Button { session.checkoutVersion(of: target) } label: {
+                    Image(systemName: "arrow.down.doc")
+                        .font(.system(size: ActionPanelRow.iconFont, weight: .semibold))
                 }
+                .buttonStyle(RowTextButtonStyle(formRow: true, circle: true))
+                .help("Checkout This Version")
+                .accessibilityLabel("Checkout This Version")
             } else {
                 Button("Checkout This Version") { session.checkoutVersion(of: target) }
                     .buttonStyle(RowTextButtonStyle())
@@ -480,6 +516,9 @@ struct DiffControlsCard: View {
                 .frame(width: ActionPanelRow.iconSize, height: ActionPanelRow.iconSize)
         }
         .buttonStyle(RowIconButtonStyle())
+        // Its own round card, as tall as the action panel; the hover circle is concentric with it.
+        .padding((ActionPanelRow.height - ActionPanelRow.iconSize) / 2)
+        .modifier(GlassCard(cornerRadius: ActionPanelRow.height / 2))
         .keyboardShortcut(.cancelAction)
         .help(closesPane ? "Close the diff (Esc)"
             : closesHistory ? "Close the File History (Esc)" : "Back to the \(backName) (Esc)")

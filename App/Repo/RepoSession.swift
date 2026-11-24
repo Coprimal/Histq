@@ -3454,6 +3454,13 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// The diff's History toggle switched off: the file history the diff was opened from closes (panel 1 shows the
+    /// sidebar again), the diff stays.
+    func closeFileHistory() {
+        guard openFile != nil, case .fileHistory? = returnTool else { return }
+        returnTool = nil
+    }
+
     /// Shows the graph whatever panel2 shows (another graph row, ref, pull request or tool, a blame's or the reflog's
     /// close): a diff opened from a tool closes with it instead of going back to it.
     func closePanel2() {
@@ -3642,7 +3649,7 @@ final class RepoSession: Identifiable {
 
     /// The revision a file of `source` is blamed at: a commit's, a compare's head; nil (the working tree) for a WIP
     /// file or a compare with the working tree.
-    private static func blameRev(of source: FileTarget.Source) -> String? {
+    static func blameRev(of source: FileTarget.Source) -> String? {
         switch source {
         case .wip: nil
         case .commit(let hash): hash
