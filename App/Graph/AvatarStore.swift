@@ -39,9 +39,9 @@ final class AvatarStore {
     /// The authors' emojis by identity: a mirror of `PrefKey.authorEmojis`, read while drawing rows.
     private(set) var emojis: [String: String]
     /// Loaded real avatars, by `cacheKey`.
-    private let images = NSCache<NSString, NSImage>()
+    private let images = AvatarImages()
     /// Generated and initials avatars, by kind and identity: resolution-independent drawings.
-    private let drawn = NSCache<NSString, NSImage>()
+    private let drawn = AvatarImages()
     /// Keys whose real load ended without an image (404, offline, error): they keep the generated avatar this session.
     private var missing: Set<String> = []
     /// Keys being loaded: one request per email and size.
@@ -661,5 +661,24 @@ private final class HTTPSOnly: NSObject, URLSessionTaskDelegate, Sendable {
         newRequest request: URLRequest
     ) async -> URLRequest? {
         request.url?.scheme == "https" ? request : nil
+    }
+}
+
+/// The avatars' in-memory cache. Not an `NSCache`: under memory pressure ("warn", common with VMs running) an
+/// `NSCache` drops an image right after it is stored, so the redraw its arrival causes misses it, loads it again from
+/// disk and redraws again, endlessly (thousands of loads a second, the generated avatar on screen, every click
+/// late). Images stay until `limit` is reached, then the cache starts over: each avatar on screen loads once more,
+/// with no loop as long as fewer than `limit` are drawn at once.
+@MainActor
+private final class AvatarImages {
+    /// Avatars are small (tens of KB decoded at most): a few tens of MB at the limit.
+    private static let limit = 1_000
+    private var images: [NSString: NSImage] = [:]
+
+    func object(forKey key: NSString) -> NSImage? { images[key] }
+
+    func setObject(_ image: NSImage, forKey key: NSString) {
+        if images.count >= Self.limit, images[key] == nil { images.removeAll(keepingCapacity: true) }
+        images[key] = image
     }
 }

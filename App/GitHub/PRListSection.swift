@@ -163,7 +163,31 @@ private struct ListCard: View {
                                  isExpanded: isExpanded)
             }
         }
+        #if DEBUG
+        .task(id: state?.rows != nil) {
+            guard state?.rows != nil, AppState.launchFlag("-HistqToggleCard") == list.rawValue else { return }
+            await Self.debugToggle(isExpanded, list: list)
+        }
+        #endif
     }
+
+    #if DEBUG
+    /// DEBUG `-HistqToggleCard <list>` (`mine`, `reviewRequested`…): once the list has rows, collapses and expands
+    /// its card four times, 1.5 s apart, as a click on its header does, and logs each toggle's time to the next
+    /// main-queue turn (`card-toggle <list> <collapse|expand> <ms>`).
+    private static func debugToggle(_ isExpanded: Binding<Bool>, list: HostingStore.List) async {
+        for _ in 0..<4 {
+            guard (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
+            let start = DispatchTime.now().uptimeNanoseconds
+            let word = isExpanded.wrappedValue ? "collapse" : "expand"
+            withAnimation(Motion.toggle) { isExpanded.wrappedValue.toggle() }
+            DispatchQueue.main.async {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000
+                UITiming.probe("card-toggle", "\(list.rawValue) \(word) \(String(format: "%.1f", ms))")
+            }
+        }
+    }
+    #endif
 
     /// By its title or its number (`#12` or `12`; GitLab's merge requests `!12`).
     private func matches(_ row: HostedRow) -> Bool {
