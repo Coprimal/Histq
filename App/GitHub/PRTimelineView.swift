@@ -929,10 +929,11 @@ extension PRTimeline {
             end += "<p class=\"empty\">The inline review comments did not load: \(HostedHTML.escape(message))</p>"
         }
         var list = sorted.joined()
-        if activity?.layout.dayHeadings == true {
-            // A day's heading before its first entry, in the order shown ("Wednesday, November 19, 2025").
-            list = ""
-            var day: String?
+        let daySections = activity?.layout.dayHeadings == true && !sorted.isEmpty
+        if let activity, daySections {
+            // Bitbucket's days: each day's heading ("Wednesday, November 19, 2025") above its own rail, the newest day
+            // first, a day's entries oldest first so a new comment comes last (user, 2026-11-24).
+            var days: [(name: String?, items: [String])] = []
             for (entry, html) in zip(entries, sorted) {
                 let date: Date? = switch entry {
                 case .comment(let root, _): root.createdAt
@@ -941,12 +942,17 @@ extension PRTimeline {
                 case .review(let review, _): review.submittedAt
                 }
                 let name = date.map(Self.dayFormatter.string(from:))
-                if let name, name != day {
-                    list += "<div class=\"day\">\(HostedHTML.escape(name))</div>"
-                    day = name
+                if days.isEmpty || (name != nil && name != days[days.count - 1].name) {
+                    days.append((name, [html]))
+                } else {
+                    days[days.count - 1].items.append(html)
                 }
-                list += html
             }
+            let reversed = activity.layout.newestFirst ?? activity.view.newestFirst
+            list = days.map { day in
+                let heading = day.name.map { "<div class=\"day\">\(HostedHTML.escape($0))</div>" } ?? ""
+                return heading + "<div class=\"rail\">\((reversed ? day.items.reversed() : day.items).joined())</div>"
+            }.joined()
         }
         if splits, sorted.isEmpty, activity == nil {
             list = "<p class=\"empty\">"
@@ -955,7 +961,7 @@ extension PRTimeline {
         }
         if activity != nil {
             if sorted.isEmpty { list = "<p class=\"empty\">Nothing to show with this filter.</p>" }
-            list = "<div class=\"rail\">\(list)</div>"
+            if !daySections { list = "<div class=\"rail\">\(list)</div>" }
         } else if pageEvents?.isEmpty == false {
             // GitHub's Conversation: comments, reviews and history entries on one rail.
             list = "<div class=\"rail\">\(list)</div>"
