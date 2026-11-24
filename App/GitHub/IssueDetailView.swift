@@ -640,7 +640,7 @@ private struct IssueHeaderCard: View {
                             Image(systemName: "safari")
                                 .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(RowIconButtonStyle())
+                        .buttonStyle(RowTextButtonStyle(formRow: true, circle: true))
                         .help("Open on \(session.github.kind.name)")
                         .accessibilityLabel("Open on \(session.github.kind.name)")
                     } else {

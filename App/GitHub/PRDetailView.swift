@@ -1742,7 +1742,7 @@ private struct PRHeaderCard: View {
                                 Image(systemName: "safari")
                                     .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(RowIconButtonStyle())
+                            .buttonStyle(RowTextButtonStyle(formRow: true, circle: true))
                             .help("Open on \(kind.name)")
                             .accessibilityLabel("Open on \(kind.name)")
                         } else {
@@ -2124,7 +2124,7 @@ struct PRReloadButton: View {
                 if reloading { ProgressView().controlSize(.mini) }
             }
         }
-        .buttonStyle(RowIconButtonStyle())
+        .buttonStyle(RowTextButtonStyle(formRow: true, circle: true))
         .disabled(reloading)
         .help("Reload the \(noun)")
         .accessibilityLabel(reloading ? "Reloading the \(noun)" : "Reload the \(noun)")
