@@ -60,6 +60,19 @@ struct PullRequestTemplateTests {
         #expect(try await read(files: withDefault, kind: .gitlab, defaultOnly: true) == "## Default\n")
     }
 
+    @Test("an Azure DevOps repo's template is searched in .azuredevops/, .vsts/, docs/, then the root, .md before .txt")
+    func azureDevOpsOrder() async throws {
+        let files = ["pull_request_template.md": "## Root\n", "docs/Pull_Request_Template.txt": "## Docs\n",
+                     ".vsts/pull_request_template.txt": "## Vsts txt\n", ".vsts/PULL_REQUEST_TEMPLATE.md": "## Vsts\n",
+                     ".github/pull_request_template.md": "## GitHub\n"]
+        #expect(try await read(files: files.merging([".azuredevops/pull_request_template.txt": "## Azure\n"]) { $1 },
+                               kind: .azureDevOps) == "## Azure\n")
+        #expect(try await read(files: files, kind: .azureDevOps) == "## Vsts\n")
+        #expect(try await read(files: files.filter { !$0.key.hasPrefix(".vsts/") }, kind: .azureDevOps) == "## Docs\n")
+        #expect(try await read(files: [".github/pull_request_template.md": "## GitHub\n"], kind: .azureDevOps) == nil)
+        #expect(try await read(files: [".azuredevops/pull_request_template.md": "## Azure\n"], kind: .github) == nil)
+    }
+
     @Test("a symlink named like a template is ignored, never followed")
     func symlinkEntryIsIgnored() async throws {
         let template = try await read(

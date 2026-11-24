@@ -24,7 +24,10 @@
 // does the same with `BitbucketStub` (Bitbucket's 2.0 shapes through `BitbucketCloudClient`, the repository `stub/stub`
 // on bitbucket.org, answered on api.bitbucket.org), and `-HistqHostingStubKind bbdc` with `BitbucketDCStub` (Data
 // Center's REST 1.0 shapes through `BitbucketDCClient`, the repository `PROJ/repo` of bitbucket.example.com under
-// `/bitbucket`, its comment writes kept in memory). The Welcome clone picker stays GitHub's.
+// `/bitbucket`, its comment writes kept in memory), and `-HistqHostingStubKind azure` with `AzureDevOpsStub` (Azure
+// DevOps's REST 7.1 shapes through `AzureDevOpsClient`, the repository `histq-demo/demo/demo` on dev.azure.com,
+// answered on dev.azure.com and app.vssps.visualstudio.com, its comment writes and votes kept in memory). The Welcome
+// clone picker stays GitHub's.
 //
 // DEBUG `-HistqStubFailWrites YES`: every stub answers each write and GraphQL mutation with a 500 (reads still answer),
 // so a launch checks how an action's failure rolls back; GitLab's rebase alone is let through, and fails later through
@@ -79,25 +82,26 @@ enum GitHubStub {
         try? GitHubClient(host: repository.host, token: token, session: session)
     }
 
-    /// DEBUG `-HistqHostingStubKind gitlab|bitbucket|bbdc`: the PRs tab's stub serves GitLab's JSON (`GitLabStub`),
-    /// Bitbucket's (`BitbucketStub`) or Bitbucket Data Center's (`BitbucketDCStub`), not GitHub's.
+    /// DEBUG `-HistqHostingStubKind gitlab|bitbucket|bbdc|azure`: the PRs tab's stub serves GitLab's JSON
+    /// (`GitLabStub`), Bitbucket's (`BitbucketStub`), Bitbucket Data Center's (`BitbucketDCStub`) or Azure DevOps's
+    /// (`AzureDevOpsStub`), not GitHub's.
     static let kind: HostingKind = switch AppState.launchFlag("-HistqHostingStubKind") {
     case "gitlab": .gitlab
     case "bitbucket": .bitbucketCloud
     case "bbdc": .bitbucketDataCenter
+    case "azure": .azureDevOps
     default: .github
     }
 
-    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's, Bitbucket's or Bitbucket Data Center's as
-    /// `-HistqHostingStubKind` says.
+    /// The PRs tab's stub provider and repository: GitHub's, or GitLab's, Bitbucket's, Bitbucket Data Center's or
+    /// Azure DevOps's as `-HistqHostingStubKind` says.
     static func hosting() -> (client: (any HostingProvider)?, repository: HostedRepository) {
         switch kind {
         case .github: (client(), repository)
         case .gitlab: (GitLabStub.client(), GitLabStub.repository)
         case .bitbucketCloud: (BitbucketStub.client(), BitbucketStub.repository)
         case .bitbucketDataCenter: (BitbucketDCStub.shared, BitbucketDCStub.repository)
-        // No stub of its own yet (`kind` never names it): no provider.
-        case .azureDevOps: (nil, repository)
+        case .azureDevOps: (AzureDevOpsStub.shared, AzureDevOpsStub.repository)
         }
     }
 
@@ -2335,6 +2339,532 @@ enum BitbucketDCStub {
         .replacingOccurrences(of: "+++ b/", with: "+++ dst://")
 }
 
+/// DEBUG `-HistqHostingStubKind azure`: Azure DevOps's REST 7.1 shapes through `AzureDevOpsClient`, the repository
+/// `histq-demo/demo/demo` on dev.azure.com (the profile and organizations on app.vssps.visualstudio.com). Every
+/// request must ask for `api-version` 7.1 (the policy evaluations' 7.1-preview.1 too), else 400. `Stub User` (the
+/// profile `me`, organization `histq-demo`), open #1 "Add feature" (`feature` into `main`, by `Stub User`; `Ada
+/// Reviewer` approved (10), `Tess Tester` waits for the author (-5), `Rory Required` is required and has not voted;
+/// two labels, mergeable, one commit, the files `add.txt`, `gone.txt` and `long.txt`, one successful build status and
+/// one approved policy) with a general thread two replies deep, a fixed thread on `long.txt`'s new side, an active one
+/// on its old side and a system vote thread, and open #2 "Fix typo" by `Ada Reviewer` with `Stub User` asked to review.
+/// #1's `lastMergeTargetCommit` and `lastMergeSourceCommit` are the real `origin/main` and `origin/feature` of the
+/// first tab's repository (`noteOpened(_:)`), so a local diff finds them. #1's comment writes and both pull requests'
+/// votes are kept for the run (`write(_:_:_:repo:)`).
+enum AzureDevOpsStub {
+    static let repository = HostedRepository(host: AzureDevOpsClient.host, path: ["histq-demo", "demo", "demo"])
+    static let profileHost = AzureDevOpsClient.profileOrigin.host() ?? "app.vssps.visualstudio.com"
+
+    /// One client for the run, the profile read once (the PR lists and the vote need its id).
+    static let shared: AzureDevOpsClient = {
+        let client = AzureDevOpsClient(session: GitHubStub.session) { _ in GitHubStub.token }
+        Task { _ = try? await client.currentUser() }
+        return client
+    }()
+
+    // MARK: The opened repository's commits
+
+    private struct Opened {
+        var folder: URL?
+        var commits: (base: String, head: String)?
+    }
+
+    private static let opened = OSAllocatedUnfairLock(uncheckedState: Opened())
+
+    /// The first tab's folder (`RepoSession`): #1's commits are read there.
+    static func noteOpened(_ folder: URL) {
+        opened.withLock { if $0.folder == nil { $0.folder = folder } }
+    }
+
+    /// `origin/main` and `origin/feature` of the opened repository, read once with git (read-only, no network);
+    /// `GitHubStub`'s fake ids before a tab opened or when git cannot read them.
+    private static var commits: (base: String, head: String) {
+        if let cached = opened.withLock({ $0.commits }) { return cached }
+        guard let folder = opened.withLock({ $0.folder }),
+              let ids = revParse(["origin/main", "origin/feature"], in: folder)
+        else { return (GitHubStub.baseSHA, GitHubStub.headSHA) }
+        let commits = (base: ids[0], head: ids[1])
+        opened.withLock { $0.commits = commits }
+        return commits
+    }
+
+    /// `git -C <folder> rev-parse <rev>^{commit}…`: each full commit id, nil when one is missing.
+    private static func revParse(_ revisions: [String], in folder: URL) -> [String]? {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/git")
+        process.arguments = ["-C", folder.path(percentEncoded: false), "rev-parse"] + revisions.map { $0 + "^{commit}" }
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let ids = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        guard process.terminationStatus == 0, ids.count == revisions.count,
+              ids.allSatisfy({ $0.count == 40 && $0.allSatisfy(\.isHexDigit) })
+        else { return nil }
+        return ids
+    }
+
+    // MARK: Answers
+
+    /// The status and JSON body for a request of the stub session to dev.azure.com or app.vssps.visualstudio.com.
+    static func reply(method: String, url: URL, body: Data?) -> (status: Int, body: String) {
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let value = { (name: String) in query.first { $0.name == name }?.value }
+        guard value("api-version")?.hasPrefix("7.1") == true else {
+            return error(400, "No api-version was supplied for the GET request.")
+        }
+        // The client writes `pullrequests`, Azure's own links `pullRequests`: both are the same segment.
+        let path = url.path(percentEncoded: false)
+            .replacingOccurrences(of: "/pullrequests", with: "/pullrequests", options: .caseInsensitive)
+        let repo = "/histq-demo/demo/_apis/git/repositories/demo"
+        guard method == "GET" else {
+            return url.host() == profileHost ? notFound : write(method, path, body, repo: repo)
+        }
+        if url.host() == profileHost {
+            switch path {
+            case "/_apis/profile/profiles/me": return (200, profile)
+            case "/_apis/accounts" where value("memberId") == me.id:
+                return list(#"{"accountId": "0b5c8a2e-6f1d-4e3a-9b7c-2d4e6f8a0c1e", "accountName": "histq-demo", "#
+                    + #""accountUri": "https://vssps.dev.azure.com/histq-demo/"}"#)
+            default: return notFound
+            }
+        }
+        let pr1 = "\(repo)/pullrequests/1", pr2 = "\(repo)/pullrequests/2"
+        switch path {
+        case "/histq-demo/_apis/git/repositories": return list(repositoryJSON)
+        case repo: return (200, repositoryJSON)
+        // All open has #1 and #2; `Stub User` opened #1 and is asked to review #2. None is closed.
+        case "\(repo)/pullrequests":
+            if value("searchCriteria.creatorId") == me.id { return list(pullRequest(1)) }
+            if value("searchCriteria.reviewerId") == me.id { return list(pullRequest(2)) }
+            return list(pullRequest(1), pullRequest(2))
+        case pr1: return (200, pullRequest(1))
+        case pr2: return (200, pullRequest(2))
+        case "\(pr1)/commits": return list(commit(commits.head, "Feature changes", at: "2026-11-20T08:40:00Z"))
+        case "\(pr2)/commits": return list(commit(typoSHA, "Fix a typo", at: "2026-11-21T10:05:00Z"))
+        case "\(pr1)/iterations": return list(#"{"id": 1}"#, #"{"id": 2}"#)
+        case "\(pr2)/iterations": return list(#"{"id": 1}"#)
+        case "\(pr1)/iterations/2/changes": return (200, changes)
+        case "\(pr2)/iterations/1/changes": return (200, #"{"changeEntries": []}"#)
+        case "\(pr1)/threads": return list(store.withLock { $0.threads.map(thread) })
+        case "\(pr2)/threads", "\(pr1)/statuses", "\(pr2)/statuses", "/histq-demo/demo/_apis/policy/configurations":
+            return list()
+        case let path where path.hasPrefix("\(repo)/commits/") && path.hasSuffix("/statuses"):
+            return path == "\(repo)/commits/\(commits.head)/statuses" ? list(buildStatus) : list()
+        case "/histq-demo/demo/_apis/policy/evaluations":
+            // With `-HistqStubPageSeed YES` also a rejected blocking policy: a failed merge check.
+            return value("artifactId") == "vstfs:///CodeReview/CodeReviewId/\(projectID)/1"
+                ? list([policy] + (GitHubStub.seedsPage ? [rejectedPolicy] : [])) : list()
+        default: return notFound
+        }
+    }
+
+    private static let notFound = error(404, "TF401019: The Git repository or the pull request does not exist.")
+
+    /// An Azure DevOps error answer with `message`, its exception `type` (`typeName` and `typeKey`).
+    private static func error(
+        _ status: Int, _ message: String, type: String = "Microsoft.TeamFoundation.Git.Server.GitItemNotFoundException"
+    ) -> (status: Int, body: String) {
+        (status, #"{"$id": "1", "innerException": null, "message": "\#(message)", "typeName": "\#(type)", "#
+            + #""typeKey": "\#(type.split(separator: ".").last ?? "")", "errorCode": 0, "eventId": 3000}"#)
+    }
+
+    /// A list answer.
+    private static func list(_ values: String...) -> (status: Int, body: String) {
+        list(values)
+    }
+
+    private static func list(_ values: [String]) -> (status: Int, body: String) {
+        (200, #"{"count": \#(values.count), "value": [\#(values.joined(separator: ", "))]}"#)
+    }
+
+    // MARK: Data
+
+    private static let projectID = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d"
+    private static let repositoryID = "5f0c6a1e-3b7d-4c2a-9e41-7a2d1c9b8e10"
+    /// #2's head (it is not in the fixture).
+    private static let typoSHA = "7777777777777777777777777777777777777777"
+
+    private struct Person {
+        var id: String
+        var name: String
+
+        var json: String {
+            #"{"displayName": "\#(name)", "url": "https://spsprodweu5.vssps.visualstudio.com/A0/_apis/Identities/\#(id)", "#
+                + #""id": "\#(id)", "descriptor": "aad.SGlzdHE"}"#
+        }
+
+        func reviewer(vote: Int, required: Bool = false) -> String {
+            #"{"reviewerUrl": "https://dev.azure.com/histq-demo/_apis/git/repositories/\#(repositoryID)/reviewers/\#(id)", "#
+                + #""vote": \#(vote), "hasDeclined": false, "isRequired": \#(required), "displayName": "\#(name)", "#
+                + #""id": "\#(id)"}"#
+        }
+    }
+
+    private static let me = Person(id: "1d2e3f40-5a6b-4c7d-8e9f-0a1b2c3d4e5f", name: "Stub User")
+    private static let ada = Person(id: "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d", name: "Ada Reviewer")
+    private static let tess = Person(id: "3b4c5d6e-7f80-4b9c-8d1e-2f3a4b5c6d7e", name: "Tess Tester")
+    private static let rory = Person(id: "4c5d6e7f-8091-4cad-9e2f-3a4b5c6d7e8f", name: "Rory Required")
+
+    private static let profile = """
+        {"displayName": "\(me.name)", "publicAlias": "\(me.id)", "emailAddress": "stub@histq.invalid",
+         "coreRevision": 1, "timeStamp": "2026-11-01T10:00:00.1234567+00:00", "id": "\(me.id)", "revision": 1}
+        """
+
+    private static let projectJSON = """
+        {"id": "\(projectID)", "name": "demo", "state": "wellFormed", "visibility": "private"}
+        """
+
+    private static let repositoryJSON = """
+        {"id": "\(repositoryID)", "name": "demo", "project": \(projectJSON), "defaultBranch": "refs/heads/main",
+         "remoteUrl": "https://histq-demo@dev.azure.com/histq-demo/demo/_git/demo",
+         "sshUrl": "git@ssh.dev.azure.com:v3/histq-demo/demo/demo", "isDisabled": false, "isFork": false}
+        """
+
+    /// #1 (from `feature`, by `Stub User`, three reviewers, two labels) or #2 (from `typo`, by `Ada Reviewer`,
+    /// `Stub User` asked to review).
+    private static func pullRequest(_ id: Int) -> String {
+        let first = id == 1
+        let description = first
+            ? "Adds the feature branch's work.\n\n- `add.txt` is new\n- `gone.txt` is removed\n- `long.txt` says feature"
+            : "Fixes a typo in the readme."
+        let reviewers = store.withLock { $0.reviewers[id] ?? [] }
+            .map { $0.person.reviewer(vote: $0.vote, required: $0.required) }
+        let labels = first
+            ? #"[{"id": "6d1f0e2a-1111-4c2b-8a3d-5e6f7a8b9c0d", "name": "enhancement", "active": true}, "#
+                + #"{"id": "6d1f0e2a-2222-4c2b-8a3d-5e6f7a8b9c0d", "name": "docs", "active": true}]"#
+            : "[]"
+        return """
+            {"repository": {"id": "\(repositoryID)", "name": "demo", "project": \(projectJSON)},
+             "pullRequestId": \(id), "codeReviewId": \(id), "status": "active", "createdBy": \((first ? me : ada).json),
+             "creationDate": "\(first ? "2026-11-20T09:00:00.1234567Z" : "2026-11-21T10:10:00.1234567Z")",
+             "title": "\(first ? "Add feature" : "Fix typo")", "description": "\(GitHubStub.jsonText(description))",
+             "sourceRefName": "refs/heads/\(first ? "feature" : "typo")", "targetRefName": "refs/heads/main",
+             "mergeStatus": "succeeded", "isDraft": \(first && GitHubStub.servesDraft),
+             "lastMergeSourceCommit": {"commitId": "\(first ? commits.head : typoSHA)"},
+             "lastMergeTargetCommit": {"commitId": "\(commits.base)"},
+             "reviewers": [\(reviewers.joined(separator: ", "))], "labels": \(labels),
+             "url": "https://dev.azure.com/histq-demo/\(projectID)/_apis/git/repositories/\(repositoryID)/pullRequests/\(id)",
+             "supportsIterations": true}
+            """
+    }
+
+    private static func commit(_ sha: String, _ message: String, at date: String) -> String {
+        #"{"commitId": "\#(sha)", "comment": "\#(message)", "author": {"name": "\#(me.name)", "#
+            + #""email": "stub@histq.invalid", "date": "\#(date)"}, "committer": {"name": "\#(me.name)", "#
+            + #""email": "stub@histq.invalid", "date": "\#(date)"}}"#
+    }
+
+    /// #1's last iteration's files, as Azure lists them (paths with a leading `/`).
+    private static let changes = """
+        {"changeEntries": [
+          {"changeTrackingId": 1, "changeId": 1, "item": {"path": "/add.txt"}, "changeType": "add"},
+          {"changeTrackingId": 2, "changeId": 2, "item": {"path": "/gone.txt"}, "changeType": "delete"},
+          {"changeTrackingId": 3, "changeId": 3, "item": {"path": "/long.txt"}, "changeType": "edit"}]}
+        """
+
+    /// A comment of a thread of #1: its id in the thread, the one it answers (0 for none), its author (only the author
+    /// may edit or delete it), its dates, its type, who liked it and whether it was deleted (Azure keeps it, marked).
+    private struct Note {
+        var id: Int
+        var parent = 0
+        var author: Person
+        var text: String
+        var date: String
+        var updated: String?
+        var type = "text"
+        var liked: [Person] = []
+        var deleted = false
+    }
+
+    /// A thread of #1: its status (nil for a system thread), its `threadContext` JSON (a file's), its properties.
+    private struct Thread {
+        var id: Int
+        var status: String?
+        var context: String?
+        var properties = "{}"
+        var date = "2026-11-21T09:00:00.1234567Z"
+        var notes: [Note]
+    }
+
+    private struct Reviewer {
+        var person: Person
+        var vote: Int
+        var required = false
+    }
+
+    /// #1's threads as this run left them: a general one two replies deep (`Ada Reviewer`'s root, liked by `Stub
+    /// User`; `Stub User`'s reply; `Ada Reviewer`'s answer to it), a fixed one on line 10 of `long.txt`'s new side
+    /// with a reply, an active one on line 40 of its old side and `Ada Reviewer`'s vote, then the written ones,
+    /// written on 2026-11-22 at 11:00 plus `ticks` minutes; and each pull request's reviewers and votes.
+    private struct Store {
+        var threads = [
+            Thread(id: 1, status: "active", notes: [
+                Note(id: 1, author: ada, text: "Looks good overall. Could the readme mention the new file?",
+                     date: "2026-11-21T09:00:00.1234567Z", liked: [me]),
+                Note(id: 2, parent: 1, author: me, text: "Added a line in the second push.",
+                     date: "2026-11-21T09:30:00.1234567Z"),
+                Note(id: 3, parent: 2, author: ada, text: "Thanks, that reads well.",
+                     date: "2026-11-21T09:35:00.1234567Z"),
+            ]),
+            Thread(id: 2, status: "fixed", context: AzureDevOpsStub.context(side: "right", line: 10), notes: [
+                Note(id: 1, author: tess, text: "Should this line say feature too?",
+                     date: "2026-11-21T09:10:00.1234567Z"),
+                Note(id: 2, parent: 1, author: me, text: "Yes, it does now.", date: "2026-11-21T09:40:00.1234567Z"),
+            ]),
+            Thread(id: 3, status: "active", context: AzureDevOpsStub.context(side: "left", line: 40), notes: [
+                Note(id: 1, author: ada, text: "The old wording here was clearer.",
+                     date: "2026-11-21T09:15:00.1234567Z"),
+            ]),
+            Thread(
+                id: 4, status: nil,
+                properties: #"{"CodeReviewThreadType": {"$type": "System.String", "$value": "VoteUpdate"}, "#
+                    + #""CodeReviewVoteResult": {"$type": "System.String", "$value": "10"}, "#
+                    + #""CodeReviewVotedByTfId": {"$type": "System.String", "$value": "\#(ada.id)"}, "#
+                    + #""CodeReviewVotedByDisplayName": {"$type": "System.String", "$value": "\#(ada.name)"}}"#,
+                notes: [Note(id: 1, author: ada, text: "\(ada.name) voted 10", date: "2026-11-21T09:50:00.1234567Z",
+                             type: "system")]),
+        ] + AzureDevOpsStub.pageSeedThreads
+        var reviewers = [
+            1: [Reviewer(person: ada, vote: 10), Reviewer(person: tess, vote: -5),
+                Reviewer(person: rory, vote: 0, required: true)],
+            2: [Reviewer(person: me, vote: 0)],
+        ]
+        var ticks = 0
+
+        mutating func now() -> String {
+            ticks += 1
+            return "2026-11-22T11:\(String(format: "%02d", min(ticks, 59))):00.1234567Z"
+        }
+    }
+
+    private static let store = OSAllocatedUnfairLock(uncheckedState: Store())
+
+    /// With `-HistqStubPageSeed YES`, #1's extra threads for the page's shot: `Stub User` pushing a commit, a by-design
+    /// general thread (`Ada Reviewer`), a won't-fix one on `add.txt`'s line 1 (`Rory Required`, a reply), a pending
+    /// general one (`Tess Tester`), `Tess Tester` joining as a reviewer, then waiting for the author (-5).
+    private static let pageSeedThreads: [Thread] = !GitHubStub.seedsPage ? [] : [
+        systemThread(5, type: "RefUpdate", by: me, at: "2026-11-20T15:00:00.1234567Z", text: "\(me.name) pushed 1 commit",
+                     extra: #""CodeReviewRefNewCommitsCount": {"$type": "System.String", "$value": "1"}"#),
+        Thread(id: 6, status: "byDesign", date: "2026-11-21T10:00:00.1234567Z", notes: [
+            Note(id: 1, author: ada, text: "Why is gone.txt removed rather than emptied?",
+                 date: "2026-11-21T10:00:00.1234567Z"),
+        ]),
+        Thread(id: 7, status: "wontFix", context: AzureDevOpsStub.context(side: "right", line: 1, path: "/add.txt"),
+               date: "2026-11-21T10:30:00.1234567Z", notes: [
+                   Note(id: 1, author: rory, text: "Could this file start with a header?",
+                        date: "2026-11-21T10:30:00.1234567Z"),
+                   Note(id: 2, parent: 1, author: me, text: "It stays one line on purpose.",
+                        date: "2026-11-21T10:45:00.1234567Z"),
+               ]),
+        Thread(id: 8, status: "pending", date: "2026-11-21T11:00:00.1234567Z", notes: [
+            Note(id: 1, author: tess, text: "Waiting on the docs review before I vote again.",
+                 date: "2026-11-21T11:00:00.1234567Z"),
+        ]),
+        systemThread(9, type: "ReviewersUpdate", by: tess, at: "2026-11-22T09:55:00.1234567Z",
+                     text: "\(tess.name) joined as a reviewer",
+                     extra: #""CodeReviewReviewersUpdatedAddedTfId": {"$type": "System.String", "$value": "\#(tess.id)"}, "#
+                         + #""CodeReviewReviewersUpdatedAddedDisplayName": {"$type": "System.String", "$value": "\#(tess.name)"}"#),
+        systemThread(10, type: "VoteUpdate", by: tess, at: "2026-11-22T10:00:00.1234567Z", text: "\(tess.name) voted -5",
+                     extra: #""CodeReviewVoteResult": {"$type": "System.String", "$value": "-5"}"#, prefix: "CodeReviewVotedBy"),
+    ]
+
+    /// A system thread of `type` by `person` (named by the type's `…ByTfId` / `…ByDisplayName` properties, or
+    /// `prefix`'s), its one system comment `text` at `date`, with the `extra` properties.
+    private static func systemThread(
+        _ id: Int, type: String, by person: Person, at date: String, text: String, extra: String, prefix: String? = nil
+    ) -> Thread {
+        let by = prefix ?? (type == "RefUpdate" ? "CodeReviewRefUpdatedBy" : "CodeReviewReviewersUpdatedBy")
+        return Thread(
+            id: id, status: nil,
+            properties: #"{"CodeReviewThreadType": {"$type": "System.String", "$value": "\#(type)"}, "#
+                + #""\#(by)TfId": {"$type": "System.String", "$value": "\#(person.id)"}, "#
+                + #""\#(by)DisplayName": {"$type": "System.String", "$value": "\#(person.name)"}, \#(extra)}"#,
+            date: date, notes: [Note(id: 1, author: person, text: text, date: date, type: "system")])
+    }
+
+    private static func comment(_ note: Note) -> String {
+        """
+        {"id": \(note.id), "parentCommentId": \(note.parent), "author": \(note.author.json),
+         "content": "\(GitHubStub.jsonText(note.text))", "publishedDate": "\(note.date)",
+         "lastUpdatedDate": "\(note.updated ?? note.date)", "lastContentUpdatedDate": "\(note.updated ?? note.date)",
+         "commentType": "\(note.type)", "usersLiked": [\(note.liked.map(\.json).joined(separator: ", "))],
+         "isDeleted": \(note.deleted)}
+        """
+    }
+
+    private static func thread(_ thread: Thread) -> String {
+        let updated = thread.notes.map { $0.updated ?? $0.date }.max() ?? thread.date
+        return """
+            {"id": \(thread.id), "publishedDate": "\(thread.date)", "lastUpdatedDate": "\(updated)",
+             "comments": [\(thread.notes.map(comment).joined(separator: ", "))],
+             \(thread.status.map { #""status": "\#($0)", "# } ?? "")
+             \(thread.context.map { #""threadContext": \#($0), "# } ?? "")"properties": \(thread.properties),
+             "identities": null, "isDeleted": false}
+            """
+    }
+
+    /// Lines `line` of `path`'s (`long.txt`'s) new (`right`) or old (`left`) side.
+    private static func context(side: String, line: Int, path: String = "/long.txt") -> String {
+        #"{"filePath": "\#(path)", "\#(side)FileStart": {"line": \#(line), "offset": 1}, "#
+            + #""\#(side)FileEnd": {"line": \#(line), "offset": 26}}"#
+    }
+
+    /// `CommentThreadStatus` by number, as a write may send it.
+    private static let statuses = ["unknown", "active", "fixed", "wontFix", "closed", "byDesign", "pending"]
+
+    /// The writes, kept for the run: on #1, `POST .../threads` (a new thread by `Stub User`, its `status` a number or
+    /// a name; with a `threadContext` on a file, whose `pullRequestThreadContext.changeTrackingId` must be the file's
+    /// in `changes`), `POST .../threads/<t>/comments` (a reply to `parentCommentId`), `PATCH .../threads/<t>` (its
+    /// `status`), `PATCH` or `DELETE .../threads/<t>/comments/<c>` (`Stub User`'s own only, else 403; a delete marks it
+    /// deleted) and `POST` or `DELETE` its `likes`; on #1 or #2, `PUT .../reviewers/<guid>` (`vote`; a new reviewer is
+    /// added). Anything else is 404.
+    private static func write(_ method: String, _ path: String, _ body: Data?, repo: String)
+        -> (status: Int, body: String)
+    {
+        let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let parts = path.split(separator: "/").map(String.init)
+        let base = repo.split(separator: "/").map(String.init) + ["pullrequests"]
+        guard parts.count > base.count + 1, Array(parts.prefix(base.count)) == base,
+              let number = Int(parts[base.count]) else { return notFound }
+        let rest = Array(parts.dropFirst(base.count + 1))
+        if method == "PUT", rest.count == 2, rest[0] == "reviewers" {
+            return vote(on: number, id: rest[1], json["vote"] as? Int)
+        }
+        guard number == 1, rest.first == "threads" else { return notFound }
+        let ids = rest.dropFirst().map { Int($0) }
+        switch (method, rest.count) {
+        case ("POST", 1): return newThread(json)
+        case ("PATCH", 2):
+            guard let id = ids[0], let status = json["status"] as? String, statuses.contains(status) else {
+                return error(400, "The thread status is not valid.")
+            }
+            return store.withLock { store -> (status: Int, body: String) in
+                guard let index = store.threads.firstIndex(where: { $0.id == id }) else { return notFound }
+                store.threads[index].status = status
+                return (200, thread(store.threads[index]))
+            }
+        case ("POST", 3) where rest[2] == "comments":
+            guard let id = ids[0], let text = json["content"] as? String, !text.isEmpty else {
+                return error(400, "The comment needs content.")
+            }
+            let parent = json["parentCommentId"] as? Int ?? 0
+            return store.withLock { store -> (status: Int, body: String) in
+                guard let index = store.threads.firstIndex(where: { $0.id == id }) else { return notFound }
+                let notes = store.threads[index].notes
+                guard parent == 0 || notes.contains(where: { $0.id == parent }) else { return notFound }
+                let note = Note(id: (notes.map(\.id).max() ?? 0) + 1, parent: parent, author: me, text: text,
+                                date: store.now())
+                store.threads[index].notes.append(note)
+                return (200, comment(note))
+            }
+        case ("PATCH", 4), ("DELETE", 4), ("POST", 5), ("DELETE", 5):
+            guard rest[2] == "comments", let id = ids[0], let local = ids[2], rest.count == 4 || rest[4] == "likes"
+            else { return notFound }
+            return change(method, thread: id, comment: local, like: rest.count == 5, text: json["content"] as? String)
+        default: return notFound
+        }
+    }
+
+    /// A new active (or the sent status's) thread by `Stub User` with the sent comments, numbered from 1.
+    private static func newThread(_ json: [String: Any]) -> (status: Int, body: String) {
+        let sent = (json["comments"] as? [[String: Any]] ?? []).map {
+            (parent: $0["parentCommentId"] as? Int ?? 0, text: $0["content"] as? String ?? "")
+        }
+        guard !sent.isEmpty, sent.allSatisfy({ !$0.text.isEmpty }) else {
+            return error(400, "The thread needs a comment.")
+        }
+        let status = (json["status"] as? Int).flatMap { statuses.indices.contains($0) ? statuses[$0] : nil }
+            ?? json["status"] as? String ?? "active"
+        var context: String?
+        if let file = json["threadContext"] as? [String: Any] {
+            let path = file["filePath"] as? String
+            let tracking = (json["pullRequestThreadContext"] as? [String: Any])?["changeTrackingId"] as? Int
+            guard let path, let tracking, trackingIDs[path] == tracking,
+                  let data = try? JSONSerialization.data(withJSONObject: file, options: [.sortedKeys])
+            else { return error(400, "The thread's file is not in the pull request's last iteration.") }
+            context = String(decoding: data, as: UTF8.self)
+        }
+        return store.withLock { [context] store -> (status: Int, body: String) in
+            let date = store.now()
+            let notes = sent.enumerated().map { index, comment in
+                Note(id: index + 1, parent: comment.parent, author: me, text: comment.text, date: date)
+            }
+            let new = Thread(id: (store.threads.map(\.id).max() ?? 0) + 1, status: status, context: context,
+                             date: date, notes: notes)
+            store.threads.append(new)
+            return (200, thread(new))
+        }
+    }
+
+    /// `changes`' change tracking ids by path.
+    private static let trackingIDs = ["/add.txt": 1, "/gone.txt": 2, "/long.txt": 3]
+
+    /// An edit (`text`) or a delete of `Stub User`'s own comment, or (`like`) a like added or taken back.
+    private static func change(_ method: String, thread id: Int, comment local: Int, like: Bool, text: String?)
+        -> (status: Int, body: String)
+    {
+        store.withLock { store -> (status: Int, body: String) in
+            guard let index = store.threads.firstIndex(where: { $0.id == id }),
+                  let row = store.threads[index].notes.firstIndex(where: { $0.id == local && !$0.deleted })
+            else { return notFound }
+            let note = store.threads[index].notes[row]
+            if like {
+                store.threads[index].notes[row].liked.removeAll { $0.id == me.id }
+                if method == "POST" { store.threads[index].notes[row].liked.append(me) }
+                return (200, "")
+            }
+            guard note.author.id == me.id else {
+                let verb = method == "DELETE" ? "delete" : "edit"
+                return error(403, "You do not have permission to \(verb) this comment.",
+                             type: "Microsoft.TeamFoundation.Framework.Server.UnauthorizedRequestException")
+            }
+            if method == "DELETE" {
+                store.threads[index].notes[row].deleted = true
+                return (200, "")
+            }
+            guard let text, !text.isEmpty else { return error(400, "The comment needs content.") }
+            store.threads[index].notes[row].text = text
+            store.threads[index].notes[row].updated = store.now()
+            return (200, comment(store.threads[index].notes[row]))
+        }
+    }
+
+    /// The vote of reviewer `id` on pull request `number`, a new reviewer added; 400 for an unknown vote or person.
+    private static func vote(on number: Int, id: String, _ vote: Int?) -> (status: Int, body: String) {
+        guard let vote, [-10, -5, 0, 5, 10].contains(vote) else { return error(400, "The vote is not valid.") }
+        guard let person = [me, ada, tess, rory].first(where: { $0.id.lowercased() == id.lowercased() }) else {
+            return error(400, "The reviewer is not a member of this project.")
+        }
+        return store.withLock { store -> (status: Int, body: String) in
+            guard var reviewers = store.reviewers[number] else { return notFound }
+            let index = reviewers.firstIndex { $0.person.id == person.id } ?? reviewers.endIndex
+            if index == reviewers.endIndex { reviewers.append(Reviewer(person: person, vote: vote)) }
+            reviewers[index].vote = vote
+            store.reviewers[number] = reviewers
+            return (200, person.reviewer(vote: vote, required: reviewers[index].required))
+        }
+    }
+
+    private static let buildStatus = """
+        {"id": 1, "state": "succeeded", "description": "Build succeeded", "context": {"name": "build", "genre": "ci"},
+         "creationDate": "2026-11-20T08:50:00.1234567Z", "updatedDate": "2026-11-20T08:55:00.1234567Z"}
+        """
+
+    private static let rejectedPolicy = """
+        {"evaluationId": "b1c2d3e4-0002-4a5b-8c6d-7e8f9a0b1c2d", "status": "rejected",
+         "configuration": {"isEnabled": true, "isBlocking": true, "type": {"displayName": "Comment requirements"}},
+         "startedDate": "2026-11-21T09:50:00.1234567Z", "completedDate": "2026-11-21T09:50:00.1234567Z"}
+        """
+
+    private static let policy = """
+        {"evaluationId": "b1c2d3e4-0001-4a5b-8c6d-7e8f9a0b1c2d", "status": "approved",
+         "configuration": {"isEnabled": true, "isBlocking": true, "type": {"displayName": "Minimum number of reviewers"}},
+         "startedDate": "2026-11-21T09:50:00.1234567Z", "completedDate": "2026-11-21T09:50:00.1234567Z"}
+        """
+}
+
 /// Answers every request of `GitHubStub.session` itself: never passes one on to the network.
 final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -2374,6 +2904,8 @@ final class GitHubStubProtocol: URLProtocol, @unchecked Sendable {
             case GitLabStub.repository.host: GitLabStub.reply(method: method, url: url, body: body)
             case BitbucketStub.apiHost: BitbucketStub.reply(method: method, url: url, body: body)
             case BitbucketDCStub.repository.host: BitbucketDCStub.reply(method: method, url: url, body: body)
+            case AzureDevOpsStub.repository.host, AzureDevOpsStub.profileHost:
+                AzureDevOpsStub.reply(method: method, url: url, body: body)
             default: GitHubStub.reply(method: method, url: url, body: body)
             }
         }

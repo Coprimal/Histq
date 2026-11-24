@@ -13,6 +13,10 @@ public enum PullRequestTemplate {
     static let folders = ["", ".github/", "docs/"]
     /// GitLab's folder of merge request templates: every `.md` file in it is one, `Default.md` (any case) the default.
     static let gitLabFolder = ".gitlab/merge_request_templates/"
+    /// Azure DevOps's folders, in the order it searches them (the first match wins): `.azuredevops/`, `.vsts/`,
+    /// `docs/`, then the root; the file is `pull_request_template.md` or `.txt`, in any case.
+    static let azureFolders = [".azuredevops/", ".vsts/", "docs/", ""]
+    static let azureNames = ["pull_request_template.md", "pull_request_template.txt"]
     /// A larger blob is skipped, not read.
     static let maxBlobBytes = 64 * 1024
     /// The longest text returned, cut at a line break (or at least between UTF-8 characters).
@@ -21,7 +25,8 @@ public enum PullRequestTemplate {
     /// The template's text at `ref` (a branch, tag or commit), from the first regular file named
     /// `pull_request_template.md` in any case in the root, `.github/` or `docs/` (GitLab: `Default.md` in any case in
     /// `.gitlab/merge_request_templates/`, else that folder's first `.md` file by name; Bitbucket Cloud: none, its
-    /// default description is a repository setting); nil when there is none or the
+    /// default description is a repository setting; Azure DevOps: `pull_request_template.md` or `.txt` in any case in
+    /// `.azuredevops/`, `.vsts/`, `docs/`, then the root); nil when there is none or the
     /// read fails (a missing ref, too). A candidate whose root-relative path `ignore` (the worktree's `.aiignore`) matches
     /// is skipped, and the search goes on. `defaultOnly`: only the template the host's own form starts with (GitLab's
     /// `Default.md`, no other file of the folder), for the Create form's description; the AI prompt takes any.
@@ -33,8 +38,9 @@ public enum PullRequestTemplate {
         let paths = switch kind {
         case .github: ["."] + folders.filter { !$0.isEmpty }
         case .gitlab: [gitLabFolder]
-        // Bitbucket keeps a repository's default description in its settings, not in a file. Azure DevOps: none yet.
-        case .bitbucketCloud, .bitbucketDataCenter, .azureDevOps: [String]()
+        case .azureDevOps: ["."] + azureFolders.filter { !$0.isEmpty }
+        // Bitbucket keeps a repository's default description in its settings, not in a file.
+        case .bitbucketCloud, .bitbucketDataCenter: [String]()
         }
         guard !paths.isEmpty, let listing = try? await runner.run(
             ["ls-tree", "-z", "-l", "--full-tree", "--end-of-options", ref, "--"] + paths,
@@ -72,7 +78,11 @@ public enum PullRequestTemplate {
             case .gitlab:
                 folder != gitLabFolder || !name.hasSuffix(".md") ? nil
                     : name == "default.md" ? 0 : defaultOnly ? nil : 1
-            case .bitbucketCloud, .bitbucketDataCenter, .azureDevOps: nil
+            case .azureDevOps:
+                azureNames.firstIndex(of: name).flatMap { file in
+                    azureFolders.firstIndex(of: folder).map { $0 * azureNames.count + file }
+                }
+            case .bitbucketCloud, .bitbucketDataCenter: nil
             }
             guard let rank, ignore?.matches(path) != true else { continue }
             found.append((rank, String(meta[2])))

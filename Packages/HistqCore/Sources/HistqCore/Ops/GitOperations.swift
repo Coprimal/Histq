@@ -100,11 +100,14 @@ public enum PullRequestDiffError: Error, Equatable, Sendable {
     case fromFork
     /// A pull request commit the fetch did not bring: a branch moved on the host since the pull request was read.
     case changed
+    /// The two commits have no merge base (`git merge-base` exits 1).
+    case noCommonHistory
 
     public var message: String {
         switch self {
         case .fromFork: "Files of pull requests from forks are shown on the web"
         case .changed: "The pull request changed on the host. Reload it to see its files."
+        case .noCommonHistory: "These branches have no common history."
         }
     }
 }
@@ -548,9 +551,11 @@ public struct GitOperations: Sendable {
     /// no submodule, so the objects arrive and no ref or FETCH_HEAD changes (a stale tracking ref stays stale; a
     /// `refs/histq/*` would show in `log --all`). Then `sourceCommit` is diffed against its merge base with
     /// `targetCommit`, as the host does (a conflicting pull request too), each file parsed as the hosts' diffs are.
-    /// Throws `PullRequestDiffError.fromFork` before any git for a pull request from a fork, `.changed` when either
-    /// commit is still missing after the fetch, and `GitOperationError` for a remote that is not one of `git remote`, a
-    /// branch name `validateBranchName` refuses or a commit that is not 40 or 64 hex digits.
+    /// The diff takes `--submodule=short`: a global `diff.submodule=log|diff` would put `Submodule …` lines in the
+    /// patches. Throws `PullRequestDiffError.fromFork` before any git for a pull request from a fork, `.changed` when
+    /// either commit is still missing after the fetch, `.noCommonHistory` when they have no merge base, and
+    /// `GitOperationError` for a remote that is not one of `git remote`, a branch name `validateBranchName` refuses or
+    /// a commit that is not 40 or 64 hex digits.
     public func pullRequestFiles(
         remote: String, sourceBranch: String, targetBranch: String, sourceCommit: String, targetCommit: String,
         fromFork: Bool
@@ -577,10 +582,15 @@ public struct GitOperations: Sendable {
                     allowedExitCodes: [0, 1])
                 if found.exitCode != 0 { throw PullRequestDiffError.changed }
             }
-            let base = try await ops.exec(["merge-base", "--end-of-options", targetCommit, sourceCommit]).text
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let diff = try await ops.exec(
-                DiffReader.compareArguments(base: base, head: sourceCommit, paths: [], context: nil))
+            let mergeBase = try await ops.exec(
+                ["merge-base", "--end-of-options", targetCommit, sourceCommit], allowedExitCodes: [0, 1])
+            if mergeBase.exitCode != 0 { throw PullRequestDiffError.noCommonHistory }
+            let base = mergeBase.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var arguments = DiffReader.compareArguments(base: base, head: sourceCommit, paths: [], context: nil)
+            if let options = arguments.firstIndex(of: "--end-of-options") {
+                arguments.insert("--submodule=short", at: options)
+            }
+            let diff = try await ops.exec(arguments)
             return BitbucketCloudClient.files(fromDiff: diff.stdout)
         }
     }

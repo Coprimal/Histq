@@ -398,9 +398,12 @@ extension HostedMergeMethod {
     }
 
     /// The title on `kind`'s merge area: Bitbucket's rebase is "Rebase, merge"; Data Center's own names for its
-    /// `ff-only`, `rebase-no-ff` and `rebase-ff-only`.
+    /// `ff-only`, `rebase-no-ff` and `rebase-ff-only`; Azure DevOps's for its `noFastForward`, `squash` and `rebase`.
     func title(on kind: HostingKind) -> String {
         switch (kind, self) {
+        case (.azureDevOps, .merge): "Merge (no fast forward)"
+        case (.azureDevOps, .squash): "Squash commit"
+        case (.azureDevOps, .rebase): "Rebase and fast-forward"
         case (.bitbucketCloud, .rebase): "Rebase, merge"
         case (.bitbucketDataCenter, .fastForward): "Fast-forward only"
         case (.bitbucketDataCenter, .rebase): "Rebase and merge"
@@ -512,6 +515,10 @@ final class PullRequestDetailModel {
     /// Shows an action in the tab's footer until the returned closure is called (`RepoSession.beginOperation`). Set by
     /// the session.
     @ObservationIgnored var beginOperation: @MainActor (String) -> @MainActor () -> Void = { _ in {} }
+    /// Azure DevOps's files with their patches, from a local diff of the pull request's branches fetched from the
+    /// remote named (`RepoSession.pullRequestFiles`). Set by the session.
+    @ObservationIgnored var localFiles: @MainActor @Sendable (HostedPullRequest, String) async
+        -> Loadable<[HostedPullRequestFile]> = { _, _ in .idle }
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadCount = 0
@@ -559,10 +566,10 @@ final class PullRequestDetailModel {
     /// `react-new|new-inline|new-inline-post|mr-react`: like `launchAction`, on a review thread (or a general thread:
     /// `greply`, `gresolve`; or the first own comment: `edit` opens its editor, `edit-save` saves "edited" into it,
     /// `delete` opens its confirmation, `delete-confirm` confirms it; or the first comment with reactions, `react`, or
-    /// with none, `react-new`, gets a reaction; or the first added line of the first file: `new-inline` opens a new
-    /// comment box under it, `new-inline-post` posts "stub inline" there; or the award bar's first kind (👍) toggled
-    /// on the pull request itself: `mr-react`) of the first load, which picks it (`threadLaunchAction(_:in:)`): only
-    /// with `-HistqGitHubStub YES` too.
+    /// with none, `react-new`, gets a reaction (`react` toggles it with one kind); or the first added line of the
+    /// first file: `new-inline` opens a new comment box under it, `new-inline-post` posts "stub inline" there; or the
+    /// award bar's first kind (👍) toggled on the pull request itself: `mr-react`) of the first load, which picks it
+    /// (`threadLaunchAction(_:in:)`): only with `-HistqGitHubStub YES` too.
     private static var threadLaunchActionName: String? = GitHubStub.isEnabled
         ? AppState.launchFlag("-HistqPRAction").flatMap {
             ["reply", "resolve", "unresolve", "greply", "gresolve", "edit", "edit-save", "delete", "delete-confirm",
@@ -637,15 +644,16 @@ final class PullRequestDetailModel {
     #endif
 
     /// The header's reload: the shown detail loaded again from the host, kept on screen (with its drafts, open
-    /// editors and tab) until the new one is in; a failure shows above the cards.
+    /// editors and tab) until the new one is in; a failure shows above the cards. Azure's files are diffed again.
     func reload(github: HostingStore) {
         guard let number, state.value != nil else { return }
-        load(number, github: github, quiet: true)
+        load(number, github: github, quiet: true, rediffs: true)
         reloading = true
     }
 
     /// Loads pull request `number`; `quiet` keeps the shown detail until the new one is in (after an action).
-    func load(_ number: Int, github: HostingStore, quiet: Bool = false) {
+    /// Azure's files (`localFiles`) are diffed again only for another head or base, or with `rediffs`.
+    func load(_ number: Int, github: HostingStore, quiet: Bool = false, rediffs: Bool = false) {
         task?.cancel()
         generation &+= 1
         reloading = false
@@ -697,13 +705,15 @@ final class PullRequestDetailModel {
         let activityView = activityView
         let rowSHA = github.row(for: .pullRequest(number))?.headSHA
         let warmsUp = state.value == nil
+        // Azure serves no patch: its files are diffed here once the pull request's commits are known.
+        let diffsLocally = api.client.kind == .azureDevOps
         task = Task { [weak self] in
             let (client, repository) = (api.client, api.repository)
             await withTaskGroup(of: Part?.self) { [weak self] group in
                 // Commits, files and checks load beside the Conversation's parts and fill in as each arrives; the
                 // checks start with the row's head, asked again below only when the pull request's is another one.
                 group.addTask { await Self.fetchCommits(client, repository, number: number) }
-                group.addTask { await Self.fetchFiles(client, repository, number: number) }
+                if !diffsLocally { group.addTask { await Self.fetchFiles(client, repository, number: number) } }
                 if let rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: rowSHA) } }
                 async let fetched = Self.fetch(
                     client, repository, number: number, loadID: loadID, expanded: expanded, general: general,
@@ -727,6 +737,24 @@ final class PullRequestDetailModel {
                     if detail.layout.bitbucketSidebar, client.capabilities.contains(.reports) {
                         detail.reports = .loading
                         group.addTask { await Self.fetchReports(client, repository, sha: sha) }
+                    }
+                    if diffsLocally {
+                        let pull = detail.pull
+                        // A revisit or an action's reload keeps the files diffed for the same head and base.
+                        let kept = state.value.map {
+                            $0.pull.number == number && $0.pull.head.sha == sha && $0.pull.base.sha == pull.base.sha
+                                && $0.files.value != nil
+                        } ?? false
+                        if pull.head.sha.isEmpty || pull.base.sha.isEmpty {
+                            // Azure has not computed the merge yet: its file list, without patches.
+                            group.addTask { await Self.fetchFiles(client, repository, number: number) }
+                        } else if rediffs || !kept {
+                            let (read, remote) = (localFiles, api.remote)
+                            group.addTask { await Self.fetchLocalFiles(read, pull, remote: remote) }
+                        } else if selectedFile == nil {
+                            // No files part comes to pick the first file, as it does for a new diff.
+                            selectedFile = state.value?.files.value?.first?.id
+                        }
                     }
                     // The parts shown for the same head stay until this load's arrive (a revisit, a reload after an
                     // action), so their tabs do not go back to loading.
@@ -1188,8 +1216,8 @@ final class PullRequestDetailModel {
     ) -> PRActivityPage? {
         layout.activity.map {
             PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies,
-                           headerEdit: layout.headerEdit, roles: layout.roleBadges ? roles ?? [:] : nil,
-                           viewerID: viewerID)
+                           headerEdit: layout.headerEdit, headerDelete: layout.headerDelete,
+                           roles: layout.roleBadges ? roles ?? [:] : nil, viewerID: viewerID)
         }
     }
 
@@ -1298,7 +1326,8 @@ final class PullRequestDetailModel {
         let bitbucketSide = layout.bitbucketSidebar
         async let tasks: Loadable<[HostedTask]> = !(bitbucketSide && client.capabilities.contains(.tasks)) ? .idle
             : await part(client.kind) { try await client.tasks(of: number, in: repository) }
-        async let mergeChecks: Loadable<[HostedMergeCheck]> = !(bitbucketSide
+        // Azure DevOps's policies, in its merge area.
+        async let mergeChecks: Loadable<[HostedMergeCheck]> = !((bitbucketSide || layout.mergeChecksInMergeArea)
             && client.capabilities.contains(.mergeChecks)) ? .idle
             : await part(client.kind) { try await client.mergeChecks(of: number, in: repository) }
         // GitHub's sidebar Projects and Development; a failure only leaves those cards out.
@@ -1382,13 +1411,27 @@ final class PullRequestDetailModel {
     private nonisolated static func fetchFiles(
         _ client: any HostingProvider, _ repository: HostedRepository, number: Int
     ) async -> Part? {
-        let read = await part(client.kind) { try await client.pullRequestFiles(number, in: repository) }
-        let files: Loadable<[PRFile]> = switch read {
+        .files(prFiles(await part(client.kind) { try await client.pullRequestFiles(number, in: repository) }))
+    }
+
+    /// Azure DevOps's files with their patches, diffed by the session (`localFiles`). Logs `content pr <n> files
+    /// local-diff <count> ok` or `… local-diff failed` (never git's words: they may hold a remote's URL).
+    @concurrent
+    private nonisolated static func fetchLocalFiles(
+        _ read: @MainActor @Sendable (HostedPullRequest, String) async -> Loadable<[HostedPullRequestFile]>,
+        _ pull: HostedPullRequest, remote: String
+    ) async -> Part? {
+        let files = prFiles(await read(pull, remote))
+        UITiming.content("pr \(pull.number) files local-diff " + (files.value.map { "\($0.count) ok" } ?? "failed"))
+        return .files(files)
+    }
+
+    private nonisolated static func prFiles(_ read: Loadable<[HostedPullRequestFile]>) -> Loadable<[PRFile]> {
+        switch read {
         case .loaded(let files): .loaded(files.map(prFile))
         case .failed(let message): .failed(message)
         case .idle, .loading: .idle
         }
-        return .files(files)
     }
 
     @concurrent
@@ -1779,6 +1822,7 @@ private struct PRHeaderCard: View {
                         case .requestedToMerge: requestedSummary(value)
                         case .stateFirst: summary(value, stateFirst: true)
                         case .bitbucket: bitbucketSummary(value)
+                        case .azureDevOps: azureSummary(value)
                         }
                     } else {
                         SkeletonLine(width: 260, height: 12)
@@ -1943,6 +1987,65 @@ private struct PRHeaderCard: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Azure DevOps's "[Active] [avatar] stub proposes to merge [feature] [copy] into [main] 1/3 comments resolved"
+    /// (the threads with a status, general and on files, as loaded), on one line, or on two before "into" in a narrow
+    /// card; the copy button puts the source branch's name on the pasteboard.
+    private func azureSummary(_ value: PullRequestDetail) -> some View {
+        let pull = value.pull
+        let roots = value.comments.filter { $0.parentID == nil && $0.resolvable == true }
+        let states = (value.threads.value?.all ?? []).compactMap(\.state)
+        let total = roots.count + states.count
+        let resolved = roots.count { $0.resolved == true } + states.count { $0.isResolved }
+        let layout = narrow
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 6))
+        return layout {
+            HStack(spacing: 6) {
+                PRStatePill(detail: value, titles: value.layout.words.states)
+                    .fixedSize()
+                if let user = pull.user {
+                    GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 18,
+                                     avatars: .of(session.github))
+                        .help(user.name ?? user.login)
+                }
+                Text(pull.user?.name ?? pull.user?.login ?? "ghost")
+                    .fontWeight(.semibold)
+                    .layoutPriority(1)
+                Text("proposes to merge")
+                    .foregroundStyle(.secondary)
+                    .layoutPriority(1)
+                branchChip(headName(pull))
+                Button {
+                    RepoMenus.copy(pull.head.ref)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(RowIconButtonStyle())
+                .help("Copy branch name")
+                .accessibilityLabel("Copy branch name")
+                .layoutPriority(1)
+            }
+            .frame(height: 20)
+            .layoutPriority(1)
+            HStack(spacing: 6) {
+                Text("into")
+                    .foregroundStyle(.secondary)
+                    .layoutPriority(1)
+                branchChip(pull.base.ref)
+                if total > 0 {
+                    Text(verbatim: "\(resolved)/\(total) comments resolved")
+                        .foregroundStyle(.secondary)
+                        .layoutPriority(1)
+                }
+            }
+        }
+        .font(.body)
+        .lineLimit(1)
+        .accessibilityElement(children: .contain)
+    }
+
     /// The head as the sentence names it: GitHub's `owner:branch`; on GitLab and Bitbucket the branch alone when it is
     /// in the same repository (its label's owner is the base's), as they write it.
     private func headName(_ pull: HostedPullRequest) -> String {
@@ -2103,8 +2206,10 @@ private struct PRHeaderReviewButtons: View {
                             .foregroundStyle(requested ? Palette.conflictTone : .secondary)
                             .accessibilityHidden(true)
                     }
-                    Text(!requested ? "Request changes"
-                        : session.github.kind == .bitbucketDataCenter ? "Requested changes" : "Changes requested")
+                    let words = detail.layout.words
+                    Text(!requested ? words.requestChanges ?? "Request changes"
+                        : words.changesRequested
+                            ?? (session.github.kind == .bitbucketDataCenter ? "Requested changes" : "Changes requested"))
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -2139,12 +2244,14 @@ struct PRReloadButton: View {
     }
 }
 
-/// Open (green), Draft, Merged (the brand blue) or Closed (red), as on GitHub.
+/// Open (green), Draft, Merged (the brand blue) or Closed (red), as on GitHub; `titles`: the host's words for them
+/// (`PRPageWords.states`, Azure DevOps's Active, Completed, Abandoned).
 private struct PRStatePill: View {
     let detail: PullRequestDetail
+    var titles: [String: String] = [:]
 
     var body: some View {
-        let (title, symbol, fill, text): (String, String, Color, Color) =
+        let (state, symbol, fill, text): (String, String, Color, Color) =
             if detail.isMerged {
                 ("Merged", "arrow.triangle.merge", Palette.mergedTone, Palette.onAccent)
             } else if !detail.isOpen {
@@ -2154,6 +2261,7 @@ private struct PRStatePill: View {
             } else {
                 ("Open", "lucide-git-pull-request-arrow", Color(nsColor: Palette.diffAddedFill), Color(nsColor: Palette.diffAddedSign))
             }
+        let title = titles[state] ?? state
         Label { Text(title) } icon: { IconImage(symbol, size: 12) }
             .font(.settingsCaption.weight(.semibold))
             .foregroundStyle(text)
@@ -2359,7 +2467,8 @@ struct PRConversationTab: View {
         } accessory: {
             let model = session.pullDetail
             if let activity = detail.layout.activity {
-                PRActivityControls(activity: activity, view: model.activityView) { [session] view in
+                PRActivityControls(activity: activity, view: model.activityView,
+                                   count: detail.timeline.entryCount) { [session] view in
                     session.pullDetail.setActivity(view, github: session.github)
                 }
             } else {
@@ -2415,20 +2524,24 @@ struct PRActivityControls: View {
     let activity: PRActivity
     /// What the Activity shows now (the model's `activityView`).
     let view: PRActivityView
+    /// Every entry's count, after the host's `allTitle` ("Show everything (7)").
+    var count: Int? = nil
     /// The model's `setActivity`.
     let set: (PRActivityView) -> Void
 
     var body: some View {
         let view = view
+        let all = activity.allTitle.map { title in count.map { "\(title) (\($0))" } ?? title } ?? PRActivity.all
+        let title = { (filter: String) in filter == PRActivity.all ? all : filter }
         HStack(spacing: 6) {
             CapsuleMenuPicker(
                 label: "Show", selection: Binding(get: { view.filter }, set: { filter in
                     var changed = view
                     changed.filter = filter
                     set(changed)
-                }), title: Text(view.filter)
+                }), title: Text(title(view.filter))
             ) {
-                ForEach([PRActivity.all] + activity.categories, id: \.self) { Text($0).tag($0) }
+                ForEach([PRActivity.all] + activity.categories, id: \.self) { Text(title($0)).tag($0) }
             }
             // A host whose order is fixed (Bitbucket's newest first) has no toggle.
             if activity.newestFirst == nil {
@@ -2805,6 +2918,8 @@ private struct PRSideColumn: View {
             hostSidebar
         } else if detail.layout.bitbucketSidebar {
             PRBitbucketSidebar(session: session, detail: detail) { reviewersCard(HostAvatars.of(session.github)) }
+        } else if detail.layout.azureSidebar {
+            PRAzureSidebar(session: session, detail: detail)
         } else {
             sideCards
         }
@@ -3086,14 +3201,7 @@ private struct PRBitbucketSidebar<Reviewers: View>: View {
                         .font(.settingsCaption)
                         .foregroundStyle(.secondary)
                     ForEach(Array(checks.enumerated()), id: \.offset) { _, check in
-                        let (symbol, tone): (String, Color?) = switch check.status {
-                        case "PASSED": ("checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
-                        case "FAILED": ("xmark.circle.fill", Color(nsColor: Palette.diffRemovedSign))
-                        case "PENDING": ("circle.dotted", Palette.conflictTone)
-                        default: ("minus.circle", nil)
-                        }
-                        PRSideStatusRow(symbol: symbol, tone: tone, text: check.name)
-                            .help(check.blocking ? "Blocks the merge" : check.required ? "Required" : check.name)
+                        PRMergeCheckRow(check: check)
                     }
                 }
             }
@@ -3178,6 +3286,99 @@ private struct PRBitbucketSidebar<Reviewers: View>: View {
         return run.conclusion == "success" ? Color(nsColor: Palette.diffAddedSign)
             : ["failure", "timed_out", "cancelled"].contains(run.conclusion ?? "")
                 ? Color(nsColor: Palette.diffRemovedSign) : nil
+    }
+}
+
+/// A merge check's row (Bitbucket's Merge checks card, Azure DevOps's merge area): passed, failed, pending or other,
+/// its name, and whether it blocks the merge as its tooltip.
+private struct PRMergeCheckRow: View {
+    let check: HostedMergeCheck
+
+    var body: some View {
+        let (symbol, tone): (String, Color?) = switch check.status {
+        case "PASSED": ("checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
+        case "FAILED": ("xmark.circle.fill", Color(nsColor: Palette.diffRemovedSign))
+        case "PENDING": ("circle.dotted", Palette.conflictTone)
+        default: ("minus.circle", nil)
+        }
+        PRSideStatusRow(symbol: symbol, tone: tone, text: check.name)
+            .help(check.blocking ? "Blocks the merge" : check.required ? "Required" : check.name)
+    }
+}
+
+/// Azure DevOps's sidebar (`PRPageLayout.azureSidebar`): Reviewers under "Required" and "Optional", each with its
+/// vote as Azure words it (`HostedReview.vote`, `isRequired`), then Tags (the labels, read-only: Azure keeps no list of
+/// tags to pick from).
+private struct PRAzureSidebar: View {
+    let session: RepoSession
+    let detail: PullRequestDetail
+
+    var body: some View {
+        let avatars = HostAvatars.of(session.github)
+        let reviews = detail.reviews.filter { $0.vote != nil && $0.user != nil }
+        let labels = detail.pull.labels ?? []
+        VStack(spacing: SectionCardMetrics.spacing) {
+            SectionCard("Reviewers", systemImage: "person.2", count: reviews.count) {
+                VStack(alignment: .leading, spacing: 10) {
+                    group("Required", reviews.filter { $0.isRequired == true }, empty: "No required reviewers",
+                          avatars: avatars)
+                    group("Optional", reviews.filter { $0.isRequired != true }, empty: "No optional reviewers",
+                          avatars: avatars)
+                }
+            }
+            SectionCard("Tags", systemImage: "tag", count: labels.count) {
+                if labels.isEmpty {
+                    PRSideEmpty(text: "No tags")
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(labels, id: \.name) { PRLabelChip(label: $0) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func group(_ title: String, _ reviews: [HostedReview], empty: String, avatars: HostAvatars)
+        -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.settingsCaption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if reviews.isEmpty { PRSideEmpty(text: empty) }
+            ForEach(reviews, id: \.id) { review in
+                let user = review.user ?? HostedUser(id: 0, login: "ghost")
+                let (words, symbol, tone) = Self.vote(review.vote ?? 0)
+                HStack(spacing: 8) {
+                    GitHubUserAvatar(login: user.login, id: user.id, avatarURL: user.avatarURL, size: 22,
+                                     avatars: avatars)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(user.name ?? user.login)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(words)
+                            .font(.settingsCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: symbol)
+                        .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+                        .accessibilityHidden(true)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    /// A vote as Azure DevOps words it, its symbol and tone: 10 approved, 5 approved with suggestions, -5 waiting for
+    /// the author, -10 rejected, else no vote.
+    private static func vote(_ vote: Int) -> (String, String, Color?) {
+        switch vote {
+        case 10: ("Approved", "checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
+        case 5: ("Approved with suggestions", "checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
+        case -5: ("Waiting for author", "clock.fill", Palette.conflictTone)
+        case -10: ("Rejected", "xmark.circle.fill", Color(nsColor: Palette.diffRemovedSign))
+        default: ("No vote", "circle", nil)
+        }
     }
 }
 
@@ -3565,7 +3766,7 @@ private struct PRActionsCard: View {
         let base = pull.base.ref
         if hasConflicts {
             return (Color(nsColor: Palette.diffRemovedSign), "exclamationmark.triangle.fill",
-                    "This branch has conflicts that must be resolved",
+                    detail.layout.words.conflicts ?? "This branch has conflicts that must be resolved",
                     "Resolve the conflicts with \(base) to merge it.")
         }
         if pull.draft == true {
@@ -3584,8 +3785,8 @@ private struct PRActionsCard: View {
             break
         }
         if mergesCleanly {
-            return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill", "No conflicts with \(base)",
-                    "This branch can be merged.")
+            return (Color(nsColor: Palette.diffAddedSign), "checkmark.circle.fill",
+                    detail.layout.words.noConflicts ?? "No conflicts with \(base)", "This branch can be merged.")
         }
         let kind = session.github.kind
         guard kind.reportsMergeability else {
@@ -3699,8 +3900,18 @@ private struct PRActionsCard: View {
                 } else if detail.isOpen {
                     statusBox(status)
                 } else {
-                    statusBox((Color(nsColor: Palette.diffRemovedSign), "xmark.circle.fill", "Declined",
-                               "This pull request was declined."))
+                    let abandoned = detail.layout.words.abandoned
+                    statusBox((Color(nsColor: Palette.diffRemovedSign), "xmark.circle.fill", abandoned ?? "Declined",
+                               "This pull request was \(abandoned?.lowercased() ?? "declined")."))
+                }
+                if detail.isOpen, detail.layout.mergeChecksInMergeArea, let checks = detail.mergeChecks,
+                   !checks.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(checks.enumerated()), id: \.offset) { _, check in
+                            PRMergeCheckRow(check: check)
+                        }
+                    }
+                    .padding(.leading, 4)
                 }
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 8) {
@@ -3774,7 +3985,7 @@ private struct PRActionsCard: View {
                 .foregroundStyle(Palette.mergedTone)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Merged pull request")
+                Text(detail.layout.words.completed ?? "Merged pull request")
                     .font(.body.weight(.semibold))
                 Text(verbatim: "Merged in \(pull.head.ref) (pull request #\(pull.number))")
                     .font(.callout)
@@ -4365,7 +4576,7 @@ private struct PRActionsCard: View {
                           title: Text(detail.layout == .default ? shown.title : shown.title(on: kind))) {
             ForEach(methods, id: \.self) { Text(detail.layout == .default ? $0.title : $0.title(on: kind)).tag($0) }
         }
-        Button("Merge") { confirmMerge(shown, options: mergeOptions) }
+        Button(detail.layout.words.complete ?? "Merge") { confirmMerge(shown, options: mergeOptions) }
             .buttonStyle(RowTextButtonStyle(
                 formRow: true,
                 fill: mergesCleanly ? Color(nsColor: Palette.graphPullOpenFill) : nil))
@@ -4406,7 +4617,8 @@ private struct PRActionsCard: View {
                         .foregroundStyle(Color(nsColor: open ? Palette.diffRemovedSign : Palette.diffAddedSign))
                         .accessibilityHidden(true)
                     let noun = session.github.kind.pullRequestNoun.capitalized
-                    Text(open ? "Close \(noun)" : "Reopen \(noun)")
+                    let words = detail.layout.words
+                    Text(open ? words.close ?? "Close \(noun)" : words.reopen ?? "Reopen \(noun)")
                 }
             }
             .buttonStyle(RowTextButtonStyle(formRow: true))
@@ -4464,7 +4676,7 @@ private struct PRActionsCard: View {
         }
         let kind = session.github.kind
         model.presentModal(.confirmation(ModalConfirmation(
-            title: "\(method.buttonTitle) \(kind.reference(.pullRequest(pull.number)))?",
+            title: "\(detail.layout.words.complete ?? method.buttonTitle) \(kind.reference(.pullRequest(pull.number)))?",
             message: "\(kind.name) merges \(count) \(count == 1 ? "commit" : "commits") of \(pull.head.ref) into "
                 + "\(pull.base.ref), \(how)."
                 + (options.deleteSourceBranch == true ? " It then deletes \(pull.head.ref) on \(kind.name)." : "")
@@ -4485,12 +4697,14 @@ private struct PRActionsCard: View {
         let kind = session.github.kind
         let reference = kind.reference(.pullRequest(number))
         let noun = kind.pullRequestNoun.lowercased()
+        let words = detail.layout.words
         model.presentModal(.confirmation(ModalConfirmation(
-            title: open ? "Reopen \(reference)?" : "Close \(reference)?",
+            title: open ? "\(words.reopen ?? "Reopen") \(reference)?" : "\(words.close ?? "Close") \(reference)?",
             message: open
                 ? "The \(noun) opens again on \(kind.name)."
                 : "The \(noun) closes on \(kind.name) without merging; it can be reopened later.",
-            button: open ? "Reopen" : "Close \(kind.pullRequestNoun.capitalized)", isDestructive: !open,
+            button: open ? words.reopen ?? "Reopen" : words.close ?? "Close \(kind.pullRequestNoun.capitalized)",
+            isDestructive: !open,
             perform: { [session] in session.pullDetail.perform(.setOpen(open), on: number, github: session.github) })))
     }
 
@@ -4616,7 +4830,7 @@ enum HostAvatars: Equatable {
         case .bitbucketCloud: return .gitlab(host: repository.host)
         // Not loaded from the host until its client maps avatars.
         case .bitbucketDataCenter: return .drawn
-        // Not loaded from the host until its client maps avatars.
+        // Azure DevOps's pictures need the token: never fetched, always drawn.
         case .azureDevOps: return .drawn
         }
     }
@@ -4912,7 +5126,9 @@ private struct PRFilesTab: View {
         case .failed(let message):
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: message)
         case .loading:
-            PRPartLoading(tab: .files)
+            PRPartLoading(tab: .files, isCurrent: { [model = session.pullDetail] in
+                if case .loading = model.state.value?.files { true } else { false }
+            })
         case .idle:
             DiffNoticeCard(title: "Files changed", systemImage: "exclamationmark.triangle", message: "Not loaded.")
         }
@@ -5225,10 +5441,12 @@ private struct PRCheckRow: View {
 /// A tab's part while it still loads (the Conversation shows first): its card, with a spinner once that takes a while.
 private struct PRPartLoading: View {
     let tab: PRTab
+    /// The part still loads (`DelayedSpinner.isCurrent`): Azure's local diff may land just before the delay ends.
+    var isCurrent: @MainActor () -> Bool = { true }
 
     var body: some View {
         SectionCard(tab.title, systemImage: tab.systemImage, countIsLoading: true) {
-            DelayedSpinner(detail: "pr \(tab.rawValue)")
+            DelayedSpinner(detail: "pr \(tab.rawValue)", isCurrent: isCurrent)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

@@ -396,7 +396,8 @@ final class IssueDetailModel {
     ) -> PRActivityPage? {
         layout.issueActivity.map {
             PRActivityPage(layout: $0, view: view, events: events, collapsesReplies: layout.collapsesReplies,
-                           headerEdit: layout.headerEdit, roles: layout.roleBadges ? roles ?? [:] : nil)
+                           headerEdit: layout.headerEdit, headerDelete: layout.headerDelete,
+                           roles: layout.roleBadges ? roles ?? [:] : nil)
         }
     }
 

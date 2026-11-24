@@ -5,7 +5,9 @@
 // Self-Managed host (with an optional base path) by pasting a personal access token, or by signing in with GitLab
 // (device flow) with Histq's application on gitlab.com or the account's own Application ID on Self-Managed; Bitbucket
 // (bitbucket.org) by pasting an Atlassian API token, or by signing in with Bitbucket (authorization code in the browser,
-// back through `LoopbackRedirect`) when the build has Histq's client ID and secret. Each token is checked with
+// back through `LoopbackRedirect`) when the build has Histq's client ID and secret; Azure DevOps (dev.azure.com) only by
+// signing in with Microsoft (the same flow, with Histq's Entra app: PKCE, no secret), when the build has its client ID,
+// and its row lists the account's organizations. Each token is checked with
 // `GET /user` before it is saved in the login Keychain (`HostingTokens`), and the profile keeps only the host (and base
 // path), the login and a Self-Managed sign-in's Application ID.
 // A sign-in that returns a refresh token or an expiry also saves the account's `.oauth` record, and an account whose
@@ -39,6 +41,8 @@ struct IntegrationsSettings: View {
     /// The hosts whose OAuth sign-in can no longer be renewed (`HostingTokens.isSignInExpired`), read with
     /// `tokenStored`.
     @State private var signInExpired: Set<String> = []
+    /// Each Azure DevOps account's organizations (by host), read after `tokenStored`; none when the read failed.
+    @State private var azureOrganizations: [String: [String]] = [:]
     @State private var activity: Activity = .idle
     /// The connection in flight (a check, an import, a device flow's polling); cancelled by Cancel, a profile switch
     /// and the Settings modal closing.
@@ -55,13 +59,13 @@ struct IntegrationsSettings: View {
 
         func title(_ kind: HostingKind) -> String {
             switch self {
-            case .signIn: "Sign in with \(kind.name)"
+            case .signIn: kind == .azureDevOps ? "Sign in with Microsoft" : "Sign in with \(kind.name)"
             case .token:
                 switch kind {
                 case .bitbucketCloud: "API token"
                 case .bitbucketDataCenter: "HTTP access token"
                 case .github, .gitlab: "Personal access token"
-                // Not offered yet (no Add Account entry); Phase 22 signs in with Microsoft Entra instead.
+                // Not offered: Azure DevOps personal access tokens are retiring, so it signs in with Microsoft only.
                 case .azureDevOps: "Access token"
                 }
             case .cli: "GitHub CLI"
@@ -71,7 +75,7 @@ struct IntegrationsSettings: View {
 
     /// The entries of the Add Account menu.
     private enum AddKind: CaseIterable {
-        case github, enterprise, gitlab, gitlabSelfManaged, bitbucket, bitbucketDataCenter
+        case github, enterprise, gitlab, gitlabSelfManaged, bitbucket, bitbucketDataCenter, azureDevOps
 
         var title: String {
             switch self {
@@ -81,6 +85,7 @@ struct IntegrationsSettings: View {
             case .gitlabSelfManaged: "GitLab Self-Managed"
             case .bitbucket: "Bitbucket"
             case .bitbucketDataCenter: "Bitbucket Data Center"
+            case .azureDevOps: "Azure DevOps"
             }
         }
 
@@ -90,6 +95,7 @@ struct IntegrationsSettings: View {
             case .gitlab, .gitlabSelfManaged: .gitlab
             case .bitbucket: .bitbucketCloud
             case .bitbucketDataCenter: .bitbucketDataCenter
+            case .azureDevOps: .azureDevOps
             }
         }
     }
@@ -117,6 +123,10 @@ struct IntegrationsSettings: View {
     /// shown or logged.
     static let bitbucketClientID = infoPlistID("HistqBitbucketClientID")
     private static let bitbucketClientSecret = infoPlistID("HistqBitbucketClientSecret")
+
+    /// `HistqAzureClientID` from Info.plist (build setting `HISTQ_AZURE_CLIENT_ID`): Histq's Microsoft Entra app, a
+    /// public client (no secret). Without it, Azure DevOps cannot connect and its sign-in row says so.
+    static let azureClientID = infoPlistID("HistqAzureClientID")
 
     private static func infoPlistID(_ key: String) -> String {
         let value = (Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "")
@@ -247,6 +257,7 @@ struct IntegrationsSettings: View {
     private func checkTokens(_ profile: Profile) async {
         tokenStored = Dictionary(profile.accounts.map { ($0.host, .loading) }, uniquingKeysWith: { first, _ in first })
         signInExpired = []
+        azureOrganizations = [:]
         for account in profile.accounts {
             do {
                 let token = try await HostingTokens.read(
@@ -262,6 +273,13 @@ struct IntegrationsSettings: View {
                 guard !Task.isCancelled else { return }
                 tokenStored[account.host] = .failed(String(describing: error))
             }
+        }
+        // After every row's token: the organizations take two requests.
+        for account in profile.accounts where account.kind == .azureDevOps && !signInExpired.contains(account.host) {
+            guard case .loaded(true) = tokenStored[account.host] else { continue }
+            let organizations = await Self.organizations(of: account, profileID: profile.id)
+            guard !Task.isCancelled else { return }
+            azureOrganizations[account.host] = organizations
         }
     }
 
@@ -300,6 +318,11 @@ struct IntegrationsSettings: View {
             }
             SettingsHint("Connected to \(account.address)")
             tokenStatus(tokenStored[account.host] ?? .idle, expired: signInExpired.contains(account.host))
+            if account.kind == .azureDevOps, let organizations = azureOrganizations[account.host] {
+                SettingsHint(organizations.isEmpty
+                    ? "No organizations found for this account."
+                    : "Organizations: " + organizations.joined(separator: ", "))
+            }
             unsafeGitUsername(account)
         }
     }
@@ -341,7 +364,7 @@ struct IntegrationsSettings: View {
     }
 
     /// The Add Account menu: GitHub (github.com), a GitHub Enterprise Server host, GitLab (gitlab.com), a GitLab
-    /// Self-Managed host, Bitbucket (bitbucket.org) or a Bitbucket Data Center host.
+    /// Self-Managed host, Bitbucket (bitbucket.org), a Bitbucket Data Center host or Azure DevOps (dev.azure.com).
     private func addAccountRow(_ profile: Profile) -> some View {
         LabeledContent {
             Menu {
@@ -361,7 +384,8 @@ struct IntegrationsSettings: View {
             .disabled(isBusy)
         } label: {
             Text(profile.accounts.isEmpty ? "No accounts yet" : "Add account")
-            SettingsHint("GitHub, GitLab or Bitbucket, on their own sites or on your own host: one account per host.")
+            SettingsHint("GitHub, GitLab, Bitbucket or Azure DevOps, on their own sites or on your own host: one "
+                + "account per host.")
         }
     }
 
@@ -404,6 +428,7 @@ struct IntegrationsSettings: View {
                 try await HostingTokens.delete(profileID: id, kind: account.kind, host: account.host)
                 library.removeAccount(forHost: account.host, of: id)
                 tokenStored[account.host] = nil
+                azureOrganizations[account.host] = nil
             } catch {
                 if !isBusy { activity = .failed("The token could not be deleted: \(error)") }
             }
@@ -420,13 +445,14 @@ struct IntegrationsSettings: View {
     }
 
     /// The host of the account being added, lowercased: github.com for GitHub, gitlab.com for GitLab, bitbucket.org
-    /// for Bitbucket, the typed host for GitHub Enterprise Server, GitLab Self-Managed and Bitbucket Data Center; nil
+    /// for Bitbucket, dev.azure.com for Azure DevOps, the typed host for GitHub Enterprise Server, GitLab Self-Managed and Bitbucket Data Center; nil
     /// when nothing is added or the typed text is empty or not a host name.
     private var draftHost: String? {
         switch adding {
         case .github: return "github.com"
         case .gitlab: return "gitlab.com"
         case .bitbucket: return BitbucketCloudClient.host
+        case .azureDevOps: return AzureDevOpsClient.host
         case .enterprise, .gitlabSelfManaged, .bitbucketDataCenter:
             return HostingHTTP.validatedHost(hostDraft.trimmingCharacters(in: .whitespacesAndNewlines))
         case nil: return nil
@@ -454,8 +480,8 @@ struct IntegrationsSettings: View {
         return text.isEmpty ? nil : text
     }
 
-    /// The OAuth client ID "Sign in with" uses for `kind`: Histq's on github.com, gitlab.com and bitbucket.org (there
-    /// only with its secret), the typed Application ID on GitLab Self-Managed; nil when there is none (always on GitHub
+    /// The OAuth client ID "Sign in with" uses for `kind`: Histq's on github.com, gitlab.com, bitbucket.org (there
+    /// only with its secret) and dev.azure.com (its Entra app), the typed Application ID on GitLab Self-Managed; nil when there is none (always on GitHub
     /// Enterprise Server).
     private func signInClientID(_ kind: AddKind) -> String? {
         let id = switch kind {
@@ -463,6 +489,7 @@ struct IntegrationsSettings: View {
         case .gitlab: Self.gitLabClientID
         case .gitlabSelfManaged: draftApplicationID ?? ""
         case .bitbucket: Self.bitbucketClientSecret.isEmpty ? "" : Self.bitbucketClientID
+        case .azureDevOps: Self.azureClientID
         case .enterprise, .bitbucketDataCenter: ""
         }
         return id.isEmpty ? nil : id
@@ -471,12 +498,14 @@ struct IntegrationsSettings: View {
     /// Histq's OAuth App exists on github.com only (without a client ID its row says how to set one); Enterprise hosts
     /// connect with a token or the GitHub CLI. GitLab hosts connect with a token, or sign in when there is an
     /// application ID (Histq's on gitlab.com, the typed one on Self-Managed). Bitbucket connects with an API token, or
-    /// signs in when the build has Histq's client. Bitbucket Data Center connects with an HTTP access token.
+    /// signs in when the build has Histq's client. Bitbucket Data Center connects with an HTTP access token. Azure
+    /// DevOps only signs in with Microsoft (without a client ID its row says the build has none).
     private func methods(_ kind: AddKind) -> [ConnectMethod] {
         switch kind {
         case .github: ConnectMethod.allCases
         case .enterprise: [.token, .cli]
         case .bitbucketDataCenter: [.token]
+        case .azureDevOps: [.signIn]
         case .gitlab, .gitlabSelfManaged, .bitbucket: signInClientID(kind) == nil ? [.token] : [.signIn, .token]
         }
     }
@@ -639,7 +668,7 @@ struct IntegrationsSettings: View {
                 SettingsHint("Create one in Bitbucket: your avatar › Manage account › HTTP access tokens, with "
                     + "Project read and Repository write.")
             case .azureDevOps:
-                SettingsHint(AzureDevOpsClient.UnsupportedError().description)
+                SettingsHint("Azure DevOps connects with Sign in with Microsoft.")
             }
         }
     }
@@ -709,16 +738,18 @@ struct IntegrationsSettings: View {
     }
 
     /// "Sign in with GitHub" or "Sign in with GitLab": the device flow's button, or the hint when this build has no
-    /// GitHub OAuth App client ID (GitLab offers the method only with an application ID); "Sign in with Bitbucket":
-    /// the authorization code flow's button (offered only with Histq's client).
+    /// GitHub OAuth App client ID (GitLab offers the method only with an application ID); "Sign in with Bitbucket"
+    /// and "Sign in with Microsoft" (Azure DevOps): the authorization code flow's button (offered only with Histq's
+    /// client; Azure DevOps without one says so).
     private func signInRow(profile: Profile?, kind: AddKind = .github, host: String?) -> some View {
         let clientID = signInClientID(kind)
+        let title = ConnectMethod.signIn.title(kind.kind)
         return LabeledContent {
             if clientID != nil {
                 Button("Sign In") {
                     guard let profile, let host else { return }
-                    if kind == .bitbucket {
-                        startCodeFlow(profile, host: host)
+                    if kind == .bitbucket || kind == .azureDevOps {
+                        startCodeFlow(profile, kind: kind, host: host)
                     } else {
                         startDeviceFlow(profile, kind: kind, host: host)
                     }
@@ -727,16 +758,21 @@ struct IntegrationsSettings: View {
                 .disabled(profile == nil || host == nil || isBusy)
             }
         } label: {
-            Text("Sign in with \(kind.kind.name)")
+            Text(title)
             if clientID == nil {
-                SettingsHint("Register a GitHub OAuth App and set HISTQ_GITHUB_CLIENT_ID")
+                SettingsHint(kind == .azureDevOps
+                    ? "This build has no Azure DevOps sign-in."
+                    : "Register a GitHub OAuth App and set HISTQ_GITHUB_CLIENT_ID")
             } else if kind == .bitbucket {
                 SettingsHint("Opens Bitbucket in your browser, where you grant Histq access.")
+            } else if kind == .azureDevOps {
+                SettingsHint("Opens Microsoft's sign-in in your browser: use the work or school account of your "
+                    + "Azure DevOps organizations.")
             } else {
                 SettingsHint("Opens \(kind.kind.name) in your browser, where you enter a one-time code.")
             }
         }
-        .settingsSearchAnchor("Sign in with \(kind.kind.name)")
+        .settingsSearchAnchor(title)
     }
 
     @ViewBuilder
@@ -894,24 +930,32 @@ struct IntegrationsSettings: View {
         }
     }
 
-    /// "Sign in with Bitbucket": Bitbucket's authorize page in the browser, which sends the code back to Histq through
-    /// the loopback redirect; the code is then exchanged with Histq's client secret. The account keeps no client ID
-    /// (Histq's renews its token).
-    private func startCodeFlow(_ profile: Profile, host: String) {
-        guard !isBusy, profile.account(forHost: host) == nil, let clientID = signInClientID(.bitbucket) else { return }
+    /// "Sign in with Bitbucket" or "Sign in with Microsoft" (Azure DevOps): the host's authorize page in the browser,
+    /// which sends the code back to Histq through the loopback redirect; the code is then exchanged with Histq's client
+    /// secret (Bitbucket) or PKCE verifier (Azure DevOps, Histq's Entra app on a random localhost port). The account
+    /// keeps no client ID (Histq's renews its token).
+    private func startCodeFlow(_ profile: Profile, kind: AddKind, host: String) {
+        guard !isBusy, profile.account(forHost: host) == nil, let clientID = signInClientID(kind) else { return }
         connectTask?.cancel()
-        let waiting = "Waiting for you to grant access on Bitbucket in your browser…"
+        let hostKind = kind.kind
+        let isAzure = hostKind == .azureDevOps
+        let site = isAzure ? "Microsoft" : hostKind.name
+        let waiting = isAzure
+            ? "Waiting for you to sign in with Microsoft in your browser…"
+            : "Waiting for you to grant access on Bitbucket in your browser…"
         activity = .working(waiting)
         let id = profile.id
         let secret = Self.bitbucketClientSecret
         connectTask = Task {
             do {
-                let flow = try OAuthCodeFlow.bitbucketCloud(clientID: clientID, clientSecret: secret)
+                let flow = isAzure
+                    ? try OAuthCodeFlow.azureDevOps(clientID: clientID)
+                    : try OAuthCodeFlow.bitbucketCloud(clientID: clientID, clientSecret: secret)
                 let attempt = flow.start()
                 // A request without this sign-in's state (another page probing the port) is ignored, not fatal.
                 let port = UInt16(flow.redirectURI.port ?? 0)
                 let target = try await LoopbackRedirect.callback(
-                    port: port, path: flow.redirectURI.path(), opening: attempt.url,
+                    port: port, path: flow.callbackPath, opening: attempt.url,
                     portBusy: {
                         activity = .working("Port \(port) is busy (the last sign-in may still hold it): waiting for "
                             + "it to free up…")
@@ -928,17 +972,40 @@ struct IntegrationsSettings: View {
                     }
                 }
                 try Task.checkCancellation()
-                let code = try flow.code(fromCallback: target, for: attempt)
-                activity = .working("Getting the token from Bitbucket…")
+                let code = try Self.code(flow, callback: target, for: attempt, kind: hostKind)
+                activity = .working("Getting the token from \(site)…")
                 let token = try await flow.exchange(code, for: attempt)
                 try Task.checkCancellation()
-                activity = .working("Checking the token with Bitbucket…")
+                activity = .working("Checking the token with \(hostKind.name)…")
                 try await finishConnect(
-                    id, kind: .bitbucketCloud, host: host, token: token.accessToken, refreshToken: token.refreshToken,
+                    id, kind: hostKind, host: host, token: token.accessToken, refreshToken: token.refreshToken,
                     expiresIn: token.expiresIn)
             } catch {
-                fail(error, kind: .bitbucketCloud)
+                fail(error, kind: hostKind)
             }
+        }
+    }
+
+    /// The code of the callback `target`. For Azure DevOps an error keeps Entra's `error_description` as the tenant
+    /// wrote it (a form-encoded `+` read as a space): Entra also answers `access_denied` when the tenant refuses the
+    /// sign-in (conditional access, an account it does not take).
+    private static func code(
+        _ flow: OAuthCodeFlow, callback target: String, for attempt: OAuthCodeFlow.Attempt, kind: HostingKind
+    ) throws -> String {
+        do {
+            return try flow.code(fromCallback: target, for: attempt)
+        } catch let error as OAuthCodeFlow.CodeFlowError where kind == .azureDevOps {
+            let code: String
+            switch error {
+            case .accessDenied: code = "access_denied"
+            case .failed(let failed, _): code = failed
+            case .missingClient, .invalidCallback: throw error
+            }
+            guard let description = URLComponents(string: target)?.percentEncodedQueryItems?
+                .first(where: { $0.name == "error_description" })?.value?
+                .replacing("+", with: "%20").removingPercentEncoding, !description.isEmpty
+            else { throw error }
+            throw OAuthCodeFlow.CodeFlowError.failed(code: code, description: description)
         }
     }
 
@@ -1024,8 +1091,21 @@ struct IntegrationsSettings: View {
             // The account takes the token's own user (`X-AUSERNAME`).
             return try await BitbucketDCClient(host: host, basePath: basePath) { _ in token }.currentUser().login
         case .azureDevOps:
-            throw AzureDevOpsClient.UnsupportedError()
+            // As GitLab's: the client takes a provider, so the token is checked here.
+            guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
+            guard host.lowercased() == AzureDevOpsClient.host else { throw HostingError.invalidHost(host) }
+            return try await AzureDevOpsClient { _ in token }.currentUser().login
         }
+    }
+
+    /// The organizations of the Azure DevOps `account`, through the client the tabs use (its token from
+    /// `HostingTokens`, renewed when needed); nil when they cannot be read.
+    @concurrent
+    private nonisolated static func organizations(of account: HostingAccount, profileID: UUID) async -> [String]? {
+        // Azure's client asks `HostingTokens` for the token itself: the one passed here is not used.
+        guard let client = try? HostingStore.client(for: account, profileID: profileID, token: "") as? AzureDevOpsClient
+        else { return nil }
+        return try? await client.organizations()
     }
 
     enum CLIError: Error, CustomStringConvertible {
@@ -1104,6 +1184,7 @@ struct IntegrationsSettings: View {
         case GitError.timeout: "gh did not answer within a minute."
         case let error as HostingError: String(describing: error)
         case let error as DeviceFlow.DeviceFlowError: error.message(provider: kind.name)
+        case let error as OAuthCodeFlow.CodeFlowError where kind == .azureDevOps: microsoftMessage(error)
         case let error as OAuthCodeFlow.CodeFlowError: error.message(provider: kind.name)
         case let error as LoopbackRedirect.Failure: error.description
         case is NoDeviceGrant: "This GitLab does not support device sign-in; use a token."
@@ -1111,6 +1192,17 @@ struct IntegrationsSettings: View {
         case let error as KeychainError: "The token could not be saved: \(error)"
         default: error.localizedDescription
         }
+    }
+
+    /// A Microsoft sign-in's failure: the tenant's own text, verbatim, and for the errors of an account or tenant that
+    /// refuses the sign-in (`AADSTS50020` an account from elsewhere, `AADSTS65001` no consent, `AADSTS53003`
+    /// conditional access) the hint that a personal Microsoft account cannot be used.
+    private static func microsoftMessage(_ error: OAuthCodeFlow.CodeFlowError) -> String {
+        let message = error.message(provider: "Microsoft")
+        guard case .failed(_, let description?) = error,
+              ["AADSTS50020", "AADSTS65001", "AADSTS53003"].contains(where: { description.contains($0) })
+        else { return message }
+        return message + "\nAzure DevOps sign-in needs a work or school account."
     }
 
     /// GitLab's and Bitbucket's wording of the errors a token check can get (`HostingError`'s own copy names GitHub);
@@ -1210,13 +1302,13 @@ extension HostingKind {
         }
     }
 
-    /// The host's logo asset (a template image); Azure DevOps has no logo of its own yet, so a git repository icon.
+    /// The host's logo asset (a template image); Azure DevOps's is Histq's own neutral loop mark.
     var logo: String {
         switch self {
         case .github: "logo-github"
         case .gitlab: "logo-gitlab"
         case .bitbucketCloud, .bitbucketDataCenter: "logo-bitbucket"
-        case .azureDevOps: "lucide-folder-git-2"
+        case .azureDevOps: "logo-azure-devops"
         }
     }
 }

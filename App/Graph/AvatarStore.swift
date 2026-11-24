@@ -15,7 +15,9 @@
 // leaves the Mac, to GitHub. `hostedAvatar(url:host:name:pixels:)` loads, in every mode too, the avatar a GitLab API
 // gives for an account (`avatar_url`), over https and only from the repository's own host (gitlab.com also from
 // gravatar.com); a remote on a GitLab Self-Managed or Bitbucket Data Center host the profiles have an account for
-// shows GitLab's or Bitbucket's bundled logo.
+// shows GitLab's or Bitbucket's bundled logo, and an Azure DevOps remote (any of its hosts) Histq's Azure DevOps mark
+// when a profile has an Azure DevOps account. Azure DevOps authors always get the drawn avatar: its pictures need the
+// token, so they are never fetched.
 import AppKit
 import CryptoKit
 import HistqCore
@@ -188,10 +190,14 @@ final class AvatarStore {
     /// nil (the caller keeps its own icon) on another host, for a URL `remoteOwner(_:)` refuses, until it is loaded, or
     /// when it cannot be; its arrival posts `didChange` with `ownerIdentity(ofRemoteURL:)`.
     func ownerAvatar(ofRemoteURL url: String, pixels: Int) -> NSImage? {
+        // Azure DevOps (`dev.azure.com`, its ssh hosts, `<org>.visualstudio.com`): its bundled mark, no request.
+        if let azure = AzureDevOpsClient.repository(fromRemoteURL: url) {
+            return Self.accountProvider(azure.host).flatMap { providerAvatar($0) }
+        }
         guard let remote = Self.remoteOwner(url) else { return nil }
         guard AvatarLoader.ownerHosts.contains(remote.host) else {
             // A GitLab Self-Managed or Bitbucket Data Center host: its bundled logo, no request.
-            return Self.selfHostedProvider(remote.host).flatMap { providerAvatar($0) }
+            return Self.accountProvider(remote.host).flatMap { providerAvatar($0) }
         }
         if remote.host == "github.com", remote.owner.lowercased() == "github" { return gitHubOwnerLogo() }
         let identity = Self.ownerIdentity(host: remote.host, owner: remote.owner)
@@ -201,10 +207,12 @@ final class AvatarStore {
         return nil
     }
 
-    /// GitLab or Bitbucket when a profile has a GitLab or Bitbucket Data Center account on `host`, else nil.
-    private static func selfHostedProvider(_ host: String) -> Provider? {
+    /// GitLab, Bitbucket or Azure DevOps when a profile has a GitLab, Bitbucket Data Center or Azure DevOps account on
+    /// `host`, else nil.
+    private static func accountProvider(_ host: String) -> Provider? {
         let kinds = ProfileLibrary.shared.store?.profiles.compactMap { $0.account(forHost: host)?.kind } ?? []
         if kinds.contains(.gitlab) { return .gitlab }
+        if kinds.contains(.azureDevOps) { return .azureDevOps }
         return kinds.contains(.bitbucketDataCenter) ? .bitbucket : nil
     }
 
@@ -336,15 +344,17 @@ final class AvatarStore {
     // MARK: Provider logos
 
     /// A hosting provider whose own no-reply address commits (web merges and edits, pipelines): `rawValue` is its
-    /// domain, its asset is `logo-<rawValue>` (simple-icons, CC0).
+    /// domain, its asset is `logo-<rawValue>` (simple-icons, CC0); Azure DevOps (owner logos only) has Histq's own
+    /// mark, `logo-azure-devops`.
     enum Provider: String {
         case github = "github.com", gitlab = "gitlab.com", bitbucket = "bitbucket.org", codeberg = "codeberg.org"
+        case azureDevOps = "dev.azure.com"
 
-        var asset: String { "logo-" + rawValue.prefix { $0 != "." } }
-        /// The brand color, but white for GitHub's near-black.
+        var asset: String { self == .azureDevOps ? "logo-azure-devops" : "logo-" + rawValue.prefix { $0 != "." } }
+        /// The brand color, but white for GitHub's near-black and for Azure DevOps's neutral mark.
         var color: NSColor {
             switch self {
-            case .github: .white
+            case .github, .azureDevOps: .white
             case .gitlab: NSColor(srgbRed: 0xFC / 255, green: 0x6D / 255, blue: 0x26 / 255, alpha: 1)
             case .bitbucket: NSColor(srgbRed: 0x00 / 255, green: 0x52 / 255, blue: 0xCC / 255, alpha: 1)
             case .codeberg: NSColor(srgbRed: 0x21 / 255, green: 0x85 / 255, blue: 0xD0 / 255, alpha: 1)

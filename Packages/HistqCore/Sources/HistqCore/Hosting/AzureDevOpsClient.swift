@@ -23,14 +23,6 @@ public struct AzureDevOpsClient: HostingProvider, CustomStringConvertible, Custo
     /// already was; nil otherwise.
     public typealias TokenProvider = @Sendable (_ rejected: String?) async throws -> String
 
-    /// What the app throws or shows where an Azure DevOps account would need the client this version does not have yet.
-    public struct UnsupportedError: Error, LocalizedError, CustomStringConvertible {
-        public init() {}
-
-        public var description: String { "Azure DevOps is not supported in this version." }
-        public var errorDescription: String? { description }
-    }
-
     /// The host of every Azure DevOps Services account and of its API.
     public static let host = "dev.azure.com"
     /// `https://dev.azure.com`: every organization's API (`/<org>[/<project>]/_apis/…`).
@@ -253,13 +245,10 @@ public struct AzureDevOpsClient: HostingProvider, CustomStringConvertible, Custo
         return HostedUser(id: Self.userID(id.lowercased()), login: login, name: profile.displayName, reviewerID: id)
     }
 
-    /// The repositories of every organization the token's user is a member of
-    /// (`GET https://app.vssps.visualstudio.com/_apis/accounts?memberId=<id>`, at most `maxOrganizations`), each
-    /// organization's `GET /<org>/_apis/git/repositories` (one answer, no pages), sorted by full name, with the https
-    /// `remoteUrl` as the clone URL. Disabled repositories, and those without an https remote URL naming them in their
-    /// organization, are left out. An organization that cannot be read is skipped; the list fails only when every one
-    /// fails, or on a 401.
-    public func userRepositories() async throws -> [HostedCloneRepository] {
+    /// The names of the organizations the token's user is a member of
+    /// (`GET https://app.vssps.visualstudio.com/_apis/accounts?memberId=<id>`, at most `maxOrganizations`), in Azure's
+    /// order, without duplicates or names that are not plain.
+    public func organizations() async throws -> [String] {
         let me = try await myID()
         let accounts: AzureDevOpsList<AzureDevOpsAccount> = try await get(
             url(["_apis", "accounts"], query: [("memberId", me)], on: Self.profileOrigin))
@@ -269,7 +258,16 @@ public struct AzureDevOpsClient: HostingProvider, CustomStringConvertible, Custo
         {
             organizations.append(name)
         }
-        organizations = Array(organizations.prefix(maxOrganizations))
+        return Array(organizations.prefix(maxOrganizations))
+    }
+
+    /// The repositories of every organization of `organizations()`, each organization's
+    /// `GET /<org>/_apis/git/repositories` (one answer, no pages), sorted by full name, with the https `remoteUrl` as
+    /// the clone URL. Disabled repositories, and those without an https remote URL naming them in their organization,
+    /// are left out. An organization that cannot be read is skipped; the list fails only when every one
+    /// fails, or on a 401.
+    public func userRepositories() async throws -> [HostedCloneRepository] {
+        let organizations = try await organizations()
         var result: [HostedCloneRepository] = []
         var lastError: (any Error)?
         var failures = 0

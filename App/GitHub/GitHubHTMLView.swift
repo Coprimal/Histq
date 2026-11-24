@@ -523,6 +523,7 @@ enum HostedHTML {
                 .thread .slot-reply, .item > .slot-reply { margin: 0 10px 8px 36px; }
                 .item.collapsed > :not(.head) { display: none; } .head .slot-chevron { align-self: center; }
                 .slot-menu, .slot-add { flex: none; align-self: center; width: 18px; height: 18px; }
+                .slot-add.like { width: 46px; }
                 .slot-edit { display: none; } .slot-edit.open { display: block; height: 120px; }
                 .item > .slot-edit { margin: 0 10px; } .comment > .slot-edit { margin: 0 0 0 26px; }
                 .body:has(+ .slot-edit.open) { display: none; }

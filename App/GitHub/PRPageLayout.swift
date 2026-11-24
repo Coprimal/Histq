@@ -40,6 +40,8 @@ struct PRPageLayout: Sendable, Equatable {
     /// Each Activity comment's Edit is a pencil in its header, beside the reaction button, its "…" menu left with
     /// Delete (GitLab's).
     var headerEdit = false
+    /// With `headerEdit`: Delete is a trash icon beside Edit too, its "…" menu gone (Azure DevOps's).
+    var headerDelete = false
     /// Each Activity comment's header shows "Author" on the item author's comments and the commenter's member role
     /// ("Owner", "Developer") the provider reads (`memberRoles`), as GitLab's badges.
     var roleBadges = false
@@ -96,6 +98,13 @@ struct PRPageLayout: Sendable, Equatable {
     /// merging": its pull request carries no choice); nil keeps Cloud's "Close source branch", shown where the pull
     /// request says its choice.
     var deleteSourceBranchTitle: String? = nil
+    /// With `bitbucketMergeArea`: the merge checks (`mergeChecks`) listed under the merge state in the merge area
+    /// (Azure DevOps's policies), read without `bitbucketSidebar`.
+    var mergeChecksInMergeArea = false
+    /// Azure DevOps's sidebar: Reviewers under "Required" and "Optional" with each one's vote, then Tags (labels).
+    var azureSidebar = false
+    /// The host's own words for the page's states and buttons; none keeps Histq's.
+    var words = PRPageWords()
 
     static let `default` = PRPageLayout(name: "default")
     static let gitlab = PRPageLayout(
@@ -115,6 +124,7 @@ struct PRPageLayout: Sendable, Equatable {
     /// A lookup, not a `switch`, so a new kind builds without a value of its own.
     private static let byKind: [HostingKind: PRPageLayout] = [
         .gitlab: .gitlab, .github: .github, .bitbucketCloud: .bitbucket, .bitbucketDataCenter: .bitbucketDataCenter,
+        .azureDevOps: .azureDevOps,
     ]
 
     #if DEBUG
@@ -138,12 +148,50 @@ struct PRPageLayout: Sendable, Equatable {
         descriptionTitle: "Description", composerPrompt: "What do you want to say?", reviewButtonsInHeader: true,
         bitbucketMergeArea: true, bitbucketSidebar: true, deleteSourceBranchTitle: "Delete source branch after merging")
 
+    /// Azure DevOps's page (the 20.6 screenshots): tabs Overview / Files / Commits; the header's "proposes to merge"
+    /// sentence with "N/M comments resolved" and Approve / Wait for author; the merge card first ("No merge
+    /// conflicts", the blocking policies, Azure's strategies and Complete); Description; the Activity newest first
+    /// with each thread's status; Reviewers (Required / Optional, by vote) and Tags.
+    static let azureDevOps = PRPageLayout(
+        name: "azureDevOps", tabs: [.conversation, .files, .commits],
+        tabTitles: [.conversation: "Overview", .files: "Files"], mergeSentence: .azureDevOps,
+        activity: .azureDevOpsPullRequest, headerEdit: true, headerDelete: true, commitsByDay: true,
+        commitVerb: "committed", shortResolveWords: true, filesTree: true, commentsCard: true, descriptionTitle: "Description", composerPrompt: "Add a comment…",
+        reviewButtonsInHeader: true, bitbucketMergeArea: true, mergeChecksInMergeArea: true, azureSidebar: true,
+        words: PRPageWords(
+            states: ["Open": "Active", "Merged": "Completed", "Closed": "Abandoned"],
+            requestChanges: "Wait for author", changesRequested: "Waiting for author", complete: "Complete",
+            noConflicts: "No merge conflicts", conflicts: "Merge conflicts", completed: "Completed",
+            abandoned: "Abandoned", close: "Abandon", reopen: "Reactivate", reopenThread: "Reactivate"))
+
     static func `for`(_ kind: HostingKind) -> PRPageLayout {
         #if DEBUG
         if forcesDefault { return .default }
         #endif
         return byKind[kind] ?? .default
     }
+}
+
+/// A host's own words on the pull request page (`PRPageLayout.words`, Azure DevOps's); each nil keeps Histq's.
+struct PRPageWords: Sendable, Equatable {
+    /// The state pill's titles by Histq's ("Open", "Merged", "Closed", "Draft").
+    var states: [String: String] = [:]
+    /// The header's Request changes, and its title once the viewer asked for changes.
+    var requestChanges: String? = nil
+    var changesRequested: String? = nil
+    /// The merge area's Merge button.
+    var complete: String? = nil
+    /// The merge state's title when the branch merges cleanly, and with conflicts.
+    var noConflicts: String? = nil
+    var conflicts: String? = nil
+    /// The merge area's title for a merged and for a closed pull request.
+    var completed: String? = nil
+    var abandoned: String? = nil
+    /// The Close and Reopen buttons (the noun dropped).
+    var close: String? = nil
+    var reopen: String? = nil
+    /// A resolved thread's button, with `shortResolveWords` ("Reopen" when nil).
+    var reopenThread: String? = nil
 }
 
 /// A host's Activity: the card's title, the filter's categories after "All activity" (in the host's order), the
@@ -169,6 +217,12 @@ struct PRActivity: Sendable, Equatable {
     var newestFirst: Bool? = nil
     /// The entries under day headings ("Wednesday, November 19, 2025", Bitbucket's).
     var dayHeadings = false
+    /// The filter's title for every entry, with their count ("Show everything (7)", Azure DevOps's); nil: "All
+    /// activity". The filter's value stays `PRActivity.all`.
+    var allTitle: String? = nil
+    /// Each thread's status in its header, by the host's raw status (Azure DevOps's `active`, `fixed`…), in place of
+    /// the "Resolved" line; empty shows none.
+    var statusTitles: [String: String] = [:]
 
     /// The category of a history entry of `action`; nil when it has none.
     func category(ofEntry action: String?) -> String? {
@@ -210,6 +264,17 @@ struct PRActivity: Sendable, Equatable {
         byAction: ["commit": "Commits", "approved": "Reviews", "unapproved": "Reviews", "changes_requested": "Reviews"],
         mine: "My comments", handles: false, fileVerb: "commented on", newestFirst: true, dayHeadings: true)
 
+    /// Azure DevOps's Activity: Show everything, then comments only or updates (its system entries) only; names
+    /// without handles, "commented on <file>", newest first (the composer on top, "created the pull request" last),
+    /// each thread's status as Azure names it.
+    static let azureDevOpsPullRequest = PRActivity(
+        title: "Activity", categories: ["Comments", "Updates"], comments: "Comments", history: "Updates",
+        handles: false, fileVerb: "commented on", newestFirst: true, allTitle: "Show everything",
+        statusTitles: [
+            "active": "Active", "pending": "Pending", "fixed": "Resolved", "wontFix": "Won't fix",
+            "byDesign": "By design", "closed": "Closed",
+        ])
+
     static let gitLabIssue = PRActivity(
         title: "Activity", categories: ["Comments only", "History only"], comments: "Comments only",
         history: "History only")
@@ -246,6 +311,8 @@ enum PRMergeSentence: Sendable, Equatable {
     case stateFirst
     /// Bitbucket's "[avatar] stub [feature] → [main] [Open] · Created 1 week ago · Last updated 2 days ago".
     case bitbucket
+    /// Azure DevOps's "[Active] [avatar] stub proposes to merge [feature] [copy] into [main] 1/3 comments resolved".
+    case azureDevOps
 }
 
 /// The issue header's sentence under the title.

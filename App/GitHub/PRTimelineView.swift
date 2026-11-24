@@ -45,9 +45,13 @@ struct PRTimelineHTML: Sendable {
     var threadsStayOpen = false
     /// Each comment's Edit is an icon in its header, out of its "…" menu (`PRPageLayout.headerEdit`).
     var headerEdit = false
+    /// With `headerEdit`: the `cmenu-<key>` slot holds a Delete icon, not the "…" menu (`PRPageLayout.headerDelete`).
+    var headerDelete = false
     /// The description has its reaction row (`creact-d`): the item's own reactions
     /// (`PRPageLayout.descriptionReactions`).
     var descriptionReactions = false
+    /// The entries before any filter (the Activity's "Show everything (N)", `PRActivity.allTitle`).
+    var entryCount = 0
 
     /// The description's page and the comments' page (`PRPageLayout.commentsCard`), split at the page's
     /// `PRTimeline.commentsMarker`; nil for a page without it. Each keeps every map: a page draws only its own slots.
@@ -72,6 +76,8 @@ struct PRActivityPage: Sendable {
     let collapsesReplies: Bool
     /// Each comment's Edit is an icon in its header (`cpen-<key>`), and its "…" menu only holds Delete.
     var headerEdit = false
+    /// With `headerEdit`: Delete is an icon too, on the menu's slot (`cmenu-<key>`).
+    var headerDelete = false
     /// The badges of each comment's header (`PRPageLayout.roleBadges`): "Author" on the item author's, and the
     /// member role (`roles`, by user id: "Owner", "Developer") the host gave; nil draws none.
     var roles: [Int: String]? = nil
@@ -315,8 +321,9 @@ enum PRGeneralAction: Equatable, Sendable {
 extension PRGeneralAction {
     /// DEBUG `-HistqPRAction` or `-HistqIssueAction` `greply` (posts "stub reply" to the first general thread),
     /// `gresolve` (resolves the first resolvable one), `edit-save` (saves "edited" into the first own comment),
-    /// `react` (adds a reaction to the first comment with reactions) or `react-new` (the first reaction of the first
-    /// comment with none, whose row then comes in; both `launchReaction`): the first root of `comments`, as the host
+    /// `react` (adds a reaction to the first comment with reactions; with one kind, toggles it as the like button
+    /// does) or `react-new` (the first reaction of the first comment with none, whose row then comes in; both
+    /// `launchReaction`): the first root of `comments`, as the host
     /// listed them, or the first comment `page` offers Edit on (`launchTarget`); nil when none fits. `delete-confirm`
     /// goes through the confirmation (`launchDelete`).
     static func launchAction(
@@ -346,6 +353,10 @@ extension PRGeneralAction {
         guard let target = keys.lazy.compactMap({ page.reactions[$0] }).first(where: { $0.hasRow == hasRow })
         else { return nil }
         let mine = Set(target.reactions.filter(\.viewerReacted).map(\.kind))
+        // One kind (`PRLikeButton`): as its click, a toggle, so `react` on a liked comment removes the like.
+        if page.reactionKinds.count == 1, let kind = page.reactionKinds.first {
+            return .react(target, kind: kind, add: !mine.contains(kind))
+        }
         return page.reactionKinds.first { !mine.contains($0) }.map { .react(target, kind: $0, add: true) }
     }
 
@@ -510,7 +521,8 @@ extension PRTimeline {
         /// The comment's reaction row's slot, after its body and editor: only when it has reactions. Its key is `g`
         /// or `r` and an integer id, the format the measuring script accepts.
         func reactionSlot(_ target: PRReactionTarget?) -> String {
-            guard let target, target.hasRow else { return "" }
+            // One kind (Azure DevOps's like): its count is on the header's like button, no row.
+            guard let target, target.hasRow, options.reactions.count != 1 else { return "" }
             return "<div class=\"slot-react\" data-slot=\"creact-\(target.key)\"></div>"
         }
 
@@ -549,7 +561,9 @@ extension PRTimeline {
             let menu = menuTarget.map { "<span class=\"slot-menu\" data-slot=\"cmenu-\($0.key)\"></span>" } ?? ""
             let penHTML = pen.map { "<span class=\"slot-menu\" data-slot=\"cpen-\($0.key)\"></span>" } ?? ""
             if let reactions { reactionTargets[reactions.key] = reactions }
-            let add = reactions.map { "<span class=\"slot-add\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
+            // One kind: the slot holds a like button with its count (`like`, wider).
+            let addClass = options.reactions.count == 1 ? "slot-add like" : "slot-add"
+            let add = reactions.map { "<span class=\"\(addClass)\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             let who = named ? Self.named(user, handle: activity?.layout.handles ?? true)
@@ -677,6 +691,14 @@ extension PRTimeline {
                 + "<div class=\"slot-reply\" data-slot=\"greply-\(id)\"></div></section>"
         }
 
+        /// A thread's status capsule as the Activity names it (`PRActivity.statusTitles`, green once resolved); nil
+        /// without titles.
+        func statusCap(_ status: String?, resolved: Bool) -> String? {
+            Self.statusTitle(status, resolved: resolved, titles: activity?.layout.statusTitles ?? [:]).map {
+                "<span class=\"cap\(resolved ? " resolved" : "")\">\(HostedHTML.escape($0))</span>"
+            }
+        }
+
         /// The Activity's "Resolved <time> by X" line under a resolved thread's header (its parts the host gave).
         func resolvedLine(by user: HostedUser?, at date: Date?) -> String {
             let by = user.map { " by " + Self.named($0, handle: false) } ?? ""
@@ -726,10 +748,13 @@ extension PRTimeline {
             let menu = target(Self.target(root, options))
             let reactions = Self.reactions(root, options)
             let started = root.resolvable == true && activity?.layout.fileVerb == nil
+            let status = root.resolvable == true
+                ? statusCap(root.threadStatus, resolved: root.resolved == true) : nil
             let header = head("avatar-i\(root.id)", root.user,
-                              action: started ? "started a thread" : "commented", date: root.createdAt,
-                              menu: menu, reactions: reactions, named: true)
-            let resolved = generalThread?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
+                              action: started ? "started a thread" : "commented", extra: status ?? "",
+                              date: root.createdAt, menu: menu, reactions: reactions, named: true)
+            let resolved = generalThread?.isResolved == true && status == nil
+                ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
             let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
             let replyRow = generalThread.map { "<div class=\"slot-reply\" data-slot=\"greply-\($0.root.id)\"></div>" }
                 ?? ""
@@ -764,10 +789,11 @@ extension PRTimeline {
                                              user: root.user, options: options)
             let file = thread.path.split(separator: "/").last.map(String.init) ?? thread.path
             let verb = activity?.layout.fileVerb.map { "\($0) \(file)" } ?? "started a thread on the diff"
-            let header = head("avatar-c\(root.id)", root.user, action: verb,
+            let status = thread.state.flatMap { statusCap($0.status, resolved: $0.isResolved) }
+            let header = head("avatar-c\(root.id)", root.user, action: verb, extra: status ?? "",
                               date: root.createdAt, menu: menu, reactions: reactions, named: true)
-            let resolved = thread.state?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt)
-                : ""
+            let resolved = thread.state?.isResolved == true && status == nil
+                ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
             let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
             let snippet = "<div class=\"snippet\"><div class=\"thread\">"
                 + threadHead(thread, isResolved: false, chevron: false) + excerptTable(thread) + "</div></div>"
@@ -822,6 +848,7 @@ extension PRTimeline {
         var entries = HostedTimelineOrder.entries(
             comments: comments, reviews: activity?.events == nil ? shown : [], threads: threads.value?.all ?? [],
             events: activity?.events ?? pageEvents ?? [])
+        let entryCount = entries.count
         if let commentFilter, commentFilter != .all {
             entries = entries.compactMap { entry in
                 Self.filtered(entry, commentFilter, viewerID: viewerID)
@@ -975,8 +1002,8 @@ extension PRTimeline {
             count: comments.count + (activity?.events == nil ? shown.count : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
             collapsesReplies: folds, threadsStayOpen: activity != nil && !folds,
-            headerEdit: activity?.headerEdit ?? false,
-            descriptionReactions: descriptionReactions)
+            headerEdit: activity?.headerEdit ?? false, headerDelete: activity?.headerDelete ?? false,
+            descriptionReactions: descriptionReactions, entryCount: entryCount)
     }
 
     /// A day heading as Bitbucket words it, relative to `now`: "Today", "Yesterday", the weekday within the last week
@@ -1069,13 +1096,24 @@ extension PRTimeline {
     }
 
     /// A thread's resolve button: "Resolve thread" / "Reopen thread" where the host's layout words it so
-    /// (`PRPageLayout.threadWords`, GitLab's), "Resolve" / "Reopen" (`shortResolveWords`, Bitbucket's), else "Resolve
-    /// conversation" / "Unresolve conversation".
+    /// (`PRPageLayout.threadWords`, GitLab's), "Resolve" / "Reopen" (`shortResolveWords`, Bitbucket's; Azure DevOps's
+    /// "Reactivate", `PRPageWords.reopenThread`), else "Resolve conversation" / "Unresolve conversation".
     static func resolveTitle(resolved: Bool, kind: HostingKind) -> String {
         let layout = PRPageLayout.for(kind)
         if layout.threadWords { return resolved ? "Reopen thread" : "Resolve thread" }
-        if layout.shortResolveWords { return resolved ? "Reopen" : "Resolve" }
+        if layout.shortResolveWords { return resolved ? layout.words.reopenThread ?? "Reopen" : "Resolve" }
         return resolved ? "Unresolve conversation" : "Resolve conversation"
+    }
+
+    /// A thread's status title (`titles`, by the host's raw `status`): the status's own while it agrees with
+    /// `resolved`, else the resolved or active one, as an optimistic resolve or reopen flips `resolved` before the
+    /// reload brings the host's status. nil without titles.
+    nonisolated static func statusTitle(_ status: String?, resolved: Bool, titles: [String: String]) -> String? {
+        guard !titles.isEmpty else { return nil }
+        if let status, let title = titles[status], (status == "active" || status == "pending") != resolved {
+            return title
+        }
+        return titles[resolved ? "fixed" : "active"]
     }
 
     /// Whether the general thread `thread` shows collapsed (its header only): only a resolvable one can be, a resolved
@@ -1196,7 +1234,9 @@ extension PRTimeline {
         var timeline = timeline
         let shown = timeline.reactions[target.key]?.reactions ?? target.reactions
         let reactions = toggled(shown, kind, add: add, kinds: timeline.reactionKinds)
-        guard PRReactionTarget.hasRow(shown) == PRReactionTarget.hasRow(reactions) else { return nil }
+        // One kind has no row (its count is on the like button): the HTML never changes.
+        guard timeline.reactionKinds.count == 1 || PRReactionTarget.hasRow(shown) == PRReactionTarget.hasRow(reactions)
+        else { return nil }
         timeline.reactions[target.key]?.reactions = reactions
         return timeline
     }
@@ -1470,6 +1510,10 @@ struct PRTimelinePage: View {
             measured(PRGeneralReplyRow(session: session, number: number, kind: kind, thread: thread, model: general,
                                        width: slot.frame.width),
                      slot: slot)
+        } else if let general, let target = Self.comment(of: slot, "cmenu-", in: timeline.comments),
+                  timeline.headerDelete, target.canDelete {
+            PRCommentDeleteButton(session: session, number: number, target: target, model: general, window: window,
+                                  busy: busy)
         } else if let general, let target = Self.comment(of: slot, "cmenu-", in: timeline.comments) {
             PRCommentMenu(session: session, number: number, kind: kind, target: target, model: general,
                           window: window, busy: busy, editsInHeader: timeline.headerEdit)
@@ -1917,6 +1961,41 @@ private struct PRCommentEditButton: View {
     }
 }
 
+/// A comment's Delete icon, on its "…" menu's slot (Azure DevOps's page, `PRPageLayout.headerDelete`): a trash with
+/// `PRCommentMenu`'s hover circle; a click opens the menu's Delete confirmation. Off while an action runs on the item.
+private struct PRCommentDeleteButton: View {
+    let session: RepoSession
+    let number: Int
+    let target: PRCommentTarget
+    let model: any PRGeneralThreadModel
+    let window: WindowModel
+    let busy: Bool
+
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: "trash")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 18, height: 18)
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .contentShape(Rectangle())
+            .opacity(busy ? 0.45 : 1)
+            .onHover { hovered = $0 }
+            .onTapGesture { if !busy { delete() } }
+            .help("Delete the comment")
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Delete \(target.author)'s comment")
+            .accessibilityAction { if !busy { delete() } }
+    }
+
+    private func delete() {
+        window.presentModal(.confirmation(PRCommentMenu.deleteConfirmation(
+            target, number: number, model: model, github: session.github)))
+    }
+}
+
 /// The item's own reactions for the description's row: the host's kinds, the given ones, whether an action runs on
 /// the item, the noun for VoiceOver ("pull request", "issue") and the write (a kind, add or remove).
 struct PRItemReactions {
@@ -2053,7 +2132,7 @@ struct PRReactionChip: View {
 
 /// A comment's add-reaction button, on its slot in the header before the "…" menu: a smiley with `PRCommentMenu`'s
 /// hover circle; a click opens the host's kinds under the pointer (the viewer's checked; a pick toggles one, through
-/// `model` as a chip's click). Off while an action runs on the item.
+/// `model` as a chip's click); a host with one kind gets `PRLikeButton` instead. Off while an action runs on the item.
 private struct PRReactionAddButton: View {
     let session: RepoSession
     let number: Int
@@ -2064,10 +2143,61 @@ private struct PRReactionAddButton: View {
     let busy: Bool
 
     var body: some View {
-        PRReactionPicker(kinds: kinds, reactions: target.reactions, busy: busy,
-                         label: "Add a reaction to \(target.author)'s comment") { kind, add in
-            model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+        if kinds.count == 1, let kind = kinds.first {
+            PRLikeButton(target: target, kind: kind, busy: busy) { add in
+                model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+            }
+        } else {
+            PRReactionPicker(kinds: kinds, reactions: target.reactions, busy: busy,
+                             label: "Add a reaction to \(target.author)'s comment") { kind, add in
+                model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+            }
         }
+    }
+}
+
+/// A host with one reaction kind (Azure DevOps's like): a thumbs-up with the count, in the accent color when the
+/// viewer gave it; a click adds or removes the viewer's own at once, as a chip's click (no picker, no chip row).
+/// Trailing in its slot (`slot-add like`, wider for the count). Off while `busy`.
+private struct PRLikeButton: View {
+    let target: PRReactionTarget
+    let kind: String
+    let busy: Bool
+    let toggle: (_ add: Bool) -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        let reaction = target.reactions.first { $0.kind == kind }
+        let mine = reaction?.viewerReacted ?? false
+        let count = reaction?.count ?? 0
+        HStack(spacing: 3) {
+            // The kind's own emoji (yellow 👍 for a like), as the reaction chips draw it.
+            Text(PRReactionGlyph.glyph(kind))
+                .font(.system(size: 12))
+            if count > 0 {
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+            }
+        }
+        .foregroundStyle(mine ? Color.accentColor : .secondary)
+        .padding(.horizontal, 5)
+        .frame(height: 18)
+        .background {
+            Capsule().fill(mine ? Color.accentColor.opacity(0.18) : hovered && !busy ? Palette.hoverFill : .clear)
+        }
+        .contentShape(Capsule())
+        .opacity(busy ? 0.45 : 1)
+        .onHover { hovered = $0 }
+        .onTapGesture { if !busy { toggle(!mine) } }
+        .help(mine ? "Remove your like" : "Like")
+        .accessibilityElement()
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Like \(target.author)'s comment, \(count)\(mine ? ", including you" : "")")
+        .accessibilityAction { if !busy { toggle(!mine) } }
+        // A count wider than the slot grows to the left, never clipped.
+        .fixedSize()
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

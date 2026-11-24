@@ -41,7 +41,8 @@ CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=
 ## OAuth apps
 
 "Sign in with GitHub" and "Sign in with GitLab" use the OAuth device flow with Histq's own registered apps; "Sign in
-with Bitbucket" uses the authorization code flow in the browser, back to Histq at `http://127.0.0.1:47823/callback`.
+with Bitbucket" and "Sign in with Microsoft" (Azure DevOps) use the authorization code flow in the browser, back to
+Histq at `http://127.0.0.1:47823/callback` (Bitbucket) or `http://localhost:<random port>` (Microsoft, with PKCE).
 Their IDs are public values, set as build settings in `project.yml` and read from Info.plist. With an empty GitHub ID,
 Settings › Integrations shows how to set it; with an empty GitLab ID, gitlab.com has no sign-in. A personal access token
 (an API token on Bitbucket) works either way.
@@ -51,6 +52,7 @@ Settings › Integrations shows how to set it; with an empty GitLab ID, gitlab.c
 | GitHub | An OAuth App with "Enable Device Flow" checked. | `HISTQ_GITHUB_CLIENT_ID` (`HistqGitHubClientID`) |
 | GitLab (gitlab.com) | An application with Confidential off (a public client), scopes `api`, `read_user`, `read_repository` and `write_repository`, and the device authorization grant enabled. | `HISTQ_GITLAB_CLIENT_ID` (`HistqGitLabClientID`) |
 | Bitbucket (bitbucket.org) | An OAuth client (Workspace settings › OAuth clients) with the grant types Authorization code and Refresh token, the callback URL `http://127.0.0.1:47823/callback`, and the scopes Account read, Workspace membership read, Repositories read and write, Pull requests read and write, Pipelines read. | `HISTQ_BITBUCKET_CLIENT_ID` (`HistqBitbucketClientID`), and the secret below |
+| Azure DevOps (Microsoft Entra) | An app registration (Entra admin center › App registrations) with supported account types "Multiple Entra ID tenants", the platform Mobile and desktop applications with the redirect URI `http://localhost`, Authentication › Allow public client flows: Yes, no client secret, and the delegated API permission Azure DevOps › `user_impersonation` (users of another tenant need their admin's consent until the app is publisher verified). Personal Microsoft accounts can't sign in to Azure DevOps through Entra apps. | `HISTQ_AZURE_CLIENT_ID` (`HistqAzureClientID`) |
 
 A GitLab Self-Managed account can use its own application (registered the same way on that instance): its Application
 ID goes in the Add Account form and is kept with the account in the profile.

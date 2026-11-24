@@ -1296,6 +1296,7 @@ final class RepoSession: Identifiable {
         self.url = url
         graphSearch.session = self
         pullDetail.beginOperation = { [weak self] in self?.beginOperation($0) ?? {} }
+        pullDetail.localFiles = { [weak self] in await self?.pullRequestFiles(of: $0, remote: $1) ?? .idle }
         issueDetail.beginOperation = { [weak self] in self?.beginOperation($0) ?? {} }
         resolveProfile()
         scheduleAutoFetch()
@@ -1310,6 +1311,9 @@ final class RepoSession: Identifiable {
         // `-HistqOpenTerminal YES`: the drawer opens with the tab and starts its shell, as an explicit open does (QA
         // shots of the terminal).
         if AppState.launchFlag("-HistqOpenTerminal") == "YES" { openTerminal() }
+        // `-HistqHostingStubKind azure`: the Azure DevOps stub's #1 points at this tab's real `origin/main` and
+        // `origin/feature`, so its diff is made locally.
+        if GitHubStub.isEnabled, GitHubStub.kind == .azureDevOps { AzureDevOpsStub.noteOpened(url) }
         // `-HistqShowHidden YES`: the Local, Remote and Tags cards list their hidden rows, as their eye button does (QA
         // shots).
         if AppState.launchFlag("-HistqShowHidden") == "YES" {
@@ -5980,6 +5984,37 @@ final class RepoSession: Identifiable {
         return try await ops.autoUpdateSubmodules(before: before, base: backend.base)
     }
 
+    /// An Azure DevOps pull request's files with their patches (Azure serves none), for the PR detail's Files changed
+    /// (`PullRequestDetailModel.localFiles`): its two branches fetched from `remote` and diffed here, off the main
+    /// actor, never moving a ref (`GitOperations.pullRequestFiles`). A failure is the tab's line.
+    func pullRequestFiles(of pull: HostedPullRequest, remote: String) async -> Loadable<[HostedPullRequestFile]> {
+        do {
+            let backend = try await backend()
+            let profile = await writeProfile()
+            return .loaded(
+                try await Self.pullRequestFiles(of: pull, remote: remote, backend: backend, profile: profile))
+        } catch {
+            let message = Self.message(for: error)
+            // git's words for a branch the host deleted: "fatal: couldn't find remote ref refs/heads/<branch>".
+            let gone = message.split(separator: "\n")
+                .contains { $0.hasSuffix("couldn't find remote ref refs/heads/\(pull.head.ref)") }
+            return .failed(gone ? "The source branch is no longer on the host." : message)
+        }
+    }
+
+    @concurrent
+    private nonisolated static func pullRequestFiles(
+        of pull: HostedPullRequest, remote: String, backend: Backend, profile: Profile?
+    ) async throws -> [HostedPullRequestFile] {
+        // A fetch: the profile's token where the gate lets it, as `.fetchRemote` gets it.
+        let ops = GitOperations(
+            runner: backend.runner, cwd: backend.directories.worktree, profile: profile,
+            base: await GitToolchain.writeBase(), credentials: await HostingTokens.credentials(for: profile))
+        return try await ops.pullRequestFiles(
+            remote: remote, sourceBranch: pull.head.ref, targetBranch: pull.base.ref, sourceCommit: pull.head.sha,
+            targetCommit: pull.base.sha, fromFork: pull.head.label == nil)
+    }
+
     /// "vendor/moved has new commits".
     private nonisolated static func skipReason(_ skipped: SubmoduleAutoUpdate.Skipped) -> String {
         switch skipped.reason {
@@ -6343,6 +6378,8 @@ final class RepoSession: Identifiable {
         case let error as RebaseTodoError:
             error.message
         case let error as PatchFile.InputError:
+            error.message
+        case let error as PullRequestDiffError:
             error.message
         case let error as GitOperationError:
             switch error {
