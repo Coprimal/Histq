@@ -77,23 +77,28 @@ public enum HostingKind: String, Codable, Sendable, Hashable {
     case bitbucketCloud
     /// Bitbucket Data Center (a server of its own, REST API 1.0).
     case bitbucketDataCenter
+    /// Azure DevOps Services (`dev.azure.com`).
+    case azureDevOps
 
     /// The repository a remote URL names on this kind's host: GitHub's `owner/repo` (`basePath` unused), GitLab's
     /// whole path after the instance's `basePath`, subgroups included, Bitbucket Data Center's project and repository
-    /// after the `basePath` and `scm`. nil when the URL names none.
+    /// after the `basePath` and `scm`, Azure DevOps' organization, project and repository (`basePath` unused). nil when
+    /// the URL names none.
     public func repository(fromRemoteURL url: String, basePath: String?) -> HostedRepository? {
         switch self {
         case .github: GitHubClient.repository(fromRemoteURL: url)
         case .gitlab: GitLabClient.repository(fromRemoteURL: url, basePath: basePath)
         case .bitbucketCloud: BitbucketCloudClient.repository(fromRemoteURL: url)
         case .bitbucketDataCenter: BitbucketDCClient.repository(fromRemoteURL: url, basePath: basePath)
+        case .azureDevOps: AzureDevOpsClient.repository(fromRemoteURL: url)
         }
     }
 
-    /// What the host calls a pull request: "Pull request" on GitHub and Bitbucket, "Merge request" on GitLab.
+    /// What the host calls a pull request: "Pull request" on GitHub, Bitbucket and Azure DevOps, "Merge request" on
+    /// GitLab.
     public var pullRequestNoun: String {
         switch self {
-        case .github, .bitbucketCloud, .bitbucketDataCenter: "Pull request"
+        case .github, .bitbucketCloud, .bitbucketDataCenter, .azureDevOps: "Pull request"
         case .gitlab: "Merge request"
         }
     }
@@ -101,19 +106,20 @@ public enum HostingKind: String, Codable, Sendable, Hashable {
     /// `pullRequestNoun`'s plural: "Pull requests", "Merge requests".
     public var pullRequestsNoun: String { pullRequestNoun + "s" }
 
-    /// The short form: "PR" on GitHub, "MR" on GitLab.
+    /// The short form: "PR" on GitHub, Bitbucket and Azure DevOps, "MR" on GitLab.
     public var shortNoun: String {
         switch self {
-        case .github, .bitbucketCloud, .bitbucketDataCenter: "PR"
+        case .github, .bitbucketCloud, .bitbucketDataCenter, .azureDevOps: "PR"
         case .gitlab: "MR"
         }
     }
 
-    /// What goes before a pull request's number: `#12` on GitHub and Bitbucket, `!12` on GitLab. Issues keep `#`.
+    /// What goes before a pull request's number: `#12` on GitHub and Bitbucket, `!12` on GitLab and Azure DevOps (as
+    /// their pages write it). Issues keep `#`.
     public var numberPrefix: String {
         switch self {
         case .github, .bitbucketCloud, .bitbucketDataCenter: "#"
-        case .gitlab: "!"
+        case .gitlab, .azureDevOps: "!"
         }
     }
 }

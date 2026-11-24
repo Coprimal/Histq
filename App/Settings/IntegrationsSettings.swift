@@ -61,6 +61,8 @@ struct IntegrationsSettings: View {
                 case .bitbucketCloud: "API token"
                 case .bitbucketDataCenter: "HTTP access token"
                 case .github, .gitlab: "Personal access token"
+                // Not offered yet (no Add Account entry); Phase 22 signs in with Microsoft Entra instead.
+                case .azureDevOps: "Access token"
                 }
             case .cli: "GitHub CLI"
             }
@@ -636,6 +638,8 @@ struct IntegrationsSettings: View {
             case .bitbucketDataCenter:
                 SettingsHint("Create one in Bitbucket: your avatar › Manage account › HTTP access tokens, with "
                     + "Project read and Repository write.")
+            case .azureDevOps:
+                SettingsHint(AzureDevOpsClient.UnsupportedError().description)
             }
         }
     }
@@ -647,6 +651,7 @@ struct IntegrationsSettings: View {
         case .gitlab: Text(verbatim: "glpat-…")
         case .bitbucketCloud: Text("API token")
         case .bitbucketDataCenter: Text("HTTP access token")
+        case .azureDevOps: Text("Access token")
         }
     }
 
@@ -1018,6 +1023,8 @@ struct IntegrationsSettings: View {
         case .bitbucketDataCenter:
             // The account takes the token's own user (`X-AUSERNAME`).
             return try await BitbucketDCClient(host: host, basePath: basePath) { _ in token }.currentUser().login
+        case .azureDevOps:
+            throw AzureDevOpsClient.UnsupportedError()
         }
     }
 
@@ -1192,34 +1199,38 @@ struct IntegrationsSettings: View {
 }
 
 extension HostingKind {
-    /// The host's product name: "GitHub", "GitLab", "Bitbucket" or "Bitbucket Data Center".
+    /// The host's product name: "GitHub", "GitLab", "Bitbucket", "Bitbucket Data Center" or "Azure DevOps".
     var name: String {
         switch self {
         case .github: "GitHub"
         case .gitlab: "GitLab"
         case .bitbucketCloud: "Bitbucket"
         case .bitbucketDataCenter: "Bitbucket Data Center"
+        case .azureDevOps: "Azure DevOps"
         }
     }
 
-    /// The host's logo asset (a template image).
+    /// The host's logo asset (a template image); Azure DevOps has no logo of its own yet, so a git repository icon.
     var logo: String {
         switch self {
         case .github: "logo-github"
         case .gitlab: "logo-gitlab"
         case .bitbucketCloud, .bitbucketDataCenter: "logo-bitbucket"
+        case .azureDevOps: "lucide-folder-git-2"
         }
     }
 }
 
 extension HostingAccount {
-    /// Whether the account is on the kind's public site (github.com, gitlab.com) rather than a host of its own.
+    /// Whether the account is on the kind's public site (github.com, gitlab.com, dev.azure.com) rather than a host of
+    /// its own.
     private var isPublicSite: Bool {
         switch kind {
         case .github: host.lowercased() == "github.com"
         case .gitlab: host.lowercased() == "gitlab.com"
         case .bitbucketCloud: host.lowercased() == "bitbucket.org"
         case .bitbucketDataCenter: false
+        case .azureDevOps: host.lowercased() == AzureDevOpsClient.host
         }
     }
 
@@ -1231,6 +1242,7 @@ extension HostingAccount {
         case .gitlab: isPublicSite ? "GitLab" : "GitLab Self-Managed"
         case .bitbucketCloud: "Bitbucket"
         case .bitbucketDataCenter: "Bitbucket Data Center"
+        case .azureDevOps: "Azure DevOps"
         }
     }
 

@@ -351,6 +351,9 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     /// A resolved root's resolver and when, where the host says (GitLab); not part of the JSON.
     public var resolvedBy: HostedUser? = nil
     public var resolvedAt: Date? = nil
+    /// A root's thread status in the host's own words, where it has more than resolved or not (Azure DevOps' `active`,
+    /// `pending`, `fixed`, `wontFix`, `closed`, `byDesign`); nil elsewhere. Not part of the JSON.
+    public var threadStatus: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, user, body
@@ -415,6 +418,11 @@ public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
     public var submittedAt: Date?
     /// As in `HostedComment`.
     public var authorAssociation: String?
+    /// The reviewer's own vote where the host has more than the state (Azure DevOps' 10 approved, 5 approved with
+    /// suggestions, 0 no vote, -5 waiting for the author, -10 rejected), and whether they must review; nil elsewhere.
+    /// Not part of the JSON.
+    public var vote: Int? = nil
+    public var isRequired: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, user, state, body
@@ -494,10 +502,12 @@ public struct HostedReviewThreadState: Sendable, Equatable, Identifiable {
     /// The REST `id` of the thread's first comment (GraphQL's `fullDatabaseId`, else `databaseId`); nil when GitHub
     /// leaves both out.
     public var rootCommentID: Int?
+    /// As `HostedComment.threadStatus`: the host's own status next to `isResolved` (Azure DevOps); nil elsewhere.
+    public var status: String?
 
     public init(
         id: String, isResolved: Bool, isOutdated: Bool, viewerCanResolve: Bool, viewerCanUnresolve: Bool,
-        rootCommentID: Int? = nil
+        rootCommentID: Int? = nil, status: String? = nil
     ) {
         self.id = id
         self.isResolved = isResolved
@@ -505,6 +515,7 @@ public struct HostedReviewThreadState: Sendable, Equatable, Identifiable {
         self.viewerCanResolve = viewerCanResolve
         self.viewerCanUnresolve = viewerCanUnresolve
         self.rootCommentID = rootCommentID
+        self.status = status
     }
 }
 

@@ -1128,6 +1128,7 @@ private struct RepositoryPicker: View {
         case .gitlab: "Projects of your groups appear here."
         case .bitbucketCloud: "Repositories of your workspaces appear here."
         case .bitbucketDataCenter: "Repositories of your projects appear here."
+        case .azureDevOps: "Repositories of your organizations appear here."
         }
     }
 

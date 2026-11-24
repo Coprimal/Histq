@@ -439,6 +439,8 @@ final class HostingStore {
             return try GitLabClient(host: account.host, basePath: account.basePath, token: accessToken)
         case .bitbucketDataCenter:
             return try BitbucketDCClient(host: account.host, basePath: account.basePath, token: accessToken)
+        case .azureDevOps:
+            throw AzureDevOpsClient.UnsupportedError()
         }
     }
 

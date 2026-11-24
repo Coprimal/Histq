@@ -4616,6 +4616,8 @@ enum HostAvatars: Equatable {
         case .bitbucketCloud: return .gitlab(host: repository.host)
         // Not loaded from the host until its client maps avatars.
         case .bitbucketDataCenter: return .drawn
+        // Not loaded from the host until its client maps avatars.
+        case .azureDevOps: return .drawn
         }
     }
 
@@ -5319,18 +5321,19 @@ private extension HostingKind {
     var reportsMergeability: Bool {
         switch self {
         case .github, .gitlab: true
-        // Data Center: false until its client reads the merge state.
-        case .bitbucketCloud, .bitbucketDataCenter: false
+        // Data Center: false until its client reads the merge state; Azure DevOps until its client reads `mergeStatus`.
+        case .bitbucketCloud, .bitbucketDataCenter, .azureDevOps: false
         }
     }
 
     /// What follows a pull request's web URL for its changed files: GitHub's `/files`, GitLab's `/diffs`, Bitbucket's
-    /// `/diff` (Cloud and Data Center).
+    /// `/diff` (Cloud and Data Center), Azure DevOps' `?_a=files` (its Files tab).
     var filesPagePath: String {
         switch self {
         case .github: "/files"
         case .gitlab: "/diffs"
         case .bitbucketCloud, .bitbucketDataCenter: "/diff"
+        case .azureDevOps: "?_a=files"
         }
     }
 }

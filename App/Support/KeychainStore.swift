@@ -324,8 +324,8 @@ enum HostingTokens {
     /// The token request of the refresher key `key`. GitLab: the account's own OAuth application (`oauthClientID`,
     /// the one its token came from) comes first, else Histq's; Bitbucket: Histq's client with its secret. Without a
     /// client, for an account this process never handed out, for GitHub (whose OAuth App tokens never expire) or for
-    /// Bitbucket Data Center (no sign-in yet), the grant cannot be renewed: a rejection, so the account shows
-    /// "reconnect".
+    /// Bitbucket Data Center and Azure DevOps (no sign-in yet), the grant cannot be renewed: a rejection, so the
+    /// account shows "reconnect".
     @concurrent
     private static func renew(_ key: String, _ refreshToken: String) async throws -> DeviceFlow.Token {
         let ownID = { (id: String) in id.trimmingCharacters(in: .whitespaces).isEmpty ? nil : id }
@@ -344,7 +344,7 @@ enum HostingTokens {
             }
             let flow = try OAuthCodeFlow.bitbucketCloud(clientID: client.id, clientSecret: client.secret)
             refresh = { try await flow.refresh($0) }
-        case .github, .bitbucketDataCenter:
+        case .github, .bitbucketDataCenter, .azureDevOps:
             throw HostingError.unauthorized
         }
         UITiming.hosting("refresh \(account.host) start")
@@ -419,7 +419,8 @@ enum HostingTokens {
     /// `gitUsername`, else `x-access-token` for GitHub, `oauth2` for GitLab (any name works with a personal access
     /// token; OAuth tokens need `oauth2`), `x-token-auth` for Bitbucket Cloud and the login for Bitbucket Data Center
     /// (the username its server names the token's user with, `X-AUSERNAME`; one `GitCredential.isSafeUsername`
-    /// rejects, such as `jdoe@corp.com`, gets the credential dropped by `GitInvocation`, and Settings says so).
+    /// rejects, such as `jdoe@corp.com`, gets the credential dropped by `GitInvocation`, and Settings says so); the
+    /// login for Azure DevOps too, until Phase 21.
     @concurrent
     static func credentials(for profile: Profile?) async -> [GitCredential] {
         guard let profile else { return [] }
@@ -440,6 +441,8 @@ enum HostingTokens {
             case .bitbucketCloud: "x-token-auth"
             // HTTP access tokens go with the user's own name: the login, which Settings took from `X-AUSERNAME`.
             case .bitbucketDataCenter: account.login
+            // Until Phase 21 decides how its tokens reach git: the account's own name, as Data Center's.
+            case .azureDevOps: account.login
             }
             let username = account.gitUsername ?? kindUsername
             credentials.append(GitCredential(kind: account.kind, host: account.host, username: username, token: token))

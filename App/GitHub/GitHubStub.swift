@@ -96,6 +96,8 @@ enum GitHubStub {
         case .gitlab: (GitLabStub.client(), GitLabStub.repository)
         case .bitbucketCloud: (BitbucketStub.client(), BitbucketStub.repository)
         case .bitbucketDataCenter: (BitbucketDCStub.shared, BitbucketDCStub.repository)
+        // No stub of its own yet (`kind` never names it): no provider.
+        case .azureDevOps: (nil, repository)
         }
     }
 
