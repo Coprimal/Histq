@@ -138,7 +138,7 @@ final class GraphPreviewView: NSView {
 
     private static func branch(_ name: String, isRemote: Bool = false, isOtherWorktree: Bool = false) -> RefBadge {
         RefBadge(kind: .branch(isLocal: true, isRemote: isRemote, isHead: false), name: name,
-                 remote: isRemote ? "origin" : nil, isOtherWorktree: isOtherWorktree)
+                 remote: isRemote ? "origin" : nil, isOtherWorktree: isOtherWorktree, isLinkedWorktree: isOtherWorktree)
     }
 
     private static func commit(_ hash: String, _ parents: [String], _ author: (String, String), _ minutesAgo: Int,

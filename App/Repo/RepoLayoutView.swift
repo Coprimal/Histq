@@ -627,6 +627,8 @@ private struct CommitListPanel: View {
                           remotes: session.remotes.map(\.name),
                           otherWorktreeBranches: Set((session.worktrees.value ?? [])
                               .filter { !$0.isCurrent }.compactMap(\.worktree.branch)),
+                          linkedWorktreeBranches: Set((session.worktrees.value ?? [])
+                              .filter { !$0.worktree.isMain }.compactMap(\.worktree.branch)),
                           remoteURLs: Dictionary(session.remotes.map { ($0.name, $0.url) },
                                                  uniquingKeysWith: { first, _ in first }),
                           onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) },

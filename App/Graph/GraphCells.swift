@@ -45,6 +45,9 @@ struct RefBadge: Hashable {
     var remote: String?
     /// A local branch checked out in another worktree: the worktree icon in front, always shown.
     var isOtherWorktree = false
+    /// A local branch checked out in a linked worktree (not the main one, this tab's included): the tree in place of
+    /// the laptop.
+    var isLinkedWorktree = false
 
     /// The name drawn in the badge.
     var shownName: String { label ?? name }
@@ -62,9 +65,11 @@ struct RefBadge: Hashable {
     /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read (and per
     /// change of `pullRequests`, the store's `branchPullRequests`: a remote branch's pull request by its name, which a
     /// local branch gets through its upstream; per change of `remotes`, the repo's remote names; and per change of
-    /// `otherWorktreeBranches`, the full refs (`refs/heads/wt`) checked out in the other worktrees).
+    /// `otherWorktreeBranches`, the full refs (`refs/heads/wt`) checked out in the other worktrees, and of
+    /// `linkedWorktreeBranches`, those checked out in the linked worktrees).
     static func badges(for refs: Refs, pullRequests: [String: PullRequest] = [:], remotes: [String] = [],
-                       otherWorktreeBranches: Set<String> = []) -> [String: [RefBadge]]
+                       otherWorktreeBranches: Set<String> = [],
+                       linkedWorktreeBranches: Set<String> = []) -> [String: [RefBadge]]
     {
         var byCommit: [String: [RefBadge]] = [:]
         let single = singleRemote(refs, remotes: remotes)
@@ -82,7 +87,8 @@ struct RefBadge: Hashable {
             byCommit[branch.commit, default: []].append(RefBadge(
                 kind: .branch(isLocal: true, isRemote: tracked != nil, isHead: branch.isHead), name: branch.name,
                 ahead: branch.ahead, behind: branch.behind, pullRequest: branch.upstream.flatMap { pullRequests[$0] },
-                remote: tracked?.remote, isOtherWorktree: otherWorktreeBranches.contains(branch.refName)))
+                remote: tracked?.remote, isOtherWorktree: otherWorktreeBranches.contains(branch.refName),
+                isLinkedWorktree: linkedWorktreeBranches.contains(branch.refName)))
         }
         for remote in refs.remoteBranches where !mergedRemotes.contains(remote.name) {
             byCommit[remote.commit, default: []].append(RefBadge(
@@ -262,8 +268,9 @@ final class RefBadgeCellView: NSView {
     private static func icons(_ badge: RefBadge) -> (leading: [String], trailing: [String]) {
         switch badge.kind {
         case .branch(let isLocal, let isRemote, let isHead):
+            let local = badge.isLinkedWorktree ? SidebarMetrics.linkedWorktreeImage : "lucide-laptop-minimal"
             return ((isHead ? [headIcon] : []) + (badge.isOtherWorktree ? [worktreeIcon] : []),
-                    (isLocal ? ["lucide-laptop-minimal"] : []) + (isRemote ? ["cloud"] : []))
+                    (isLocal ? [local] : []) + (isRemote ? ["cloud"] : []))
         case .tag: return (["tag"], [])
         case .head: return ([headIcon], [])
         case .worktree: return ([worktreeIcon], [])

@@ -115,6 +115,9 @@ enum SidebarMetrics {
     static let branchImage = "lucide-git-branch"
     /// The Worktrees card and each worktree's row: a folder with a branch.
     static let worktreeImage = "lucide-folder-git-2"
+    /// A graph badge's local branch checked out in a linked worktree (not the main one): a pine tree in place of the
+    /// laptop.
+    static let linkedWorktreeImage = "lucide-tree-pine"
     /// The Submodules card and each submodule's row: a box.
     static let submoduleImage = "shippingbox"
     /// The Stashes card and each stash's row: the tray of the graph's stash node.

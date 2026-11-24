@@ -202,6 +202,8 @@ enum TourStops {
         legend: [
             SpotlightLegendRow(mark: .icon(SidebarMetrics.currentImage), text: "The branch checked out here"),
             SpotlightLegendRow(mark: .icon(SidebarMetrics.localImage), text: "A local branch"),
+            SpotlightLegendRow(mark: .icon(SidebarMetrics.linkedWorktreeImage),
+                               text: "A local branch checked out in a linked worktree"),
             SpotlightLegendRow(mark: .icon(SidebarMetrics.remoteImage),
                                text: "A remote branch (its owner's avatar once loaded)"),
             SpotlightLegendRow(mark: .icon(SidebarMetrics.worktreeImage), text: "Checked out in another worktree"),

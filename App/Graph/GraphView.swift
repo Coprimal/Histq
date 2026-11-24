@@ -148,6 +148,9 @@ struct GraphView: NSViewRepresentable {
     /// The branches checked out in the other worktrees, as full refs (`refs/heads/wt`): their badges show the worktree
     /// icon.
     var otherWorktreeBranches: Set<String> = []
+    /// The branches checked out in the linked worktrees (not the main one), as full refs: their badges show the tree
+    /// in place of the laptop.
+    var linkedWorktreeBranches: Set<String> = []
     /// The repo's remotes' URLs by name (`RepoSession.remotes`): the cloud on a remote's badges gives way to its
     /// owner's logo (`AvatarStore.ownerAvatar`).
     var remoteURLs: [String: String] = [:]
@@ -510,6 +513,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var pullRequests: [String: RefBadge.PullRequest] = [:]
     private var remotes: [String] = []
     private var otherWorktreeBranches: Set<String> = []
+    private var linkedWorktreeBranches: Set<String> = []
     private var remoteURLs: [String: String] = [:]
     /// The logos of the remotes' owners loaded so far, by remote name (`RefBadgeCellView.remoteAvatars`).
     private var remoteAvatars: [String: NSImage] = [:]
@@ -800,14 +804,17 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         if view.refs != refs || view.pullRequests != pullRequests || view.remotes != remotes
             || view.otherWorktreeBranches != otherWorktreeBranches
+            || view.linkedWorktreeBranches != linkedWorktreeBranches
         {
             refs = view.refs
             pullRequests = view.pullRequests
             remotes = view.remotes
             otherWorktreeBranches = view.otherWorktreeBranches
+            linkedWorktreeBranches = view.linkedWorktreeBranches
             badges = view.refs.map {
                 RefBadge.badges(for: $0, pullRequests: pullRequests, remotes: remotes,
-                                otherWorktreeBranches: otherWorktreeBranches)
+                                otherWorktreeBranches: otherWorktreeBranches,
+                                linkedWorktreeBranches: linkedWorktreeBranches)
             } ?? [:]
             reloadVisible = true
         }
@@ -1480,7 +1487,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         return Ghost(row: row, hash: hash, badge: RefBadge(
             kind: .branch(isLocal: isLocal, isRemote: !isLocal, isHead: false), name: name, label: label,
             isGhost: true, remote: remoteName,
-            isOtherWorktree: isLocal && otherWorktreeBranches.contains("refs/heads/" + name)))
+            isOtherWorktree: isLocal && otherWorktreeBranches.contains("refs/heads/" + name),
+            isLinkedWorktree: isLocal && linkedWorktreeBranches.contains("refs/heads/" + name)))
     }
 
     /// Moves the ghost to the selection's: reloads only the refs and graph cells of the row it leaves and the row it
