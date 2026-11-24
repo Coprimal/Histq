@@ -1313,8 +1313,8 @@ enum RepoMenus {
     }
 
     /// Checks out a sidebar or badge ref: a local branch; a remote branch through its local branch (created tracking
-    /// it when there is none); a tag as a detached HEAD (confirmed). The toolbar's branch button shows it running
-    /// (`ActionBarAction.checkout`), wherever it started.
+    /// it when there is none, brought up to it when it tracks it: `checkout(_:catchingUpTo:_:)`); a tag as a detached
+    /// HEAD (confirmed). The toolbar's branch button shows it running (`ActionBarAction.checkout`), wherever it started.
     static func checkout(_ item: SidebarItem, _ session: RepoSession) {
         let refs = session.refs.value
         switch item {
@@ -1327,7 +1327,7 @@ enum RepoMenus {
             if let local = refs?.localBranches.first(where: { $0.upstream == name })
                 ?? refs?.localBranches.first(where: { $0.name == localName })
             {
-                checkout(.local(local.name), session)
+                checkout(local, catchingUpTo: branch, session)
             } else {
                 checkoutAskingIfDirty(name: localName, session) {
                     .checkoutTracking(remoteBranch: name, as: localName, autostash: $0)
@@ -1337,6 +1337,35 @@ enum RepoMenus {
             guard let tag = refs?.tags.first(where: { $0.name == name }) else { return }
             confirmDetached(tag.commit ?? tag.target, tag: name, session)
         }
+    }
+
+    /// The local branch of a remote branch, checked out (when it is not already) and brought up to it when it tracks
+    /// it and is behind: only behind, it is fast-forwarded (before the checkout, which then lands on the new tip);
+    /// diverged, the user picks Merge (as Pull "fast-forward if possible" does: a merge commit), Checkout Only, or
+    /// Cancel.
+    private static func checkout(_ local: LocalBranch, catchingUpTo remote: RemoteBranch, _ session: RepoSession) {
+        guard local.upstream == remote.name, local.behind > 0 else { return checkout(.local(local.name), session) }
+        let isCurrent = local.name == session.currentBranch
+        if local.ahead == 0 {
+            let title = "Fast-forward \(local.name) to \(remote.name)"
+            if isCurrent {
+                return session.run(.merge(remote.refName, checkoutFirst: nil, mode: .fastForwardOnly), title: title)
+            }
+            return session.run(.fastForward(local.name, to: remote.refName), title: title) {
+                checkout(.local(local.name), session)
+            }
+        }
+        let commits = { (count: Int) in "\(count) \(count == 1 ? "commit" : "commits")" }
+        session.confirm("\(local.name) and \(remote.name) have diverged",
+                        message: "\(remote.name) has \(commits(local.behind)) that \(local.name) does not have, and "
+                            + "\(local.name) has \(commits(local.ahead)) of its own, so it cannot be fast-forwarded. "
+                            + "Merge brings \(remote.name) into \(local.name) with a merge commit"
+                            + (isCurrent ? "." : "; Checkout Only checks \(local.name) out as it is."),
+                        button: isCurrent ? "Merge" : "Checkout & Merge",
+                        write: .merge(remote.refName, checkoutFirst: isCurrent ? nil : local.name, mode: .fastForward),
+                        operation: "Merge \(remote.name) into \(local.name)", key: isCurrent ? nil : .checkout,
+                        isDestructive: false,
+                        secondary: isCurrent ? nil : ("Checkout Only", .checkoutBranch(local.name)))
     }
 
     /// A clean working tree checks out at once. With changes, `PrefKey.autoStash` picks: "always" stashes them first
