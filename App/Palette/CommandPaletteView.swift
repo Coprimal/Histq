@@ -1,7 +1,7 @@
 // The command palette over the window (ported from Dblore's `CommandPaletteView`): a scrim, and a bg_card container
-// near the top with its two parts, the search capsule and the results card. It shows in the frame of ⌘K or the click
-// that opens it; the rows follow once ranked. Up and Down move the highlight, Return or a click runs the row; Escape or
-// a click on the scrim closes it and gives the focus back to the view that had it.
+// near the top with its two parts, the search capsule and the results card. It starts fading in (`ModalFade`) in the
+// frame of ⌘K or the click that opens it; the rows follow once ranked. Up and Down move the highlight, Return or a
+// click runs the row; Escape or a click on the scrim closes it and gives the focus back to the view that had it.
 import AppKit
 import SwiftUI
 
@@ -21,20 +21,32 @@ struct CommandPaletteOverlay: View {
     let model: WindowModel
 
     var body: some View {
-        if let palette = model.palette {
-            ZStack(alignment: .top) {
-                // The modals' backdrop: this scrim, over the window content `MainView` blurs meanwhile.
-                ModalScrim { model.closePalette() }
-                CommandPaletteView(model: model, palette: palette)
-                    .padding(.top, CommandPaletteMetrics.topMargin)
+        let isOpen = model.palette != nil
+        // Always there, so the palette fades out (`ModalFade`) as it closes; at once when its row opens a modal or
+        // Settings, which then shows at once too (`ModalHost`).
+        let showsLayer = isOpen || model.modal != nil || model.isSettingsOpen || model.actionSession?.hasModal == true
+        ZStack {
+            if let palette = model.palette {
+                overlay(palette)
+                    .transition(.modalFade)
             }
-            // A new view per opening: the highlight, the focus to restore and the timing lines start over.
-            .id(ObjectIdentifier(palette))
-            // The toolbar stays live above the scrim: a tab or page change (⌘W, the repo menu) closes the
-            // palette, whose repo rows act on the session and page it opened on.
-            .onChange(of: model.selectedTabID) { model.closePalette() }
-            .onChange(of: model.navigation.page) { model.closePalette() }
         }
+        .animation(isOpen ? Motion.sheet : Motion.exit, value: showsLayer)
+    }
+
+    private func overlay(_ palette: CommandPaletteModel) -> some View {
+        ZStack(alignment: .top) {
+            // The modals' backdrop: this scrim, over the window content `MainView` blurs meanwhile.
+            ModalScrim { model.closePalette() }
+            CommandPaletteView(model: model, palette: palette)
+                .padding(.top, CommandPaletteMetrics.topMargin)
+        }
+        // A new view per opening: the highlight, the focus to restore and the timing lines start over.
+        .id(ObjectIdentifier(palette))
+        // The toolbar stays live above the scrim: a tab or page change (⌘W, the repo menu) closes the
+        // palette, whose repo rows act on the session and page it opened on.
+        .onChange(of: model.selectedTabID) { model.closePalette() }
+        .onChange(of: model.navigation.page) { model.closePalette() }
     }
 }
 

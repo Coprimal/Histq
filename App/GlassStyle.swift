@@ -1451,6 +1451,28 @@ struct ModalBackdrop: ViewModifier {
     }
 }
 
+/// A modal, Settings or the command palette fading in (`Motion.sheet`) and out (`Motion.exit`), like the backdrop's blur
+/// (user, 2026-11-24: they opened abruptly). The host drives it with `.animation(_:value:)` on whether one shows, so a
+/// swap from one modal to the next stays instant. Inert while it fades out: a second click or Return can't run its
+/// button again.
+struct ModalFade: ViewModifier {
+    let isVisible: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isVisible ? 1 : 0)
+            .allowsHitTesting(isVisible)
+            .disabled(!isVisible)
+    }
+}
+
+extension AnyTransition {
+    /// `ModalFade` as a transition.
+    static var modalFade: AnyTransition {
+        .modifier(active: ModalFade(isVisible: false), identity: ModalFade(isVisible: true))
+    }
+}
+
 /// The scrim of an open modal or the command palette: `Palette.scrim` over the window content (under the toolbar,
 /// which stays live). A click runs `onTap` (closing the palette or a confirmation; a form ignores it).
 struct ModalScrim: View {

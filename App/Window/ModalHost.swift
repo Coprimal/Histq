@@ -1,8 +1,9 @@
 // The window's modals (task 9.6): the repo operation's forms, confirmations, host-key and rebase cards
 // (`RepoSession`), and the window's own (`WindowModel.modal`: a view's confirmation, Generate Key). Drawn in the window
 // like the command palette, not as sheets: a scrim over the content `MainView` blurs, then the card in the middle. It
-// shows in the frame that sets its state. Escape cancels; the focus moves into the card and goes back to the view
-// that had it once it closes. The AppKit toolbar stays live above the scrim: a tab or page change cancels the modal.
+// starts fading in (`ModalFade`) in the frame that sets its state. Escape cancels; the focus moves into the card and
+// goes back to the view that had it once it closes. The AppKit toolbar stays live above the scrim: a tab or page change
+// cancels the modal.
 // Settings (task 9.7) is the bottom layer: the modals it opens (Generate Key, a profile's deletion) and a form a
 // toolbar action opens meanwhile stack above it, with their own scrim, while its card is blurred and disabled.
 // An AI card opened from the rebase or pull request form stacks above the form the same way, so the form keeps its
@@ -115,44 +116,57 @@ struct ModalHost: View {
         // Always there (an empty stack draws nothing and takes no clicks), so a tab or page change that hides the
         // modal in the same update still reaches the `onChange`s below.
         ZStack {
-            // Under the other modals, never replaced by them: its section, profile and scroll stay as they were.
-            if model.isSettingsOpen {
-                SettingsLayer(model: model, isCovered: shown != nil)
+            // Each layer fades as it opens and closes (`ModalFade`), under its own animation; a swap from one modal to
+            // the next, or from the palette's row to what it opens, stays instant.
+            ZStack {
+                // Under the other modals, never replaced by them: its section, profile and scroll stay as they were.
+                if model.isSettingsOpen {
+                    SettingsLayer(model: model, isCovered: shown != nil)
+                        .transition(.modalFade)
+                }
             }
-            if let shown {
-                let cover = aiCover(shown)
-                let covered = cover != nil
-                ZStack {
-                    ModalScrim { if shown.closesOnScrimTap { cancel(shown) } }
-                    card(shown)
-                        .environment(\.modalAvailableHeight,
-                                     layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
-                        .padding(ModalMetrics.margin)
-                        // Always there, never in an `if`: the form keeps its identity and input under the AI card.
-                        // Disabled at once (the backdrop disables late), so Return can't reach the form's button.
-                        .modifier(ModalBackdrop(isActive: covered))
-                        .disabled(covered)
-                    if let cover {
-                        ZStack {
-                            ModalScrim()
-                            AIResultSheet(session: cover.session, run: cover.run) { cover.session.closeAI() }
-                                .environment(\.modalAvailableHeight,
-                                             layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
-                                .padding(ModalMetrics.margin)
+            .animation(model.isSettingsOpen ? Motion.sheet : Motion.exit,
+                       value: model.isSettingsOpen || model.palette != nil)
+            ZStack {
+                if let shown {
+                    let cover = aiCover(shown)
+                    let covered = cover != nil
+                    ZStack {
+                        ModalScrim { if shown.closesOnScrimTap { cancel(shown) } }
+                        card(shown)
+                            .environment(\.modalAvailableHeight,
+                                         layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
+                            .padding(ModalMetrics.margin)
+                            // Always there, never in an `if`: the form keeps its identity and input under the AI card.
+                            // Disabled at once (the backdrop disables late), so Return can't reach the form's button.
+                            .modifier(ModalBackdrop(isActive: covered))
+                            .disabled(covered)
+                        if let cover {
+                            ZStack {
+                                ModalScrim()
+                                AIResultSheet(session: cover.session, run: cover.run) { cover.session.closeAI() }
+                                    .environment(\.modalAvailableHeight,
+                                                 layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
+                                    .padding(ModalMetrics.margin)
+                            }
+                            .id("ai \(cover.run.id)")
+                            .modifier(RestoresFocus(model: model))
+                            .transition(.modalFade)
                         }
-                        .id("ai \(cover.run.id)")
-                        .modifier(RestoresFocus(model: model))
                     }
-                }
-                // The scrim fills the window under the toolbar: a tall form fits its card in that (`CreatePRView`).
-                .onGeometryChange(for: CGFloat.self, of: \.size.height) { layerHeight = $0 }
-                // A new view per modal: the focus to restore starts over.
-                .id(shown.id)
-                .modifier(RestoresFocus(model: model))
-                .onExitCommand {
-                    if let cover { cover.session.closeAI() } else { cancel(shown) }
+                    .animation(covered ? Motion.sheet : Motion.exit, value: covered)
+                    // The scrim fills the window under the toolbar: a tall form fits its card in that (`CreatePRView`).
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { layerHeight = $0 }
+                    // A new view per modal: the focus to restore starts over.
+                    .id(shown.id)
+                    .modifier(RestoresFocus(model: model))
+                    .onExitCommand {
+                        if let cover { cover.session.closeAI() } else { cancel(shown) }
+                    }
+                    .transition(.modalFade)
                 }
             }
+            .animation(shown != nil ? Motion.sheet : Motion.exit, value: shown != nil || model.palette != nil)
         }
         // The toolbar stays live above the scrim: the modal acts on the tab and page it opened on, so a change of
         // either cancels it.

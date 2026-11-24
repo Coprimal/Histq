@@ -2005,8 +2005,8 @@ final class WindowModel {
 
     // MARK: Command palette
 
-    /// Opens the command palette on the window's rows now (`PaletteCommands`), `query` typed; the card shows in this
-    /// frame, its rows once ranked off the main actor.
+    /// Opens the command palette on the window's rows now (`PaletteCommands`), `query` typed; the card starts fading
+    /// in this frame, its rows once ranked off the main actor.
     func openPalette(query: String = "") {
         // ⌘K and the toolbar's Search stay live over a modal: the palette waits until it closes. Never during the
         // onboarding, its tour included (where `isShowingModal` is false).
