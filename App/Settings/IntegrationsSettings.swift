@@ -288,7 +288,11 @@ struct IntegrationsSettings: View {
                 Text(account.login)
                     .foregroundStyle(.secondary)
             }
-            SettingsHint("Connected to \(account.address)")
+            // SettingsHint's caption, in green: the connection is the row's success status.
+            Text("Connected to \(account.address)")
+                .font(.settingsCaption)
+                .foregroundStyle(Palette.success)
+                .fixedSize(horizontal: false, vertical: true)
             tokenStatus(tokenStored[account.host] ?? .idle, expired: signInExpired.contains(account.host))
         }
     }
