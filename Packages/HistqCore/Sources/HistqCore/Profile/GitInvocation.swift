@@ -457,10 +457,12 @@ public enum GitInvocation {
         guard !urls.isEmpty else { return .otherURL }
         var reached: Set<String> = []
         for url in urls {
-            // A bare username only on Bitbucket, whose own clone links carry one. Elsewhere a username in the URL picks
-            // one of the user's own logins for that host (their helpers'), which the account's token must not replace.
+            // A bare username only on Bitbucket (Cloud and Data Center), whose own clone links carry one. Elsewhere a
+            // username in the URL picks one of the user's own logins for that host (their helpers'), which the
+            // account's token must not replace.
             guard let credential = usable.first(where: {
-                isTokenURL(url, host: $0.host, allowsUsername: $0.kind == .bitbucketCloud)
+                isTokenURL(
+                    url, host: $0.host, allowsUsername: [.bitbucketCloud, .bitbucketDataCenter].contains($0.kind))
             }) else { return .otherURL }
             reached.insert(credential.host)
         }
@@ -943,12 +945,14 @@ public struct GitCredential: Sendable, Equatable, CustomStringConvertible, Custo
     /// What the token helper answers as the username: GitHub's `x-access-token`, whatever `username` says; for
     /// GitLab `username` (any name works with a personal access token; an OAuth account saves `oauth2`), else
     /// `oauth2`; Bitbucket Cloud's `x-token-auth`, which its API tokens and OAuth tokens both accept (Atlassian docs,
-    /// phase 11.0). Only a name `isSafeUsername(_:)` accepts is ever answered.
+    /// phase 11.0); Bitbucket Data Center's `username`, the account's own name, which its HTTP access tokens go with.
+    /// Only a name `isSafeUsername(_:)` accepts is ever answered.
     var gitUsername: String {
         switch kind {
         case .github: "x-access-token"
         case .gitlab: Self.isSafeUsername(username) ? username : "oauth2"
         case .bitbucketCloud: "x-token-auth"
+        case .bitbucketDataCenter: username
         }
     }
 

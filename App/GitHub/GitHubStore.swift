@@ -432,6 +432,8 @@ final class HostingStore {
             return BitbucketCloudClient(token: accessToken)
         case .gitlab:
             return try GitLabClient(host: account.host, basePath: account.basePath, token: accessToken)
+        case .bitbucketDataCenter:
+            throw BitbucketDCClient.UnsupportedError()
         }
     }
 

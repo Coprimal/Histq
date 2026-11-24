@@ -4599,6 +4599,8 @@ enum HostAvatars: Equatable {
         // `AvatarStore.hostedIdentity` takes Bitbucket's `links.avatar.href` on bitbucket.org, Atlassian's avatar
         // service or Gravatar, whatever the commit avatars' mode (as GitLab's).
         case .bitbucketCloud: return .gitlab(host: repository.host)
+        // Not loaded from the host until its client maps avatars.
+        case .bitbucketDataCenter: return .drawn
         }
     }
 
@@ -5302,17 +5304,18 @@ private extension HostingKind {
     var reportsMergeability: Bool {
         switch self {
         case .github, .gitlab: true
-        case .bitbucketCloud: false
+        // Data Center: false until its client reads the merge state.
+        case .bitbucketCloud, .bitbucketDataCenter: false
         }
     }
 
     /// What follows a pull request's web URL for its changed files: GitHub's `/files`, GitLab's `/diffs`, Bitbucket's
-    /// `/diff`.
+    /// `/diff` (Cloud and Data Center).
     var filesPagePath: String {
         switch self {
         case .github: "/files"
         case .gitlab: "/diffs"
-        case .bitbucketCloud: "/diff"
+        case .bitbucketCloud, .bitbucketDataCenter: "/diff"
         }
     }
 }

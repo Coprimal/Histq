@@ -33,8 +33,8 @@ public enum PullRequestTemplate {
         let paths = switch kind {
         case .github: ["."] + folders.filter { !$0.isEmpty }
         case .gitlab: [gitLabFolder]
-        // Bitbucket Cloud keeps a repository's default description in its settings, not in a file.
-        case .bitbucketCloud: [String]()
+        // Bitbucket keeps a repository's default description in its settings, not in a file.
+        case .bitbucketCloud, .bitbucketDataCenter: [String]()
         }
         guard !paths.isEmpty, let listing = try? await runner.run(
             ["ls-tree", "-z", "-l", "--full-tree", "--end-of-options", ref, "--"] + paths,
@@ -72,7 +72,7 @@ public enum PullRequestTemplate {
             case .gitlab:
                 folder != gitLabFolder || !name.hasSuffix(".md") ? nil
                     : name == "default.md" ? 0 : defaultOnly ? nil : 1
-            case .bitbucketCloud: nil
+            case .bitbucketCloud, .bitbucketDataCenter: nil
             }
             guard let rank, ignore?.matches(path) != true else { continue }
             found.append((rank, String(meta[2])))

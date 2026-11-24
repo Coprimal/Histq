@@ -118,6 +118,36 @@ struct RemoteURLTests {
         #expect(BitbucketCloudClient.repository(fromRemoteURL: url) == expected)
     }
 
+    @Test("Bitbucket Data Center wants scm and the context path on https, neither on ssh, then a project and a repo",
+          arguments: [
+        ("https://bitbucket.example.com/scm/PROJ/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["PROJ", "repo"])),
+        ("https://Bitbucket.Example.com:8443/scm/PROJ/my.repo", nil,
+         HostedRepository(host: "bitbucket.example.com:8443", path: ["PROJ", "my.repo"])),
+        ("https://me@bitbucket.example.com/scm/PROJ/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["PROJ", "repo"])),
+        ("https://example.com/bitbucket/scm/PROJ/repo.git", "/bitbucket",
+         HostedRepository(host: "example.com", path: ["PROJ", "repo"])),
+        ("https://bitbucket.example.com/scm/~jdoe/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["~jdoe", "repo"])),
+        ("ssh://git@bitbucket.example.com:7999/proj/repo.git", "/bitbucket",
+         HostedRepository(host: "bitbucket.example.com", path: ["proj", "repo"])),
+        ("ssh://git@bitbucket.example.com:7999/~jdoe/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["~jdoe", "repo"])),
+        // No scm, a wrong or missing context path, scm on ssh, a third segment, a password, a bare or doubled `~`.
+        ("https://bitbucket.example.com/PROJ/repo.git", nil, nil),
+        ("https://example.com/scm/PROJ/repo.git", "/bitbucket", nil),
+        ("https://example.com/other/scm/PROJ/repo.git", "/bitbucket", nil),
+        ("ssh://git@bitbucket.example.com:7999/scm/proj/repo.git", nil, nil),
+        ("https://bitbucket.example.com/scm/PROJ/sub/repo.git", nil, nil),
+        ("https://user:tok@bitbucket.example.com/scm/PROJ/repo.git", nil, nil),
+        ("https://bitbucket.example.com/scm/~/repo.git", nil, nil),
+        ("https://bitbucket.example.com/scm/PROJ/~repo.git", nil, nil),
+    ] as [(String, String?, HostedRepository?)])
+    func bitbucketDataCenterRepository(url: String, basePath: String?, expected: HostedRepository?) {
+        #expect(BitbucketDCClient.repository(fromRemoteURL: url, basePath: basePath) == expected)
+    }
+
     @Test("an account's kind resolves its remotes: GitLab subgroups and base paths, GitHub's two segments as before",
           arguments: [
         (HostingKind.gitlab, "https://gitlab.com/group/sub/proj.git", nil,
@@ -134,6 +164,9 @@ struct RemoteURLTests {
         (.github, "https://gitlab.com/group/sub/proj.git", nil, nil),
         (.bitbucketCloud, "git@bitbucket.org:ws/repo.git", nil, HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
         (.bitbucketCloud, "https://github.com/octo/hello.git", nil, nil),
+        (.bitbucketDataCenter, "https://example.com/bitbucket/scm/PROJ/repo.git", "bitbucket",
+         HostedRepository(host: "example.com", path: ["PROJ", "repo"])),
+        (.bitbucketDataCenter, "https://github.com/octo/hello.git", nil, nil),
     ] as [(HostingKind, String, String?, HostedRepository?)])
     func kindRepository(kind: HostingKind, url: String, basePath: String?, expected: HostedRepository?) {
         #expect(kind.repository(fromRemoteURL: url, basePath: basePath) == expected)

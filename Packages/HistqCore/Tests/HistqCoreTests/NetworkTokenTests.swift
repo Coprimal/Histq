@@ -116,6 +116,32 @@ struct NetworkTokenTests {
         #expect(!answer.contains("username=me\n"), "the URL's username reached the transport")
     }
 
+    @Test("a Data Center clone link https://user@<host>/scm/P/r.git gets the account's token, and git signs in as the account's username, not as user")
+    func bitbucketDataCenterUsernameURL() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let source = try await box.sandbox.makeRepo("scm/P/r.git")
+        try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "remote only"], in: source)
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "origin", "https://user@\(Self.host)\(source.path)"], in: repo)
+        let credentials = [
+            GitCredential(kind: .bitbucketDataCenter, host: Self.host, username: "jane.doe", token: Self.token)
+        ]
+
+        let decision = await box.decision(.fetch(remotes: ["origin"]), in: repo, credentials: credentials)
+        guard case .attach(let matched) = decision else {
+            Issue.record("expected .attach, got \(decision)")
+            return
+        }
+        #expect(matched.map(\.host) == [Self.host])
+        try await box.operations(naive: false, in: repo, credentials: credentials).fetch(remote: "origin")
+        #expect(try await box.hasRef("refs/remotes/origin/main", in: repo))
+        let answer = box.transportAnswer(host: Self.host)
+        let signedIn = answer.contains("password=\(Self.token)\n") && answer.contains("username=jane.doe\n")
+        #expect(signedIn, "the transport did not sign in with the token as the account's username")
+        #expect(!answer.contains("username=user\n"), "the URL's username reached the transport")
+    }
+
     @Test("the same username form on a GitHub or GitLab host, or user:pass@ on any host, gets no token")
     func usernameURLRefused() async throws {
         let box = try await TokenSandbox()

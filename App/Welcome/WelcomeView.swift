@@ -1125,6 +1125,7 @@ private struct RepositoryPicker: View {
         case .github: "Organization repositories appear when the organization allows Histq's GitHub access."
         case .gitlab: "Projects of your groups appear here."
         case .bitbucketCloud: "Repositories of your workspaces appear here."
+        case .bitbucketDataCenter: "Repositories of your projects appear here."
         }
     }
 

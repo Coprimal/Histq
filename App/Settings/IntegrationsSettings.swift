@@ -55,7 +55,12 @@ struct IntegrationsSettings: View {
         func title(_ kind: HostingKind) -> String {
             switch self {
             case .signIn: "Sign in with \(kind.name)"
-            case .token: kind == .bitbucketCloud ? "API token" : "Personal access token"
+            case .token:
+                switch kind {
+                case .bitbucketCloud: "API token"
+                case .bitbucketDataCenter: "HTTP access token"
+                case .github, .gitlab: "Personal access token"
+                }
             case .cli: "GitHub CLI"
             }
         }
@@ -598,6 +603,8 @@ struct IntegrationsSettings: View {
             case .github:
                 SettingsHint("Classic: the repo scope (and workflow to push workflow files). Fine-grained: Contents "
                     + "read and write.")
+            case .bitbucketDataCenter:
+                SettingsHint(BitbucketDCClient.UnsupportedError().description)
             }
         }
     }
@@ -608,6 +615,7 @@ struct IntegrationsSettings: View {
         case .github: Text(verbatim: "ghp_…")
         case .gitlab: Text(verbatim: "glpat-…")
         case .bitbucketCloud: Text("API token")
+        case .bitbucketDataCenter: Text("HTTP access token")
         }
     }
 
@@ -976,6 +984,8 @@ struct IntegrationsSettings: View {
             guard HostingHTTP.isUsableToken(token) else { throw HostingError.invalidToken }
             guard host.lowercased() == BitbucketCloudClient.host else { throw HostingError.invalidHost(host) }
             return try await BitbucketCloudClient { _ in token }.currentUser().login
+        case .bitbucketDataCenter:
+            throw BitbucketDCClient.UnsupportedError()
         }
     }
 
@@ -1143,12 +1153,13 @@ struct IntegrationsSettings: View {
 }
 
 extension HostingKind {
-    /// The host's product name: "GitHub", "GitLab" or "Bitbucket".
+    /// The host's product name: "GitHub", "GitLab", "Bitbucket" or "Bitbucket Data Center".
     var name: String {
         switch self {
         case .github: "GitHub"
         case .gitlab: "GitLab"
         case .bitbucketCloud: "Bitbucket"
+        case .bitbucketDataCenter: "Bitbucket Data Center"
         }
     }
 
@@ -1157,7 +1168,7 @@ extension HostingKind {
         switch self {
         case .github: "logo-github"
         case .gitlab: "logo-gitlab"
-        case .bitbucketCloud: "logo-bitbucket"
+        case .bitbucketCloud, .bitbucketDataCenter: "logo-bitbucket"
         }
     }
 }
@@ -1169,6 +1180,7 @@ extension HostingAccount {
         case .github: host.lowercased() == "github.com"
         case .gitlab: host.lowercased() == "gitlab.com"
         case .bitbucketCloud: host.lowercased() == "bitbucket.org"
+        case .bitbucketDataCenter: false
         }
     }
 
@@ -1179,6 +1191,7 @@ extension HostingAccount {
         case .github: isPublicSite ? "GitHub" : "GitHub Enterprise Server"
         case .gitlab: isPublicSite ? "GitLab" : "GitLab Self-Managed"
         case .bitbucketCloud: "Bitbucket"
+        case .bitbucketDataCenter: "Bitbucket Data Center"
         }
     }
 

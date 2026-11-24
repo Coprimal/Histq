@@ -75,21 +75,25 @@ public enum HostingKind: String, Codable, Sendable, Hashable {
     case gitlab
     /// Bitbucket Cloud (`bitbucket.org`, API 2.0). Bitbucket Data Center is a kind of its own.
     case bitbucketCloud
+    /// Bitbucket Data Center (a server of its own, REST API 1.0).
+    case bitbucketDataCenter
 
     /// The repository a remote URL names on this kind's host: GitHub's `owner/repo` (`basePath` unused), GitLab's
-    /// whole path after the instance's `basePath`, subgroups included. nil when the URL names none.
+    /// whole path after the instance's `basePath`, subgroups included, Bitbucket Data Center's project and repository
+    /// after the `basePath` and `scm`. nil when the URL names none.
     public func repository(fromRemoteURL url: String, basePath: String?) -> HostedRepository? {
         switch self {
         case .github: GitHubClient.repository(fromRemoteURL: url)
         case .gitlab: GitLabClient.repository(fromRemoteURL: url, basePath: basePath)
         case .bitbucketCloud: BitbucketCloudClient.repository(fromRemoteURL: url)
+        case .bitbucketDataCenter: BitbucketDCClient.repository(fromRemoteURL: url, basePath: basePath)
         }
     }
 
     /// What the host calls a pull request: "Pull request" on GitHub and Bitbucket, "Merge request" on GitLab.
     public var pullRequestNoun: String {
         switch self {
-        case .github, .bitbucketCloud: "Pull request"
+        case .github, .bitbucketCloud, .bitbucketDataCenter: "Pull request"
         case .gitlab: "Merge request"
         }
     }
@@ -100,7 +104,7 @@ public enum HostingKind: String, Codable, Sendable, Hashable {
     /// The short form: "PR" on GitHub, "MR" on GitLab.
     public var shortNoun: String {
         switch self {
-        case .github, .bitbucketCloud: "PR"
+        case .github, .bitbucketCloud, .bitbucketDataCenter: "PR"
         case .gitlab: "MR"
         }
     }
@@ -108,7 +112,7 @@ public enum HostingKind: String, Codable, Sendable, Hashable {
     /// What goes before a pull request's number: `#12` on GitHub and Bitbucket, `!12` on GitLab. Issues keep `#`.
     public var numberPrefix: String {
         switch self {
-        case .github, .bitbucketCloud: "#"
+        case .github, .bitbucketCloud, .bitbucketDataCenter: "#"
         case .gitlab: "!"
         }
     }
