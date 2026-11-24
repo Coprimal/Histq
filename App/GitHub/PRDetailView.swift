@@ -146,6 +146,9 @@ struct PullRequestDetail: Sendable {
     /// `mergeChecks`); nil otherwise or when their read failed (no card).
     var tasks: [HostedTask]? = nil
     var mergeChecks: [HostedMergeCheck]? = nil
+    /// Bitbucket's Reports card (the head's Code Insights reports, the provider's `reports`): loading until read,
+    /// idle where the layout or host has none (no card).
+    var reports: Loadable<[HostedReport]> = .idle
 
     var isMerged: Bool { pull.mergedAt != nil || pull.merged == true }
     var isOpen: Bool { pull.state == "open" }
@@ -714,12 +717,17 @@ final class PullRequestDetailModel {
                 case .success(var detail):
                     let sha = detail.pull.head.sha
                     if sha != rowSHA { group.addTask { await Self.fetchChecks(client, repository, sha: sha) } }
+                    if detail.layout.bitbucketSidebar, client.capabilities.contains(.reports) {
+                        detail.reports = .loading
+                        group.addTask { await Self.fetchReports(client, repository, sha: sha) }
+                    }
                     // The parts shown for the same head stay until this load's arrive (a revisit, a reload after an
                     // action), so their tabs do not go back to loading.
                     if let shown = state.value, shown.pull.number == number, shown.pull.head.sha == sha {
                         detail.commits = shown.commits
                         detail.files = Self.joined(shown.files, detail.threads)
                         detail.checks = shown.checks
+                        if detail.reports.value == nil, shown.reports.value != nil { detail.reports = shown.reports }
                     }
                     state = .loaded(detail)
                     UITiming.content("pr \(number) layout \(detail.layout.name)")
@@ -782,6 +790,9 @@ final class PullRequestDetailModel {
                             #if DEBUG || HISTQ_PERF
                             UITiming.content("pr \(number) checks loaded")
                             #endif
+                        case .reports(let sha, let reports):
+                            guard sha == shown.pull.head.sha else { continue }
+                            shown.reports = reports
                         }
                         state = .loaded(shown)
                         #if DEBUG
@@ -1349,6 +1360,8 @@ final class PullRequestDetailModel {
         case files(Loadable<[PRFile]>)
         /// The check runs of head `sha`.
         case checks(sha: String, Loadable<[HostedCheckRun]>)
+        /// The reports on head `sha` (Bitbucket's).
+        case reports(sha: String, Loadable<[HostedReport]>)
     }
 
     @concurrent
@@ -1376,6 +1389,13 @@ final class PullRequestDetailModel {
         _ client: any HostingProvider, _ repository: HostedRepository, sha: String
     ) async -> Part? {
         .checks(sha: sha, await part(client.kind) { try await client.checkRuns(for: sha, in: repository) })
+    }
+
+    @concurrent
+    private nonisolated static func fetchReports(
+        _ client: any HostingProvider, _ repository: HostedRepository, sha: String
+    ) async -> Part? {
+        .reports(sha: sha, await part(client.kind) { try await client.reports(commit: sha, in: repository) })
     }
 
     /// Joins the threads' comments (REST) and states (GraphQL): without the comments there are no threads, so their
@@ -2961,6 +2981,7 @@ private struct PRBitbucketSidebar<Reviewers: View>: View {
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
             builds
+            if detail.reports != .idle { reports }
             if let checks = detail.mergeChecks { mergeChecks(checks) }
             reviewers()
             if let tasks = detail.tasks { tasksCard(tasks) }
@@ -2990,6 +3011,40 @@ private struct PRBitbucketSidebar<Reviewers: View>: View {
                         .buttonStyle(.plain)
                         .disabled(run.htmlURL == nil)
                         .help(run.htmlURL == nil ? run.name : "Open \(run.name)")
+                    }
+                }
+            case .failed: PRSideEmpty(text: "Could not be read")
+            case .loading, .idle: PRSideEmpty(text: "Loading…")
+            }
+        }
+    }
+
+    /// Bitbucket's Reports (Code Insights on the head): "N of M reports passed", each report's result and title, a
+    /// click opening its page.
+    private var reports: some View {
+        let list = detail.reports.value ?? []
+        let passed = list.count { $0.result == "PASSED" }
+        return SectionCard("Reports", systemImage: "doc.text.magnifyingglass", count: list.count) {
+            switch detail.reports {
+            case .loaded(let list) where list.isEmpty: PRSideEmpty(text: "No reports")
+            case .loaded(let list):
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(passed) of \(list.count) \(list.count == 1 ? "report" : "reports") passed")
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                    ForEach(list) { report in
+                        let (symbol, tone): (String, Color?) = switch report.result {
+                        case "PASSED": ("checkmark.circle.fill", Color(nsColor: Palette.diffAddedSign))
+                        case "FAILED": ("xmark.circle.fill", Color(nsColor: Palette.diffRemovedSign))
+                        case "PENDING": ("circle.dotted", Palette.conflictTone)
+                        default: ("minus.circle", nil)
+                        }
+                        Button { GitHubLinks.open(report.link) } label: {
+                            PRSideStatusRow(symbol: symbol, tone: tone, text: report.title)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(report.link == nil)
+                        .help(report.link == nil ? report.title : "Open \(report.title)")
                     }
                 }
             case .failed: PRSideEmpty(text: "Could not be read")

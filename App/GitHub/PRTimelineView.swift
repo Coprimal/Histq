@@ -800,8 +800,9 @@ extension PRTimeline {
         func eventHTML(_ event: HostedTimelineEvent) -> String {
             let text = event.textHTML ?? "<p>\(HostedHTML.escape(event.text))</p>"
             let actor = event.actor.map { Self.named($0, handle: false) + " " } ?? ""
+            let detail = event.detailHTML.map { "<div class=\"detail\">\($0)</div>" } ?? ""
             return "<div class=\"event\"><span class=\"dot\"></span><div class=\"line\">\(actor)"
-                + "<div class=\"body\">\(text)</div> \(when(event.createdAt))</div></div>"
+                + "<div class=\"body\">\(text)</div> \(when(event.createdAt))</div>\(detail)</div>"
         }
 
         /// "· Pinned by <login>" in the pinned comment's header (GitHub's).
@@ -931,9 +932,9 @@ extension PRTimeline {
         var list = sorted.joined()
         let daySections = activity?.layout.dayHeadings == true && !sorted.isEmpty
         if let activity, daySections {
-            // Bitbucket's days: each day's heading ("Wednesday, November 19, 2025") above its own rail, the newest day
-            // first, a day's entries oldest first so a new comment comes last (user, 2026-11-24).
-            var days: [(name: String?, items: [String])] = []
+            // Bitbucket's days: each day's heading ("Today", "Yesterday", "Saturday", else "Wednesday, November 19,
+            // 2025") above its own rail, in the Activity's order (newest first: user, 2026-11-24).
+            var days: [(name: String?, date: Date?, items: [String])] = []
             for (entry, html) in zip(entries, sorted) {
                 let date: Date? = switch entry {
                 case .comment(let root, _): root.createdAt
@@ -943,15 +944,18 @@ extension PRTimeline {
                 }
                 let name = date.map(Self.dayFormatter.string(from:))
                 if days.isEmpty || (name != nil && name != days[days.count - 1].name) {
-                    days.append((name, [html]))
+                    days.append((name, date, [html]))
                 } else {
                     days[days.count - 1].items.append(html)
                 }
             }
-            let reversed = activity.layout.newestFirst ?? activity.view.newestFirst
             list = days.map { day in
-                let heading = day.name.map { "<div class=\"day\">\(HostedHTML.escape($0))</div>" } ?? ""
-                return heading + "<div class=\"rail\">\((reversed ? day.items.reversed() : day.items).joined())</div>"
+                var heading = ""
+                if let full = day.name, let date = day.date {
+                    heading = "<div class=\"day\" title=\"\(HostedHTML.escape(full))\">"
+                        + "\(HostedHTML.escape(Self.dayName(date, now: now)))</div>"
+                }
+                return heading + "<div class=\"rail\">\(day.items.joined())</div>"
             }.joined()
         }
         if splits, sorted.isEmpty, activity == nil {
@@ -974,6 +978,27 @@ extension PRTimeline {
             headerEdit: activity?.headerEdit ?? false,
             descriptionReactions: descriptionReactions)
     }
+
+    /// A day heading as Bitbucket words it, relative to `now`: "Today", "Yesterday", the weekday within the last week
+    /// ("Saturday"), else the full date.
+    nonisolated static func dayName(_ date: Date, now: Date) -> String {
+        let calendar = Calendar.current
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
+                                           to: calendar.startOfDay(for: now)).day ?? .max
+        switch days {
+        case 0: return "Today"
+        case 1: return "Yesterday"
+        case 2..<7: return weekdayFormatter.string(from: date)
+        default: return dayFormatter.string(from: date)
+        }
+    }
+
+    nonisolated static let weekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.dateFormat = "EEEE"
+        return formatter
+    }()
 
     /// A day heading's words, in the page's English: "Wednesday, November 19, 2025".
     nonisolated static let dayFormatter: DateFormatter = {

@@ -192,6 +192,8 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let tasks = HostingCapabilities(rawValue: 1 << 24)
     /// The merge checks of a pull request (`mergeChecks(of:in:)`).
     public static let mergeChecks = HostingCapabilities(rawValue: 1 << 25)
+    /// The reports on a commit (`reports(commit:in:)`).
+    public static let reports = HostingCapabilities(rawValue: 1 << 26)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -464,6 +466,8 @@ public protocol HostingProvider: Sendable {
     func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws
     /// Pull request `number`'s merge checks (only with `mergeChecks`).
     func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck]
+    /// The reports on commit `sha` (only with `reports`).
+    func reports(commit sha: String, in repo: HostedRepository) async throws -> [HostedReport]
 }
 
 extension HostingProvider {
@@ -607,6 +611,11 @@ extension HostingProvider {
 
     public func deleteTask(_ id: Int, on number: Int, in repo: HostedRepository) async throws {
         throw HostingError.validationFailed(message: "this host has no tasks")
+    }
+
+    /// A host without the `reports` capability has none.
+    public func reports(commit sha: String, in repo: HostedRepository) async throws -> [HostedReport] {
+        throw HostingError.validationFailed(message: "this host has no reports")
     }
 
     /// A host without the `mergeChecks` capability has none.

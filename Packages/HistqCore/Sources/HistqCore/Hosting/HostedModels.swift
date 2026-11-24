@@ -379,10 +379,12 @@ public struct HostedTimelineEvent: Sendable, Equatable, Identifiable {
     public var textHTML: String?
     public var action: String?
     public var icon: String?
+    /// Sanitized HTML under the entry's line (Bitbucket's task text or the reviewers added), or nil.
+    public var detailHTML: String?
 
     public init(
         id: String, actor: HostedUser?, createdAt: Date?, text: String, textHTML: String? = nil,
-        action: String? = nil, icon: String? = nil
+        action: String? = nil, icon: String? = nil, detailHTML: String? = nil
     ) {
         self.id = id
         self.actor = actor
@@ -391,6 +393,7 @@ public struct HostedTimelineEvent: Sendable, Equatable, Identifiable {
         self.textHTML = textHTML
         self.action = action
         self.icon = icon
+        self.detailHTML = detailHTML
     }
 }
 
@@ -708,10 +711,13 @@ public struct HostedTask: Sendable, Equatable, Identifiable {
     public var createdAt: Date?
     /// The comment it was made on; nil for one of the pull request itself.
     public var commentID: Int?
+    /// When and by whom it was last marked done (nil while open).
+    public var resolvedAt: Date?
+    public var resolvedBy: HostedUser?
 
     public init(
         id: Int, body: String, isResolved: Bool, creator: HostedUser? = nil, createdAt: Date? = nil,
-        commentID: Int? = nil
+        commentID: Int? = nil, resolvedAt: Date? = nil, resolvedBy: HostedUser? = nil
     ) {
         self.id = id
         self.body = body
@@ -719,6 +725,31 @@ public struct HostedTask: Sendable, Equatable, Identifiable {
         self.creator = creator
         self.createdAt = createdAt
         self.commentID = commentID
+        self.resolvedAt = resolvedAt
+        self.resolvedBy = resolvedBy
+    }
+}
+
+/// A report on a commit (Bitbucket's Code Insights): its title, `result` (`PASSED`, `FAILED`, `PENDING`, or nil when
+/// the reporter gave none), its type (`SECURITY`, `COVERAGE`, `TEST`, `BUG`), who reported it and its page.
+public struct HostedReport: Sendable, Equatable, Identifiable {
+    public var id: String
+    public var title: String
+    public var result: String?
+    public var reportType: String?
+    public var reporter: String?
+    public var link: URL?
+
+    public init(
+        id: String, title: String, result: String? = nil, reportType: String? = nil, reporter: String? = nil,
+        link: URL? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.result = result
+        self.reportType = reportType
+        self.reporter = reporter
+        self.link = link
     }
 }
 

@@ -182,8 +182,8 @@ struct PRActivity: Sendable, Equatable {
     /// Bitbucket Cloud's Activity: All activity, All comments, My comments, Commits (its Tasks and Statuses are not
     /// in the API's activity), names without handles, "commented on <file>", newest first under day headings.
     static let bitbucketPullRequest = PRActivity(
-        title: "Activity", categories: ["All comments", "My comments", "Commits"], comments: "All comments",
-        byAction: ["commit": "Commits"], mine: "My comments", handles: false, fileVerb: "commented on",
+        title: "Activity", categories: ["All comments", "My comments", "Commits", "Tasks"], comments: "All comments",
+        byAction: ["commit": "Commits", "task": "Tasks"], mine: "My comments", handles: false, fileVerb: "commented on",
         newestFirst: true, dayHeadings: true)
 
     static let gitLabIssue = PRActivity(

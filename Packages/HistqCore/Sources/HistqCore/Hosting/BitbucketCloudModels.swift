@@ -198,6 +198,25 @@ struct BitbucketActivity: Decodable {
         var author: BitbucketAccount?
         var source: BitbucketPullRequest.Endpoint?
         var reviewers: [BitbucketAccount]?
+        /// What this update changed; only its reviewers are read (`added`, `removed`), and a shape Histq does not
+        /// expect reads as nil rather than failing the whole activity.
+        var changes: Changes?
+    }
+
+    struct Changes: Decodable {
+        var reviewers: ReviewerChange?
+
+        struct ReviewerChange: Decodable {
+            var added: [BitbucketAccount]?
+            var removed: [BitbucketAccount]?
+        }
+
+        private enum CodingKeys: String, CodingKey { case reviewers }
+
+        init(from decoder: any Decoder) throws {
+            let container = try? decoder.container(keyedBy: CodingKeys.self)
+            reviewers = (try? container?.decodeIfPresent(ReviewerChange.self, forKey: .reviewers)) ?? nil
+        }
     }
 
     struct Approval: Decodable {
@@ -213,9 +232,22 @@ struct BitbucketTask: Decodable {
     var state: String?
     var creator: BitbucketAccount?
     var createdOn: String?
+    var resolvedOn: String?
+    var resolvedBy: BitbucketAccount?
     var comment: Comment?
 
     struct Comment: Decodable { var id: Int? }
+}
+
+/// A Code Insights report on a commit (`commit/{hash}/reports`).
+struct BitbucketReport: Decodable {
+    var uuid: String?
+    var externalId: String?
+    var title: String?
+    var result: String?
+    var reportType: String?
+    var reporter: String?
+    var link: String?
 }
 
 /// One merge check (`mergeability/checks`): `type`, `status`, `required`, `blocking`; a `name` when Bitbucket gives

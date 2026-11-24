@@ -90,7 +90,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     public var capabilities: HostingCapabilities {
         [.requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
          .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
-         .timelineEvents, .tasks, .mergeChecks]
+         .timelineEvents, .tasks, .mergeChecks, .reports]
     }
 
     /// `merge_commit`, `squash` and `rebase_merge`; `merge(_:in:method:sha:)` refuses one the destination branch does
@@ -677,27 +677,42 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     /// date order (the first "Opened the pull request"; then each change of the source commit "Updated the pull
     /// request with N commits: <links>", the commits between the two from the pull request's commits; of the state
     /// "Merged" / "Declined the pull request"; of the title or description "edited the title" / "edited the
-    /// description"; of the reviewers "added" / "removed N reviewer(s)"), and its `approval` and `changes_requested`
-    /// entries. Comments are left out (read on their own). Histq's words are escaped in `textHTML`.
+    /// description"; of the reviewers "added" / "removed N reviewer(s)" with their names), and its `approval` and
+    /// `changes_requested` entries; then the tasks' "created a task" and "resolved a task" with their text (the v2.0
+    /// activity has no task entries: they come from `/tasks`, the last resolution only). Comments are left out (read
+    /// on their own). Histq's words are escaped in `textHTML` and `detailHTML`.
     public func timelineEvents(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedTimelineEvent] {
         guard case .pullRequest(let number) = item else { throw Self.noIssues }
         async let commits = (try? await pullRequestCommits(number, in: repo)) ?? []
+        async let tasks = (try? await tasks(of: number, in: repo)) ?? []
         let activity: [BitbucketActivity] = try await list(url(try pullRequestPath(number, in: repo) + ["activity"]))
-        return Self.events(activity, commits: await commits) { [self] sha in
+        return Self.events(activity, commits: await commits, tasks: await tasks) { [self] sha in
             webURL(.commit(sha), in: repo)?.absoluteString
         }
     }
 
-    /// `timelineEvents`' entries from `activity`, with `commits` (oldest first) naming each update's commits.
+    /// `timelineEvents`' entries from `activity`, with `commits` (oldest first) naming each update's commits, and
+    /// `tasks`' creations and resolutions.
     static func events(
-        _ activity: [BitbucketActivity], commits: [HostedCommit], commitURL: (String) -> String?
+        _ activity: [BitbucketActivity], commits: [HostedCommit], tasks: [HostedTask] = [],
+        commitURL: (String) -> String?
     ) -> [HostedTimelineEvent] {
         var events: [HostedTimelineEvent] = []
-        func add(_ id: String, _ actor: BitbucketAccount?, _ date: String?, _ text: String, action: String,
-                 html: String? = nil) {
+        func add(_ id: String, _ actor: HostedUser?, _ date: Date?, _ text: String, action: String,
+                 html: String? = nil, detail: String? = nil) {
             events.append(HostedTimelineEvent(
-                id: id, actor: actor?.hosted, createdAt: GitLabDate.parse(date), text: text,
-                textHTML: html ?? "<p>\(MarkdownHTML.escape(text))</p>", action: action))
+                id: id, actor: actor, createdAt: date, text: text,
+                textHTML: html ?? "<p>\(MarkdownHTML.escape(text))</p>", action: action, detailHTML: detail))
+        }
+        func add(_ id: String, _ actor: BitbucketAccount?, _ date: String?, _ text: String, action: String,
+                 html: String? = nil, detail: String? = nil) {
+            add(id, actor?.hosted, GitLabDate.parse(date), text, action: action, html: html, detail: detail)
+        }
+        /// "+ Ann, Bob": the names of the reviewers an update added or removed.
+        func names(_ sign: String, _ accounts: [BitbucketAccount]) -> String? {
+            let list = accounts.map { $0.hosted.name ?? $0.hosted.login }
+            guard !list.isEmpty else { return nil }
+            return "<p>\(sign) " + list.map { "<b>\(MarkdownHTML.escape($0))</b>" }.joined(separator: ", ") + "</p>"
         }
         let updates = activity.compactMap(\.update).enumerated()
             .sorted { (GitLabDate.parse($0.element.date) ?? .distantPast, $0.offset)
@@ -739,16 +754,24 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
             if let text = update.description, let was = before.description, text != was {
                 add(id + "-description", update.author, update.date, "edited the description", action: "description")
             }
-            if let now = update.reviewers, let was = before.reviewers {
+            // The update's own list of what changed, else the two snapshots' difference.
+            var added: [BitbucketAccount] = [], removed: [BitbucketAccount] = []
+            if let change = update.changes?.reviewers {
+                added = change.added ?? []
+                removed = change.removed ?? []
+            } else if let now = update.reviewers, let was = before.reviewers {
                 let nowIDs = Set(now.compactMap(\.uuid)), wasIDs = Set(was.compactMap(\.uuid))
-                let added = nowIDs.subtracting(wasIDs).count, removed = wasIDs.subtracting(nowIDs).count
-                func reviewers(_ n: Int) -> String { "\(n) \(n == 1 ? "reviewer" : "reviewers")" }
-                if added > 0 {
-                    add(id + "-added", update.author, update.date, "added \(reviewers(added))", action: "reviewer")
-                }
-                if removed > 0 {
-                    add(id + "-removed", update.author, update.date, "removed \(reviewers(removed))", action: "reviewer")
-                }
+                added = now.filter { $0.uuid.map { !wasIDs.contains($0) } ?? false }
+                removed = was.filter { $0.uuid.map { !nowIDs.contains($0) } ?? false }
+            }
+            func reviewers(_ n: Int) -> String { "\(n) \(n == 1 ? "reviewer" : "reviewers")" }
+            if !added.isEmpty {
+                add(id + "-added", update.author, update.date, "added \(reviewers(added.count))", action: "reviewer",
+                    detail: names("+", added))
+            }
+            if !removed.isEmpty {
+                add(id + "-removed", update.author, update.date, "removed \(reviewers(removed.count))",
+                    action: "reviewer", detail: names("−", removed))
             }
             previous = update
         }
@@ -758,6 +781,15 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
             }
             if let request = entry.changesRequested {
                 add("changes-\(index)", request.user, request.date, "Requested changes", action: "changes_requested")
+            }
+        }
+        for task in tasks {
+            let text = MarkdownHTML.escape(task.body)
+            add("task-\(task.id)-created", task.creator, task.createdAt, "created a task", action: "task",
+                detail: "<p class=\"task\">☐ \(text)</p>")
+            if task.isResolved, let date = task.resolvedAt {
+                add("task-\(task.id)-resolved", task.resolvedBy, date, "resolved a task", action: "task",
+                    detail: "<p class=\"task done\">☑ \(text)</p>")
             }
         }
         return events
@@ -803,7 +835,22 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     private static func task(_ task: BitbucketTask) -> HostedTask {
         HostedTask(
             id: task.id, body: task.content?.raw ?? "", isResolved: task.state == "RESOLVED",
-            creator: task.creator?.hosted, createdAt: GitLabDate.parse(task.createdOn), commentID: task.comment?.id)
+            creator: task.creator?.hosted, createdAt: GitLabDate.parse(task.createdOn), commentID: task.comment?.id,
+            resolvedAt: GitLabDate.parse(task.resolvedOn), resolvedBy: task.resolvedBy?.hosted)
+    }
+
+    /// `GET .../commit/{sha}/reports`: the Code Insights reports, named by their title (else their reporter), their
+    /// page only when it is https.
+    public func reports(commit sha: String, in repo: HostedRepository) async throws -> [HostedReport] {
+        guard sha.count >= 7, sha.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return [] }
+        let reports: [BitbucketReport] = try await list(url(try repoPath(repo) + ["commit", sha, "reports"]))
+        return reports.enumerated().map { index, report in
+            let link = report.link.flatMap(URL.init(string:)).flatMap { $0.scheme?.lowercased() == "https" ? $0 : nil }
+            return HostedReport(
+                id: report.uuid ?? report.externalId ?? "report-\(index)",
+                title: report.title ?? report.reporter ?? "Report", result: report.result,
+                reportType: report.reportType, reporter: report.reporter, link: link)
+        }
     }
 
     /// `GET .../mergeability/checks`, each named by Bitbucket where it gives a name, else by its type.

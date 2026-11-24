@@ -310,18 +310,24 @@ struct BitbucketCloudClientTests {
         #expect(stub.requests.count == sent + 1, "only the head check: nothing merged")
     }
 
-    @Test("activity: update snapshots in date order become Opened, Updated with the commits between (linked), Merged, edited the title and description, added and removed reviewers; approvals and change requests kept; comments left out")
+    @Test("activity: update snapshots in date order become Opened, Updated with the commits between (linked), Merged, edited the title and description, added and removed reviewers (named, from the changes when given); approvals and change requests kept; tasks created and resolved; comments left out")
     func activityEvents() async throws {
         let a = String(repeating: "a", count: 40), b = String(repeating: "b", count: 40)
         let c = String(repeating: "c", count: 40)
         func update(_ date: String, _ hash: String, state: String = "OPEN", title: String = "T",
-                    description: String = "D", reviewers: [String] = ["r1"]) -> String {
+                    description: String = "D", reviewers: [String] = ["r1"], changes: String? = nil) -> String {
             let list = reviewers.map { Self.account($0, $0) }.joined(separator: ", ")
             return #"{"update": {"date": "\#(date)", "state": "\#(state)", "title": "\#(title)", "#
                 + #""description": "\#(description)", "author": \#(Self.account("u1", "me")), "#
-                + #""source": {"commit": {"hash": "\#(hash.prefix(12))"}}, "reviewers": [\#(list)]}}"#
+                + #""source": {"commit": {"hash": "\#(hash.prefix(12))"}}, "reviewers": [\#(list)]"#
+                + (changes.map { #", "changes": \#($0)"# } ?? "") + "}}"
         }
         let activity = "{\"values\": [" + [
+            // An odd `changes` shape is read as none; one that names the added reviewer wins over the snapshots.
+            update("2026-11-05T10:00:00+00:00", c, state: "MERGED", title: "T2", description: "D2", reviewers: ["r2"],
+                   changes: "[]"),
+            update("2026-11-04T10:00:00+00:00", c, state: "MERGED", title: "T2", description: "D2", reviewers: ["r2"],
+                   changes: #"{"reviewers": {"added": [\#(Self.account("r3", "<ann>"))]}}"#),
             update("2026-11-03T10:00:00+00:00", c, state: "MERGED", title: "T2", description: "D2", reviewers: ["r2"]),
             #"{"comment": {"id": 9, "content": {"raw": "hi"}}}"#,
             #"{"approval": {"date": "2026-11-02T12:00:00+00:00", "user": \#(Self.account("u2", "rev"))}}"#,
@@ -334,25 +340,38 @@ struct BitbucketCloudClientTests {
             return #"{"hash": "\#(hash)", "message": "m", "date": "2026-11-01T10:00:00+00:00", "#
                 + #""parents": [\#(parent.isEmpty ? "" : #"{"hash": "\#(parent)"}"#)]}"#
         }.joined(separator: ", ") + "]}"
+        let tasks = "{\"values\": [" + #"{"id": 7, "content": {"raw": "Do <it>"}, "state": "RESOLVED", "#
+            + #""creator": \#(Self.account("u2", "rev")), "created_on": "2026-11-02T13:00:00+00:00", "#
+            + #""resolved_on": "2026-11-02T14:00:00+00:00", "resolved_by": \#(Self.account("u1", "me"))}, "#
+            + #"{"id": 8, "content": {"raw": "Open one"}, "state": "UNRESOLVED", "#
+            + #""creator": \#(Self.account("u1", "me")), "created_on": "2026-11-02T15:00:00+00:00"}]}"#
         let stub = StubServer { request in
-            request.url?.path().hasSuffix("/activity") == true ? .init(body: activity) : .init(body: commits)
+            let path = request.url?.path() ?? ""
+            return .init(body: path.hasSuffix("/activity") ? activity : path.hasSuffix("/tasks") ? tasks : commits)
         }
         let events = try await Self.client(stub).timelineEvents(of: .pullRequest(5), in: Self.repo)
 
         #expect(events.map(\.text) == [
             "Opened the pull request", "Updated the pull request with 2 commits", "edited the title",
             "edited the description", "Merged the pull request", "added 1 reviewer", "removed 1 reviewer",
-            "Approved the pull request", "Requested changes",
+            "added 1 reviewer", "Approved the pull request", "Requested changes", "created a task", "resolved a task",
+            "created a task",
         ])
         #expect(events.map(\.action) == ["opened", "commit", "title", "description", "merged", "reviewer", "reviewer",
-                                         "approved", "changes_requested"])
+                                         "reviewer", "approved", "changes_requested", "task", "task", "task"])
+        #expect(events[5].detailHTML == "<p>+ <b>User r2</b></p>" && events[6].detailHTML == "<p>\u{2212} <b>User r1</b></p>")
+        #expect(events[7].detailHTML == "<p>+ <b>User &lt;ann&gt;</b></p>", "named from the update's changes, escaped")
+        #expect(events[10].detailHTML == "<p class=\"task\">\u{2610} Do &lt;it&gt;</p>" && events[10].actor?.login == "rev")
+        #expect(events[11].detailHTML == "<p class=\"task done\">\u{2611} Do &lt;it&gt;</p>"
+            && events[11].actor?.login == "me"
+            && events[11].createdAt == ISO8601DateFormatter().date(from: "2026-11-02T14:00:00Z"))
         let html = try #require(events[1].textHTML)
         #expect(html.contains(">bbbbbbb</a>, <a ") && html.contains(">ccccccc</a>"), "both commits after the first")
-        #expect(events.first?.actor?.login == "me" && events[7].actor?.login == "rev")
+        #expect(events.first?.actor?.login == "me" && events[8].actor?.login == "rev")
         await #expect(throws: HostingError.self) { _ = try await Self.client(stub).timelineEvents(of: .issue(5), in: Self.repo) }
     }
 
-    @Test("tasks: listed with state, creator and comment; create POSTs the raw text, resolve and reopen PUT the state, delete DELETEs; merge checks named by Bitbucket or by type", arguments: [
+    @Test("tasks: listed with state, creator and comment; create POSTs the raw text, resolve and reopen PUT the state, delete DELETEs; merge checks named by Bitbucket or by type; reports of a commit with https pages only", arguments: [
         ("create", "POST", "/tasks", #"{"content":{"raw":"Do it"}}"#),
         ("resolve", "PUT", "/tasks/7", #"{"state":"RESOLVED"}"#),
         ("reopen", "PUT", "/tasks/7", #"{"state":"UNRESOLVED"}"#),
@@ -361,7 +380,11 @@ struct BitbucketCloudClientTests {
     func tasksAndChecks(write: String, method: String, path: String, body: String) async throws {
         let task = #"{"id": 7, "content": {"raw": "Do it"}, "state": "UNRESOLVED", "creator": \#(Self.account("u1", "me")), "#
             + #""created_on": "2026-11-01T10:00:00+00:00", "comment": {"id": 9}}"#
+        let reports = #"{"values": [{"uuid": "{a}", "title": "Scan", "result": "PASSED", "report_type": "SECURITY", "#
+            + #""reporter": "S", "link": "https://scan.example/1"}, {"external_id": "cov", "reporter": "Cov", "#
+            + #""result": "FAILED", "link": "http://insecure.example/2"}]}"#
         let stub = StubServer { request in
+            if request.url?.path().hasSuffix("/reports") == true { return .init(body: reports) }
             if request.url?.path().hasSuffix("/checks") == true {
                 return .init(body: #"{"values": [{"type": "git_mergeability_check", "status": "PASSED", "required": true}, "#
                     + #"{"type": "custom_pre_merge_check", "name": "Jira key", "status": "FAILED", "blocking": true}]}"#)
@@ -377,6 +400,16 @@ struct BitbucketCloudClientTests {
         let checks = try await client.mergeChecks(of: 5, in: Self.repo)
         #expect(checks == [HostedMergeCheck(name: "No conflicts", status: "PASSED", required: true),
                            HostedMergeCheck(name: "Jira key", status: "FAILED", blocking: true)])
+        let read = try await client.reports(commit: "abc123def456", in: Self.repo)
+        #expect(stub.requests.last?.url?.path() == Self.repoPath + "/commit/abc123def456/reports")
+        #expect(read == [
+            HostedReport(id: "{a}", title: "Scan", result: "PASSED", reportType: "SECURITY", reporter: "S",
+                         link: URL(string: "https://scan.example/1")),
+            HostedReport(id: "cov", title: "Cov", result: "FAILED", reporter: "Cov"),
+        ], "named by the reporter without a title; an http page left out")
+        let sentBefore = stub.requests.count
+        #expect(try await client.reports(commit: "../../user", in: Self.repo).isEmpty)
+        #expect(stub.requests.count == sentBefore, "a sha that is not hex is never sent")
 
         switch write {
         case "create": _ = try await client.createTask(on: 5, in: Self.repo, body: "Do it")
@@ -882,7 +915,7 @@ struct BitbucketCloudClientTests {
         #expect(client.capabilities == [
             .requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
             .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
-            .timelineEvents, .tasks, .mergeChecks,
+            .timelineEvents, .tasks, .mergeChecks, .reports,
         ])
         #expect(!client.capabilities.contains(.reactions) && client.reactionKinds.isEmpty)
     }

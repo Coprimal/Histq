@@ -1625,7 +1625,8 @@ enum BitbucketStub {
         case "\(pr1)/diff": return (200, diff)
         // #1's history: opened at the first commit, updated with the second, approved by `reviewer`.
         case "\(pr1)/activity":
-            return page(activityUpdate("2026-11-10T09:00:00", head: startSHA),
+            return page(activityUpdate("2026-11-10T09:00:00", head: startSHA, reviewers: false),
+                        activityUpdate("2026-11-10T09:02:00", head: startSHA, addsReviewer: true),
                         #"{"approval": {"date": "2026-11-12T15:00:00.000000+00:00", "user": \#(reviewer)}}"#,
                         activityUpdate("2026-11-12T13:20:00", head: GitHubStub.headSHA))
         case "\(pr1)/tasks": return page(tasks)
@@ -1647,6 +1648,13 @@ enum BitbucketStub {
                  "created_on": "2026-11-12T16:31:00.000000+00:00", "updated_on": "2026-11-12T16:35:00.000000+00:00"}
                 """)
         case let path where path.hasPrefix("\(repo)/commit/") && path.hasSuffix("/statuses"): return page()
+        // The head's Code Insights reports: a passed scan with its page, a failed coverage report without one.
+        case "\(repo)/commit/\(GitHubStub.headSHA.prefix(12))/reports":
+            return page(#"{"uuid": "{rep-1}", "title": "Security scan", "result": "PASSED", "report_type": "SECURITY", "#
+                            + #""reporter": "Scanner", "link": "https://scanner.example/reports/1"}"#,
+                        #"{"uuid": "{rep-2}", "title": "Coverage", "result": "FAILED", "report_type": "COVERAGE", "#
+                            + #""reporter": "Coverage bot"}"#)
+        case let path where path.hasPrefix("\(repo)/commit/") && path.hasSuffix("/reports"): return page()
         default: return notFound
         }
     }
@@ -1900,12 +1908,15 @@ enum BitbucketStub {
             """
     }
 
-    /// An `/activity` update: #1 by `stub` at `date` with its source at `head`.
-    private static func activityUpdate(_ date: String, head: String) -> String {
+    /// An `/activity` update: #1 by `stub` at `date` with its source at `head`, `reviewer` among its reviewers unless
+    /// `reviewers` is false; `addsReviewer`: its `changes` say it added `reviewer`.
+    private static func activityUpdate(_ date: String, head: String, reviewers: Bool = true,
+                                       addsReviewer: Bool = false) -> String {
         #"{"update": {"date": "\#(date).000000+00:00", "state": "OPEN", "title": "Add feature", "#
             + #""description": "Adds the feature branch's work.", "author": \#(user), "#
             + #""source": {"branch": {"name": "feature"}, "commit": {"hash": "\#(head.prefix(12))"}}, "#
-            + #""reviewers": [\#(reviewer)]}}"#
+            + #""reviewers": [\#(reviewers ? reviewer : "")]"#
+            + (addsReviewer ? #", "changes": {"reviewers": {"added": [\#(reviewer)]}}"# : "") + "}}"
     }
 
     /// #1's tasks: with `-HistqStubPageSeed YES` an open one by `reviewer` on comment 806 and a resolved one by
@@ -1921,6 +1932,7 @@ enum BitbucketStub {
             return #"{"id": \#(task.id), "content": {"raw": "\#(GitHubStub.jsonText(task.body))"}, "#
                 + #""state": "\#(resolved ? "RESOLVED" : "UNRESOLVED")", "creator": \#(task.by), "#
                 + #""created_on": "2026-11-12T15:10:00.000000+00:00""#
+                + (resolved ? #", "resolved_on": "2026-11-12T15:40:00.000000+00:00", "resolved_by": \#(user)"# : "")
                 + (task.comment.map { #", "comment": {"id": \#($0)}"# } ?? "") + "}"
         }
     }
