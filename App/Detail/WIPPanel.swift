@@ -100,7 +100,7 @@ struct WIPPanel: View {
                     .fileMenu { file in
                         [menuAction("Mark as Resolved (Stage File)", busy: [.stage(file.path)]) {
                             stage([file], part: .conflicted)
-                        }] + fileTools(file) + copyPath(file)
+                        }] + fileTools(file)
                     }
                     .folderButtons { _, files in
                         rowButton("checkmark.circle", help: "Mark Folder as Resolved (Stage Files)",
@@ -156,7 +156,6 @@ struct WIPPanel: View {
                             menuAction(file.kind == .untracked ? "Delete File…" : "Discard Changes…",
                                        busy: [.discard(file.path)], destructive: true) { confirmDiscard(file) },
                         ] + editFile(file) + wipExtras(file) + patch(file, staged: false) + fileTools(file)
-                            + copyPath(file)
                     }
                     .folderMenu { folder, files in
                         [
@@ -204,7 +203,6 @@ struct WIPPanel: View {
                         [menuAction("Unstage File", busy: [.unstage(file.path)]) {
                             unstage([file])
                         }] + editFile(file) + wipExtras(file) + patch(file, staged: true) + fileTools(file)
-                            + copyPath(file)
                     }
                     .folderButtons { _, files in
                         rowButton("minus.circle", help: "Unstage Folder", busy: files.map { .unstage($0.path) }) {
@@ -339,11 +337,6 @@ struct WIPPanel: View {
         guard file.kind != .untracked, !file.isSubmodule else { return [] }
         return [.separator]
             + RepoMenus.fileTools(path: file.path, rev: nil, blame: file.kind != .deleted, session: session)
-    }
-
-    /// "Copy Relative Path" after a separator: the file's path from the repository's root, as git lists it.
-    private func copyPath(_ file: FileChange) -> [MenuEntry] {
-        [.separator, .action("Copy Relative Path") { RepoMenus.copy(file.path) }]
     }
 
     /// Copy as Patch and Save as Patch of an unstaged (`staged` false: an untracked file as a new file) or staged

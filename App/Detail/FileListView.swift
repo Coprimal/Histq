@@ -1,7 +1,8 @@
 // The changed files of a commit, a stash or the working tree, as one row per path or as a folder tree (the toggle
 // is saved in `PrefKey.fileListMode`). Each row has a status icon, a context menu (the caller's entries, such as
-// "Checkout File from This Commit", then Copy Path and Reveal in Finder) and the caller's trailing buttons (stage,
-// unstage, discard). A click on a row opens that file's diff when the caller asks for it (`onSelectFile`).
+// "Checkout File from This Commit", then Copy Relative Path, Copy Full Path and Reveal in Finder) and the caller's
+// trailing buttons (stage, unstage, discard). A click on a row opens that file's diff when the caller asks for it
+// (`onSelectFile`).
 import AppKit
 import SwiftUI
 
@@ -183,7 +184,7 @@ struct FileListView<Trailing: View>: View {
     let files: [FileChange]
     let repoURL: URL
     @ViewBuilder let trailing: (FileChange) -> Trailing
-    /// The caller's context menu entries of a row, above Copy Path and Reveal in Finder.
+    /// The caller's context menu entries of a row, above Copy Relative Path, Copy Full Path and Reveal in Finder.
     var menu: (FileChange) -> [MenuEntry] = { _ in [] }
     /// The caller's context menu of a folder row (the tree), given its path and the files under it; none when empty.
     var folderMenuEntries: (String, [FileChange]) -> [MenuEntry] = { _, _ in [] }
@@ -376,7 +377,8 @@ private struct FileRow<Trailing: View>: View {
                 MenuEntriesView(entries: entries)
                 Divider()
             }
-            Button("Copy Path") { Self.copy(file.path) }
+            Button("Copy Relative Path") { Self.copy(file.path) }
+            Button("Copy Full Path") { Self.copy(repoURL.appending(path: file.path).path) }
             Button("Reveal in Finder") { revealInFinder(file.path, in: repoURL) }
         }
     }
