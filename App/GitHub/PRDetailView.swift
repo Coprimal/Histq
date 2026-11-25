@@ -103,6 +103,21 @@ struct PRThreads: Sendable {
             unattached: applied(unattached), resolveUnavailable: resolveUnavailable, statesFailed: statesFailed)
     }
 
+    /// The same threads with `reply` at the end of thread `rootID`: an optimistic reply, until the reload.
+    func replying(_ reply: HostedReviewComment, to rootID: Int) -> PRThreads {
+        func added(_ threads: [HostedReviewThread]) -> [HostedReviewThread] {
+            threads.map { thread in
+                guard thread.id == rootID else { return thread }
+                var thread = thread
+                thread.comments.append(reply)
+                return thread
+            }
+        }
+        return PRThreads(
+            byReview: byReview.mapValues(added), replyOnlyReviewIDs: replyOnlyReviewIDs,
+            unattached: added(unattached), resolveUnavailable: resolveUnavailable, statesFailed: statesFailed)
+    }
+
     /// The same threads without their pending comments (a thread of only pending ones goes).
     var withoutPending: PRThreads {
         func published(_ threads: [HostedReviewThread]) -> [HostedReviewThread] {
@@ -270,6 +285,10 @@ enum PullRequestAction: Equatable, Sendable {
     /// Apply suggestion: the host's suggestion `id` of review comment `commentID` committed on the source branch,
     /// shown "Applied" at once (optimistic); the reload brings the moved head.
     case applySuggestion(commentID: Int, id: Int)
+    /// Apply suggestions: the batch (GitLab's "Add suggestion to batch", `PullRequestDetailModel.suggestionBatch`)
+    /// committed as one on the source branch, each suggestion `ids[i]` of review comment `commentIDs[i]` shown
+    /// "Applied" at once (optimistic); the reload brings the moved head.
+    case applySuggestions(ids: [Int], commentIDs: [Int])
 
     var progressTitle: String {
         switch self {
@@ -298,6 +317,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .submitPending: "Submitting the review…"
         case .discardPending: "Discarding the review…"
         case .applySuggestion: "Applying the suggestion…"
+        case .applySuggestions: "Applying the suggestions…"
         }
     }
 
@@ -328,6 +348,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .submitPending: "The review was not submitted"
         case .discardPending: "The review was not discarded"
         case .applySuggestion: "The suggestion was not applied"
+        case .applySuggestions: "The suggestions were not applied"
         }
     }
 
@@ -361,6 +382,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .submitPending: "The review of \(number) was not submitted"
         case .discardPending: "The review of \(number) was not discarded"
         case .applySuggestion: "The suggestion on \(number) was not applied"
+        case .applySuggestions: "The suggestions on \(number) were not applied"
         }
     }
 
@@ -392,6 +414,7 @@ enum PullRequestAction: Equatable, Sendable {
         case .submitPending: "submit-review"
         case .discardPending: "discard-review"
         case .applySuggestion: "apply-suggestion"
+        case .applySuggestions: "apply-suggestions"
         }
     }
 }
@@ -588,6 +611,9 @@ final class PullRequestDetailModel {
     var quoteFocus: String?
     /// The Conversation scrolls its comment box into view (Finish your review, a quote into it), then clears this.
     var scrollsToComposer = false
+    /// The suggestions added to the batch (GitLab's "Add suggestion to batch"): suggestion id → its review comment's
+    /// id, until "Apply suggestions" commits them or another pull request shows.
+    var suggestionBatch: [Int: Int] = [:]
     /// The open new inline comment box (one at a time) and its text. The text is not observed: the box reads it when
     /// it shows and writes it as it is typed, so typing never redraws the detail.
     var inlineComposer: PRInlineComposer?
@@ -671,7 +697,7 @@ final class PullRequestDetailModel {
         ? AppState.launchFlag("-HistqPRAction").flatMap {
             ["reply", "resolve", "unresolve", "greply", "gresolve", "edit", "edit-save", "delete", "delete-confirm",
              "react", "react-new", "new-inline", "new-inline-post", "mr-react", "quote", "edit-description",
-             "pending-comment", "submit-review", "discard-review", "apply-suggestion", "hide", "unhide",
+             "pending-comment", "submit-review", "discard-review", "apply-suggestion", "apply-batch", "hide", "unhide",
              "pending-edit", "pending-delete", "pending-react", "pending-reply",
             ].contains($0) ? $0 : nil
         }
@@ -725,8 +751,15 @@ final class PullRequestDetailModel {
                 guard case .apply(let id)? = target.suggestion else { return nil }
                 return .applySuggestion(commentID: target.id, id: id)
             }.first
+        // The same suggestion as a batch of one ("Add suggestion to batch", then "Apply suggestion").
+        case "apply-batch":
+            return detail.timeline.comments.sorted { $0.key < $1.key }.compactMap { _, target -> PullRequestAction? in
+                guard case .apply(let id)? = target.suggestion else { return nil }
+                return .applySuggestions(ids: [id], commentIDs: [target.id])
+            }.first
         case "reply":
-            return threads.first.map { .reply(rootID: $0.id, body: "QA reply") }
+            // A published thread (a draft's comes first on the page, and has no reply row on GitLab).
+            return threads.first { !PRPlaceholderID.isPending($0.id) }.map { .reply(rootID: $0.id, body: "QA reply") }
         // A pending thread's reply row (GitHub's, where the thread state joined): Reply goes into the pending review.
         case "pending-reply":
             return threads.first {
@@ -832,6 +865,7 @@ final class PullRequestDetailModel {
             editingComments = []
             commentEditDrafts = [:]
             quoteFocus = nil
+            suggestionBatch = [:]
             inlineComposer = nil
             inlineDraft = ""
             actionError = nil
@@ -1224,6 +1258,80 @@ final class PullRequestDetailModel {
             optimistic = (shown, shown.comments, .loaded(threads.applyingSuggestion(id, of: commentID)),
                           PRGeneralOptions(api.client, expanded: generalExpanded))
         }
+        // The batch likewise, and it empties at once (a failure leaves it empty: the suggestions show appliable
+        // again, to batch anew).
+        if case .applySuggestions(let ids, let commentIDs) = action, self.number == number, let shown = state.value,
+           let threads = shown.threads.value {
+            let applied = zip(ids, commentIDs).reduce(threads) { $0.applyingSuggestion($1.0, of: $1.1) }
+            suggestionBatch = [:]
+            optimistic = (shown, shown.comments, .loaded(applied),
+                          PRGeneralOptions(api.client, expanded: generalExpanded))
+        }
+        // A reply on a review thread shows at once at the end of its thread (Pending where it goes into the pending
+        // review), its box cleared; and so does a comment from the comment box (Comment, Start thread) at the end of
+        // the page. Placeholder ids, so nothing acts on them until the reload brings the host's. A failure puts the
+        // page and the text back. Without it the page showed the text only after the host's answer and a reload
+        // (about 3 s on GitLab, user 2026-11-25).
+        let replyTarget: (rootID: Int, body: String, pending: Bool)? = switch action {
+        case .reply(let rootID, let body):
+            (rootID, body, api.client.routesThroughPendingReview && pending.map { !$0.isEmpty } == true)
+        case .pendingReply(let rootID, let body): (rootID, body, true)
+        default: nil
+        }
+        // Whether the box was cleared at once: a success then leaves alone what was typed in it meanwhile.
+        var clearedReply = false, clearedDraft = false
+        if let replyTarget, optimistic == nil, self.number == number, let shown = state.value,
+           let threads = shown.threads.value,
+           var reply = threads.all.first(where: { $0.id == replyTarget.rootID })?.comments.last {
+            optimisticID &+= 1
+            reply.id = optimisticID
+            reply.inReplyToID = replyTarget.rootID
+            reply.user = shown.viewer ?? HostedUser(id: 0, login: "you")
+            reply.body = replyTarget.body
+            reply.bodyHTML = nil
+            reply.htmlURL = nil
+            reply.createdAt = .now
+            reply.hostKey = nil
+            reply.authorAssociation = nil
+            reply.viewerCanEdit = false
+            reply.viewerCanDelete = false
+            reply.viewerCanReact = nil
+            reply.reactions = []
+            reply.suggestions = []
+            reply.isMinimized = false
+            reply.minimizedReason = nil
+            reply.isPending = replyTarget.pending
+            replyDrafts[replyTarget.rootID] = nil
+            clearedReply = true
+            if replyTarget.pending, case .loaded(var detail) = state {
+                pendingShown = (detail.loadID, detail.pending)
+                detail.pending?.comments.append(reply)
+                state = .loaded(detail)
+            }
+            optimistic = (shown, shown.comments, .loaded(threads.replying(reply, to: replyTarget.rootID)),
+                          PRGeneralOptions(api.client, expanded: generalExpanded))
+        }
+        let composed: (body: String, thread: Bool)? = switch action {
+        case .comment(let body): (body, false)
+        case .startThread(let body): (body, true)
+        default: nil
+        }
+        if let composed, optimistic == nil, self.number == number, let shown = state.value,
+           let data = try? JSONSerialization.data(withJSONObject: ["id": optimisticID &+ 1]),
+           var comment = try? JSONDecoder().decode(HostedComment.self, from: data) {
+            optimisticID &+= 1
+            comment.user = shown.viewer ?? HostedUser(id: 0, login: "you")
+            comment.body = composed.body
+            comment.createdAt = .now
+            if composed.thread {
+                comment.resolvable = true
+                comment.resolved = false
+            }
+            draft = ""
+            clearedDraft = true
+            optimistic = (shown, shown.comments + [comment], shown.threads,
+                          PRGeneralOptions(api.client, expanded: generalExpanded))
+        }
         if let optimistic, let ready,
            replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments,
                        threads: optimistic.threads, timeline: ready) {
@@ -1281,7 +1389,7 @@ final class PullRequestDetailModel {
         let reference = github.kind.reference(.pullRequest(number))
         let endOperation = beginOperation("\(reference) \(action.progressTitle.dropLast())")
         let activityView = activityView
-        Task { [weak self, ready, threadShown] in
+        Task { [weak self, ready, threadShown, clearedReply, clearedDraft] in
             if let optimistic, ready == nil {
                 let page = await Self.page(
                     optimistic.shown, comments: optimistic.comments, threads: optimistic.threads,
@@ -1322,6 +1430,11 @@ final class PullRequestDetailModel {
                 }
                 // The new task's text comes back, unless another one was typed meanwhile.
                 if case .createTask(let body) = action, self.number == number, taskDraft.isEmpty { taskDraft = body }
+                // So do an optimistic reply's and comment's.
+                if let replyTarget, clearedReply, self.number == number, (replyDrafts[replyTarget.rootID] ?? "").isEmpty {
+                    replyDrafts[replyTarget.rootID] = replyTarget.body
+                }
+                if let composed, clearedDraft, self.number == number, draft.isEmpty { draft = composed.body }
                 if case .general(.edit(let target, let body)) = action, self.number == number {
                     reopenEdit(target.key, body: body)
                     if editingComments.contains(target.key) {
@@ -1372,11 +1485,11 @@ final class PullRequestDetailModel {
                 return
             }
             switch action {
-            case .comment, .startThread: if self.number == number { draft = "" }
+            case .comment, .startThread: if self.number == number, !clearedDraft { draft = "" }
             // The header's Approve and Request changes send no text: the box keeps what is typed in it.
             case .review(_, let body): if self.number == number, !body.isEmpty { draft = "" }
             case .reply(let rootID, _), .pendingReply(let rootID, _):
-                if self.number == number { replyDrafts[rootID] = nil }
+                if self.number == number, !clearedReply { replyDrafts[rootID] = nil }
             case .submitPending:
                 if self.number == number {
                     draft = ""
@@ -1409,7 +1522,7 @@ final class PullRequestDetailModel {
                 }
             case .unapprove, .newInline, .itemReaction, .rebase, .requestReviewers, .addAssignees, .addLabels,
                  .updateBranch, .deleteBranch, .restoreBranch, .createTask, .setTask, .deleteTask, .pendingInline,
-                 .discardPending, .applySuggestion:
+                 .discardPending, .applySuggestion, .applySuggestions:
                 break
             }
             afterSuccess?()
@@ -1860,6 +1973,7 @@ final class PullRequestDetailModel {
             case .discardPending:
                 try await client.discardPendingReview(pending ?? HostedPendingReview(), on: number, in: repository)
             case .applySuggestion(_, let id): try await client.applySuggestion(id, in: repository)
+            case .applySuggestions(let ids, _): try await client.applySuggestions(ids, in: repository)
             }
             return nil
         } catch {
@@ -1895,6 +2009,19 @@ extension PullRequestDetailModel: PRGeneralThreadModel {
     func applySuggestion(_ target: PRCommentTarget, on number: Int, github: HostingStore) {
         guard case .apply(let id)? = target.suggestion else { return }
         perform(.applySuggestion(commentID: target.id, id: id), on: number, github: github)
+    }
+
+    /// "Add suggestion to batch" / "Remove from batch" on `target`'s suggestion (no network).
+    func toggleBatch(_ target: PRCommentTarget) {
+        guard case .apply(let id)? = target.suggestion else { return }
+        if suggestionBatch.removeValue(forKey: id) == nil { suggestionBatch[id] = target.id }
+    }
+
+    /// "Apply suggestions (N)": the batch, as one commit.
+    func applyBatch(on number: Int, github: HostingStore) {
+        let batch = suggestionBatch.sorted { $0.key < $1.key }
+        guard !batch.isEmpty else { return }
+        perform(.applySuggestions(ids: batch.map(\.key), commentIDs: batch.map(\.value)), on: number, github: github)
     }
 
     @discardableResult func quote(_ target: PRCommentTarget) -> String? {
@@ -2451,12 +2578,27 @@ private struct PRTabsRow: View {
 /// its tone (gray without one, no bar without a measure).
 private struct PRMergeColumn: View {
     typealias Column = (title: String, note: String, tone: Color?, fraction: Double?)
+    /// Which column it is, for the one whose details show (`PRActionsCard.openColumn`).
+    enum Kind: Hashable { case checks, comments, approvals }
     let column: Column
+    /// Its details show under the columns: its chevron points down and its edge takes the accent color.
+    var isOpen = false
+    /// A click anywhere on it shows or hides its details.
+    var toggle: () -> Void = {}
+    @State private var hovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(column.title)
-                .font(.body.weight(.semibold))
+            HStack(spacing: 6) {
+                Text(column.title)
+                    .font(.body.weight(.semibold))
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isOpen ? 90 : 0))
+                    .accessibilityHidden(true)
+            }
             Text(column.note)
                 .font(.settingsCaption)
                 .foregroundStyle(.secondary)
@@ -2478,9 +2620,87 @@ private struct PRMergeColumn: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
-            .fill(Palette.tabFill))
+            .fill(hovered ? Palette.hoverFill : Palette.tabFill))
         .overlay(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
-            .strokeBorder(Palette.surfaceBorder, lineWidth: 1))
+            .strokeBorder(isOpen ? Color.accentColor.opacity(0.7) : Palette.surfaceBorder, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous))
+        .onHover { hovered = $0 }
+        .onTapGesture(perform: toggle)
+        .help(isOpen ? "Hide the details" : "Show the details")
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(isOpen ? "expanded" : "collapsed")
+        .accessibilityAction { toggle() }
+    }
+}
+
+/// A conversation left to resolve in GitHub's merge box details: its file and line, who started it and the start of
+/// what they wrote; a click goes to Files changed, where it sits under its line.
+private struct PRMergeThreadRow: View {
+    let thread: HostedReviewThread
+    let open: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        let first = thread.comments.first
+        let line = thread.line.map { " · line \($0)" } ?? ""
+        let excerpt = (first?.body ?? "").split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        HStack(spacing: 8) {
+            Image(systemName: "text.bubble")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(thread.path + line)
+                .font(.system(.body, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
+            Text("\(first?.user?.login ?? "ghost"): \(excerpt)")
+                .font(.settingsCaption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(minHeight: SidebarItemStyle.height)
+        .background(Capsule().fill(hovered ? Palette.hoverFill : .clear))
+        .contentShape(Capsule())
+        .onHover { hovered = $0 }
+        .onTapGesture(perform: open)
+        .help("Show it in Files changed")
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { open() }
+    }
+}
+
+/// A reviewer in GitHub's merge box details: their avatar and login, and their review ("Approved", "Changes
+/// requested", "Commented", "Pending" while only requested).
+private struct PRMergeReviewerRow: View {
+    let reviewer: PRReviewer
+    let avatars: HostAvatars
+
+    var body: some View {
+        let (word, tone): (String, Color?) = switch reviewer.state {
+        case "APPROVED"?: ("Approved", Color(nsColor: Palette.diffAddedSign))
+        case "CHANGES_REQUESTED"?: ("Changes requested", Color(nsColor: Palette.diffRemovedSign))
+        case "COMMENTED"?: ("Commented", nil)
+        case "DISMISSED"?: ("Dismissed", nil)
+        case nil: ("Pending", Palette.conflictTone)
+        case let other?: (other.capitalized.replacingOccurrences(of: "_", with: " "), nil)
+        }
+        HStack(spacing: 8) {
+            GitHubUserAvatar(login: reviewer.login, id: reviewer.userID, avatarURL: reviewer.avatarURL, size: 18,
+                             avatars: avatars)
+            Text(reviewer.login)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(word)
+                .font(.settingsCaption)
+                .foregroundStyle(tone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+        }
+        .padding(.horizontal, 8)
+        .frame(minHeight: SidebarItemStyle.height)
         .accessibilityElement(children: .combine)
     }
 }
@@ -4103,6 +4323,20 @@ private struct PRActionsCard: View {
     let session: RepoSession
     let detail: PullRequestDetail
     @Environment(WindowModel.self) private var model
+    /// GitHub's merge box: the column whose details show under the columns (`PRMergeColumn.Kind`), one at a time.
+    @State private var openColumn: PRMergeColumn.Kind? = Self.launchColumn
+
+    #if DEBUG
+    /// DEBUG `-HistqMergeColumn checks|comments|approvals`: that column starts open (for shots).
+    private static let launchColumn: PRMergeColumn.Kind? = switch AppState.launchFlag("-HistqMergeColumn") {
+    case "checks": .checks
+    case "comments": .comments
+    case "approvals": .approvals
+    default: nil
+    }
+    #else
+    private static let launchColumn: PRMergeColumn.Kind? = nil
+    #endif
 
     #if DEBUG
     /// DEBUG `-HistqPRAction resolve-manual`: clicks Resolve manually once, as soon as it can start (the status read,
@@ -4470,16 +4704,76 @@ private struct PRActionsCard: View {
     /// GitHub's three columns under the merge state: Checks, Comments and Approvals, each its word, a line of what
     /// stands and a bar of how far it got (the checks that passed, the conversations resolved, the reviewers who
     /// approved), side by side, under each other when the column is narrow.
+    /// A click on a column shows what it counts under the columns, as github.com's merge box does: the check runs,
+    /// the conversations left to resolve, the reviewers and their reviews; a second click hides it.
     private var gitHubColumns: some View {
-        let columns = [checksColumn, commentsColumn, approvalsColumn]
-        return ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 8) {
-                ForEach(columns.indices, id: \.self) { PRMergeColumn(column: columns[$0]).frame(minWidth: 150) }
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(columns.indices, id: \.self) { PRMergeColumn(column: columns[$0]) }
+        let columns: [(PRMergeColumn.Kind, PRMergeColumn.Column)] = [
+            (.checks, checksColumn), (.comments, commentsColumn), (.approvals, approvalsColumn),
+        ]
+        func column(_ index: Int) -> PRMergeColumn {
+            let (kind, value) = columns[index]
+            return PRMergeColumn(column: value, isOpen: openColumn == kind) {
+                withAnimation(Motion.hover) { openColumn = openColumn == kind ? nil : kind }
             }
         }
+        return VStack(alignment: .leading, spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(columns.indices, id: \.self) { column($0).frame(minWidth: 150) }
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(columns.indices, id: \.self) { column($0) }
+                }
+            }
+            if let openColumn {
+                mergeColumnDetails(openColumn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// The open column's details: each check run (`PRCheckRow`, its page on the host), each conversation left to
+    /// resolve (a click goes to Files changed, where it sits under its line), each reviewer with their review.
+    @ViewBuilder private func mergeColumnDetails(_ kind: PRMergeColumn.Kind) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            switch kind {
+            case .checks:
+                if let runs = detail.checks.value, !runs.isEmpty {
+                    ForEach(runs) { PRCheckRow(run: $0, hostName: session.github.kind.name) }
+                } else {
+                    mergeDetailNote(detail.checks.value == nil ? "The checks are not loaded." : "No checks ran.")
+                }
+            case .comments:
+                let open = (detail.threads.value?.all ?? []).filter { $0.state?.isResolved != true }
+                if open.isEmpty {
+                    mergeDetailNote("No conversation is left to resolve.")
+                } else {
+                    ForEach(open, id: \.id) { thread in
+                        PRMergeThreadRow(thread: thread) { session.pullDetail.tab = .files }
+                    }
+                }
+            case .approvals:
+                if detail.reviewers.isEmpty {
+                    mergeDetailNote("No reviewers.")
+                } else {
+                    let avatars = HostAvatars.of(session.github)
+                    ForEach(detail.reviewers) { PRMergeReviewerRow(reviewer: $0, avatars: avatars) }
+                }
+            }
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+            .fill(Palette.tabFill))
+        .overlay(RoundedRectangle(cornerRadius: SettingsInputMetrics.cornerRadius, style: .continuous)
+            .strokeBorder(Palette.surfaceBorder, lineWidth: 1))
+    }
+
+    private func mergeDetailNote(_ text: String) -> some View {
+        Text(text)
+            .font(.settingsCaption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .frame(minHeight: SidebarItemStyle.height)
     }
 
     /// The checks of the head: how many are done (passed, skipped or neutral) of those that ran; "No checks" without
@@ -5505,6 +5799,8 @@ private struct PRCommitRow: View {
 private struct PRFilesTab: View {
     let session: RepoSession
     let detail: PullRequestDetail
+    /// For a thread row's Delete confirmation (host-like layouts).
+    @Environment(WindowModel.self) private var window
 
     private static let listWidth: CGFloat = 240
     /// The tree's column (`PRPageLayout.filesTree`): its rows indent, so it takes more room.
@@ -5603,23 +5899,39 @@ private struct PRFilesTab: View {
         // A comment hidden on the host shows its text behind a Show toggle where the page hides it too.
         let hides = detail.layout != .default
             && session.github.api?.client.capabilities.contains(.hideComments) == true
+        // A host-like layout (never `.default`) draws each thread as the host's inline thread: the Overview's own
+        // rights and actions on each comment (`chrome`), suggestion boxes, the reply box (`reply`). Read here, so an
+        // Edit opening or closing redraws the rows; the texts are read by the rows only (`threadActions`).
+        let client = detail.layout != .default ? session.github.api?.client : nil
+        let options = client.map { PRGeneralOptions($0, expanded: [:]) }
+        let editing = options == nil ? [] : session.pullDetail.editingComments
         let threads = file.threads.compactMap { thread -> DiffInlineThread? in
             // The root's own line: `thread.line` falls back to the line it was written on, of an older diff.
             guard let line = thread.comments.first?.line else { return nil }
             let start = thread.comments.first?.startLine
-            return DiffInlineThread(
+            var inline = DiffInlineThread(
                 id: thread.id, line: line, newSide: thread.side != "LEFT",
                 title: start.map { $0 != line ? "Lines \($0)–\(line)" : "Line \(line)" } ?? "Line \(line)",
                 isResolved: thread.state?.isResolved == true,
                 comments: thread.comments.enumerated().map { index, comment in
                     let suggestions = Self.suggestions(of: comment, in: file)
                     let body = suggestions.isEmpty ? comment.body ?? "" : MarkdownHTML.removingSuggestions(comment.body ?? "")
-                    return DiffInlineThread.Comment(
+                    var item = DiffInlineThread.Comment(
                         author: comment.user?.login ?? "ghost", date: comment.createdAt.map(dates.relative) ?? "",
                         body: body.trimmingCharacters(in: .whitespacesAndNewlines), isReply: index > 0,
                         isPending: comment.isPending, suggestions: suggestions, id: comment.id,
                         hiddenNote: hides && comment.isMinimized ? PRHiddenReason.note(comment.minimizedReason) : nil)
+                    if let options {
+                        item.chrome = chrome(comment, in: thread, options: options, editing: editing)
+                        item.suggestions = Self.boxed(suggestions, of: comment, options: options)
+                    }
+                    return item
                 })
+            if let client, let options {
+                inline.hostLike = true
+                inline.reply = reply(thread, client: client, options: options)
+            }
+            return inline
         }
         return DiffInlineThreads(
             path: file.id, threads: threads,
@@ -5627,7 +5939,238 @@ private struct PRFilesTab: View {
             onToggle: { [session] id, collapsed in session.pullDetail.threadExpanded[id] = !collapsed },
             onReply: { [session] in session.pullDetail.tab = .conversation },
             replyTitle: "Reply in \(detail.layout.title(of: .conversation))",
-            newComments: newComments(file))
+            newComments: newComments(file),
+            actions: options == nil ? nil : threadActions(file))
+    }
+
+    // MARK: Host-like thread rows
+
+    /// A host-like comment's chrome: the Overview page's own targets for it (`PRTimelineHTML.comments` and
+    /// `.reactions`, key `r<id>`: its menu's items and rights, its reactions); for a comment an Overview filter left
+    /// off the page, the same targets made by the same rules (`PRCommentTarget`, `PRReactionTarget` with the page's
+    /// options, the page builder's reviewTarget). Its badges as the page's (`PRPageLayout.roleBadges`): "Author" on
+    /// the pull request author's, then the member role (not with "Author" where `authorBadgeOnly`).
+    private func chrome(_ comment: HostedReviewComment, in thread: HostedReviewThread, options: PRGeneralOptions,
+                        editing: Set<String>) -> DiffInlineThread.Chrome {
+        let key = "r\(comment.id)"
+        let quote = Self.repliable(thread, options: options) ? PRQuoteTarget.thread(thread.id) : nil
+        let menu = detail.timeline.comments[key] ?? {
+            var target = PRCommentTarget(
+                .review, id: comment.id, hostKey: comment.hostKey, body: comment.body, user: comment.user,
+                canEdit: comment.viewerCanEdit, canDelete: comment.viewerCanDelete, quote: quote,
+                suggestion: PRCommentSuggestion(comment, options: options),
+                hide: PRCommentHide(isMinimized: comment.isMinimized, canMinimize: comment.viewerCanMinimize,
+                                    canUnminimize: comment.viewerCanUnminimize, options: options),
+                options: options)
+            // As the page's suggestion slot marks it: Apply suggestion is a button, not a menu item.
+            if options.suggestionButtons, case .apply? = target?.suggestion { target?.suggestionButtons = true }
+            return target
+        }()
+        let reactions = detail.timeline.reactions[key] ?? PRReactionTarget(
+            .review, id: comment.id, hostKey: comment.hostKey, reactions: comment.reactions, user: comment.user,
+            canReact: comment.viewerCanReact, options: options)
+        var badges: [String] = []
+        if detail.layout.roleBadges, let user = comment.user {
+            let isAuthor = detail.pull.user?.id == user.id
+            if isAuthor { badges.append("Author") }
+            if !(isAuthor && detail.layout.authorBadgeOnly), let role = detail.memberRoles?[user.id] {
+                badges.append(role)
+            }
+        }
+        return DiffInlineThread.Chrome(
+            userID: comment.user?.id, avatarURL: comment.user?.avatarURL, badges: badges, menu: menu,
+            reactions: reactions, applied: PRCommentSuggestion.isApplied(comment, options: options),
+            editing: menu.map { $0.canEdit && editing.contains($0.key) } ?? false)
+    }
+
+    /// Whether a thread has its reply box, as on the Overview page (the page builder's rule): every thread the host
+    /// answered, and a pending review's thread whose state the host gives where a reply goes into the pending review
+    /// (`PRGeneralOptions.pendingReplies`, GitHub's; a GitLab draft has none); never one the host has not answered yet.
+    private static func repliable(_ thread: HostedReviewThread, options: PRGeneralOptions) -> Bool {
+        guard PRPlaceholderID.isPlaceholder(thread.id) else { return true }
+        return options.pendingReplies && PRPlaceholderID.isPending(thread.id)
+            && thread.state.map { !$0.id.isEmpty } == true
+    }
+
+    /// A host-like thread's reply box, as the Overview's reply row decides (`PRReplyRow`): Reply, or "Add review
+    /// comment" where the reply goes into the pending review (`routesIntoPending`); the pending review's second button
+    /// (`pendingButton`); Resolve or Unresolve where the viewer may, or why resolving is unavailable. nil for a thread
+    /// with no reply row.
+    private func reply(_ thread: HostedReviewThread, client: any HostingProvider, options: PRGeneralOptions)
+        -> DiffInlineThread.Reply?
+    {
+        guard Self.repliable(thread, options: options) else { return nil }
+        var reply = DiffInlineThread.Reply(
+            title: detail.routesIntoPending(client) ? PullRequestDetail.addReviewComment : "Reply",
+            pendingTitle: detail.pendingButton(client))
+        if session.github.offers(.resolveThreads) {
+            if let reason = detail.threads.value?.resolveUnavailable {
+                reply.resolveUnavailable = reason
+            } else if let state = thread.state, state.isResolved ? state.viewerCanUnresolve : state.viewerCanResolve {
+                reply.resolveTitle = PRTimeline.resolveTitle(resolved: state.isResolved, kind: client.kind)
+            }
+        }
+        return reply
+    }
+
+    /// The host-like boxes' extras on `comment`'s suggested changes: Apply suggestion with the host's id where the
+    /// page applies them (`PRSuggestionMenu.apply`, GitLab's) and it is appliable and not applied yet, Applied once it
+    /// is, and on a pending comment of a host without an apply API (`PRSuggestionMenu.open`, GitHub's) its note.
+    private static func boxed(_ suggestions: [DiffInlineThread.Suggestion], of comment: HostedReviewComment,
+                              options: PRGeneralOptions) -> [DiffInlineThread.Suggestion] {
+        suggestions.enumerated().map { index, suggestion in
+            var suggestion = suggestion
+            if options.suggestions == .apply, index < comment.suggestions.count {
+                let host = comment.suggestions[index]
+                suggestion.applied = host.applied
+                if host.appliable, !host.applied { suggestion.applyID = host.id }
+            }
+            suggestion.pendingNote = options.suggestions == .open && comment.isPending
+            return suggestion
+        }
+    }
+
+    /// What the host-like rows' controls do: the Overview's model calls (`PRGeneralThreadModel`,
+    /// `PullRequestDetailModel.perform`), the same drafts (`replyDrafts`, `commentEditDrafts`) and the same Quote
+    /// reply (`quote`, whose `quoteFocus` the table takes for a box of this file).
+    private func threadActions(_ file: PRFile) -> DiffThreadActions {
+        let model = session.pullDetail
+        let github = session.github
+        let number = detail.pull.number
+        let avatars = HostAvatars.of(github)
+        let window = window
+        let layout = detail.layout
+        let focusReply = model.quoteFocus.flatMap { key -> Int? in
+            guard key.hasPrefix("reply-"), let id = Int(key.dropFirst("reply-".count)),
+                  file.threads.contains(where: { $0.id == id }) else { return nil }
+            return id
+        }
+        return DiffThreadActions(
+            headerEdit: layout.headerEdit, headerDelete: layout.headerDelete,
+            reactionKinds: detail.timeline.reactionKinds, busy: model.running != nil, focusReply: focusReply,
+            avatar: { login, chrome, pixels in
+                avatars.image(login: login, id: chrome.userID, avatarURL: chrome.avatarURL, pixels: pixels)
+            },
+            avatarChanged: { changed, login, chrome in
+                avatars.matches(changed, login: login, id: chrome.userID, avatarURL: chrome.avatarURL)
+            },
+            menu: { target in
+                Self.menuEntries(target, editsInHeader: layout.headerEdit, model: model, github: github,
+                                 number: number, window: window)
+            },
+            react: { target, kind, add in
+                model.perform(PRGeneralAction.react(target, kind: kind, add: add), on: number, github: github)
+            },
+            edit: { target in
+                model.beginEdit(target)
+                UITiming.content("pr \(number) action edit open")
+            },
+            delete: { target in
+                window.presentModal(.confirmation(Self.deleteConfirmation(target, number: number, model: model,
+                                                                          github: github)))
+            },
+            quote: { target in model.quote(target) },
+            editDraft: { key in model.commentEditDrafts[key] ?? "" },
+            onEditDraft: { key, text in model.commentEditDrafts[key] = text },
+            cancelEdit: { key in model.endEdit(key) },
+            saveEdit: { target, body in
+                guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                model.perform(PRGeneralAction.edit(target, body: body), on: number, github: github)
+            },
+            replyDraft: { id in model.replyDrafts[id] ?? "" },
+            onReplyDraft: { id, text in model.replyDrafts[id] = text.isEmpty ? nil : text },
+            reply: { id, body in
+                guard !body.isEmpty else { return }
+                model.perform(PullRequestAction.reply(rootID: id, body: body), on: number, github: github)
+            },
+            pendingReply: { id, body in
+                guard !body.isEmpty else { return }
+                model.perform(PullRequestAction.pendingReply(rootID: id, body: body), on: number, github: github)
+            },
+            resolve: { id in
+                guard let state = model.state.value?.threads.value?.all.first(where: { $0.id == id })?.state
+                else { return }
+                model.perform(PullRequestAction.resolve(thread: state, resolved: !state.isResolved), on: number,
+                              github: github)
+            },
+            applySuggestion: { commentID, id in
+                model.perform(PullRequestAction.applySuggestion(commentID: commentID, id: id), on: number,
+                              github: github)
+            },
+            replyFocused: {
+                if model.quoteFocus?.hasPrefix("reply-") == true { model.quoteFocus = nil }
+            })
+    }
+
+    /// A thread row comment's "…" menu: the Overview's (`PRCommentMenu`, private to the page's file) items, order and
+    /// words, kept in step with it: Edit (unless the header has the pencil, `editsInHeader`), Quote reply, Copy
+    /// Markdown, the suggestion's item (none where it is a button: the suggestion box's Apply suggestion), Hide (the
+    /// host's reasons) or Unhide, Delete… (the app's confirmation first).
+    private static func menuEntries(
+        _ target: PRCommentTarget, editsInHeader: Bool, model: PullRequestDetailModel, github: HostingStore,
+        number: Int, window: WindowModel
+    ) -> [MenuEntry] {
+        var entries: [MenuEntry] = []
+        if target.canEdit, !editsInHeader {
+            entries.append(.action("Edit") {
+                model.beginEdit(target)
+                UITiming.content("pr \(number) action edit open")
+            })
+        }
+        if target.quote != nil {
+            entries.append(.action("Quote reply") { model.quote(target) })
+        }
+        if target.copyMarkdown {
+            // The raw markdown as the host has it (never its HTML); no network.
+            entries.append(.action("Copy Markdown") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(target.body, forType: .string)
+            })
+        }
+        switch target.suggestion {
+        // A button on the suggestion instead (GitLab's, `PRCommentTarget.suggestionButtons`): the box's Apply here.
+        case .apply? where target.suggestionButtons: break
+        case .apply?:
+            entries.append(.action("Apply suggestion") { model.applySuggestion(target, on: number, github: github) })
+        case .open(let url)?:
+            entries.append(.action("Apply on \(github.kind.name)") { GitHubLinks.open(url) })
+        case nil: break
+        }
+        switch target.hide {
+        case .hide(let reasons)?:
+            entries.append(.submenu("Hide", reasons.compactMap { reason in
+                PRHiddenReason.title(reason).map { title in
+                    .action(title) {
+                        model.revealedComments.remove(target.key)
+                        model.perform(PRGeneralAction.hide(target, reason: reason), on: number, github: github)
+                    }
+                }
+            }))
+        case .unhide?:
+            entries.append(.action("Unhide") {
+                model.perform(PRGeneralAction.unhide(target), on: number, github: github)
+            })
+        case nil: break
+        }
+        if target.canDelete {
+            entries.append(.action("Delete…", destructive: true) {
+                window.presentModal(.confirmation(deleteConfirmation(target, number: number, model: model,
+                                                                     github: github)))
+            })
+        }
+        return entries
+    }
+
+    /// Delete's confirmation, as the Overview's (`PRCommentMenu.deleteConfirmation`): its button deletes the comment
+    /// (shown gone at once, then written).
+    private static func deleteConfirmation(
+        _ target: PRCommentTarget, number: Int, model: PullRequestDetailModel, github: HostingStore
+    ) -> ModalConfirmation {
+        ModalConfirmation(
+            title: "Delete this comment?",
+            message: "The comment is deleted on \(github.kind.name) for everyone. This cannot be undone.",
+            button: "Delete Comment", isDestructive: true,
+            perform: { model.perform(PRGeneralAction.delete(target), on: number, github: github) })
     }
 
     /// The suggested changes in `comment`'s raw body as native −/+ lines: the new lines from the block, the replaced
@@ -5640,10 +6183,13 @@ private struct PRFilesTab: View {
         guard !blocks.isEmpty else { return [] }
         let rows = file.section?.rows(.diff).filter { $0.kind == .added || $0.kind == .context } ?? []
         return blocks.enumerated().map { index, block in
+            // The first replaced line's number, for a host-like box's line numbers (`.default` draws none).
             if index < comment.suggestions.count, let from = comment.suggestions[index].fromContent {
                 var lines = from.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
                 if lines.last == "" { lines.removeLast() }
-                return DiffInlineThread.Suggestion(old: lines, new: block.lines)
+                return DiffInlineThread.Suggestion(
+                    old: lines, new: block.lines,
+                    firstLine: comment.suggestions[index].fromLine ?? comment.line.map { $0 - block.above })
             }
             guard comment.side != "LEFT", let line = comment.line else {
                 return DiffInlineThread.Suggestion(old: [], new: block.lines)
@@ -5652,7 +6198,8 @@ private struct PRFilesTab: View {
             let last = line + block.below
             let covered = rows.filter { row in row.newLine.map { first <= $0 && $0 <= last } == true }
             let complete = first <= last && covered.count == last - first + 1
-            return DiffInlineThread.Suggestion(old: complete ? covered.map(\.text) : [], new: block.lines)
+            return DiffInlineThread.Suggestion(old: complete ? covered.map(\.text) : [], new: block.lines,
+                                               firstLine: first)
         }
     }
 

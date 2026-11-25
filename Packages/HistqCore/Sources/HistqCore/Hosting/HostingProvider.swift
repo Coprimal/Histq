@@ -538,6 +538,9 @@ public protocol HostingProvider: Sendable {
     /// Applies suggestion `id` (a `HostedSuggestion.id`) as a commit on the source branch (only with
     /// `applySuggestions`).
     func applySuggestion(_ id: Int, in repo: HostedRepository) async throws
+    /// Applies suggestions `ids` together as one commit on the source branch (GitLab's batch; only with
+    /// `applySuggestions`).
+    func applySuggestions(_ ids: [Int], in repo: HostedRepository) async throws
     /// While a pending review exists, the host holds back immediate inline comments, replies and reviews (GitHub's
     /// one pending review per user): they go through it instead (`createInlineComment(at:on:in:body:pending:)`,
     /// `reply(to:on:in:body:pending:)`, `review(_:in:event:body:pending:)`). False by default.
@@ -766,6 +769,11 @@ extension HostingProvider {
     /// A host without the `applySuggestions` capability refuses it unsent.
     public func applySuggestion(_ id: Int, in repo: HostedRepository) async throws {
         throw HostingError.validationFailed(message: "this host cannot apply a suggestion")
+    }
+
+    /// A host without the `applySuggestions` capability refuses it unsent.
+    public func applySuggestions(_ ids: [Int], in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot apply suggestions")
     }
 
     /// Whether immediate writes go through `pending` (`routesThroughPendingReview`, and one exists).

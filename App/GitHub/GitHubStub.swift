@@ -1205,6 +1205,15 @@ enum GitLabStub {
             return (200, discussion(id, resolved: query.contains("resolved=true")).json)
         case let (method, path) where path.hasPrefix("\(mr1)/draft_notes"):
             return draftNotes(method, String(path.dropFirst("\(mr1)/draft_notes".count)), json)
+        // The seeded suggestion in a batch (`ids: [77]`), as its own apply.
+        case ("PUT", "/api/v4/suggestions/batch_apply") where GitHubStub.seedsPage:
+            guard (json["ids"] as? [Int]) == [77] else { return (400, #"{"message": "A suggestion is not applicable."}"#) }
+            let applied = writes.withLock { writes in
+                defer { writes.suggestionApplied = true }
+                return writes.suggestionApplied
+            }
+            return applied ? (400, #"{"message": "A suggestion is not applicable."}"#)
+                : (200, #"[{"id": 77, "from_line": 1, "to_line": 1, "appliable": false, "applied": true}]"#)
         // The seeded suggestion (`-HistqStubPageSeed YES`), applied once: GitLab answers an applied one with 400.
         case ("PUT", "/api/v4/suggestions/77/apply") where GitHubStub.seedsPage:
             let applied = writes.withLock { writes in

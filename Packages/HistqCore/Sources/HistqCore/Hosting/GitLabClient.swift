@@ -825,6 +825,19 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
         _ = try await perform("PUT", url(["suggestions", String(id), "apply"]))
     }
 
+    /// `PUT /suggestions/batch_apply` with `ids` (no `commit_message`: GitLab's default one), the merge request page's
+    /// "Add suggestion to batch" then "Apply suggestions": one commit for all of them. An empty batch is refused
+    /// unsent, and so is a project on another host.
+    public func applySuggestions(_ ids: [Int], in repo: HostedRepository) async throws {
+        _ = try projectID(repo)
+        guard !ids.isEmpty else { throw HostingError.validationFailed(message: "no suggestion to apply") }
+        struct Body: Encodable { var ids: [Int] }
+        let _: [Suggestion] = try await send("PUT", url(["suggestions", "batch_apply"]), body: Body(ids: ids))
+    }
+
+    /// An applied suggestion as `batch_apply` answers it (read only to check the answer is GitLab's list).
+    private struct Suggestion: Decodable { var id: Int }
+
     // MARK: - Comment interactions
 
     /// `POST .../discussions/:discussion_id/notes` on the merge request or issue: `comment` is the thread's root

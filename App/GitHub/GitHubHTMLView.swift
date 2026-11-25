@@ -283,7 +283,7 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// (`.defaultClient`), apart from the page, which still has no JavaScript of its own: the page's settings and
         /// policy stay as they are.
         private static let measureScript = """
-            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen|show)-[gr][0-9]+|c(react|menu|pen|edit)-d)$/;
+            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen|show|sugg)-[gr][0-9]+|c(react|menu|pen|edit)-d)$/;
             for (const slot of document.querySelectorAll('[data-slot]')) {
               if (slot.closest('.body') || !own.test(slot.dataset.slot)) continue;
               const height = heights[slot.dataset.slot];
@@ -561,6 +561,11 @@ enum HostedHTML {
                 .item.collapsed > :not(.head) { display: none; } .head .slot-chevron { align-self: center; }
                 .slot-menu, .slot-add { flex: none; align-self: center; width: 18px; height: 18px; }
                 .slot-add.like { width: 46px; }
+                .slot-chips { flex: none; align-self: center; height: 22px; }
+                .slot-chips.fill { flex: 1 1 auto; min-width: 0; margin-left: 8px; }
+                .slot-sugg { height: 28px; } .item > .slot-sugg { margin: 0 10px 8px; }
+                .comment > .slot-sugg { margin: 6px 0 0 26px; }
+                .gl .date + .slot-chips { margin-left: auto; }
                 .slot-menu.pair { width: 42px; }
                 .slot-show { flex: none; align-self: center; width: 40px; height: 18px; }
                 .hidden-as { font-style: italic; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis;

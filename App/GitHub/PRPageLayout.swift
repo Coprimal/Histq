@@ -223,6 +223,9 @@ struct PRActivity: Sendable, Equatable {
     /// Each thread's status in its header, by the host's raw status (Azure DevOps's `active`, `fixed`…), in place of
     /// the "Resolved" line; empty shows none.
     var statusTitles: [String: String] = [:]
+    /// The tab's count takes every note, the diff threads' comments too, as gitlab.com's Overview does (its
+    /// `user_notes_count`); false counts the general comments only.
+    var countsThreadNotes = false
 
     /// The category of a history entry of `action`; nil when it has none.
     func category(ofEntry action: String?) -> String? {
@@ -246,7 +249,7 @@ struct PRActivity: Sendable, Equatable {
         return PRActivity(
             title: "Activity",
             categories: [approvals, people, comments, commits, edits, labels, lock, mentions, status, tracking],
-            comments: comments, byAction: byAction)
+            comments: comments, byAction: byAction, countsThreadNotes: true)
     }()
 
     /// Bitbucket Cloud's Activity: All activity, All comments, My comments, Commits (its Tasks and Statuses are not
