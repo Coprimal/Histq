@@ -2,7 +2,8 @@
 // `<name>` is the lowercase hex SHA-256 of the image's bytes plus the extension of its detected type. The images live
 // in one folder (`Library`). Uploads and the references read from session and workspace files are untrusted: a
 // reference is parsed strictly before it names a file, so it never leaves the folder, and an upload is size-checked
-// before it is read and decoded only by ImageIO.
+// before it is read and decoded only by ImageIO. An SVG, which ImageIO does not read, is recognised by its root
+// element `<svg>` (parsed without resolving external entities) and has no pixel size to check; the app draws it.
 import CryptoKit
 import Foundation
 import ImageIO
@@ -22,6 +23,8 @@ public enum CustomIcon {
         UTType.jpeg.identifier: "jpg",
         UTType.webP.identifier: "webp",
     ]
+    /// The extension an SVG is stored with.
+    public static let svgExtension = "svg"
 
     /// The reference for a stored file name.
     public static func ref(fileName: String) -> String {
@@ -43,7 +46,9 @@ public enum CustomIcon {
     /// Exactly 64 lowercase hex digits, a dot and one accepted extension: nothing that can leave the folder.
     public static func isValidFileName(_ name: String) -> Bool {
         let parts = name.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 2, extensions.values.contains(String(parts[1])) else { return false }
+        guard parts.count == 2, extensions.values.contains(String(parts[1])) || parts[1] == svgExtension else {
+            return false
+        }
         let hash = parts[0].utf8
         return hash.count == 64 && hash.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
@@ -61,12 +66,33 @@ public enum CustomIcon {
             case let .tooLarge(bytes):
                 "The image is \((bytes + 1023) / 1024) KB; the limit is \(CustomIcon.maxBytes / 1024) KB."
             case .unsupportedType:
-                "The file is not a supported image. Use a PNG, JPEG or WebP image."
+                "The file is not a supported image. Use a PNG, JPEG, WebP or SVG image."
             case let .sizeOutOfRange(width, height):
                 "The image is \(width) × \(height) px; each side must be \(CustomIcon.sides.lowerBound)–\(CustomIcon.sides.upperBound) px."
             case .unreadable:
                 "The image could not be read."
             }
+        }
+    }
+
+    /// Whether `data` is an XML document whose root element is `svg`. Only the start of the document is parsed.
+    static func isSVG(_ data: Data) -> Bool {
+        let parser = XMLParser(data: data)
+        parser.shouldResolveExternalEntities = false
+        let root = RootElement()
+        parser.delegate = root
+        parser.parse()
+        return root.name == "svg"
+    }
+
+    /// Records the local name of the root element, then stops the parse.
+    private final class RootElement: NSObject, XMLParserDelegate {
+        var name: String?
+
+        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                    qualifiedName: String?, attributes: [String: String] = [:]) {
+            name = elementName.split(separator: ":").last.map(String.init)
+            parser.abortParsing()
         }
     }
 
@@ -85,6 +111,7 @@ public enum CustomIcon {
             guard size <= CustomIcon.maxBytes else { throw Problem.tooLarge(bytes: size) }
             guard let data = try? Data(contentsOf: url) else { throw Problem.unreadable }
             guard data.count <= CustomIcon.maxBytes else { throw Problem.tooLarge(bytes: data.count) }
+            if CustomIcon.isSVG(data) { return try store(data, ext: CustomIcon.svgExtension) }
             guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw Problem.unreadable }
             guard let type = CGImageSourceGetType(source) as String?, let ext = CustomIcon.extensions[type] else {
                 throw Problem.unsupportedType
@@ -96,7 +123,12 @@ public enum CustomIcon {
             guard CustomIcon.sides.contains(width), CustomIcon.sides.contains(height) else {
                 throw Problem.sizeOutOfRange(width: width, height: height)
             }
+            return try store(data, ext: ext)
+        }
 
+        /// Stores `data` under the SHA-256 of its bytes unless it is already stored (then marks it as the newest) and
+        /// returns its reference.
+        private func store(_ data: Data, ext: String) throws -> String {
             let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             let name = hash + "." + ext
             let file = directory.appendingPathComponent(name, isDirectory: false)

@@ -63,7 +63,7 @@ struct CustomIconTests {
         #expect(library.url(for: ref) == nil)
     }
 
-    @Test("a valid reference names its file directly inside the folder", arguments: ["png", "jpg", "webp"])
+    @Test("a valid reference names its file directly inside the folder", arguments: ["png", "jpg", "webp", "svg"])
     func acceptsValidReference(ext: String) throws {
         let name = "\(hash).\(ext)"
         let ref = CustomIcon.ref(fileName: name)
@@ -115,5 +115,22 @@ struct CustomIconTests {
 
         #expect(Self.files(in: library.directory).isEmpty)
         #expect(library.refs().isEmpty)
+    }
+    @Test("an SVG is stored with its extension; XML with another root is refused")
+    func addsSVG() throws {
+        let folder = try Fixtures.makeTempDirectory("HistqCustomIcon")
+        defer { Fixtures.removeTempDirectory(folder) }
+        let library = CustomIcon.Library(directory: folder.appending(path: "Icons", directoryHint: .isDirectory))
+
+        let svg = folder.appending(path: "logo.svg")
+        try Data(#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>"#.utf8).write(to: svg)
+        let ref = try library.add(contentsOf: svg)
+        #expect(ref.hasSuffix(".svg"))
+        #expect(library.refs() == [ref])
+
+        let html = folder.appending(path: "page.svg")
+        try Data("<html><body/></html>".utf8).write(to: html)
+        #expect(throws: CustomIcon.Problem.self) { try library.add(contentsOf: html) }
+        #expect(library.refs() == [ref])
     }
 }

@@ -24,8 +24,8 @@ struct IconLibraryPicker: View {
             Button("Upload…", action: upload)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
                 .disabled(uploading)
-                .help("Add a PNG, JPEG or WebP image of up to \(CustomIcon.maxBytes / 1024) KB, "
-                    + "\(CustomIcon.sides.lowerBound)–\(CustomIcon.sides.upperBound) px a side")
+                .help("Add a PNG, JPEG, WebP or SVG image of up to \(CustomIcon.maxBytes / 1024) KB; "
+                    + "a bitmap must be \(CustomIcon.sides.lowerBound)–\(CustomIcon.sides.upperBound) px a side")
             if !refs.isEmpty {
                 HStack(spacing: 8) {
                     Text("Uploaded")
@@ -60,7 +60,7 @@ struct IconLibraryPicker: View {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.png, .jpeg, .webP]
+        panel.allowedContentTypes = [.png, .jpeg, .webP, .svg]
         panel.prompt = "Upload"
         uploading = true
         Task { @MainActor in
