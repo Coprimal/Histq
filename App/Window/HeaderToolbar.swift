@@ -1,6 +1,7 @@
-// The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the
-// workspace's name (workspace windows only, with its read-only or not-saved warning), the repo menu (the window's repo
-// tabs, recent repos, Open…), the branch menu (checks out the picked branch),
+// The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge Histq's
+// logo (fixed: the user can neither move nor remove it), the workspace's name (workspace windows only, with its
+// read-only or not-saved warning), the repo menu (the window's repo tabs, recent repos, Open…), the branch menu (checks
+// out the picked branch),
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge the green Update button while Sparkle has an update
 // (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, Row Height ▾ (the graph's
 // row heights), then Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed.
@@ -73,8 +74,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         image: NSImage(systemSymbolName: workspaceSymbol, accessibilityDescription: "Workspace"))
     /// What `workspaceItem` shows now, so it is only written when it changes.
     private var workspaceShown: (text: String, toolTip: String, isWarning: Bool)?
-    /// The saved configuration was checked for the workspace item this launch (`insertWorkspaceItemIfMissing`).
-    private static var checkedWorkspaceItem = false
+    /// Histq's logo, first in the row: the app icon, no capsule, no action.
+    private let logoItem = NSToolbarItem(itemIdentifier: ID.logo)
+    /// The saved configuration was checked for the logo and workspace items this launch (`insertItemsIfMissing`).
+    private static var checkedSavedItems = false
     private var groups: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
     /// On macOS 26, the button showing each plain button item (`hoverButton`), by the item.
     private var hoverButtons: [ObjectIdentifier: ToolbarHoverButton] = [:]
@@ -104,6 +107,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     private enum ID {
+        static let logo = NSToolbarItem.Identifier("logo")
         static let workspace = NSToolbarItem.Identifier("workspace")
         static let repo = NSToolbarItem.Identifier("repo")
         static let branch = NSToolbarItem.Identifier("branch")
@@ -145,6 +149,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: Items
 
     private func configureItems() {
+        configureLogoItem()
         configureWorkspaceItem()
         for dropdown in [workspaceItem, repoItem, branchItem, profileItem] {
             dropdown.menu.delegate = self
@@ -238,6 +243,32 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         for (id, item) in groups { if let palette = Self.palette[id] { item.paletteLabel = palette.label } }
     }
 
+    private func configureLogoItem() {
+        // The app icon's tile cut without its transparent margin (`histq-logo`), not `applicationIconImage`: macOS 26
+        // redraws that one inside its own, wider margin.
+        let view = NSImageView(image: NSImage(named: "histq-logo") ?? NSApp.applicationIconImage)
+        view.imageScaling = .scaleProportionallyUpOrDown
+        // Wider than the logo, which sits at its leading edge: room before the next item.
+        view.imageAlignment = .alignLeft
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: Self.logoSize + Self.logoTrailingGap),
+            view.heightAnchor.constraint(equalToConstant: Self.logoSize),
+        ])
+        view.toolTip = "Histq"
+        view.setAccessibilityLabel("Histq")
+        logoItem.view = view
+        logoItem.isBordered = false
+        logoItem.label = ""
+        logoItem.paletteLabel = "Histq Logo"
+        logoItem.autovalidates = false
+    }
+
+    /// The logo's side: a little less than the dropdowns' capsules (37 pt with their border), which looked too big.
+    private static let logoSize: CGFloat = 32
+    /// Extra room after the logo, beside the toolbar's own gap between items.
+    private static let logoTrailingGap: CGFloat = 6
+
     /// The workspace pull-down: as wide as its name (cut in `apply`), its menu built on open (`workspaceEntries`).
     private func configureWorkspaceItem() {
         // A plain name is the first to go to the overflow menu when the toolbar is full (the default width has about
@@ -327,8 +358,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let gap: [NSToolbarItem.Identifier] = PlatformFeatures.liquidGlass ? [.space] : []
         let sync = PlatformFeatures.liquidGlass ? [ID.pull] + gap + [ID.push] + gap + [ID.fetch] : [ID.syncGroup]
         // The Update button right after the flexible space: hidden, it and its gap only widen the empty middle.
-        return [ID.workspace, ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.update] + gap + [ID.historyGroup] + gap
-            + sync + gap + [ID.branchGroup] + gap + [ID.rowHeight] + gap + [ID.toolsGroup]
+        return [ID.logo, ID.workspace, ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.update] + gap
+            + [ID.historyGroup] + gap + sync + gap + [ID.branchGroup] + gap + [ID.rowHeight] + gap + [ID.toolsGroup]
     }
 
     /// Each default item once, then the spaces (the default set repeats `.space`).
@@ -337,12 +368,18 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         return items.reduce(into: []) { if !$0.contains($1) { $0.append($1) } } + [.space, .flexibleSpace]
     }
 
+    /// The logo stays first: Customize Toolbar can neither move nor remove it.
+    func toolbarImmovableItemIdentifiers(_ toolbar: NSToolbar) -> Set<NSToolbarItem.Identifier> {
+        [ID.logo]
+    }
+
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem?
     {
         // The customization palette's sample: a new item, as the live one's view would leave the window's toolbar.
         guard flag else { return Self.paletteItem(itemIdentifier) }
         return switch itemIdentifier {
+        case ID.logo: logoItem
         case ID.workspace: workspaceItem.item
         case ID.repo: repoItem.item
         case ID.branch: branchItem.item
@@ -369,6 +406,13 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     ]
 
     private static func paletteItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem? {
+        if id == ID.logo {
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.label = "Histq Logo"
+            item.paletteLabel = "Histq Logo"
+            item.image = NSApp.applicationIconImage
+            return item
+        }
         guard let palette = palette[id] else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         item.label = palette.label
@@ -377,14 +421,18 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         return item
     }
 
-    /// Adds the workspace item at the leading edge when the saved configuration (from a build without it) lacks it,
-    /// once per launch, not on every workspace join; every window shares the configuration, so all of them get it
-    /// (hidden in Untitled windows). Called once the toolbar is in its window, so its items are loaded.
-    func insertWorkspaceItemIfMissing() {
-        guard !Self.checkedWorkspaceItem else { return }
-        Self.checkedWorkspaceItem = true
+    /// Adds the logo, then the workspace item, at the leading edge when the saved configuration (from a build without
+    /// them) lacks them, once per launch, not on every workspace join; every window shares the configuration, so all of
+    /// them get them (the workspace hidden in Untitled windows). Called once the toolbar is in its window, so its items
+    /// are loaded.
+    func insertItemsIfMissing() {
+        guard !Self.checkedSavedItems else { return }
+        Self.checkedSavedItems = true
+        if !toolbar.items.contains(where: { $0.itemIdentifier == ID.logo }) {
+            toolbar.insertItem(withItemIdentifier: ID.logo, at: 0)
+        }
         guard !toolbar.items.contains(where: { $0.itemIdentifier == ID.workspace }) else { return }
-        toolbar.insertItem(withItemIdentifier: ID.workspace, at: 0)
+        toolbar.insertItem(withItemIdentifier: ID.workspace, at: 1)
     }
 
     /// Whether this toolbar shows and has the Update slot (the user may have removed it in Customize Toolbar).

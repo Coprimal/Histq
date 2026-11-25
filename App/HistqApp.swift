@@ -394,7 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let window = NSWindow(contentViewController: hosting)
         let toolbar = HeaderToolbar(model: model, updater: updater)
         window.toolbar = toolbar.toolbar
-        toolbar.insertWorkspaceItemIfMissing()
+        toolbar.insertItemsIfMissing()
         window.title = "Histq"
         window.titleVisibility = .hidden
         // One row for the traffic lights and the toolbar; the tab strip is the content's first row under it.
