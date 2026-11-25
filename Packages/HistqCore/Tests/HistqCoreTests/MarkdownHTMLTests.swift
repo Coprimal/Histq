@@ -155,4 +155,45 @@ struct MarkdownHTMLTests {
         #expect(MarkdownHTML.html("[x](a/b)", mentionsAt: nil, origin: origin) == "<p>x</p>\n")
         #expect(MarkdownHTML.html("[x](/a/b)") == "<p>x</p>\n")
     }
+
+    // MARK: - Suggested changes
+
+    @Test func suggestionRendersAsAnEscapedDiff() {
+        let markdown = "Use this:\n\n```suggestion:-1+0\nlet a = \"<b>\" & 1\n<script>x</script>\n```\n"
+        let html = MarkdownHTML.html(markdown, mentionsAt: nil, suggestionsFrom: ["let a = <i>\nold\n"])
+        #expect(html == "<p>Use this:</p>\n<div class=\"suggestion\"><div class=\"suggestion-head\">Suggested change"
+            + "</div><div class=\"del\">let a = &lt;i&gt;</div><div class=\"del\">old</div>"
+            + "<div class=\"add\">let a = &quot;&lt;b&gt;&quot; &amp; 1</div>"
+            + "<div class=\"add\">&lt;script&gt;x&lt;/script&gt;</div></div>\n")
+        #expect(!html.contains("<script") && !html.contains("<i>") && !html.contains("<b>"))
+    }
+
+    @Test func suggestionWithoutOldLinesShowsNewOnesOnly() {
+        let html = MarkdownHTML.html("```suggestion\nnew\n\n```\n```suggestion:-0+2\nx\n```")
+        #expect(html == "<div class=\"suggestion\"><div class=\"suggestion-head\">Suggested change</div>"
+            + "<div class=\"add\">new</div><div class=\"add\"></div></div>\n"
+            + "<div class=\"suggestion\"><div class=\"suggestion-head\">Suggested change</div>"
+            + "<div class=\"add\">x</div></div>\n")
+        #expect(!html.contains("class=\"del\""))
+    }
+
+    @Test(arguments: [
+        "suggestion:-1", "suggestion:+1-0", "suggestion:-a+0", "suggestion:-1+0\"onload=x", "suggestions",
+        "suggestion:-12345+0", "suggestion:-١+0", "x suggestion",
+    ])
+    func otherInfoStringsStayCode(_ info: String) {
+        let html = MarkdownHTML.html("```\(info)\n<b>\n```")
+        #expect(!html.contains("class=\"suggestion\"") && html.contains("<pre><code"))
+        #expect(html.contains("&lt;b&gt;") && !html.contains("onload=\""))
+    }
+
+    @Test func suggestionsAreReadFromTheRawBody() {
+        let body = "Two:\n\n```suggestion\na\nb\n```\n\n~~~suggestion:-2+1\n~~~\n\n```swift\nc\n```"
+        let found = MarkdownHTML.suggestions(in: body)
+        #expect(found.map(\.above) == [0, 2] && found.map(\.below) == [0, 1])
+        #expect(found.map(\.lines) == [["a", "b"], []])
+        #expect(MarkdownHTML.removingSuggestions(body) == "Two:\n\n\n\n```swift\nc\n```")
+        #expect(MarkdownHTML.suggestions(in: "`suggestion` inline only").isEmpty)
+        #expect(MarkdownHTML.suggestions(in: String(repeating: ">", count: 300) + " ```suggestion\nx\n```").isEmpty)
+    }
 }

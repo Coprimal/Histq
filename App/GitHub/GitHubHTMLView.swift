@@ -63,7 +63,8 @@ struct HostedHTMLSlot: Equatable, Sendable {
 
 /// What the app changed on a loaded page without loading it again: a slot's height, when its native view is taller
 /// or shorter than the stylesheet's (a reply field grown to more lines), whether an element has the `collapsed`
-/// class (a review thread the user expanded or collapsed), and which comments are being edited in place. Applied
+/// class (a review thread the user expanded or collapsed), which comments are being edited in place, and which hidden
+/// comments show their text (their Show toggle's slot open). Applied
 /// before every measurement, so a new page (a quiet reload) gets it too. Ids are the page's own (`data-slot`, `id`),
 /// of the timeline's formats only (a slot's, `thread-<n>`, a general thread's `gthread-<n>`): nothing inside GitHub's
 /// HTML (`.body`) changes, only the stylesheet hides a body while its comment is edited.
@@ -75,6 +76,9 @@ struct HostedHTMLPatch: Equatable {
     /// The editor slots shown open (`cedit-<key>`, the `open` class), each with its comment's rendered body (the
     /// `.body` right before it) hidden; every other editor slot is hidden.
     var editing: Set<String> = []
+    /// The Show toggle slots shown open (`cshow-<key>`, the `open` class): their hidden comment's text shows (the
+    /// stylesheet's `minimized` rule); every other one stays closed.
+    var shown: Set<String> = []
 }
 
 extension View {
@@ -262,7 +266,8 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         private var isMeasuring = false
         private var measureAgain = false
 
-        /// First the patch (`heights`, `collapsed`, `editing`: the arguments, never text spliced into the script), then
+        /// First the patch (`heights`, `collapsed`, `editing`, `shown`: the arguments, never text spliced into the
+        /// script), then
         /// the body's border box, not `documentElement.scrollHeight`, which is never less than the view's own height
         /// and so would never let the card shrink, and every `data-slot` element's frame in the page. A slot inside
         /// GitHub's HTML (`.body`) is skipped: only Histq's own markup places native views. So is a hidden one (in a
@@ -270,19 +275,22 @@ private struct GitHubHTMLPage: NSViewRepresentable {
         /// (`PRTimeline`: `avatar-d`, `avatar-c|i|r<n>`, `chevron-<n>`, `reply-<n>` for a slot, `thread-<n>` for
         /// `collapsed`, a general thread's `gchevron-<n>`, `greply-<n>` and `gthread-<n>`, and a comment's menu,
         /// editor, reaction row, add-reaction button and header Edit icon, `cmenu-<g|r><n>`, `cedit-<g|r><n>`,
-        /// `creact-<g|r><n>`, `cadd-<g|r><n>` and `cpen-<g|r><n>`, the description's reaction row `creact-d`, the
-        /// editor open as `editing` says), in case GitHub's HTML
+        /// `creact-<g|r><n>`, `cadd-<g|r><n>` and `cpen-<g|r><n>`, the description's reaction row `creact-d` and its
+        /// Edit's menu, pencil and editor `cmenu-d`, `cpen-d` and `cedit-d` (all in its header or after its body, never
+        /// inside it), the editor open as `editing` says, and a hidden comment's Show toggle `cshow-<g|r><n>` in its
+        /// header, open as `shown` says), in case GitHub's HTML
         /// ever left `.body` unbalanced. `width` is the page's own, for the DEBUG slot probe. Runs in the app's own content world
         /// (`.defaultClient`), apart from the page, which still has no JavaScript of its own: the page's settings and
         /// policy stay as they are.
         private static let measureScript = """
-            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen)-[gr][0-9]+|creact-d)$/;
+            const own = /^(avatar-d|avatar-[cir][0-9]+|g?chevron-[0-9]+|g?reply-[0-9]+|c(menu|edit|react|add|pen|show)-[gr][0-9]+|c(react|menu|pen|edit)-d)$/;
             for (const slot of document.querySelectorAll('[data-slot]')) {
               if (slot.closest('.body') || !own.test(slot.dataset.slot)) continue;
               const height = heights[slot.dataset.slot];
               if (height !== undefined) slot.style.height = height + 'px';
               const id = slot.dataset.slot;
               if (id.startsWith('cedit-')) slot.classList.toggle('open', editing.includes(id));
+              if (id.startsWith('cshow-')) slot.classList.toggle('open', shown.includes(id));
             }
             for (const [id, on] of Object.entries(collapsed)) {
               if (!/^g?thread-[0-9]+$/.test(id)) continue;
@@ -349,7 +357,8 @@ private struct GitHubHTMLPage: NSViewRepresentable {
             isMeasuring = true
             // Every name the script reads, always: a missing one throws, and the page is never measured.
             let arguments: [String: Any] = ["heights": patch.slotHeights.mapValues(Double.init),
-                                            "collapsed": patch.collapsed, "editing": patch.editing.sorted()]
+                                            "collapsed": patch.collapsed, "editing": patch.editing.sorted(),
+                                            "shown": patch.shown.sorted()]
             webView.callAsyncJavaScript(
                 Self.measureScript, arguments: arguments, in: nil, in: .defaultClient
             ) { [weak self] result in
@@ -462,6 +471,8 @@ enum HostedHTML {
             let number = rgba(Palette.diffLineNumber)
             let outdated = rgba(NSColor(Palette.conflictTone))
             let mono = "ui-monospace, \"SF Mono\", Menlo, monospace"
+            let addedMark = rgba(Palette.diffAddedSign.withAlphaComponent(0.3))
+            let removedMark = rgba(Palette.diffRemovedSign.withAlphaComponent(0.3))
             css = """
                 html, body { margin: 0; padding: 0; overflow: hidden; background: \(rgba(background)); color: \(text);
                   font: 13px/1.5 -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
@@ -475,6 +486,31 @@ enum HostedHTML {
                 blockquote { margin-left: 0; padding-left: 10px; border-left: 3px solid \(border); color: \(secondary); }
                 table { border-collapse: collapse; } td, th { border: 1px solid \(border); padding: 4px 8px; }
                 .body table { display: block; overflow-x: auto; } .body td, .body th { overflow-wrap: break-word; }
+                .body .suggestion, .body .js-suggested-changes-blob { border: 1px solid \(border); border-radius: 6px;
+                  margin: 0 0 8px; overflow: hidden; font: 12px/18px \(mono); }
+                .body .suggestion-head, .body .js-suggested-changes-blob > div:first-child { padding: 3px 10px;
+                  color: \(secondary); font: 12px/18px -apple-system, system-ui, sans-serif;
+                  border-bottom: 1px solid \(border); }
+                .body .suggestion > .del, .body .suggestion > .add { position: relative; min-height: 18px;
+                  padding: 0 10px 0 24px; white-space: pre-wrap; tab-size: 4; }
+                .body .suggestion > .del { background: \(removedFill); } .body .suggestion > .add { background: \(addedFill); }
+                .body .suggestion > .del::before, .body .suggestion > .add::before { position: absolute; left: 9px; }
+                .body .suggestion > .del::before { content: "−"; color: \(removed); }
+                .body .suggestion > .add::before { content: "+"; color: \(added); }
+                .body .js-suggested-changes-blob .blob-wrapper { overflow-x: auto; }
+                .body .js-suggested-changes-blob table { display: table; width: 100%; margin: 0; }
+                .body .js-suggested-changes-blob td { border: 0; padding: 0 8px; vertical-align: top; }
+                .body .js-suggested-changes-blob .blob-num { width: 1px; text-align: right; color: \(number);
+                  font-size: 11px; user-select: none; }
+                .body .js-suggested-changes-blob .blob-num::before { content: attr(data-line-number); }
+                .body .js-suggested-changes-blob .blob-code-inner { white-space: pre-wrap; tab-size: 4; }
+                .body .js-suggested-changes-blob .blob-code-deletion,
+                .body .js-suggested-changes-blob .blob-num-deletion { background: \(removedFill); }
+                .body .js-suggested-changes-blob .blob-code-addition,
+                .body .js-suggested-changes-blob .blob-num-addition { background: \(addedFill); }
+                .body .js-suggested-changes-blob .blob-code-deletion .x { background: \(removedMark); }
+                .body .js-suggested-changes-blob .blob-code-addition .x { background: \(addedMark); }
+                .body .js-apply-changes:empty { display: none; } .body code.language-suggestion { color: \(added); }
                 img { max-width: 100%; } hr { border: 0; border-top: 1px solid \(border); }
                 .item { border: 1px solid \(border); border-radius: 10px; margin: 0 0 10px; overflow: hidden; }
                 .item.desc { margin-bottom: 0; } .item.bare { border: 0; border-radius: 0; }
@@ -491,7 +527,7 @@ enum HostedHTML {
                 .body { padding: 8px 10px; } .empty { color: \(secondary); font-style: italic; } .plain { white-space: pre-wrap; }
                 .badge { font-weight: 600; } .approved { color: \(added); } .changes { color: \(removed); }
                 .slot-avatar { flex: none; align-self: center; width: 20px; height: 20px; }
-                .slot-reply { height: 44px; }
+                .slot-reply { height: 44px; } .slot-reply.stack { height: 80px; }
                 .threads { padding: 0 10px 10px; } .threads.loose { padding: 0; }
                 .thread { border: 1px solid \(border); border-radius: 8px; margin-top: 8px; overflow: hidden; }
                 .loose .thread { margin: 0 0 10px; }
@@ -507,6 +543,7 @@ enum HostedHTML {
                 .cap { flex: none; font-size: 11px; line-height: 16px; padding: 0 7px; border: 1px solid \(border);
                   border-radius: 9px; } .cap.outdated { color: \(outdated); }
                 .cap.resolved { color: \(added); border-color: \(added); background: \(addedFill); font-weight: 600; }
+                .cap.pending { color: \(outdated); border-color: \(outdated); font-weight: 600; }
                 .excerpt { width: 100%; margin: 0; border-collapse: collapse; font: 12px/18px \(mono); }
                 .excerpt td { border: 0; padding: 0; vertical-align: top; }
                 .excerpt .num { width: 1px; padding: 0 8px; text-align: right; color: \(number); font-size: 11px;
@@ -524,6 +561,12 @@ enum HostedHTML {
                 .item.collapsed > :not(.head) { display: none; } .head .slot-chevron { align-self: center; }
                 .slot-menu, .slot-add { flex: none; align-self: center; width: 18px; height: 18px; }
                 .slot-add.like { width: 46px; }
+                .slot-menu.pair { width: 42px; }
+                .slot-show { flex: none; align-self: center; width: 40px; height: 18px; }
+                .hidden-as { font-style: italic; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
+                .item.minimized:not(:has(> .head .slot-show.open)) > :not(.head),
+                .comment.minimized:not(:has(> .comment-head .slot-show.open)) > :not(.comment-head) { display: none; }
                 .slot-edit { display: none; } .slot-edit.open { display: block; height: 120px; }
                 .item > .slot-edit { margin: 0 10px; } .comment > .slot-edit { margin: 0 0 0 26px; }
                 .body:has(+ .slot-edit.open) { display: none; }

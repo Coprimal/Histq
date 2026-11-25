@@ -440,6 +440,8 @@ struct BitbucketDCClientTests {
             switch (request.httpMethod ?? "", request.url?.path() ?? "") {
             case ("GET", comments + "/40"): return .init(body: Self.comment(40, version: 3, text: "General", at: Self.t0))
             case ("PUT", comments + "/41"): return .init(status: 409, body: Self.errors(stale))
+            case ("GET", Self.prPath): return .init(body: Self.pullRequest(version: 3))
+            case ("PUT", Self.prPath): return .init(body: Self.pullRequest(version: 4))
             case ("PUT", let path):
                 let id = Int(path.split(separator: "/").last ?? "") ?? 0
                 let resolved = body["threadResolved"] as? Bool
@@ -488,6 +490,12 @@ struct BitbucketDCClientTests {
                     try await client.editComment(
                         HostedCommentRef(kind: .general, id: 41, hostKey: "2"), on: pr, in: Self.repo, body: "new")
                 }
+            }),
+            // The description: read first, then its version, title and reviewers sent back with the new text (the
+            // answer's version 4 is not kept: a later write reads the pull request again).
+            (["GET " + Self.prPath, "PUT " + Self.prPath],
+             ["version": 3, "title": "Add feature", "description": "new", "reviewers": [["user": ["name": "rev"]]]], {
+                try await client.editDescription(of: pr, in: Self.repo, body: "new")
             }),
             (["DELETE " + comments + "/40?version=7"], nil, {
                 try await client.deleteComment(root, on: pr, in: Self.repo)
@@ -553,6 +561,7 @@ struct BitbucketDCClientTests {
         let refusals: [(String, () async throws -> Void)] = [
             ("issue reply", { _ = try await client.reply(toGeneral: root, on: issue, in: Self.repo, body: "hi") }),
             ("issue edit", { try await client.editComment(root, on: issue, in: Self.repo, body: "x") }),
+            ("issue description", { try await client.editDescription(of: issue, in: Self.repo, body: "x") }),
             ("review ref reply", { _ = try await client.reply(toGeneral: inlineRef, on: pr, in: Self.repo, body: "hi") }),
             ("review ref resolve", {
                 _ = try await client.setGeneralThread(inlineRef, on: pr, in: Self.repo, resolved: true)

@@ -129,6 +129,10 @@ final class IssueDetailModel {
     /// The comments being edited in place and their editors' text, by `PRCommentTarget.key` (`PRGeneralThreadModel`).
     var editingComments: Set<String> = []
     var commentEditDrafts: [String: String] = [:]
+    /// The hidden comments whose text the user showed, by `PRCommentTarget.key` (`PRGeneralThreadModel`).
+    var revealedComments: Set<String> = []
+    /// The box a Quote reply filled, until it takes the focus (`PRGeneralThreadModel.quoteFocus`).
+    var quoteFocus: String?
     /// The Activity's filter and sort (`PRPageLayout.issueActivity`), as `PullRequestDetailModel.activityView`: the
     /// filter is the issue's, the sort the app's.
     private(set) var activityView = PRActivityView()
@@ -151,7 +155,9 @@ final class IssueDetailModel {
 
     #if DEBUG
     /// DEBUG `-HistqIssueAction comment|close|reopen|greply|gresolve|edit|edit-save|delete|delete-confirm|react|`
-    /// `react-new|issue-react` (`issue-react`: the award bar's first kind, 👍, toggled on the issue itself): runs that action once, on the first load, without its confirmation, so a launch exercises the
+    /// `react-new|issue-react|quote|edit-description|hide|unhide` (`issue-react`: the award bar's first kind, 👍,
+    /// toggled on the issue itself; `edit-description`: saves "Edited description" as its description, where its Edit is offered;
+    /// `quote`: Quote reply on the first comment, `PRGeneralThreadModel.launchQuote`): runs that action once, on the first load, without its confirmation, so a launch exercises the
     /// action path and its reload. Only with `-HistqGitHubStub YES`: never an unconfirmed action on a real account.
     /// `greply` and `gresolve` act on the first general thread of that load, `edit-save` on its first own comment and
     /// `react` (`react-new`) on its first comment with (without) reactions (`PRGeneralAction.launchAction`); `edit`,
@@ -176,6 +182,17 @@ final class IssueDetailModel {
     /// `edit` opens the first own comment's editor, `delete` and `delete-confirm` its confirmation (the page opens it,
     /// `launchDelete`); nothing for another name or when no comment fits.
     private func openLaunchStep(_ name: String, in detail: IssueDetail) {
+        // No Edit on the description (`.default`, a viewer who may not).
+        if name == "edit-description", let number {
+            return UITiming.content("issue \(number) action edit-description failed no edit")
+        }
+        if name == "quote", let number {
+            return launchQuote(in: detail.comments, page: detail.timeline, kind: "issue", number: number)
+        }
+        // No comment offering Hide (Unhide): another host, `.default`, or no right.
+        if name == "hide" || name == "unhide", let number {
+            return UITiming.content("issue \(number) action \(name) failed no comment")
+        }
         guard let target = PRGeneralAction.launchTarget(name, in: detail.comments, page: detail.timeline),
               let number else { return }
         switch name {
@@ -208,6 +225,7 @@ final class IssueDetailModel {
             generalExpanded = [:]
             editingComments = []
             commentEditDrafts = [:]
+            quoteFocus = nil
             activityView.filter = PRActivity.all
             actionError = nil
         }
@@ -285,6 +303,12 @@ final class IssueDetailModel {
             // Where replies fold (the Activity), a thread just replied to opens, so the reply shows.
             if case .reply(let root, _) = general, shown.layout.collapsesReplies { generalExpanded[root.id] = true }
             if case .edit(let target, _) = general { editingComments.remove(target.key) }
+            // A saved description: the page is built with it (`PullRequestDetailModel.perform`'s rule).
+            var shown = shown
+            if case .edit(let target, let body) = general, target.isDescription {
+                shown.issue.body = body
+                shown.issue.bodyHTML = nil
+            }
             optimisticID &+= 1
             let options = PRGeneralOptions(api.client, expanded: generalExpanded)
             optimistic = (shown, PRTimeline.patched(shown.comments, general, viewer: shown.viewer,
@@ -387,7 +411,8 @@ final class IssueDetailModel {
         timeline(detail.issue, comments: comments, general: general, now: detail.now, layout: detail.layout,
                  roles: detail.memberRoles, events: detail.events,
                  activity: activityPage(detail.layout, events: detail.events, view: activity,
-                                        roles: detail.memberRoles), pin: detail.extras?.pin)
+                                        roles: detail.memberRoles), pin: detail.extras?.pin,
+                 viewerID: detail.viewer?.id)
     }
 
     /// The Activity of an issue page with `layout` (nil without one), its `events`, `view` and commenters' `roles`.
@@ -405,14 +430,15 @@ final class IssueDetailModel {
     private nonisolated static func timeline(
         _ issue: HostedIssue, comments: [HostedComment], general: PRGeneralOptions, now: Date, layout: PRPageLayout,
         roles: [Int: String]?, events: [HostedTimelineEvent]?, activity: PRActivityPage?,
-        pin: HostedIssueExtras.Pin?
+        pin: HostedIssueExtras.Pin?, viewerID: Int?
     ) -> PRTimelineHTML {
         PRTimeline.page(
             author: issue.user, action: layout.descriptionVerb ?? "opened this issue", date: issue.createdAt,
             html: issue.bodyHTML, markdown: issue.body, comments: comments, general: general, now: now,
             activity: activity, roles: layout.roleBadges ? roles ?? [:] : nil, authorOnly: layout.authorBadgeOnly,
             descriptionReactions: layout.descriptionReactions, events: layout.timelineEvents ? events : nil,
-            pin: pin)
+            pin: pin, descriptionEditable: general.editDescription && PRTimeline.mayEditDescription(
+                issue.viewerCanEditDescription, author: issue.user, viewerID: viewerID))
     }
 
     /// The Activity's filter or sort changed (`view`): it shows at once in its controls, the page is rebuilt off the
@@ -452,7 +478,8 @@ final class IssueDetailModel {
         let layout = PRPageLayout.for(client.kind)
         async let issue = client.issue(number, in: repository)
         async let comments = client.comments(on: .issue(number), in: repository)
-        async let viewer = general.replies ? try? await client.currentUser() : nil
+        // The description's Edit falls back to its author (`PRTimeline.mayEditDescription`): it needs the viewer too.
+        async let viewer = general.replies || general.editDescription ? try? await client.currentUser() : nil
         let readsEvents = (layout.issueActivity != nil || layout.timelineEvents)
             && client.capabilities.contains(.timelineEvents)
         async let events: Loadable<[HostedTimelineEvent]> = !readsEvents ? .idle
@@ -473,7 +500,8 @@ final class IssueDetailModel {
         async let extras: Loadable<HostedIssueExtras> = !asksExtras ? .idle
             : await part(client.kind) { try await client.issueExtras(number, in: repository) }
         do {
-            let (issue, comments) = try await (issue, comments)
+            let (fetched, comments) = try await (issue, comments)
+            var issue = fetched
             let viewer = await viewer
             // The badges' roles, once the commenters are known (`PullRequestDetailModel.fetch`'s rule).
             let users = [issue.user, viewer] + comments.map(\.user)
@@ -487,10 +515,12 @@ final class IssueDetailModel {
             }
             let events = await events.value
             let extras = await extras.value
+            // GitHub says whether the viewer may edit the issue in its extras (`viewerCanUpdate`).
+            if issue.viewerCanEditDescription == nil { issue.viewerCanEditDescription = extras?.viewerCanUpdate }
             let timeline = timeline(issue, comments: comments, general: general, now: now, layout: layout,
                                     roles: roles, events: events,
                                     activity: activityPage(layout, events: events, view: activityView, roles: roles),
-                                    pin: extras?.pin)
+                                    pin: extras?.pin, viewerID: viewer?.id)
             let reactions = await itemReactions.value
             var shown = issue
             if let reactions { shown.reactions = reactions }
@@ -544,6 +574,23 @@ extension IssueDetailModel: PRGeneralThreadModel {
 
     func perform(_ action: PRGeneralAction, on number: Int, github: HostingStore) {
         perform(.general(action), on: number, github: github)
+    }
+
+    @discardableResult func quote(_ target: PRCommentTarget) -> String? {
+        let text: String
+        switch target.quote {
+        case .general(let root):
+            generalExpanded[root] = true
+            text = PRQuoteTarget.appending(target.body, to: generalReplyDrafts[root] ?? "")
+            generalReplyDrafts[root] = text
+        case .composer:
+            text = PRQuoteTarget.appending(target.body, to: draft)
+            draft = text
+        // An issue has no review threads.
+        case .thread, nil: return nil
+        }
+        quoteFocus = target.quote?.focusKey
+        return text
     }
 }
 
@@ -607,7 +654,8 @@ private struct IssueHeaderCard: View {
                             .frame(width: 22, height: 22)
                     }
                     .buttonStyle(RowIconButtonStyle())
-                    .keyboardShortcut(.cancelAction)
+                    // Not while a comment or the description is being edited: Esc is its editor's Cancel then.
+                    .keyboardShortcut(session.issueDetail.editingComments.isEmpty ? .cancelAction : nil)
                     .help("Back to the Graph (Esc)")
                     .accessibilityLabel("Back to the graph")
                     .padding(.leading, 4)
@@ -806,6 +854,8 @@ private struct IssueContent: View {
 /// The comment box.
 private struct IssueCommentCard: View {
     let session: RepoSession
+    /// The box, for Quote reply's focus (`IssueDetailModel.quote`).
+    @FocusState private var focused: Bool
 
     var body: some View {
         @Bindable var model = session.issueDetail
@@ -813,8 +863,14 @@ private struct IssueCommentCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 TextEditor(text: $model.draft)
                     .font(.body)
+                    .focused($focused)
                     .settingsTextEditor()
                     .frame(height: 64)
+                    .onChange(of: model.quoteFocus, initial: true) { _, key in
+                        guard key == PRQuoteTarget.composer.focusKey else { return }
+                        focused = true
+                        model.quoteFocus = nil
+                    }
                     .overlay(alignment: .topLeading) {
                         if model.draft.isEmpty {
                             Text("Leave a comment")

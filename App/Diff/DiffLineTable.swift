@@ -431,6 +431,21 @@ struct DiffInlineThread: Equatable, Sendable {
         let date: String
         let body: String
         let isReply: Bool
+        /// A comment of the viewer's pending review: a "Pending" capsule after the author.
+        var isPending = false
+        /// Its suggested changes (`body` without their blocks), drawn under the text as −/+ lines.
+        var suggestions: [Suggestion] = []
+        /// The comment's id, which its Show toggle is kept by.
+        var id = 0
+        /// Hidden on the host: the note after the author ("hidden as outdated"), and its text only behind a Show
+        /// toggle; nil for a comment shown as any other.
+        var hiddenNote: String? = nil
+    }
+
+    /// A suggested change: the lines it replaces (empty when unknown) and its new lines.
+    struct Suggestion: Equatable, Sendable {
+        let old: [String]
+        let new: [String]
     }
 
     let id: Int
@@ -525,6 +540,14 @@ struct DiffNewComments {
     let onDraft: @MainActor (String) -> Void
     let onCancel: @MainActor () -> Void
     let onPost: @MainActor (String) -> Void
+    /// The main button's title: "Comment", or "Add review comment" where the host routes it into the pending review.
+    var commentTitle = "Comment"
+    /// A second button beside it that adds the text to the pending review ("Start a review", "Add review comment");
+    /// nil shows none.
+    var review: (title: String, onPost: @MainActor (String) -> Void)?
+    /// The host's suggestion block holding the box's lines (their current text), which "Suggest a change" inserts;
+    /// nil shows no button (a host without suggestions).
+    var suggestion: (@MainActor ([String]) -> String)?
 }
 
 /// Fonts and column positions of a table's rows. The gutters fit the largest line number; the content width fits the
@@ -921,6 +944,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     private var collapsedThreads: Set<Int> = []
     private var threadRows = IndexSet()
     private var unplacedThreads: [Int] = []
+    /// The hidden comments whose text their Show toggle showed here, by comment id.
+    private var revealedComments: Set<Int> = []
     /// Expanded threads' heights by thread id, for `threadHeightsWidth` (the width their boxes were laid out at).
     private var threadHeights: [Int: CGFloat] = [:]
     private var threadHeightsWidth: CGFloat = -1
@@ -1125,7 +1150,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             threadHeightsWidth = width
         }
         if let height = threadHeights[thread.id] { return height }
-        let height = DiffThreadDrawing.height(thread, width: width)
+        let height = DiffThreadDrawing.height(thread, width: width, revealed: revealedComments)
         threadHeights[thread.id] = height
         return height
     }
@@ -1134,7 +1159,25 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         cell.configure(thread, collapsed: collapsedThreads.contains(thread.id),
                        onToggle: { [weak self] in self?.toggleThread(thread.id) },
                        onReply: { [weak self] in self?.view?.inlineThreads?.onReply() },
-                       replyTitle: view?.inlineThreads?.replyTitle ?? "Reply in Conversation")
+                       replyTitle: view?.inlineThreads?.replyTitle ?? "Reply in Conversation",
+                       revealed: revealedComments,
+                       onReveal: { [weak self] in self?.toggleRevealed($0, in: thread.id) })
+    }
+
+    /// A hidden comment's Show or Hide: its text shows or goes at once, its thread's row taking the new height.
+    private func toggleRevealed(_ commentID: Int, in threadID: Int) {
+        if revealedComments.remove(commentID) == nil { revealedComments.insert(commentID) }
+        threadHeights[threadID] = nil
+        guard let table, let index = threadRows.first(where: { index in
+            if case .thread(let thread) = rows[index] { thread.id == threadID } else { false }
+        }), case .thread(let thread) = rows[index] else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+        }
+        if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? DiffThreadCellView {
+            configure(cell, thread)
+        }
     }
 
     /// A header click: the thread collapses or expands at once, then the owner keeps the choice.
@@ -1252,7 +1295,26 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         cell.configure(composer, text: newComments.draft(), busy: newComments.isBusy,
                        onDraft: { [weak self] in self?.view?.inlineThreads?.newComments?.onDraft($0) },
                        onCancel: { [weak self] in self?.view?.inlineThreads?.newComments?.onCancel() },
-                       onPost: { [weak self] in self?.view?.inlineThreads?.newComments?.onPost($0) })
+                       onPost: { [weak self] in self?.view?.inlineThreads?.newComments?.onPost($0) },
+                       commentTitle: newComments.commentTitle,
+                       review: newComments.review.map { review in
+                           (review.title, { [weak self] in self?.view?.inlineThreads?.newComments?.review?.onPost($0) })
+                       },
+                       suggestion: newComments.suggestion.flatMap { block in suggestionLines(composer).map(block) })
+    }
+
+    /// The text of the box's new-side lines (added or unchanged; removed ones in between skipped), what "Suggest a
+    /// change" puts in its block; nil when its first or last line is a removed one (or it is not shown).
+    private func suggestionLines(_ composer: DiffInlineComposer) -> [String]? {
+        guard composer.end.kind != .removed, composer.start?.kind != .removed, let last = row(of: composer.end)
+        else { return nil }
+        let first = composer.start.flatMap(row(of:)) ?? last
+        guard first <= last else { return nil }
+        let lines = rows[first...last].compactMap { row -> String? in
+            guard case .single(let line) = row, line.kind == .added || line.kind == .context else { return nil }
+            return line.text
+        }
+        return lines.isEmpty ? nil : lines
     }
 
     private var composerCell: DiffComposerCellView? {
@@ -2207,6 +2269,7 @@ enum DiffThreadDrawing {
     static let title = attributes(11, .semibold, .secondaryLabelColor)
     static let summaryText = attributes(11, .regular, .secondaryLabelColor)
     static let resolved = attributes(10, .semibold, Palette.diffAddedSign)
+    static let pending = attributes(10, .semibold, NSColor(Palette.conflictTone))
     static let author = attributes(12, .semibold, .labelColor)
     static let date = attributes(11, .regular, .secondaryLabelColor)
     static let body = attributes(12, .regular, Palette.diffText, wraps: true)
@@ -2224,21 +2287,54 @@ enum DiffThreadDrawing {
         max(40, width - 2 * inset - 2 * padding - (isReply ? replyIndent : 0))
     }
 
-    static func bodyHeight(_ text: String, width: CGFloat) -> CGFloat {
-        guard !text.isEmpty else { return 0 }
-        return NSAttributedString(string: text, attributes: body)
-            .boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
-                          options: [.usesLineFragmentOrigin, .usesFontLeading])
+    static func bodyHeight(_ text: NSAttributedString, width: CGFloat) -> CGFloat {
+        guard text.length > 0 else { return 0 }
+        return text.boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
+                                 options: [.usesLineFragmentOrigin, .usesFontLeading])
             .height.rounded(.up)
     }
 
-    /// An expanded thread's row height in a row `width` wide.
-    static func height(_ thread: DiffInlineThread, width: CGFloat) -> CGFloat {
+    static let suggestionTitle = attributes(11, .semibold, .secondaryLabelColor)
+    static let suggestionRemoved = code(Palette.diffRemovedSign)
+    static let suggestionAdded = code(Palette.diffAddedSign)
+
+    private static func code(_ color: NSColor) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byCharWrapping
+        return [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color,
+                .backgroundColor: color.withAlphaComponent(0.12), .paragraphStyle: paragraph]
+    }
+
+    /// A comment's text as drawn, plain (never HTML): its body, then each suggested change as "Suggested change" and
+    /// its lines, the replaced ones "− " in red and the new ones "+ " in green; none for a hidden comment whose Show
+    /// toggle is closed (`revealed` has not its id).
+    static func bodyText(_ comment: DiffInlineThread.Comment, revealed: Set<Int> = []) -> NSAttributedString {
+        if comment.hiddenNote != nil, !revealed.contains(comment.id) { return NSAttributedString() }
+        let text = NSMutableAttributedString(string: comment.body, attributes: body)
+        for suggestion in comment.suggestions {
+            if text.length > 0 { text.append(NSAttributedString(string: "\n", attributes: body)) }
+            text.append(NSAttributedString(string: "Suggested change", attributes: suggestionTitle))
+            for line in suggestion.old {
+                text.append(NSAttributedString(string: "\n− " + line, attributes: suggestionRemoved))
+            }
+            for line in suggestion.new {
+                text.append(NSAttributedString(string: "\n+ " + line, attributes: suggestionAdded))
+            }
+        }
+        return text
+    }
+
+    /// An expanded thread's row height in a row `width` wide, the hidden comments of `revealed` with their text.
+    static func height(_ thread: DiffInlineThread, width: CGFloat, revealed: Set<Int> = []) -> CGFloat {
         thread.comments.reduce(2 * margin + 2 * padding + headerHeight + footerGap + footerHeight) { height, comment in
             height + commentGap + authorHeight + bodyGap
-                + bodyHeight(comment.body, width: textWidth(width: width, isReply: comment.isReply))
+                + bodyHeight(bodyText(comment, revealed: revealed),
+                             width: textWidth(width: width, isReply: comment.isReply))
         }
     }
+
+    static let hiddenNote = attributes(11, .regular, .secondaryLabelColor)
+    static let revealToggle = attributes(11, .semibold, .linkColor)
 
     /// "alice · 2 comments": the collapsed header's summary.
     static func summary(_ thread: DiffInlineThread) -> String {
@@ -2256,6 +2352,10 @@ final class DiffThreadCellView: NSView {
     private var collapsed = false
     private var onToggle: (() -> Void)?
     private var onReply: (() -> Void)?
+    private var revealed: Set<Int> = []
+    private var onReveal: ((Int) -> Void)?
+    /// Each hidden comment's Show / Hide as last drawn, by comment id: what a click there toggles.
+    private var revealRects: [(id: Int, rect: NSRect)] = []
     private let reply = NSButton(title: "Reply in Conversation", target: nil, action: nil)
 
     override var isFlipped: Bool { true }
@@ -2279,22 +2379,38 @@ final class DiffThreadCellView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     func configure(_ thread: DiffInlineThread, collapsed: Bool, onToggle: @escaping () -> Void,
-                   onReply: @escaping () -> Void, replyTitle: String = "Reply in Conversation") {
+                   onReply: @escaping () -> Void, replyTitle: String = "Reply in Conversation",
+                   revealed: Set<Int> = [], onReveal: ((Int) -> Void)? = nil) {
         if reply.title != replyTitle { reply.title = replyTitle }
         self.thread = thread
         self.collapsed = collapsed
         self.onToggle = onToggle
         self.onReply = onReply
+        self.revealed = revealed
+        self.onReveal = onReveal
         // A thread the host has not answered yet has no reply row in the Conversation either (`PRPlaceholderID`).
         reply.isHidden = collapsed || PRPlaceholderID.isPlaceholder(thread.id)
         let comments = collapsed ? DiffThreadDrawing.summary(thread)
-            : thread.comments.map { "\($0.author), \($0.date): \($0.body)" }.joined(separator: ". ")
+            : thread.comments.map { comment in
+                let text = comment.hiddenNote.map { revealed.contains(comment.id) ? "\($0): \(comment.body)" : $0 }
+                return "\(comment.author), \(comment.date): \(text ?? comment.body)"
+            }.joined(separator: ". ")
         setAccessibilityLabel("Thread on \(thread.title)\(thread.isResolved ? ", resolved" : ""): \(comments)")
         let toggle = NSAccessibilityCustomAction(name: collapsed ? "Expand" : "Collapse") { [weak self] in
             self?.onToggle?()
             return true
         }
-        setAccessibilityCustomActions([toggle])
+        // Each hidden comment's Show / Hide, as its toggle.
+        let hiddenComments = collapsed ? [] : thread.comments.filter { $0.hiddenNote != nil }
+        let reveals = hiddenComments.map { comment in
+            let shown = revealed.contains(comment.id)
+            return NSAccessibilityCustomAction(name: "\(shown ? "Hide" : "Show") \(comment.author)'s hidden comment") {
+                [weak self] in
+                self?.onReveal?(comment.id)
+                return true
+            }
+        }
+        setAccessibilityCustomActions([toggle] + reveals)
         needsLayout = true
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
@@ -2340,7 +2456,12 @@ final class DiffThreadCellView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         // Elsewhere in the row nothing happens: a thread is not a line the table selects.
-        if headerRect.contains(convert(event.locationInWindow, from: nil)) { onToggle?() }
+        let point = convert(event.locationInWindow, from: nil)
+        if !collapsed, let hit = revealRects.first(where: { $0.rect.contains(point) }) {
+            onReveal?(hit.id)
+            return
+        }
+        if headerRect.contains(point) { onToggle?() }
     }
 
     override func resetCursorRects() {
@@ -2388,6 +2509,7 @@ final class DiffThreadCellView: NSView {
             label.draw(at: NSPoint(x: capsule.minX + 6, y: capsule.minY + 2))
             x = capsule.maxX + 8
         }
+        revealRects = []
         if collapsed {
             let summary = NSAttributedString(string: D.summary(thread), attributes: D.summaryText)
             let size = summary.size()
@@ -2404,22 +2526,52 @@ final class DiffThreadCellView: NSView {
             y += D.commentGap
             let left = box.minX + D.padding + (comment.isReply ? D.replyIndent : 0)
             let textWidth = D.textWidth(width: width, isReply: comment.isReply)
-            let bodyHeight = D.bodyHeight(comment.body, width: textWidth)
+            let text = D.bodyText(comment, revealed: revealed)
+            let bodyHeight = D.bodyHeight(text, width: textWidth)
             if comment.isReply {
                 D.replyLine.setFill()
                 NSRect(x: box.minX + D.padding + 5, y: y, width: 2, height: D.authorHeight + D.bodyGap + bodyHeight).fill()
             }
             let author = NSAttributedString(string: comment.author, attributes: D.author)
-            let authorWidth = min(author.size().width, textWidth)
+            var authorWidth = min(author.size().width, textWidth)
             author.draw(in: NSRect(x: left, y: y, width: authorWidth, height: D.authorHeight))
+            if comment.isPending, textWidth - authorWidth > 60 {
+                // The pending review's capsule, as the Conversation's (`.cap.pending`).
+                let label = NSAttributedString(string: "Pending", attributes: D.pending)
+                let size = label.size()
+                let capsule = NSRect(x: left + authorWidth + 6, y: y + (D.authorHeight - size.height - 2) / 2,
+                                     width: size.width + 12, height: size.height + 2)
+                let shape = NSBezierPath(roundedRect: capsule.insetBy(dx: 0.5, dy: 0.5), xRadius: capsule.height / 2,
+                                         yRadius: capsule.height / 2)
+                NSColor(Palette.conflictTone).setStroke()
+                shape.lineWidth = 1
+                shape.stroke()
+                label.draw(at: NSPoint(x: capsule.minX + 6, y: capsule.minY + 1))
+                authorWidth = capsule.maxX - left
+            }
+            if let note = comment.hiddenNote {
+                // Hidden on the host: "hidden as <reason>", then its Show / Hide toggle.
+                let label = NSAttributedString(string: note, attributes: D.hiddenNote)
+                let toggle = NSAttributedString(string: revealed.contains(comment.id) ? "Hide" : "Show",
+                                                attributes: D.revealToggle)
+                let labelWidth = min(label.size().width, max(0, textWidth - authorWidth - 6))
+                label.draw(in: NSRect(x: left + authorWidth + 6, y: y + 1, width: labelWidth, height: D.authorHeight))
+                authorWidth += 6 + labelWidth
+                let size = toggle.size()
+                if textWidth - authorWidth > size.width + 8 {
+                    let rect = NSRect(x: left + authorWidth + 8, y: y + 1, width: size.width, height: D.authorHeight)
+                    toggle.draw(in: rect)
+                    revealRects.append((comment.id, rect.insetBy(dx: -4, dy: -2)))
+                    authorWidth += 8 + size.width
+                }
+            }
             if !comment.date.isEmpty, textWidth - authorWidth > 20 {
                 let date = NSAttributedString(string: comment.date, attributes: D.date)
                 date.draw(in: NSRect(x: left + authorWidth + 6, y: y + 1, width: textWidth - authorWidth - 6,
                                      height: D.authorHeight))
             }
             y += D.authorHeight + D.bodyGap
-            NSAttributedString(string: comment.body, attributes: D.body)
-                .draw(with: NSRect(x: left, y: y, width: textWidth, height: bodyHeight),
+            text.draw(with: NSRect(x: left, y: y, width: textWidth, height: bodyHeight),
                       options: [.usesLineFragmentOrigin, .usesFontLeading])
             y += bodyHeight
         }
@@ -2528,10 +2680,16 @@ final class DiffComposerCellView: NSView, NSTextViewDelegate {
     private let text = DiffComposerTextView()
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let comment = TintedCapsuleButton(title: "Comment", fill: NSColor(Palette.primaryFill))
+    /// Start a review / Add review comment, where the pending review offers it (`DiffNewComments.review`).
+    private let review = NSButton(title: "Start a review", target: nil, action: nil)
+    /// Suggest a change, where the host renders suggestions and every line of the box is on the new side.
+    private let suggest = NSButton(title: "Suggest a change", target: nil, action: nil)
+    private var suggestion: String?
     private var busy = false
     private var onDraft: ((String) -> Void)?
     private var onCancel: (() -> Void)?
     private var onPost: ((String) -> Void)?
+    private var onReview: ((String) -> Void)?
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -2581,7 +2739,22 @@ final class DiffComposerCellView: NSView, NSTextViewDelegate {
         comment.target = self
         comment.action = #selector(commentPressed)
         comment.toolTip = "Comment (⌘↩)"
-        for view in [title, message, scroll, cancel, comment] { addSubview(view) }
+        review.bezelStyle = .push
+        if #available(macOS 26, *) { review.borderShape = .capsule }
+        review.controlSize = .small
+        review.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        review.target = self
+        review.action = #selector(reviewPressed)
+        review.isHidden = true
+        suggest.bezelStyle = .push
+        if #available(macOS 26, *) { suggest.borderShape = .capsule }
+        suggest.controlSize = .small
+        suggest.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        suggest.target = self
+        suggest.action = #selector(suggestPressed)
+        suggest.toolTip = "Insert a suggested change holding the lines"
+        suggest.isHidden = true
+        for view in [title, message, scroll, suggest, cancel, review, comment] { addSubview(view) }
         setAccessibilityElement(false)
     }
 
@@ -2590,10 +2763,18 @@ final class DiffComposerCellView: NSView, NSTextViewDelegate {
 
     func configure(_ composer: DiffInlineComposer, text draft: String, busy: Bool,
                    onDraft: @escaping (String) -> Void, onCancel: @escaping () -> Void,
-                   onPost: @escaping (String) -> Void) {
+                   onPost: @escaping (String) -> Void, commentTitle: String = "Comment",
+                   review: (title: String, onPost: (String) -> Void)? = nil, suggestion: String? = nil) {
         self.onDraft = onDraft
+        self.suggestion = suggestion
+        suggest.isHidden = suggestion == nil
         self.onCancel = onCancel
         self.onPost = onPost
+        onReview = review?.onPost
+        comment.retitle(commentTitle)
+        comment.toolTip = "\(commentTitle) (⌘↩)"
+        review.map { self.review.title = $0.title }
+        self.review.isHidden = review == nil
         title.stringValue = composer.title
         message.stringValue = composer.message ?? ""
         // The field keeps its own text (and caret) while it already holds the owner's.
@@ -2617,6 +2798,7 @@ final class DiffComposerCellView: NSView, NSTextViewDelegate {
     private func updateComment() {
         comment.isEnabled = !busy && !text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         comment.alphaValue = comment.isEnabled ? 1 : 0.5
+        review.isEnabled = comment.isEnabled
     }
 
     func textDidChange(_ notification: Notification) {
@@ -2631,6 +2813,22 @@ final class DiffComposerCellView: NSView, NSTextViewDelegate {
 
     @objc private func commentPressed() {
         post()
+    }
+
+    /// Inserts the suggestion block at the caret (replacing a selection) on lines of its own, as typed text: the draft
+    /// and undo follow.
+    @objc private func suggestPressed() {
+        guard let suggestion, !busy else { return }
+        let range = text.selectedRange()
+        let before = (text.string as NSString).substring(to: min(range.location, (text.string as NSString).length))
+        let block = (before.isEmpty || before.hasSuffix("\n") ? "" : "\n") + suggestion + "\n"
+        window?.makeFirstResponder(text)
+        text.insertText(block, replacementRange: range)
+    }
+
+    @objc private func reviewPressed() {
+        guard comment.isEnabled else { return }
+        onReview?(text.string.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func post() {
@@ -2677,8 +2875,16 @@ final class DiffComposerCellView: NSView, NSTextViewDelegate {
         comment.frame = NSRect(x: box.maxX - D.padding - commentSize.width,
                                y: footerY + (D.footerHeight - commentSize.height) / 2,
                                width: commentSize.width, height: commentSize.height)
+        let reviewSize = review.isHidden ? .zero : review.fittingSize
+        review.frame = NSRect(x: comment.frame.minX - 8 - reviewSize.width,
+                              y: footerY + (D.footerHeight - reviewSize.height) / 2,
+                              width: reviewSize.width, height: reviewSize.height)
+        let suggestSize = suggest.isHidden ? .zero : suggest.fittingSize
+        suggest.frame = NSRect(x: left, y: footerY + (D.footerHeight - suggestSize.height) / 2,
+                               width: suggestSize.width, height: suggestSize.height)
         let cancelSize = cancel.fittingSize
-        cancel.frame = NSRect(x: comment.frame.minX - 8 - cancelSize.width,
+        let cancelRight = review.isHidden ? comment.frame.minX : review.frame.minX
+        cancel.frame = NSRect(x: cancelRight - 8 - cancelSize.width,
                               y: footerY + (D.footerHeight - cancelSize.height) / 2,
                               width: cancelSize.width, height: cancelSize.height)
     }
@@ -2719,6 +2925,17 @@ final class TintedCapsuleButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// Shows `title` (white, small), when it is another one.
+    func retitle(_ title: String) {
+        guard attributedTitle.string != title else { return }
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize(for: .small)),
+            .foregroundColor: NSColor.white,
+        ])
+        invalidateIntrinsicContentSize()
+        superview?.needsLayout = true
+    }
 
     /// The small push button's size: its title plus 10 pt on each side, 22 pt tall.
     override var intrinsicContentSize: NSSize {

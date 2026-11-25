@@ -139,6 +139,7 @@ public struct BitbucketDCClient: HostingProvider, CustomStringConvertible, Custo
         var capabilities: HostingCapabilities = [
             .requestChanges, .resolveThreads, .reopen, .reviewRequests, .generalReplies, .resolveGeneralThreads,
             .editComments, .deleteComments, .newInlineComments, .timelineEvents, .tasks, .mergeChecks,
+            .editDescription,
         ]
         if Self.supportsDraft(memo.version.withLock({ $0 })) { capabilities.insert(.draft) }
         return capabilities
@@ -478,6 +479,36 @@ public struct BitbucketDCClient: HostingProvider, CustomStringConvertible, Custo
             body: Body(
                 version: version, title: current.title, description: current.description,
                 reviewers: names.map { Reviewer(user: Name(name: $0)) }, draft: current.draft))
+    }
+
+    /// `PUT {PR}` with the new `description`: the pull request is read first and its `version`, title, reviewers and
+    /// draft state are sent back (the `PUT` replaces them). The answer's new `version` needs no keeping: no version is
+    /// cached, each version-guarded write (a merge included) reads the pull request again. A 409 (it changed since)
+    /// is `validationFailed` with Data Center's message and a reload hint.
+    public func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws {
+        guard case .pullRequest(let number) = item else { throw Self.noIssues }
+        let path = try pullRequestPath(number, in: repo)
+        let (current, version) = try await versioned(path)
+        struct Name: Encodable { var name: String }
+        struct Reviewer: Encodable { var user: Name }
+        struct Body: Encodable {
+            var version: Int
+            var title: String?
+            var description: String
+            var reviewers: [Reviewer]
+            var draft: Bool?
+        }
+        let reviewers = (current.reviewers ?? []).compactMap { $0.user?.name }.map { Reviewer(user: Name(name: $0)) }
+        do {
+            let _: BitbucketDCPullRequest = try await send(
+                "PUT", url(path),
+                body: Body(version: version, title: current.title, description: body, reviewers: reviewers,
+                           draft: current.draft))
+        } catch HostingError.http(status: 409, let message) {
+            throw HostingError.validationFailed(
+                message: message.isEmpty ? "the pull request changed: reload it"
+                    : message + (message.hasSuffix(".") ? " " : ". ") + "Reload the pull request.")
+        }
     }
 
     public func addLabels(_ names: [String], to item: HostedItem, in repo: HostedRepository) async throws {

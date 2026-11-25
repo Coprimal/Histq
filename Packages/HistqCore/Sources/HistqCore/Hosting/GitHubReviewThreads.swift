@@ -75,8 +75,10 @@ public struct HostedReviewThread: Sendable, Equatable, Identifiable {
         return (threadsByReview, reviewIDs.subtracting(threadsByReview.keys), unattached)
     }
 
-    /// Oldest first, then by id when the dates tie or are missing, so the order is the same on every run.
+    /// Oldest first, then by id when the dates tie or are missing, so the order is the same on every run; a pending
+    /// comment (`isPending`, which may have no date) after every published one.
     private static func isEarlier(_ a: HostedReviewComment, _ b: HostedReviewComment) -> Bool {
-        (a.createdAt ?? .distantPast, a.id) < (b.createdAt ?? .distantPast, b.id)
+        if a.isPending != b.isPending { return b.isPending }
+        return (a.createdAt ?? .distantPast, a.id) < (b.createdAt ?? .distantPast, b.id)
     }
 }

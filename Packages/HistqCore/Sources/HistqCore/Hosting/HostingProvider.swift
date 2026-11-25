@@ -204,6 +204,27 @@ public struct HostingCapabilities: OptionSet, Sendable, Hashable {
     public static let mergeChecks = HostingCapabilities(rawValue: 1 << 25)
     /// The reports on a commit (`reports(commit:in:)`).
     public static let reports = HostingCapabilities(rawValue: 1 << 26)
+    /// Replaces the description of a pull request (and of an issue, where the host has issues) with new raw markdown
+    /// (`editDescription(of:in:body:)`), where the token's user may (`viewerCanEditDescription`).
+    public static let editDescription = HostingCapabilities(rawValue: 1 << 27)
+    /// A pending review only the token's user sees until they submit it: its comments read back, new ones added,
+    /// submitted with a review event, or discarded (`pendingReview(of:in:)`, `addPendingComment`,
+    /// `submitPendingReview`, `discardPendingReview`).
+    public static let pendingReviews = HostingCapabilities(rawValue: 1 << 28)
+    /// The host renders suggested changes written in a diff comment's body (GitHub's ```` ```suggestion ```` block,
+    /// GitLab's ```` ```suggestion:-N+M ````), so the diff-line composer offers "Suggest a change".
+    public static let suggestions = HostingCapabilities(rawValue: 1 << 29)
+    /// A suggested change can be applied through the API (`applySuggestion(_:in:)`, GitLab's
+    /// `HostedReviewComment.suggestions`).
+    public static let applySuggestions = HostingCapabilities(rawValue: 1 << 30)
+    /// A comment can be hidden (minimized) on the host for everyone with a reason, and shown again
+    /// (`hideComment(_:on:in:reason:)`, `unhideComment(_:on:in:)`), where the token's user may
+    /// (`HostedComment.viewerCanMinimize`, `viewerCanUnminimize`).
+    public static let hideComments = HostingCapabilities(rawValue: 1 << 31)
+    /// A comment of the pending review can be edited or deleted on its own before the review is sent
+    /// (`editPendingComment(_:on:in:body:)`, `deletePendingComment(_:on:in:)`), through the host's own pending calls:
+    /// a pending comment's id (`HostedPendingReview.idBase`'s band) never goes to the published comments' endpoints.
+    public static let editPendingComments = HostingCapabilities(rawValue: 1 << 32)
 }
 
 /// A pull request or an issue: one number space on GitHub, two on hosts where merge request !5 and issue #5 differ.
@@ -328,6 +349,9 @@ public protocol HostingProvider: Sendable {
     /// The reaction kinds the token's user can add, in the order the host shows them (host names, as
     /// `HostedReaction.kind`); empty without the `reactions` capability.
     var reactionKinds: [String] { get }
+    /// The reasons a comment can be hidden with, in the host's order (its own values, GitHub's
+    /// `ReportedContentClassifiers`: `OUTDATED`, `OFF_TOPIC`…); empty without the `hideComments` capability.
+    var hideReasons: [String] { get }
     /// How pull request `pullRequest`'s head is fetched locally.
     func checkout(of pullRequest: HostedPullRequest) -> HostedCheckout
     /// The web page of `target` in `repo`; nil when it has none.
@@ -415,6 +439,8 @@ public protocol HostingProvider: Sendable {
     /// Replaces the body of `comment` with `body` (only with the `editComments` capability).
     func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
         async throws
+    /// Replaces the description of `item` with `body`, raw markdown (only with the `editDescription` capability).
+    func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws
     /// Deletes `comment` (only with the `deleteComments` capability).
     func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository) async throws
     /// Adds the token's user's reaction `kind` (one of `reactionKinds`) to `comment` (only with `reactions`).
@@ -424,6 +450,11 @@ public protocol HostingProvider: Sendable {
     func removeReaction(
         _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws
+    /// Hides `comment` for everyone with `reason`, one of `hideReasons` (only with `hideComments`).
+    func hideComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, reason: String)
+        async throws
+    /// Shows a hidden `comment` again (only with `hideComments`).
+    func unhideComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository) async throws
     /// Writes a new inline comment at `position` on pull request `number` (only with `newInlineComments`, and
     /// `multiLineInlineComments` for a start line).
     func createInlineComment(
@@ -478,6 +509,39 @@ public protocol HostingProvider: Sendable {
     func mergeChecks(of number: Int, in repo: HostedRepository) async throws -> [HostedMergeCheck]
     /// The reports on commit `sha` (only with `reports`).
     func reports(commit sha: String, in repo: HostedRepository) async throws -> [HostedReport]
+
+    /// The token's user's pending review of pull request `number`, empty when there is none (only with
+    /// `pendingReviews`).
+    func pendingReview(of number: Int, in repo: HostedRepository) async throws -> HostedPendingReview
+    /// Adds a pending comment with `body` at `target` to `review` (the one `pendingReview(of:in:)` read; empty: a new
+    /// one is started) (only with `pendingReviews`).
+    func addPendingComment(
+        _ target: HostedPendingTarget, to review: HostedPendingReview, on number: Int, in repo: HostedRepository,
+        body: String
+    ) async throws
+    /// Publishes every comment of `review` as one review with `event` and the summary `body` (only with
+    /// `pendingReviews`).
+    func submitPendingReview(
+        _ review: HostedPendingReview, on number: Int, in repo: HostedRepository, event: HostedReviewEvent,
+        body: String?
+    ) async throws
+    /// Deletes `review` and its comments (only with `pendingReviews`).
+    func discardPendingReview(_ review: HostedPendingReview, on number: Int, in repo: HostedRepository) async throws
+    /// Replaces the raw markdown of pending comment `comment` (a `HostedReviewComment.isPending`'s: its id in
+    /// `HostedPendingReview.idBase`'s band, its `hostKey`) of pull request `number` with `body` (only with
+    /// `editPendingComments`).
+    func editPendingComment(_ comment: HostedCommentRef, on number: Int, in repo: HostedRepository, body: String)
+        async throws
+    /// Deletes pending comment `comment` of pull request `number`; the rest of the pending review stays (only with
+    /// `editPendingComments`).
+    func deletePendingComment(_ comment: HostedCommentRef, on number: Int, in repo: HostedRepository) async throws
+    /// Applies suggestion `id` (a `HostedSuggestion.id`) as a commit on the source branch (only with
+    /// `applySuggestions`).
+    func applySuggestion(_ id: Int, in repo: HostedRepository) async throws
+    /// While a pending review exists, the host holds back immediate inline comments, replies and reviews (GitHub's
+    /// one pending review per user): they go through it instead (`createInlineComment(at:on:in:body:pending:)`,
+    /// `reply(to:on:in:body:pending:)`, `review(_:in:event:body:pending:)`). False by default.
+    var routesThroughPendingReview: Bool { get }
 }
 
 extension HostingProvider {
@@ -488,6 +552,9 @@ extension HostingProvider {
 
     /// None by default.
     public var reactionKinds: [String] { [] }
+
+    /// None by default.
+    public var hideReasons: [String] { [] }
 
     /// A host without the comment capability refuses each comment write unsent.
     public func reply(
@@ -514,6 +581,11 @@ extension HostingProvider {
         throw HostingError.validationFailed(message: "this host cannot delete a comment")
     }
 
+    /// A host without the `editDescription` capability refuses it unsent.
+    public func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws {
+        throw HostingError.validationFailed(message: "this host cannot edit a description")
+    }
+
     public func addReaction(
         _ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws {
@@ -524,6 +596,19 @@ extension HostingProvider {
         _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws {
         throw HostingError.validationFailed(message: "this host cannot remove a reaction")
+    }
+
+    /// A host without the `hideComments` capability refuses these unsent.
+    public func hideComment(
+        _ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, reason: String
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot hide a comment")
+    }
+
+    public func unhideComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    {
+        throw HostingError.validationFailed(message: "this host cannot unhide a comment")
     }
 
     public func createInlineComment(
@@ -636,5 +721,92 @@ extension HostingProvider {
     /// A host without the `pullRequestExtras` capability has none.
     public func pullRequestExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequestExtras {
         throw HostingError.validationFailed(message: "this host has no pull request extras")
+    }
+
+    /// A host without the `pendingReviews` capability refuses these unsent.
+    public func pendingReview(of number: Int, in repo: HostedRepository) async throws -> HostedPendingReview {
+        throw HostingError.validationFailed(message: "this host has no pending reviews")
+    }
+
+    public func addPendingComment(
+        _ target: HostedPendingTarget, to review: HostedPendingReview, on number: Int, in repo: HostedRepository,
+        body: String
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host has no pending reviews")
+    }
+
+    public func submitPendingReview(
+        _ review: HostedPendingReview, on number: Int, in repo: HostedRepository, event: HostedReviewEvent,
+        body: String?
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host has no pending reviews")
+    }
+
+    public func discardPendingReview(_ review: HostedPendingReview, on number: Int, in repo: HostedRepository)
+        async throws
+    {
+        throw HostingError.validationFailed(message: "this host has no pending reviews")
+    }
+
+    public var routesThroughPendingReview: Bool { false }
+
+    /// A host without the `editPendingComments` capability refuses these unsent.
+    public func editPendingComment(
+        _ comment: HostedCommentRef, on number: Int, in repo: HostedRepository, body: String
+    ) async throws {
+        throw HostingError.validationFailed(message: "this host cannot edit a pending comment")
+    }
+
+    public func deletePendingComment(_ comment: HostedCommentRef, on number: Int, in repo: HostedRepository)
+        async throws
+    {
+        throw HostingError.validationFailed(message: "this host cannot delete a pending comment")
+    }
+
+    /// A host without the `applySuggestions` capability refuses it unsent.
+    public func applySuggestion(_ id: Int, in repo: HostedRepository) async throws {
+        throw HostingError.validationFailed(message: "this host cannot apply a suggestion")
+    }
+
+    /// Whether immediate writes go through `pending` (`routesThroughPendingReview`, and one exists).
+    private func routes(_ pending: HostedPendingReview?) -> Bool {
+        routesThroughPendingReview && pending.map { !$0.isEmpty } == true
+    }
+
+    /// A new inline comment: a pending comment of `pending` where the host routes through it, else
+    /// `createInlineComment(at:on:in:body:)`.
+    public func createInlineComment(
+        at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String,
+        pending: HostedPendingReview?
+    ) async throws {
+        if let pending, routes(pending) {
+            try await addPendingComment(.line(position), to: pending, on: number, in: repo, body: body)
+        } else {
+            _ = try await createInlineComment(at: position, on: number, in: repo, body: body)
+        }
+    }
+
+    /// A reply: a pending reply in `pending` where the host routes through it, else `reply(to:on:in:body:)`.
+    public func reply(
+        to thread: HostedThreadRef, on number: Int, in repo: HostedRepository, body: String,
+        pending: HostedPendingReview?
+    ) async throws {
+        if let pending, routes(pending) {
+            try await addPendingComment(.reply(thread), to: pending, on: number, in: repo, body: body)
+        } else {
+            _ = try await reply(to: thread, on: number, in: repo, body: body)
+        }
+    }
+
+    /// A review: `pending` submitted with `event` where the host routes through it, else `review(_:in:event:body:)`.
+    public func review(
+        _ number: Int, in repo: HostedRepository, event: HostedReviewEvent, body: String?,
+        pending: HostedPendingReview?
+    ) async throws {
+        if let pending, routes(pending) {
+            try await submitPendingReview(pending, on: number, in: repo, event: event, body: body)
+        } else {
+            _ = try await review(number, in: repo, event: event, body: body)
+        }
     }
 }

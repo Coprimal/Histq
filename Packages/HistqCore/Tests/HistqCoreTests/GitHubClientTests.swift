@@ -111,11 +111,15 @@ struct GitHubClientTests {
         #expect(client.capabilities == [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
-            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras, .editDescription,
+            .pendingReviews, .suggestions, .hideComments, .editPendingComments,
         ])
         #expect(client.reactionKinds == ["+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"])
         await #expect(throws: HostingError.self) {
             try await client.unapprove(1, in: HostedRepository(host: "github.com", owner: "octo", name: "hello"))
+        }
+        await #expect(throws: HostingError.self, "no apply API: Apply on GitHub opens the comment") {
+            try await client.applySuggestion(1, in: HostedRepository(host: "github.com", owner: "octo", name: "hello"))
         }
         #expect(stub.requests.isEmpty)
     }
@@ -515,6 +519,284 @@ struct GitHubClientTests {
         #expect(query.contains("databaseId") == (host != "github.com"))
     }
 
+    // MARK: - Pending review
+
+    /// A request's GraphQL query text and its `input` variable.
+    static func graphQLInput(_ request: URLRequest) -> (query: String, input: [String: Any]) {
+        let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let input = (body["variables"] as? [String: Any])?["input"] as? [String: Any] ?? [:]
+        return (body["query"] as? String ?? "", input)
+    }
+
+    @Test("the pending review: one query (values in variables) for the viewer's PENDING review; its comments map as pending, ids in their own band, a removed line's side from its hunk, a reply's root by replyTo, the viewer's rights and reactions as GitHub gives them (none when left out); none is empty with the pull request's key")
+    func pendingReviewRead() async throws {
+        let stub = StubServer { request in
+            let variables = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])?[
+                "variables"] as? [String: Any]
+            let reviews = variables?["number"] as? Int == 7 ? "" : """
+                {"id": "PRR_p", "fullDatabaseId": "90", "comments": {"nodes": [
+                  {"id": "PRRC_a", "fullDatabaseId": "41", "body": "Root", "bodyHTML": "<p>Root</p>", "path": "a.swift",
+                   "diffHunk": "@@ -1,2 +1,2 @@\\n-old\\n+new", "line": 2, "originalLine": 2, "startLine": null,
+                   "originalStartLine": null, "createdAt": "2026-11-20T10:00:00Z",
+                   "viewerCanUpdate": true, "viewerCanDelete": true, "viewerCanReact": true,
+                   "reactionGroups": [{"content": "HEART", "viewerHasReacted": true, "reactors": {"totalCount": 1}},
+                                      {"content": "THUMBS_UP", "viewerHasReacted": false, "reactors": {"totalCount": 0}}],
+                   "author": {"login": "octo", "avatarUrl": null, "databaseId": 1}, "replyTo": null},
+                  {"id": "PRRC_b", "fullDatabaseId": 42, "body": "Gone line", "path": "a.swift",
+                   "diffHunk": "@@ -1,2 +1,2 @@\\n-old", "line": 1, "createdAt": "2026-11-20T10:01:00Z",
+                   "author": {"login": "octo"}, "replyTo": {"fullDatabaseId": "41"}},
+                  {"id": "PRRC_c", "fullDatabaseId": 43, "body": "On a published thread", "path": "a.swift",
+                   "diffHunk": "@@ -1 +1 @@\\n+new", "line": 1, "createdAt": "2026-11-20T10:02:00Z",
+                   "author": {"login": "octo"}, "replyTo": {"fullDatabaseId": 10}}]}}
+                """
+            return .init(body: """
+                {"data": {"repository": {"pullRequest": {"id": "PR_node", "reviews": {"nodes": [\(reviews)]}}}}}
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let review = try await client.pendingReview(of: 5, in: repo)
+
+        #expect(review.hostKey == "PRR_p" && review.reviewID == 90 && review.pullRequestKey == "PR_node")
+        #expect(review.comments.map(\.id) == [41, 42, 43].map(HostedPendingReview.id))
+        #expect(review.comments.allSatisfy { $0.isPending && $0.pullRequestReviewID == nil })
+        let root = review.comments[0]
+        #expect(root.viewerCanEdit && root.viewerCanDelete && root.viewerCanReact == true)
+        #expect(root.reactions == [HostedReaction(kind: "heart", count: 1, viewerReacted: true)])
+        #expect(review.comments.dropFirst().allSatisfy {
+            !$0.viewerCanEdit && !$0.viewerCanDelete && $0.viewerCanReact == false && $0.reactions.isEmpty
+        })
+        #expect(review.comments.map(\.side) == ["RIGHT", "LEFT", "RIGHT"])
+        #expect(review.comments.map(\.inReplyToID) == [nil, HostedPendingReview.id(41), 10])
+        #expect(review.comments.map(\.hostKey) == ["PRRC_a", "PRRC_b", "PRRC_c"])
+        #expect(review.comments[0].bodyHTML == "<p>Root</p>" && review.comments[0].user?.login == "octo")
+        #expect(review.comments.allSatisfy { $0.id >= HostedPendingReview.idBase && $0.id < 1 << 62 })
+        let (query, _) = Self.graphQLInput(try #require(stub.requests.first))
+        #expect(query.contains("reviews(states: [PENDING], first: 1)") && query.contains("ReadPendingReview"))
+        #expect(query.contains("viewerCanUpdate viewerCanDelete viewerCanReact") && query.contains("reactionGroups"))
+        #expect(!query.contains("octo") && !query.contains("hello"))
+
+        let none = try await client.pendingReview(of: 7, in: repo)
+        #expect(none.isEmpty && none.pullRequestKey == "PR_node")
+    }
+
+    @Test("pending comments: a first line starts the review in one addPullRequestReview with its thread (no event, no comments); then threads and replies go into it; submit and discard name it; a reply without its thread's key is refused unsent")
+    func pendingReviewWrites() async throws {
+        let stub = StubServer { request in
+            let (query, _) = Self.graphQLInput(request)
+            let field = ["addPullRequestReviewThreadReply", "addPullRequestReviewThread", "addPullRequestReview",
+                         "submitPullRequestReview", "deletePullRequestReview"].first { query.contains($0 + "(") } ?? ""
+            let payload = switch field {
+            case "addPullRequestReviewThread": #"{"thread": {"id": "PRRT_n"}}"#
+            case "addPullRequestReviewThreadReply": #"{"comment": {"id": "PRRC_n"}}"#
+            default: #"{"pullRequestReview": {"id": "PRR_new"}}"#
+            }
+            return .init(body: #"{"data": {"\#(field)": \#(payload)}}"#)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+        let range = HostedInlinePosition(
+            path: "a.swift", oldLine: nil, newLine: 6, lineKind: .added, startNewLine: 4, headSHA: "cafe")
+        let removed = HostedInlinePosition(path: "a.swift", oldLine: 3, newLine: nil, lineKind: .removed, headSHA: "cafe")
+        let thread = HostedThreadRef(rootCommentID: 10, hostKey: "PRRT_x")
+
+        try await client.addPendingComment(
+            .line(range), to: HostedPendingReview(pullRequestKey: "PR_node"), on: 5, in: repo, body: "First")
+        let pending = HostedPendingReview(hostKey: "PRR_p", pullRequestKey: "PR_node")
+        try await client.addPendingComment(.line(removed), to: pending, on: 5, in: repo, body: "Second")
+        try await client.addPendingComment(.reply(thread), to: pending, on: 5, in: repo, body: "Third")
+        try await client.submitPendingReview(pending, on: 5, in: repo, event: .requestChanges, body: "Fix these")
+        try await client.discardPendingReview(pending, on: 5, in: repo)
+
+        let sent = stub.requests.map(Self.graphQLInput)
+        #expect(sent.count == 5)
+        #expect(sent.allSatisfy { $0.query.hasPrefix("mutation") })
+        #expect(stub.requests.allSatisfy { $0.url?.absoluteString == "https://api.github.com/graphql" })
+        #expect(sent[0].query.contains("addPullRequestReview(input:"))
+        #expect(NSDictionary(dictionary: sent[0].input).isEqual(to: [
+            "pullRequestId": "PR_node", "commitOID": "cafe",
+            "threads": [["path": "a.swift", "line": 6, "side": "RIGHT", "startLine": 4, "startSide": "RIGHT",
+                         "body": "First"]],
+        ]), "\(sent[0].input)")
+        #expect(sent[1].query.contains("addPullRequestReviewThread(input:"))
+        #expect(NSDictionary(dictionary: sent[1].input).isEqual(to: [
+            "pullRequestReviewId": "PRR_p", "path": "a.swift", "line": 3, "side": "LEFT", "body": "Second",
+        ]), "\(sent[1].input)")
+        #expect(sent[2].query.contains("addPullRequestReviewThreadReply(input:"))
+        #expect(NSDictionary(dictionary: sent[2].input).isEqual(to: [
+            "pullRequestReviewId": "PRR_p", "pullRequestReviewThreadId": "PRRT_x", "body": "Third",
+        ]))
+        #expect(sent[3].query.contains("submitPullRequestReview(input:"))
+        #expect(NSDictionary(dictionary: sent[3].input).isEqual(to: [
+            "pullRequestReviewId": "PRR_p", "event": "REQUEST_CHANGES", "body": "Fix these",
+        ]))
+        #expect(sent[4].query.contains("deletePullRequestReview(input:"))
+        #expect(NSDictionary(dictionary: sent[4].input).isEqual(to: ["pullRequestReviewId": "PRR_p"]))
+        for request in sent {
+            #expect(!request.query.contains("addPullRequestReviewComment") && !request.query.contains("comments:"))
+            #expect(!request.query.contains("PRR_p") && !request.query.contains("First"))
+        }
+
+        // A reply with no review yet: the review first (empty), then the reply into it.
+        try await client.addPendingComment(
+            .reply(thread), to: HostedPendingReview(pullRequestKey: "PR_node"), on: 5, in: repo, body: "Fourth")
+        let reply = stub.requests.suffix(2).map(Self.graphQLInput)
+        #expect(NSDictionary(dictionary: reply[0].input).isEqual(to: ["pullRequestId": "PR_node"]))
+        #expect(reply[1].input["pullRequestReviewId"] as? String == "PRR_new")
+
+        let count = stub.requests.count
+        await #expect(throws: HostingError.self) {
+            try await client.addPendingComment(
+                .reply(HostedThreadRef(rootCommentID: 10)), to: pending, on: 5, in: repo, body: "No key")
+        }
+        await #expect(throws: HostingError.self) {
+            try await client.submitPendingReview(HostedPendingReview(), on: 5, in: repo, event: .comment, body: nil)
+        }
+        #expect(stub.requests.count == count, "refused unsent")
+    }
+
+    @Test("while a pending review exists GitHub routes a new inline comment, a reply and a review through it; without one they stay REST")
+    func pendingReviewRouting() async throws {
+        let stub = StubServer { request in
+            if request.url?.path() == "/graphql" {
+                let (query, _) = Self.graphQLInput(request)
+                let field = ["addPullRequestReviewThreadReply", "addPullRequestReviewThread",
+                             "submitPullRequestReview"].first { query.contains($0 + "(") } ?? ""
+                let payload = switch field {
+                case "addPullRequestReviewThread": #"{"thread": {"id": "PRRT_n"}}"#
+                case "addPullRequestReviewThreadReply": #"{"comment": {"id": "PRRC_n"}}"#
+                default: #"{"pullRequestReview": {"id": "PRR_p"}}"#
+                }
+                return .init(body: #"{"data": {"\#(field)": \#(payload)}}"#)
+            }
+            if request.url?.path().hasSuffix("/reviews") == true {
+                return .init(body: #"{"id": 3, "state": "APPROVED", "user": {"id": 1, "login": "octo"}}"#)
+            }
+            return .init(status: 201, body: #"{"id": 77, "path": "a.swift", "body": "x"}"#)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+        let position = HostedInlinePosition(path: "a.swift", oldLine: nil, newLine: 2, lineKind: .added, headSHA: "cafe")
+        let thread = HostedThreadRef(rootCommentID: 10, hostKey: "PRRT_x")
+        let pending = HostedPendingReview(hostKey: "PRR_p")
+        #expect(client.capabilities.contains(.pendingReviews) && client.routesThroughPendingReview)
+
+        try await client.createInlineComment(at: position, on: 5, in: repo, body: "a", pending: pending)
+        try await client.reply(to: thread, on: 5, in: repo, body: "b", pending: pending)
+        try await client.review(5, in: repo, event: .approve, body: nil, pending: pending)
+        let routed = stub.requests.map(Self.graphQLInput)
+        #expect(routed.map { $0.query.contains("addPullRequestReviewThread(input:") } == [true, false, false])
+        #expect(routed[1].query.contains("addPullRequestReviewThreadReply(input:"))
+        #expect(routed[2].query.contains("submitPullRequestReview(input:") && routed[2].input["event"] as? String == "APPROVE")
+
+        let before = stub.requests.count
+        try await client.createInlineComment(at: position, on: 5, in: repo, body: "a", pending: HostedPendingReview())
+        try await client.reply(to: thread, on: 5, in: repo, body: "b", pending: nil)
+        try await client.review(5, in: repo, event: .approve, body: nil, pending: HostedPendingReview())
+        #expect(stub.requests.dropFirst(before).map { "\($0.httpMethod ?? "") \($0.url?.path() ?? "")" } == [
+            "POST /repos/octo/hello/pulls/5/comments", "POST /repos/octo/hello/pulls/5/comments/10/replies",
+            "POST /repos/octo/hello/pulls/5/reviews",
+        ])
+    }
+
+    @Test("a pending review merges into the published comments: its own copies there left out, a reply named by its thread's key joined to that root, one without a thread left out")
+    func pendingReviewMerge() {
+        func comment(_ id: Int, review: Int? = nil, root: Int? = nil, path: String = "a.swift", key: String? = nil)
+            -> HostedReviewComment
+        {
+            var comment = try! JSONDecoder().decode(
+                HostedReviewComment.self, from: Data(#"{"id": \#(id), "path": "\#(path)"}"#.utf8))
+            comment.pullRequestReviewID = review
+            comment.inReplyToID = root
+            comment.hostKey = key
+            return comment
+        }
+        var root = comment(HostedPendingReview.id(41), path: "b.swift")
+        root.isPending = true
+        var reply = comment(HostedPendingReview.id(5), path: "", key: "disc-1")
+        reply.isPending = true
+        var lost = comment(HostedPendingReview.id(6), path: "", key: "disc-gone")
+        lost.isPending = true
+        let review = HostedPendingReview(hostKey: "PRR_p", reviewID: 90, comments: [root, reply, lost])
+        let published = [comment(10, key: "disc-1"), comment(11, root: 10, key: "disc-1"), comment(41, review: 90),
+                         comment(12, review: 90)]
+
+        let merged = review.merged(into: published)
+
+        #expect(merged.map(\.id) == [10, 11, root.id, reply.id])
+        #expect(merged.last?.inReplyToID == 10 && merged.last?.path == "a.swift")
+    }
+
+    @Test("a pending comment's edit and delete are GraphQL updatePullRequestReviewComment / deletePullRequestReviewComment on its node id (values in variables), never REST; a published id or one without a node id is refused unsent, and REST edit and delete refuse a pending id unsent")
+    func pendingCommentWrites() async throws {
+        let stub = StubServer { request in
+            let (query, _) = Self.graphQLInput(request)
+            if query.contains("updatePullRequestReviewComment(") {
+                return .init(body: #"{"data": {"updatePullRequestReviewComment": {"pullRequestReviewComment": {"id": "PRRC_a"}}}}"#)
+            }
+            return .init(body: #"{"data": {"deletePullRequestReviewComment": {"clientMutationId": null}}}"#)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+        let pending = HostedCommentRef(kind: .review, id: HostedPendingReview.id(41), hostKey: "PRRC_a")
+
+        try await client.editPendingComment(pending, on: 5, in: repo, body: "New \"text\"")
+        try await client.deletePendingComment(pending, on: 5, in: repo)
+
+        let sent = stub.requests.map(Self.graphQLInput)
+        #expect(stub.requests.allSatisfy { $0.url?.absoluteString == "https://api.github.com/graphql" })
+        #expect(stub.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)" })
+        #expect(sent.count == 2 && sent.allSatisfy { $0.query.hasPrefix("mutation") })
+        #expect(sent[0].query.contains("updatePullRequestReviewComment(input: $input)"))
+        #expect(NSDictionary(dictionary: sent[0].input).isEqual(to: [
+            "pullRequestReviewCommentId": "PRRC_a", "body": "New \"text\"",
+        ]), "\(sent[0].input)")
+        #expect(sent[1].query.contains("deletePullRequestReviewComment(input: $input)"))
+        #expect(NSDictionary(dictionary: sent[1].input).isEqual(to: ["id": "PRRC_a"]))
+        for request in sent {
+            #expect(!request.query.contains("PRRC_a") && !request.query.contains("New"))
+            #expect(!request.query.contains("addPullRequestReviewComment"))
+        }
+
+        let count = stub.requests.count
+        let published = HostedCommentRef(kind: .review, id: 41, hostKey: "PRRC_a")
+        let keyless = HostedCommentRef(kind: .review, id: HostedPendingReview.id(41))
+        await #expect(throws: HostingError.self) { try await client.editPendingComment(published, on: 5, in: repo, body: "x") }
+        await #expect(throws: HostingError.self) { try await client.deletePendingComment(keyless, on: 5, in: repo) }
+        await #expect(throws: HostingError.self) {
+            try await client.editComment(pending, on: .pullRequest(5), in: repo, body: "x")
+        }
+        await #expect(throws: HostingError.self) { try await client.deleteComment(pending, on: .pullRequest(5), in: repo) }
+        #expect(stub.requests.count == count, "refused unsent")
+    }
+
+    @Test("a thread whose first comment is still PENDING joins the pending root's id (its own band), so a reply goes into it; a published one keeps its REST id")
+    func pendingThreadStates() async throws {
+        let stub = StubServer { _ in
+            .init(body: """
+                {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+                  {"id": "PRRT_p", "isResolved": false, "isOutdated": false, "viewerCanResolve": true,
+                   "viewerCanUnresolve": false, "comments": {"nodes": [{"fullDatabaseId": "41", "state": "PENDING"}]}},
+                  {"id": "PRRT_s", "isResolved": false, "isOutdated": false, "viewerCanResolve": true,
+                   "viewerCanUnresolve": false, "comments": {"nodes": [{"fullDatabaseId": 10, "state": "SUBMITTED"}]}}],
+                  "pageInfo": {"hasNextPage": false, "endCursor": null}}}}}}
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let states = try await client.reviewThreadStates(of: 5, in: repo)
+
+        #expect(states.map(\.rootCommentID) == [HostedPendingReview.id(41), 10])
+        let (query, _) = Self.graphQLInput(try #require(stub.requests.first))
+        #expect(query.contains("comments(first: 1) { nodes { fullDatabaseId state } }"))
+        var root = try JSONDecoder().decode(HostedReviewComment.self, from: Data(#"{"id": 1, "path": "a.swift"}"#.utf8))
+        root.id = HostedPendingReview.id(41)
+        root.isPending = true
+        #expect(HostedReviewThread.group([root], states: states).unattached.first?.state?.id == "PRRT_p")
+    }
+
     @Test("a GraphQL answer with errors throws its first message, even with status 200")
     func graphQLErrorsThrow() async throws {
         let stub = StubServer { _ in
@@ -566,6 +848,8 @@ struct GitHubClientTests {
              { try await client.editComment(general, on: .pullRequest(7), in: repo, body: "new") }),
             ("PATCH", "/repos/octo/hello/pulls/comments/6", ["body": "new"],
              { try await client.editComment(review, on: .pullRequest(7), in: repo, body: "new") }),
+            ("PATCH", "/repos/octo/hello/pulls/7", ["body": "new"],
+             { try await client.editDescription(of: .pullRequest(7), in: repo, body: "new") }),
             ("DELETE", "/repos/octo/hello/issues/comments/5", nil,
              { try await client.deleteComment(general, on: .issue(7), in: repo) }),
             ("DELETE", "/repos/octo/hello/pulls/comments/6", nil,
@@ -686,7 +970,8 @@ struct GitHubClientTests {
             if query.contains("IssueExtras") {
                 return .init(body: """
                     {"data": {"repository": {"pinnedIssueFields": {"nodes": [{"name": "Priority"}]},
-                     "issue": {"issueType": {"name": "Bug", "pinnedFields": [{"name": "Priority"}, {"name": "Effort"}]},
+                     "issue": {"viewerCanUpdate": true,
+                      "issueType": {"name": "Bug", "pinnedFields": [{"name": "Priority"}, {"name": "Effort"}]},
                       "pinnedIssueComment": {"pinnedAt": "2026-11-24T02:50:32Z",
                        "pinnedBy": {"login": "octo", "avatarUrl": "https://avatars.githubusercontent.com/u/7", "databaseId": 7},
                        "issueComment": {"databaseId": 9001}},
@@ -717,6 +1002,7 @@ struct GitHubClientTests {
         #expect(extras.parent == .init(number: 3, title: "Epic"))
         #expect(extras.subIssues == 4 && extras.subIssuesCompleted == 1)
         #expect(extras.blockedBy == 2 && extras.blocking == 0)
+        #expect(extras.viewerCanUpdate == true)
         #expect(extras.projects == nil && extras.projectCount == 2, "titles refused: the count alone")
         let bodies = try stub.requests.map { request in
             try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
@@ -988,6 +1274,118 @@ struct GitHubClientTests {
             #expect(query.contains("fullDatabaseId") == (host == "github.com"))
             #expect(query.contains("databaseId") == (host != "github.com"))
         }
+    }
+
+    @Test("the hidden state comes with the rights in the same nodes(ids:) query: isMinimized, the reason and the viewer's minimize rights on both comment kinds; a node without them stays shown")
+    func commentHiddenState() async throws {
+        let stub = StubServer { request in
+            let path = request.url?.path() ?? ""
+            if path == "/graphql" {
+                let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let ids = (body?["variables"] as? [String: Any])?["ids"] as? [String] ?? []
+                if ids == ["PRRC_20"] {
+                    return .init(body: """
+                        {"data": {"nodes": [{"__typename": "PullRequestReviewComment", "fullDatabaseId": "20",
+                          "isMinimized": true, "minimizedReason": "off-topic", "viewerCanMinimize": false,
+                          "viewerCanUnminimize": true}]}}
+                        """)
+                }
+                return .init(body: """
+                    {"data": {"nodes": [
+                      {"__typename": "IssueComment", "fullDatabaseId": "10", "viewerCanUpdate": false,
+                       "isMinimized": true, "minimizedReason": "outdated", "viewerCanMinimize": false,
+                       "viewerCanUnminimize": true},
+                      {"__typename": "IssueComment", "fullDatabaseId": "11", "isMinimized": false,
+                       "minimizedReason": null, "viewerCanMinimize": true, "viewerCanUnminimize": false},
+                      {"__typename": "IssueComment", "fullDatabaseId": "12"}]}}
+                    """)
+            }
+            if path.hasSuffix("/pulls/7/comments") {
+                return .init(body: #"[{"id": 20, "path": "a.swift", "node_id": "PRRC_20"}]"#)
+            }
+            return .init(body: """
+                [{"id": 10, "node_id": "IC_10"}, {"id": 11, "node_id": "IC_11"}, {"id": 12, "node_id": "IC_12"}]
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let comments = try await client.comments(on: .pullRequest(7), in: repo)
+        let reviewComments = try await client.reviewComments(of: 7, in: repo)
+
+        #expect(comments.map(\.isMinimized) == [true, false, false])
+        #expect(comments.map(\.minimizedReason) == ["outdated", nil, nil])
+        #expect(comments.map(\.viewerCanMinimize) == [false, true, false])
+        #expect(comments.map(\.viewerCanUnminimize) == [true, false, false])
+        #expect(reviewComments.first?.isMinimized == true)
+        #expect(reviewComments.first?.minimizedReason == "off-topic")
+        #expect(reviewComments.first?.viewerCanMinimize == false)
+        #expect(reviewComments.first?.viewerCanUnminimize == true)
+        // One round trip per comment list, as before: the hidden state rides on the rights query.
+        let queries = stub.requests.filter { $0.httpMethod == "POST" }
+        #expect(queries.count == 2)
+        for request in queries {
+            let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+            let query = try #require(body["query"] as? String)
+            #expect(query.contains("CommentViewerStates"))
+            for field in ["isMinimized", "minimizedReason", "viewerCanMinimize", "viewerCanUnminimize"] {
+                #expect(query.contains(field), "\(field)")
+            }
+        }
+    }
+
+    @Test("hide and unhide: minimizeComment and unminimizeComment on the node id with the classifier, values only in variables; github.com offers seven reasons, Enterprise four; a reason the host lacks or a comment without a node id is refused unsent",
+          arguments: [
+              ("github.com", "https://api.github.com/graphql",
+               ["ABUSE", "DUPLICATE", "LOW_QUALITY", "OFF_TOPIC", "OUTDATED", "RESOLVED", "SPAM"]),
+              ("ghe.example.com", "https://ghe.example.com/api/graphql",
+               ["DUPLICATE", "OFF_TOPIC", "OUTDATED", "RESOLVED"]),
+          ])
+    func hideComments(host: String, endpoint: String, reasons: [String]) async throws {
+        let stub = StubServer { _ in .init(body: #"{"data": {}}"#) }
+        let client = try GitHubClient(host: host, token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: host, owner: "octo", name: "hello")
+        let general = HostedCommentRef(kind: .general, id: 5, hostKey: "IC_5")
+        let review = HostedCommentRef(kind: .review, id: 6, hostKey: "PRRC_6")
+
+        #expect(client.hideReasons == reasons)
+        try await client.hideComment(general, on: .issue(7), in: repo, reason: "OUTDATED")
+        try await client.unhideComment(review, on: .pullRequest(7), in: repo)
+
+        let rows: [(mutation: String, variables: [String: Any])] = [
+            ("minimizeComment(input: {subjectId: $subjectId, classifier: $classifier})",
+             ["subjectId": "IC_5", "classifier": "OUTDATED"]),
+            ("unminimizeComment(input: {subjectId: $subjectId})", ["subjectId": "PRRC_6"]),
+        ]
+        #expect(stub.requests.count == rows.count)
+        for (request, row) in zip(stub.requests, rows) {
+            #expect(request.httpMethod == "POST")
+            #expect(request.url?.absoluteString == endpoint)
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+            let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+            let query = try #require(body["query"] as? String)
+            #expect(query.hasPrefix("mutation"))
+            #expect(query.contains(row.mutation))
+            #expect(!query.contains("IC_5") && !query.contains("PRRC_6") && !query.contains("OUTDATED"))
+            #expect(NSDictionary(dictionary: body["variables"] as? [String: Any] ?? [:]).isEqual(to: row.variables))
+        }
+
+        let sent = stub.requests.count
+        await #expect(throws: HostingError.self, "not a classifier") {
+            try await client.hideComment(general, on: .issue(7), in: repo, reason: "outdated")
+        }
+        if host != "github.com" {
+            await #expect(throws: HostingError.self, "Enterprise has no SPAM") {
+                try await client.hideComment(general, on: .issue(7), in: repo, reason: "SPAM")
+            }
+        }
+        await #expect(throws: HostingError.self, "no node id") {
+            try await client.hideComment(.init(kind: .general, id: 5), on: .issue(7), in: repo, reason: "OUTDATED")
+        }
+        await #expect(throws: HostingError.self, "no node id") {
+            try await client.unhideComment(.init(kind: .review, id: 6), on: .pullRequest(7), in: repo)
+        }
+        #expect(stub.requests.count == sent)
     }
 
     @Test("no inline comment is lost: replies join their root's review, and a comment without a review stays")

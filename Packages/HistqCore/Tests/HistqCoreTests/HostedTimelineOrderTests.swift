@@ -96,4 +96,38 @@ struct HostedTimelineOrderTests {
             comments: comments.reversed(), reviews: reviews.reversed(), threads: threads.reversed(),
             events: events.reversed())) == withEvents)
     }
+
+    @Test("pending first: the threads whose root is a pending comment move to the front in their order, the rest keep theirs; a pending reply in a published thread leaves it in place")
+    func pendingFirst() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var comments = try decoder.decode([HostedReviewComment].self, from: Data("""
+            [{"id": 10, "path": "a", "created_at": "2026-11-12T10:00:00Z"},
+             {"id": 11, "in_reply_to_id": 10, "path": "a", "created_at": "2026-11-12T13:00:00Z"},
+             {"id": 20, "path": "b", "created_at": "2026-11-12T12:00:00Z"},
+             {"id": 30, "path": "c", "created_at": "2026-11-12T11:00:00Z"}]
+            """.utf8))
+        // 11 (a pending reply into published thread 10) and roots 20, 30 are pending.
+        for index in comments.indices where comments[index].id != 10 { comments[index].isPending = true }
+        let general = try decoder.decode([HostedComment].self, from: Data("""
+            [{"id": 5, "created_at": "2026-11-12T09:00:00Z"}, {"id": 6, "created_at": "2026-11-12T14:00:00Z"}]
+            """.utf8))
+        let threads = HostedReviewThread.group(comments, states: []).unattached
+        func describe(_ entries: [HostedTimelineOrder.Entry]) -> [String] {
+            entries.map { entry in
+                switch entry {
+                case .comment(let root, _): "c\(root.id)"
+                case .thread(let thread): "t\(thread.id)"
+                case .review(let review, _): "r\(review.id)"
+                case .event(let event): "e-" + event.id
+                }
+            }
+        }
+        let entries = HostedTimelineOrder.entries(comments: general, reviews: [], threads: threads)
+        #expect(describe(entries) == ["c5", "t10", "t30", "t20", "c6"])
+        #expect(describe(HostedTimelineOrder.pendingFirst(entries)) == ["t30", "t20", "c5", "t10", "c6"])
+        #expect(describe(HostedTimelineOrder.pendingFirst(entries.reversed())) == ["t20", "t30", "c6", "t10", "c5"])
+        let published = HostedTimelineOrder.entries(comments: general, reviews: [], threads: [])
+        #expect(HostedTimelineOrder.pendingFirst(published) == published)
+    }
 }

@@ -40,11 +40,13 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     public var debugDescription: String { description }
     public var customMirror: Mirror { Mirror(self, children: ["host": Self.host, "apiBase": apiBase]) }
 
-    /// What the client remembers between calls: the token's user's uuid, and the pull request of each thread it
-    /// mapped (for `setReviewThread(_:resolved:)`, which gets the thread only). Shared by copies of the client.
+    /// What the client remembers between calls: the token's user's uuid, the pull request of each thread it
+    /// mapped (for `setReviewThread(_:resolved:)`, which gets the thread only), and the token's user's permission on
+    /// each repository it asked about (`myPermission(in:)`). Shared by copies of the client.
     private final class Memo: Sendable {
         let userUUID = Mutex<String?>(nil)
         let pullRequestByThread = Mutex<[Int: (path: [String], number: Int)]>([:])
+        let permissionByRepo = Mutex<[String: String]>([:])
     }
 
     // MARK: - Remote URLs and ids
@@ -90,7 +92,7 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
     public var capabilities: HostingCapabilities {
         [.requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
          .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
-         .timelineEvents, .tasks, .mergeChecks, .reports]
+         .timelineEvents, .tasks, .mergeChecks, .reports, .editDescription]
     }
 
     /// `merge_commit`, `squash` and `rebase_merge`; `merge(_:in:method:sha:)` refuses one the destination branch does
@@ -163,11 +165,40 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         return prs.map { pullRequest($0, in: repo) }
     }
 
-    /// With `participants`, and `bodyHTML` from Bitbucket's rendered description.
+    /// With `participants`, and `bodyHTML` from Bitbucket's rendered description. On an open pull request, the
+    /// token's user may edit its description with write or admin permission on the repository, not only as its author
+    /// (bitbucket.org lets them; a read-only user may not): `viewerCanEditDescription` true then. A permission that
+    /// could not be read leaves it to the app's author rule.
     public func pullRequest(_ number: Int, in repo: HostedRepository) async throws -> HostedPullRequest {
         let path = try pullRequestPath(number, in: repo)
         let pr: BitbucketPullRequest = try await get(url(path, query: Self.strategyFields))
-        return pullRequest(pr, in: repo)
+        var pull = pullRequest(pr, in: repo)
+        if pr.state == "OPEN", let permission = await myPermission(in: repo), ["write", "admin"].contains(permission) {
+            pull.viewerCanEditDescription = true
+        }
+        return pull
+    }
+
+    /// The token's user's effective permission on `repo` (`admin`, `write` or `read`), asked once per repository:
+    /// `GET /user/workspaces/{workspace}/permissions/repositories?q=repository.full_name="<ws>/<repo>"` (scope
+    /// `read:repository:bitbucket`). Nil when the read fails or lists nothing (a public repository the user has no
+    /// explicit permission on).
+    private func myPermission(in repo: HostedRepository) async -> String? {
+        guard let path = try? repoPath(repo) else { return nil }
+        let fullName = repo.path.joined(separator: "/")
+        if let known = memo.permissionByRepo.withLock({ $0[fullName] }) { return known }
+        struct Permission: Decodable { var permission: String? }
+        struct Page: Decodable { var values: [Permission]? }
+        // The workspace is `path[1]` (`repositories/<ws>/<repo>`); the name goes in quotes: one with a quote or a
+        // backslash is not asked about.
+        guard !fullName.contains("\""), !fullName.contains("\\") else { return nil }
+        let query = [("q", "repository.full_name=\"\(fullName)\"")]
+        guard let page: Page = try? await get(url(["user", "workspaces", path[1], "permissions", "repositories"],
+                                                  query: query)),
+              let permission = page.values?.compactMap(\.permission).first
+        else { return nil }
+        memo.permissionByRepo.withLock { $0[fullName] = permission }
+        return permission
     }
 
     public func issues(in repo: HostedRepository, state: HostedListState) async throws -> [HostedIssue] {
@@ -397,6 +428,24 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         struct Body: Encodable { var title: String; var reviewers: [Reviewer] }
         let _: BitbucketPullRequest = try await send(
             "PUT", url(path), body: Body(title: current.title, reviewers: uuids.map(Reviewer.init)))
+    }
+
+    /// `PUT` the pull request with the new `description`: it is read first (its own URL, the one with the reviewers)
+    /// and its title and reviewers are sent back, since a `PUT` without `reviewers` drops them. Only an open pull
+    /// request can be changed: another one is refused unsent.
+    public func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws {
+        guard case .pullRequest(let number) = item else { throw Self.noIssues }
+        let path = try pullRequestPath(number, in: repo)
+        let current: BitbucketPullRequest = try await get(url(path))
+        guard current.state == "OPEN" else {
+            throw HostingError.validationFailed(message: "only an open pull request's description can be edited")
+        }
+        struct Reviewer: Encodable { var uuid: String }
+        struct Body: Encodable { var title: String; var description: String; var reviewers: [Reviewer] }
+        let _: BitbucketPullRequest = try await send(
+            "PUT", url(path),
+            body: Body(title: current.title, description: body,
+                       reviewers: (current.reviewers ?? []).compactMap(\.uuid).map(Reviewer.init)))
     }
 
     public func addLabels(_ names: [String], to item: HostedItem, in repo: HostedRepository) async throws {
@@ -899,6 +948,8 @@ public struct BitbucketCloudClient: HostingProvider, CustomStringConvertible, Cu
         pull.openTaskCount = pr.taskCount
         pull.mergedBy = merged ? pr.closedBy?.hosted : nil
         pull.mergeCommitSHA = merged ? pr.mergeCommit?.hash : nil
+        // Only an open pull request's description changes; on one, its author's (left to the app).
+        if pr.state != "OPEN" { pull.viewerCanEditDescription = false }
         return pull
     }
 

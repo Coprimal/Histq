@@ -182,7 +182,7 @@ public struct AzureDevOpsClient: HostingProvider, CustomStringConvertible, Custo
         [
             .labels, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests, .unapprove, .generalReplies,
             .resolveGeneralThreads, .editComments, .deleteComments, .reactions, .newInlineComments,
-            .multiLineInlineComments, .timelineEvents, .mergeChecks,
+            .multiLineInlineComments, .timelineEvents, .mergeChecks, .editDescription,
         ]
     }
 
@@ -876,6 +876,18 @@ public struct AzureDevOpsClient: HostingProvider, CustomStringConvertible, Custo
         struct Body: Encodable { var status: String }
         let _: AzureDevOpsPullRequest = try await send(
             "PATCH", url(try pullRequestPath(number, in: repo)), body: Body(status: open ? "active" : "abandoned"))
+    }
+
+    /// `PATCH {PR}` with the new `description`; one longer than `maxDescriptionLength` is refused unsent.
+    public func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws {
+        guard case .pullRequest(let number) = item else { throw Self.noIssues }
+        guard body.utf16.count <= Self.maxDescriptionLength else {
+            throw HostingError.validationFailed(
+                message: "Azure DevOps takes a description of at most \(Self.maxDescriptionLength) characters")
+        }
+        struct Body: Encodable { var description: String }
+        let _: AzureDevOpsPullRequest = try await send(
+            "PATCH", url(try pullRequestPath(number, in: repo)), body: Body(description: body))
     }
 
     private static let noIssues = HostingError.validationFailed(message: "Azure DevOps issues are not supported")

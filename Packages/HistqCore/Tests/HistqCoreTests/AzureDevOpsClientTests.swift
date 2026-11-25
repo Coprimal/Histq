@@ -581,6 +581,7 @@ struct AzureDevOpsClientTests {
             switch Self.route(request) {
             case "POST " + threads + "/1/comments": return .init(body: Self.comment(4, parent: 2, text: "Thanks", minute: 4))
             case "PATCH " + threads + "/1": return .init(body: Self.thread(1, status: "fixed", comments: [Self.comment(1, minute: 1)]))
+            case "PATCH " + Self.prPath: return .init(body: Self.pullRequest())
             case "PATCH " + threads + "/1/comments/2": return .init(body: Self.comment(2, parent: 1, text: "Edited", minute: 2))
             case "DELETE " + threads + "/1/comments/2", "POST " + threads + "/1/comments/2/likes",
                  "DELETE " + threads + "/1/comments/2/likes":
@@ -648,6 +649,11 @@ struct AzureDevOpsClientTests {
                 let root = try await c.createInlineComment(at: oldSide, on: 7, in: Self.repo, body: "Nit")
                 #expect(root.path == "src/old.swift" && root.side == "LEFT" && root.line == 4 && root.startLine == nil)
             }, "POST " + threads, inline("left", 4, 4, 6), nil),
+            ("description", { c in try await c.editDescription(of: item, in: Self.repo, body: "New") },
+             "PATCH " + Self.prPath, ["description": "New"], nil),
+            ("description over 4000 characters", { c in
+                try await c.editDescription(of: item, in: Self.repo, body: String(repeating: "a", count: 4001))
+            }, nil, nil, nil),
             ("delete refused", { c in try await c.deleteComment(HostedCommentRef(kind: .general, id: 1 << 20 | 3), on: item, in: Self.repo) },
              "DELETE " + threads + "/1/comments/3", nil, .validationFailed(message: deleteRefused)),
             ("no thread", { c in try await c.editComment(HostedCommentRef(kind: .general, id: 2), on: item, in: Self.repo, body: "x") }, nil, nil, nil),

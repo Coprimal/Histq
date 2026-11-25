@@ -276,6 +276,33 @@ struct BitbucketCloudClientTests {
         #expect(Set(body.keys) == ["merge_strategy"] && body["merge_strategy"] as? String == "squash")
     }
 
+    @Test("write or admin permission on the repository lets the viewer edit an open pull request's description")
+    func descriptionRightsFromPermission() async throws {
+        for (permission, expected) in [("write", true), ("admin", true), ("read", nil), (nil, nil)] as [(String?, Bool?)] {
+            let page = permission.map { #"{"values": [{"type": "repository_permission", "permission": "\#($0)"}]}"# }
+                ?? #"{"values": []}"#
+            let stub = StubServer { request in
+                request.url?.path().hasSuffix("/permissions/repositories") == true ? .init(body: page)
+                    : .init(body: Self.pullRequest())
+            }
+            let client = Self.client(stub)
+            let pull = try await client.pullRequest(5, in: Self.repo)
+            #expect(pull.viewerCanEditDescription == expected, "\(permission ?? "none")")
+            let asked = try #require(stub.requests.last)
+            #expect(asked.url?.path() == "/2.0/user/workspaces/ws/permissions/repositories")
+            #expect(Self.query(asked, "q") == [#"repository.full_name="ws/repo""#])
+            // Asked once per repository.
+            _ = try await client.pullRequest(5, in: Self.repo)
+            let permissionReads = stub.requests.filter { $0.url?.path().hasSuffix("/permissions/repositories") == true }
+            #expect(permissionReads.count == (permission == nil ? 2 : 1), "\(permission ?? "none")")
+        }
+        // A merged pull request: no permission read, and no Edit.
+        let merged = StubServer { _ in .init(body: Self.pullRequest().replacingOccurrences(
+            of: #""state": "OPEN""#, with: #""state": "MERGED""#)) }
+        let pull = try await Self.client(merged).pullRequest(5, in: Self.repo)
+        #expect(pull.viewerCanEditDescription == false && merged.requests.count == 1)
+    }
+
     @Test("strategies: the destination branch's ids map to methods in the dialog's order (unknown ids left out, none left is nil), the default only when allowed; a merge sends close_source_branch only when set, and a Data Center method is refused unsent", arguments: [
         (["merge_commit", "squash", "fast_forward", "squash_fast_forward", "rebase_fast_forward", "rebase_merge"],
          "squash", [HostedMergeMethod.merge, .squash, .fastForward, .squashFastForward, .rebaseFastForward, .rebase],
@@ -620,7 +647,9 @@ struct BitbucketCloudClientTests {
 
         let ids = reviews.map(\.id) + conversation.map(\.id) + reviewComments.map(\.id)
         #expect(Set(ids).count == ids.count)
-        for request in stub.requests where request.url?.path() != "/2.0/user" {
+        // Besides the pull request's own URLs: who the token's user is, and their permission on the repository.
+        let others: Set<String> = ["/2.0/user", "/2.0/user/workspaces/ws/permissions/repositories"]
+        for request in stub.requests where !others.contains(request.url?.path() ?? "") {
             #expect(request.url?.path().hasPrefix(Self.repoPath + "/pullrequests") == true)
         }
     }
@@ -696,6 +725,8 @@ struct BitbucketCloudClientTests {
             case "DELETE": return .init(status: 204, body: "")
             case "POST" where path.hasSuffix("/42/resolve"): return .init(status: 409, body: "{}")
             case "POST" where path.hasSuffix("/resolve"): return .init(body: #"{"type": "comment_resolution"}"#)
+            case "GET" where path == Self.prPath, "PUT" where path == Self.prPath:
+                return .init(body: Self.pullRequest())
             case "PUT": return .init(body: Self.listed(40, by: "u1"))
             case "POST":
                 let body = Self.json(request)
@@ -789,6 +820,19 @@ struct BitbucketCloudClientTests {
             #expect(NSDictionary(dictionary: Self.json(request)).isEqual(to: expected), "row \(index): \(Self.json(request))")
         }
 
+        // The description: the pull request read first on its own URL, then a PUT that sends its title and reviewers
+        // back (one without `reviewers` drops them).
+        let before = stub.requests.count
+        try await client.editDescription(of: pr, in: Self.repo, body: "new")
+        #expect(stub.requests.count == before + 2)
+        #expect(stub.requests[before].httpMethod == "GET")
+        #expect(stub.requests[before].url?.path() == Self.prPath)
+        let put = try #require(stub.requests.last)
+        #expect(put.httpMethod == "PUT" && put.url?.path() == Self.prPath)
+        #expect(NSDictionary(dictionary: Self.json(put)).isEqual(to: [
+            "title": "Add feature", "description": "new", "reviewers": [["uuid": "{u2}"]],
+        ]), "\(Self.json(put))")
+
         let issue = HostedItem.issue(3)
         let position = HostedInlinePosition(path: "a.swift", oldLine: nil, newLine: 2, lineKind: .added, headSHA: "a")
         let refusals: [(String, () async throws -> Void)] = [
@@ -796,6 +840,7 @@ struct BitbucketCloudClientTests {
             ("issue resolve", { _ = try await client.setGeneralThread(root, on: issue, in: Self.repo, resolved: true) }),
             ("issue edit", { try await client.editComment(root, on: issue, in: Self.repo, body: "x") }),
             ("issue delete", { try await client.deleteComment(root, on: issue, in: Self.repo) }),
+            ("issue description", { try await client.editDescription(of: issue, in: Self.repo, body: "x") }),
             ("review ref reply", {
                 _ = try await client.reply(toGeneral: inlineRef, on: pr, in: Self.repo, body: "hi")
             }),
@@ -915,8 +960,17 @@ struct BitbucketCloudClientTests {
         #expect(client.capabilities == [
             .requestChanges, .resolveThreads, .draft, .reviewRequests, .unapprove, .generalReplies,
             .resolveGeneralThreads, .editComments, .deleteComments, .newInlineComments, .multiLineInlineComments,
-            .timelineEvents, .tasks, .mergeChecks, .reports,
+            .timelineEvents, .tasks, .mergeChecks, .reports, .editDescription,
         ])
         #expect(!client.capabilities.contains(.reactions) && client.reactionKinds.isEmpty)
+    }
+
+    @Test("no pending comments to edit or delete: refused unsent by the protocol's defaults")
+    func pendingCommentWritesRefused() async throws {
+        let client = BitbucketCloudClient { _ in Self.token }
+        let pending = HostedCommentRef(kind: .review, id: HostedPendingReview.id(3))
+        #expect(!client.capabilities.contains(.editPendingComments))
+        await #expect(throws: HostingError.self) { try await client.editPendingComment(pending, on: 1, in: Self.repo, body: "x") }
+        await #expect(throws: HostingError.self) { try await client.deletePendingComment(pending, on: 1, in: Self.repo) }
     }
 }
