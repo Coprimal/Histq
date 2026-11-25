@@ -68,7 +68,7 @@ html:has(.nav--sticky) { scroll-padding-top: 76px; }
 .swapshot > img.is-on { opacity: 1; z-index: 2; }
 
 /* hero callouts: labels outside the window, a leader from each label to the spot it names (drawn by site.js) */
-.hero__shot { margin-block: 116px 120px; outline: 0; box-shadow: none; }
+.hero__shot { margin-block: 148px 152px; outline: 0; box-shadow: none; }
 .hero__shot > img { width: 100%; filter: drop-shadow(0 22px 40px oklch(22% 0.03 258 / 0.3)); }
 .callouts { list-style: none; margin: 0; padding: 0; position: absolute; inset: 0; z-index: 3; pointer-events: none; }
 .callouts > li { position: absolute; left: calc(var(--lx) * 1%); transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: var(--radius-pill); background: var(--color-ink); color: var(--color-paper); font-size: var(--text-sm); font-weight: 600; line-height: 1.1; white-space: nowrap; box-shadow: 0 2px 8px oklch(22% 0.03 258 / 0.25); }
@@ -102,9 +102,9 @@ html:has(.nav--sticky) { scroll-padding-top: 76px; }
 
 /* ---------- hosts: every code host, with its real logo ---------- */
 .hosts { padding-block: 0 var(--sec-pad-s); }
-.hosts__head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-xs) var(--space-xl); margin-bottom: var(--space-lg); }
-.hosts__head h2 { flex: 1 1 30rem; max-width: 30ch; }
-.hosts__head .lead { flex: 1 1 24rem; font-size: var(--text-lg); }
+.hosts__head { display: grid; gap: var(--space-xs); margin-bottom: var(--space-lg); }
+.hosts__head h2 { max-width: 30ch; }
+.hosts__head .lead { font-size: var(--text-lg); }
 .hosts__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-md); margin: 0; padding: 0; list-style: none; }
 .host { display: grid; align-content: start; gap: var(--space-md); padding: var(--space-lg); border: 1px solid var(--color-rule); border-radius: var(--radius-card); background: color-mix(in oklab, var(--color-paper) 55%, white); }
 .host__id { display: flex; align-items: center; gap: var(--space-sm); }
