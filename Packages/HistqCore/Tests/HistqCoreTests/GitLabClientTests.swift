@@ -1610,6 +1610,8 @@ struct GitLabClientTests {
                     """)
             case ("PUT", "/gitlab/api/v4/suggestions/77/apply"):
                 return .init(body: #"{"id": 77, "appliable": false, "applied": true}"#)
+            case ("PUT", "/gitlab/api/v4/suggestions/batch_apply"):
+                return .init(body: #"[{"id": 77, "appliable": false, "applied": true}, {"id": 79, "applied": true}]"#)
             default: return .init(status: 404, body: "{}")
             }
         }
@@ -1637,6 +1639,19 @@ struct GitLabClientTests {
             try await client.applySuggestion(77, in: HostedRepository(host: "gitlab.com", path: ["group", "proj"]))
         }
         #expect(stub.requests.count == sent)
+
+        // A batch: one PUT with every id, under the API root.
+        try await client.applySuggestions([77, 79], in: Self.writeRepo)
+        let batch = try #require(stub.requests.last)
+        #expect(batch.httpMethod == "PUT")
+        #expect(batch.url?.absoluteString == "https://git.example.com/gitlab/api/v4/suggestions/batch_apply")
+        #expect(NSDictionary(dictionary: Self.json(batch)).isEqual(to: ["ids": [77, 79]]), "\(Self.json(batch))")
+        let batched = stub.requests.count
+        await #expect(throws: HostingError.self) { try await client.applySuggestions([], in: Self.writeRepo) }
+        await #expect(throws: HostingError.self) {
+            try await client.applySuggestions([77], in: HostedRepository(host: "gitlab.com", path: ["group", "proj"]))
+        }
+        #expect(stub.requests.count == batched, "an empty batch and another host are refused unsent")
     }
 
     // MARK: - Draft notes (pending review)

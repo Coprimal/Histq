@@ -57,6 +57,8 @@ struct PRTimelineHTML: Sendable {
     var hiddenComments: Set<String> = []
     /// The reply rows put their buttons under the box (`PRGeneralOptions.stackedReplies`).
     var stackedReplies = false
+    /// The reaction chips are in the comments' headers (`PRGeneralOptions.reactionsInHeader`).
+    var reactionsInHeader = false
 
     /// The description's page and the comments' page (`PRPageLayout.commentsCard`), split at the page's
     /// `PRTimeline.commentsMarker`; nil for a page without it. Each keeps every map: a page draws only its own slots.
@@ -135,6 +137,15 @@ struct PRReactionTarget: Equatable, Sendable {
 
     nonisolated static func hasRow(_ reactions: [HostedReaction]) -> Bool { reactions.contains { $0.count > 0 } }
 
+    /// The width of the chips of `reactions` in a header (`PRGeneralOptions.reactionsInHeader`), a little more than
+    /// `PRReactionChip`s take (7 pt padding each side, the emoji, 4 pt, about 7 pt a digit) with 6 pt between them: the
+    /// row sits at the slot's trailing edge.
+    nonisolated static func chipsWidth(_ reactions: [HostedReaction]) -> Int {
+        let shown = reactions.filter { $0.count > 0 }
+        guard !shown.isEmpty else { return 0 }
+        return shown.reduce(0) { $0 + 36 + 7 * String($1.count).count } + 6 * (shown.count - 1)
+    }
+
     /// The comment's reactions when `options` offer reactions; nil otherwise, for an optimistic comment, and for a
     /// pending one unless `options` give pending comments their chrome and the host lets the viewer react to it
     /// (`canReact`, `HostedReviewComment.viewerCanReact`: GitHub's pending comments yes, GitLab's drafts no).
@@ -169,6 +180,9 @@ struct PRCommentTarget: Equatable, Sendable {
     let quote: PRQuoteTarget?
     /// What the menu offers on the comment's suggested change (`PRGeneralOptions.suggestions`); nil: nothing.
     var suggestion: PRCommentSuggestion?
+    /// Apply suggestion is a button under the body with "Add suggestion to batch" (`csugg-<key>`,
+    /// `PRGeneralOptions.suggestionButtons`), not in the "…" menu.
+    var suggestionButtons = false
     /// Hide (with a reason) or Unhide in the menu (`PRGeneralOptions.hideReasons`); nil: neither.
     var hide: PRCommentHide?
     /// The item's own description, not a comment (`init(description:user:)`): Edit only, saved with
@@ -394,6 +408,12 @@ struct PRGeneralOptions: Sendable {
     /// A comment whose "…" menu would hold Edit alone gets the Edit pencil instead (a host-like layout, never
     /// `PRPageLayout.default`).
     var editAloneAsIcon = false
+    /// A comment's reaction chips sit in its header, before the add button, instead of on a row under its body (a
+    /// host-like layout, never `PRPageLayout.default`; user, 2026-11-25).
+    var reactionsInHeader = false
+    /// Apply suggestion and "Add suggestion to batch" as buttons under a comment's body (GitLab's, where the host
+    /// applies them: `suggestions == .apply`; user, 2026-11-25), not in its "…" menu.
+    var suggestionButtons = false
     /// Copy Markdown in each comment's "…" menu (a host-like layout with a menu, never `PRPageLayout.default` nor
     /// Azure DevOps's icons, `headerDelete`).
     var copyMarkdown = false
@@ -435,6 +455,7 @@ struct PRGeneralOptions: Sendable {
         if PRPageLayout.for(client.kind) != .default {
             stackedReplies = true
             editAloneAsIcon = true
+            reactionsInHeader = true
             copyMarkdown = !PRPageLayout.for(client.kind).headerDelete
             pendingComments = capabilities.contains(.editPendingComments)
             pendingReplies = pendingComments && client.routesThroughPendingReview
@@ -442,6 +463,7 @@ struct PRGeneralOptions: Sendable {
             suggestions = capabilities.contains(.applySuggestions) ? .apply
                 : capabilities.contains(.suggestions) ? .open : nil
             if capabilities.contains(.hideComments) { hideReasons = client.hideReasons }
+            suggestionButtons = suggestions == .apply
         }
     }
 }
@@ -879,8 +901,18 @@ extension PRTimeline {
         /// or `r` and an integer id, the format the measuring script accepts.
         func reactionSlot(_ target: PRReactionTarget?) -> String {
             // One kind (Azure DevOps's like): its count is on the header's like button, no row.
-            guard let target, target.hasRow, options.reactions.count != 1 else { return "" }
+            // In the header instead (`reactionsInHeader`, `head`).
+            guard let target, target.hasRow, options.reactions.count != 1, !options.reactionsInHeader else { return "" }
             return "<div class=\"slot-react\" data-slot=\"creact-\(target.key)\"></div>"
+        }
+
+        /// The suggestion buttons' slot under the body (`suggestionButtons`), for a comment with a suggestion the
+        /// host can apply; its target then keeps Apply suggestion out of the menu. Its key is `r` and an integer id,
+        /// the format the measuring script accepts.
+        func suggestionSlot(_ target: PRCommentTarget?) -> String {
+            guard options.suggestionButtons, let target, case .apply? = target.suggestion else { return "" }
+            targets[target.key]?.suggestionButtons = true
+            return "<div class=\"slot-sugg\" data-slot=\"csugg-\(target.key)\"></div>"
         }
 
         /// The in-place editor's slot, right after the comment's body (the stylesheet hides that body while the slot
@@ -941,6 +973,13 @@ extension PRTimeline {
             // One kind: the slot holds a like button with its count (`like`, wider).
             let addClass = options.reactions.count == 1 ? "slot-add like" : "slot-add"
             let add = reactions.map { "<span class=\"\(addClass)\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
+            // The chips before the add button (`reactionsInHeader`), as wide as they draw; a key is `g` or `r` and an
+            // integer id, the format the measuring script accepts.
+            let chips = reactions.flatMap { target -> String? in
+                guard options.reactionsInHeader, options.reactions.count != 1, target.hasRow else { return nil }
+                return "<span class=\"slot-chips\" data-slot=\"creact-\(target.key)\" "
+                    + "style=\"width: \(PRReactionTarget.chipsWidth(target.reactions))px\"></span>"
+            } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             let who = named ? Self.named(user, handle: activity?.layout.handles ?? true)
@@ -951,7 +990,13 @@ extension PRTimeline {
                 let created = "<span>Created by</span> \(who)"
                     + whenHTML.replacingOccurrences(of: "class=\"date\"", with: "class=\"date near\"")
                 let tools = penHTML + menu
-                return tools.isEmpty ? created : created + "<span class=\"tools\">\(tools)</span>"
+                // The description's own reactions in its header (`reactionsInHeader`): a slot filling the room up to
+                // the buttons, its row at the trailing end (the item's reactions are not in the page, so it has no
+                // width of its own and adding or removing one never changes the HTML).
+                let itemChips = descriptionReactions && options.reactionsInHeader
+                    ? "<span class=\"slot-chips fill\" data-slot=\"creact-d\"></span>" : ""
+                return tools.isEmpty && itemChips.isEmpty ? created
+                    : created + itemChips + "<span class=\"tools\">\(tools)</span>"
             }
             let start = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)\(whenHTML)"
             if !named, activity == nil, roles != nil {
@@ -959,14 +1004,14 @@ extension PRTimeline {
                 // end (`date near`).
                 let near = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)"
                     + whenHTML.replacingOccurrences(of: "class=\"date\"", with: "class=\"date near\"")
-                let tools = badges(user) + show + add + penHTML + menu
+                let tools = badges(user) + show + chips + add + penHTML + menu
                 return tools.isEmpty ? near : near + "<span class=\"tools\">\(tools)</span>"
             }
             guard named, activity?.headerEdit == true || roles != nil else {
-                return start + show + add + penHTML + menu
+                return start + show + chips + add + penHTML + menu
             }
             // GitLab's right-hand group: the badges, then the reaction, Edit and "…" buttons.
-            let tools = badges(user) + show + add + penHTML + menu
+            let tools = badges(user) + show + chips + add + penHTML + menu
             return tools.isEmpty ? start : start + "<span class=\"tools\">\(tools)</span>"
         }
 
@@ -1027,7 +1072,7 @@ extension PRTimeline {
                               reactions: reactions, named: activity != nil, hidden: hidden)
             let minimized = hidden == nil ? "" : " minimized"
             return "<div class=\"comment\(minimized)\"><div class=\"comment-head\">\(header)</div>\(body)"
-                + "\(editSlot(menu))\(reactionSlot(reactions))</div>"
+                + "\(editSlot(menu))\(suggestionSlot(menu))\(reactionSlot(reactions))</div>"
         }
 
         /// Replies (their depth and HTML, each after the one it answers) in nested `replies` boxes, one per level up
@@ -1088,7 +1133,7 @@ extension PRTimeline {
                 content = ""
             }
             let list = threads.isEmpty ? "" : "<div class=\"threads\">\(threads.map(thread).joined())</div>"
-            let edit = editSlot(menu) + reactionSlot(reactions)
+            let edit = editSlot(menu) + suggestionSlot(menu) + reactionSlot(reactions)
             guard let generalThread else {
                 // A comment hidden on the host: its header alone until its Show toggle opens (`minimized`), its line in
                 // place of what they did.
@@ -1195,7 +1240,7 @@ extension PRTimeline {
                             replies: rows, slotPrefix: "avatar-i", reply: replyRow)
             }
             return "<section class=\"item gl\"><div class=\"head\">\(header)</div>\(resolved)\(body)"
-                + "\(editSlot(menu))\(reactionSlot(reactions))\(tail)</section>"
+                + "\(editSlot(menu))\(suggestionSlot(menu))\(reactionSlot(reactions))\(tail)</section>"
         }
 
         /// A diff thread on the Activity: "<name> @login started a thread on the diff <time>" (the root comment's
@@ -1238,7 +1283,7 @@ extension PRTimeline {
                        collapsed: isCollapsed(thread, expanded: expanded, collapsesReplies: true),
                        replies: Array(rows), slotPrefix: "avatar-c", reply: replyRow)
             return "<section class=\"item gl\"><div class=\"head\">\(header)</div>\(resolved)\(snippet)\(body)"
-                + "\(editSlot(menu))\(reactionSlot(reactions))\(tail)</section>"
+                + "\(editSlot(menu))\(suggestionSlot(menu))\(reactionSlot(reactions))\(tail)</section>"
         }
 
         /// A history entry: one line on the rail, its dot, the actor's name, the wording (the entry's `textHTML`, built
@@ -1362,7 +1407,7 @@ extension PRTimeline {
             // Alone in its card: no gap under it.
             description = "<section class=\"item desc\"" + String(description.dropFirst("<section class=\"item\"".count))
         }
-        if descriptionReactions {
+        if descriptionReactions, !(options.reactionsInHeader && commentFilter != nil) {
             // The item's own reactions under the description, always a row (picker and chips), so adding the first
             // or removing the last never changes the page's HTML; its views read the detail's reactions.
             description = description.replacingOccurrences(
@@ -1428,12 +1473,16 @@ extension PRTimeline {
         }
         return PRTimelineHTML(
             html: description + (splits ? commentsMarker : "") + list + end, avatars: avatars,
-            count: comments.count + (activity?.events == nil ? shown.count : 0),
+            // GitLab's Overview counts every note, the diff threads' too (`PRActivity.countsThreadNotes`), the
+            // viewer's drafts aside.
+            count: comments.count + (activity?.events == nil ? shown.count : 0)
+                + (activity?.layout.countsThreadNotes == true
+                    ? (threads.value?.all ?? []).reduce(0) { $0 + $1.comments.filter { !$0.isPending }.count } : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
             collapsesReplies: folds, threadsStayOpen: activity != nil && !folds,
             headerEdit: activity?.headerEdit ?? false, headerDelete: activity?.headerDelete ?? false,
             descriptionReactions: descriptionReactions, entryCount: entryCount, hiddenComments: hiddenKeys,
-            stackedReplies: options.stackedReplies)
+            stackedReplies: options.stackedReplies, reactionsInHeader: options.reactionsInHeader)
     }
 
     /// A day heading as Bitbucket words it, relative to `now`: "Today", "Yesterday", the weekday within the last week
@@ -1690,6 +1739,10 @@ extension PRTimeline {
         // One kind has no row (its count is on the like button): the HTML never changes.
         guard timeline.reactionKinds.count == 1 || PRReactionTarget.hasRow(shown) == PRReactionTarget.hasRow(reactions)
         else { return nil }
+        // Chips in the header: their slot's width is in the HTML, so a change of width rebuilds the page.
+        if timeline.reactionsInHeader, PRReactionTarget.chipsWidth(shown) != PRReactionTarget.chipsWidth(reactions) {
+            return nil
+        }
         timeline.reactions[target.key]?.reactions = reactions
         return timeline
     }
@@ -2005,15 +2058,18 @@ struct PRTimelinePage: View {
         } else if let general, let target = Self.comment(of: slot, "cedit-", in: timeline.comments),
                   general.editingComments.contains(target.key) {
             measured(PRCommentEditor(session: session, number: number, target: target, model: general), slot: slot)
+        } else if let target = Self.comment(of: slot, "csugg-", in: timeline.comments), target.suggestionButtons {
+            PRSuggestionButtons(session: session, number: number, target: target, busy: busy)
         } else if let general, slot.id.hasPrefix("cshow-") {
             let key = String(slot.id.dropFirst("cshow-".count))
             PRHiddenToggle(shown: general.revealedComments.contains(key)) {
                 if general.revealedComments.remove(key) == nil { general.revealedComments.insert(key) }
             }
         } else if slot.id == "creact-d", let itemReactions {
-            PRItemReactionRow(reactions: itemReactions)
+            PRItemReactionRow(reactions: itemReactions, trailing: timeline.reactionsInHeader)
         } else if let general, let target = Self.reactions(of: slot, "creact-", in: timeline.reactions) {
-            PRReactionRow(session: session, number: number, target: target, model: general, busy: busy)
+            PRReactionRow(session: session, number: number, target: target, model: general, busy: busy,
+                          trailing: timeline.reactionsInHeader)
         } else if let general, let target = Self.reactions(of: slot, "cadd-", in: timeline.reactions) {
             PRReactionAddButton(session: session, number: number, target: target, kinds: timeline.reactionKinds,
                                 model: general, busy: busy)
@@ -2408,7 +2464,7 @@ private struct PRCommentMenu: View {
             .font(.system(size: 11, weight: .bold))
             .foregroundStyle(.secondary)
             .frame(width: 18, height: 18)
-            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-3) }
             .contentShape(Rectangle())
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
@@ -2428,7 +2484,7 @@ private struct PRCommentMenu: View {
         case nil: nil
         }
         let verbs = [target.canEdit && !editsInHeader ? "edit" : nil, target.quote != nil ? "quote" : nil,
-                     target.copyMarkdown ? "copy" : nil, target.suggestion != nil ? "apply the suggestion of" : nil,
+                     target.copyMarkdown ? "copy" : nil, target.suggestion != nil && !target.suggestionButtons ? "apply the suggestion of" : nil,
                      hide, target.canDelete ? "delete" : nil]
             .compactMap { $0 }
         let list = verbs.count > 1 ? verbs.dropLast().joined(separator: ", ") + " or " + verbs[verbs.count - 1]
@@ -2458,6 +2514,7 @@ private struct PRCommentMenu: View {
             })
         }
         switch target.suggestion {
+        case .apply? where target.suggestionButtons: break
         case .apply?:
             entries.append(.action("Apply suggestion") { [model, target, number, session] in
                 model.applySuggestion(target, on: number, github: session.github)
@@ -2548,7 +2605,7 @@ struct PRCommentEditButton: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
             .frame(width: 18, height: 18)
-            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-3) }
             .contentShape(Rectangle())
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
@@ -2581,7 +2638,7 @@ private struct PRCommentQuoteButton: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
             .frame(width: 18, height: 18)
-            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-3) }
             .contentShape(Rectangle())
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
@@ -2611,7 +2668,7 @@ private struct PRCommentDeleteButton: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
             .frame(width: 18, height: 18)
-            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-3) }
             .contentShape(Rectangle())
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
@@ -2643,21 +2700,29 @@ struct PRItemReactions {
 /// (the detail's optimistic `itemReaction`), off while an action runs on the item.
 private struct PRItemReactionRow: View {
     let reactions: PRItemReactions
+    /// In the description's header (`PRGeneralOptions.reactionsInHeader`): the chips, then the picker, at the trailing
+    /// end, as a comment's header has them.
+    var trailing = false
 
     var body: some View {
         HStack(spacing: 6) {
-            PRReactionPicker(kinds: reactions.kinds, reactions: reactions.given, busy: reactions.busy,
-                             label: "Add a reaction to the \(reactions.noun)") { kind, add in
-                reactions.perform(kind, add)
-            }
-            ForEach(reactions.given, id: \.kind) { reaction in
+            if !trailing { picker }
+            ForEach(reactions.given.filter { !trailing || $0.count > 0 }, id: \.kind) { reaction in
                 PRReactionChip(reaction: reaction, busy: reactions.busy) {
                     guard !reactions.busy else { return }
                     reactions.perform(reaction.kind, !reaction.viewerReacted)
                 }
             }
+            if trailing { picker }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+    }
+
+    private var picker: some View {
+        PRReactionPicker(kinds: reactions.kinds, reactions: reactions.given, busy: reactions.busy,
+                         label: "Add a reaction to the \(reactions.noun)") { kind, add in
+            reactions.perform(kind, add)
+        }
     }
 }
 
@@ -2707,6 +2772,44 @@ private struct PRCommentEditor: View {
     }
 }
 
+/// A comment's suggestion buttons, on the slot under its body (GitLab's, `PRGeneralOptions.suggestionButtons`):
+/// "Apply suggestion" and "Add suggestion to batch"; once batched, "Apply suggestions (N)" (the whole batch as one
+/// commit) and "Remove from batch". A batch toggle changes no HTML (`PullRequestDetailModel.suggestionBatch`). Off
+/// while an action runs on the pull request.
+private struct PRSuggestionButtons: View {
+    let session: RepoSession
+    let number: Int
+    let target: PRCommentTarget
+    let busy: Bool
+
+    var body: some View {
+        let model = session.pullDetail
+        let batched = if case .apply(let id)? = target.suggestion { model.suggestionBatch[id] != nil } else { false }
+        let count = model.suggestionBatch.count
+        HStack(spacing: 8) {
+            if batched {
+                Button("Remove from batch") { model.toggleBatch(target) }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                Button(count == 1 ? "Apply suggestion" : "Apply suggestions (\(count))") {
+                    model.applyBatch(on: number, github: session.github)
+                }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .help("Commit every suggestion of the batch as one")
+            } else {
+                Button("Add suggestion to batch") { model.toggleBatch(target) }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .help("Apply it later with the others, as one commit")
+                Button("Apply suggestion") { model.applySuggestion(target, on: number, github: session.github) }
+                    .buttonStyle(RowTextButtonStyle(formRow: true, prominent: count == 0))
+                    .help("Commit this suggestion on the source branch")
+            }
+        }
+        .disabled(busy)
+        .fixedSize()
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// A comment's reaction row, on the slot after its body (only a comment with reactions has one): a chip per kind
 /// (its emoji and count, highlighted when the viewer gave it; a click adds or removes the viewer's own). Each click
 /// changes the row at once and writes off the main actor through `model` (`PRGeneralAction.react`). Off while an
@@ -2717,10 +2820,12 @@ private struct PRReactionRow: View {
     let target: PRReactionTarget
     let model: any PRGeneralThreadModel
     let busy: Bool
+    /// In a header (`PRGeneralOptions.reactionsInHeader`): at the slot's trailing edge, by the add button.
+    var trailing = false
 
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(target.reactions, id: \.kind) { reaction in
+            ForEach(target.reactions.filter { !trailing || $0.count > 0 }, id: \.kind) { reaction in
                 PRReactionChip(reaction: reaction, busy: busy) {
                     guard !busy else { return }
                     model.perform(.react(target, kind: reaction.kind, add: !reaction.viewerReacted), on: number,
@@ -2728,7 +2833,7 @@ private struct PRReactionRow: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
     }
 }
 
@@ -2858,7 +2963,7 @@ struct PRReactionPicker: View {
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
             .frame(width: 18, height: 18)
-            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear) }
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-3) }
             .contentShape(Circle())
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }

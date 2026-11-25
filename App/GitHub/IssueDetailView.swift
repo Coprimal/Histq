@@ -316,6 +316,21 @@ final class IssueDetailModel {
                           options)
             ready = PRTimeline.patched(shown.timeline, general)
         }
+        // A comment from the comment box shows at once at the end of the page, the box cleared (a placeholder id:
+        // nothing acts on it until the reload brings the host's); a failure puts the page and the text back. Without
+        // it the page showed it only after the host's answer and a reload (about 3 s on GitLab, user 2026-11-25).
+        var clearedDraft = false
+        if case .comment(let body) = action, self.number == number, let shown = state.value,
+           let data = try? JSONSerialization.data(withJSONObject: ["id": optimisticID &+ 1]),
+           var comment = try? JSONDecoder().decode(HostedComment.self, from: data) {
+            optimisticID &+= 1
+            comment.user = shown.viewer ?? HostedUser(id: 0, login: "you")
+            comment.body = body
+            comment.createdAt = .now
+            draft = ""
+            clearedDraft = true
+            optimistic = (shown, shown.comments + [comment], PRGeneralOptions(api.client, expanded: generalExpanded))
+        }
         if let optimistic, let ready,
            replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.comments, timeline: ready) {
             UITiming.content("issue \(number) action \(action.timingName) patched")
@@ -331,7 +346,7 @@ final class IssueDetailModel {
             UITiming.content("issue \(number) action \(action.timingName) patched")
         }
         let activityView = activityView
-        Task { [weak self, ready] in
+        Task { [weak self, ready, clearedDraft] in
             if let optimistic, ready == nil {
                 let page = await Self.page(optimistic.shown, comments: optimistic.comments,
                                            general: optimistic.general, activity: activityView)
@@ -351,6 +366,8 @@ final class IssueDetailModel {
                     replacePage(of: optimistic.shown.loadID, number: number, comments: optimistic.shown.comments,
                                 timeline: optimistic.shown.timeline)
                 }
+                // The comment's text comes back, unless another one was typed meanwhile.
+                if case .comment(let body) = action, clearedDraft, self.number == number, draft.isEmpty { draft = body }
                 if let reactionsShown, self.number == number, case .loaded(var detail) = state,
                    detail.loadID == reactionsShown.loadID {
                     detail.issue.reactions = reactionsShown.reactions
@@ -374,7 +391,7 @@ final class IssueDetailModel {
                 }
                 return
             }
-            if case .comment = action, self.number == number { draft = "" }
+            if case .comment = action, self.number == number, !clearedDraft { draft = "" }
             if case .general(.reply(let root, _)) = action, self.number == number { generalReplyDrafts[root.id] = nil }
             if case .general(.edit(let target, _)) = action, self.number == number { savedEdit(target.key) }
             github.refreshNow()
