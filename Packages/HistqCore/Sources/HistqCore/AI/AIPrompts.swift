@@ -705,6 +705,16 @@ public enum AIPrompts {
         return AIChatHistory.cut(chatSeedIntro + "\n\n" + regions.joined(separator: "\n"), toBytes: budget)
     }
 
+    /// The content of a native tool result: the tool's output (repository text, git stderr) in one data block.
+    public static func toolOutputContent(_ output: String, candidate: () -> String = randomToken) -> String {
+        dataBlocks([AIDataBlock(label: .toolOutput, text: output)], candidate: candidate)
+    }
+
+    /// The note that ends a turn whose replies still called tools after `steps` steps (app text, shown and saved).
+    public static func toolStepLimit(steps: Int) -> String {
+        "(Stopped after \(steps) tool steps. Ask again to continue.)"
+    }
+
     /// `blocks` as chat data blocks, a blank line between them. Each gets a fresh token that occurs nowhere in its
     /// text, an app line naming it, then a line "BEGIN DATA <token>", the text and a line "END DATA <token>". The
     /// label is an app string (`AIDataLabel`), so repository text only ever sits inside a block.
