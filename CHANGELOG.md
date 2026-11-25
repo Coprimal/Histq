@@ -4,6 +4,8 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
 ### Added
 - Workspaces: a `.histqws` file keeps a set of windows and their tabs, manual tab groups (closed ones too), each repository's graph view (hidden, solo and pinned branches) and the profiles they use (without secrets), with repository paths stored relative to the file and from `~`, so the file and its repositories can be moved or shared together. Several workspaces can be open at once and each one saves itself as you change it. The File menu and the command palette have New Workspace, Open Workspace…, Save Workspace As…, Recent Workspaces and Close Workspace, and a workspace window shows its name in the toolbar. Window frames and collapsed groups stay on this Mac. A workspace tab whose profile is missing shows a badge and cannot commit or push until you import the profile from the file (after a sheet that lists its keys and accounts) or pick another one. A file with settings this version does not know opens read-only, and one from a newer format version is refused.
 - Move Tab to Window: move a tab to another window from the tab's menu, the command palette or by dragging it onto another window. It keeps its terminal, AI run and graph view. One tab moves at a time, and not into a window where its repository is already open; a worktree box or a tab group dropped outside its window snaps back.
@@ -11,7 +13,12 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - File editor: an Edit tab next to Diff, Split and Full file for a modified, staged or untracked text file, with line numbers, syntax colors and Find (⌘F). Edit File… in the command palette opens any tracked or untracked text file, even an unchanged one, and the Unstaged and Staged rows' menus have Edit File. Save with ⌘S or the Save button: it writes your text, keeps the file's line endings, BOM and final newline, and never stages the file; a dot on the Edit tab marks unsaved text, which switching to Diff and back keeps. ⌘Z in the editor undoes text, never a git operation. A file changed outside Histq reloads when you have not edited it, else asks Reload or Keep Mine; a file deleted on disk offers Copy Text or Close. Binary, image and non-UTF-8 files, files over 2 MB, symlinks, conflicted files (they open in the conflict editor) and commit or stash files can't be edited.
 - Unsaved text in the file editor, or unsaved choices in the conflict editor, asks Save, Don't Save or Cancel before you leave the file, close its tab, its window or its workspace, or quit. Removing a worktree whose tab has unsaved text asks first too.
 - Onboarding for new users: setting steps with live previews (tab position, layout, commit avatars, row height, lane colors, fade other worktrees), a git check with help for installing the Command Line Tools, your profile, GitHub sign-in and a first clone, AI with your own API key, and a spotlight tour of the main window on a small demo repository. Every step can be skipped, or all of it. It shows by itself only on a fresh install; Help › Show Onboarding…, the command palette and Settings › General start it again.
-- Bitbucket Data Center accounts: connect with a personal HTTP access token (host and optional context path) in Settings › Integrations. Bitbucket Data Center support is checked against the Bitbucket Data Center 10.4 API spec, not against a live server.
+- Hosting integrations beyond GitHub: GitLab (gitlab.com and self-managed), Bitbucket Cloud, Bitbucket Data Center and Azure DevOps. Connect accounts in Settings › Integrations with a token or a sign-in (GitLab, Bitbucket Cloud and Microsoft sign-in for Azure DevOps), with several accounts per host, each repository's git credentials picked from its own host, and a GitHub Enterprise Server entry. Bitbucket Data Center support is checked against the Bitbucket Data Center 10.4 API spec, not against a live server.
+- Pull request, merge request and issue pages like each host's web page, for GitHub, GitLab, Bitbucket and Azure DevOps: header with status and reload, Overview with the activity (system notes, commits by day, tasks, reviewers, reports), sidebar details, a merge box with the strategies the destination allows, and Files changed with comment threads, reactions, reply, resolve, edit and delete.
+- Double-click a remote branch in the graph to fast-forward its local branch; if the two have diverged it asks what to do.
+- AI Generate for the squash message in Interactive Rebase; the default summary names how many commits are squashed.
+- A branch checked out in a linked worktree shows a pine tree in place of the laptop on its graph badge.
+- Push the checked-out branch and open a pull request into the clicked branch, from the graph; a merge request first pushes the branch and prefills the default template.
 
 - Rebase with uncommitted changes: Rebase … onto … asks Stash & Rebase or Cancel (or follows Settings › General › Uncommitted changes). Your changes are stashed, the branch is rebased and the changes come back; if a commit would not replay cleanly or your changes would conflict with the rebased branch, nothing is changed and the failure names the conflicted files. Untracked files stay where they are.
 
@@ -20,7 +27,15 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 - Fade Other Worktrees is off by default. When it is on, selecting a row of another worktree lights only that worktree: every other one fades, the current tab's own commits and WIP row too.
 - A branch checked out in another worktree shows the worktree icon on its graph badge, and keeps it when the badge is cut short. Worktrees use a folder-with-branch icon in the graph, the sidebar and the WIP panel.
 - A group's menu has Delete Group, which asks first, then closes the group and its tabs as Close Group used to (⇧⌘T brings them back).
+- Modals, Settings and the command palette fade in and out; loading placeholders pulse.
+- Branch badge lines in the graph are thinner and fainter for branches other than the checked-out one, and ahead/behind counts stay on badges with a cut name or icons only.
 - The bar above an open file is lower and holds the Diff, Split, Full file and Edit tabs, with the matching buttons on the right; the file editor gets Wrap Lines (the diff's setting). File History and Blame are no longer buttons there: open them from the file's context menu or the command palette.
+
+### Fixed
+- Pull requests that were merged show as merged: API reads no longer come from the URL cache.
+- Fetching uses each remote's own host token, and an empty commit name or email in a profile no longer overrides git config.
+- Loaded avatars stay out of the cache that memory pressure emptied, which looped their loads and slowed every click.
+- Jumping to the first conflict when a conflicted file opens, a plus icon for untracked files in Working changes, and the emoji filling the avatar disc.
 
 ## [0.3.0] - 2026-11-21
 
