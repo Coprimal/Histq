@@ -11,7 +11,7 @@
 #     Keychain access rests on it, and Xcode and the export write the DR differently)
 #   - Info.plist keys CFBundleIdentifier, CFBundleShortVersionString, CFBundleVersion,
 #     LSMinimumSystemVersion, SUFeedURL, SUPublicEDKey, HistqGitHubClientID, HistqGitLabClientID,
-#     HistqBitbucketClientID, and only whether HistqBitbucketClientSecret is set (its value is never printed)
+#     HistqBitbucketClientID, HistqAzureClientID, and only whether HistqBitbucketClientSecret is set (its value is never printed)
 # It prints every mismatch and exits 1, else prints "PARITY OK".
 #
 # The local Release build is not the notarized export that ships; the export can be checked the
@@ -106,7 +106,7 @@ plist_value() {
   /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist" 2> /dev/null || echo "<missing>"
 }
 for key in CFBundleIdentifier CFBundleShortVersionString CFBundleVersion LSMinimumSystemVersion \
-  SUFeedURL SUPublicEDKey HistqGitHubClientID HistqGitLabClientID HistqBitbucketClientID; do
+  SUFeedURL SUPublicEDKey HistqGitHubClientID HistqGitLabClientID HistqBitbucketClientID HistqAzureClientID; do
   compare "Info.plist $key" "$(plist_value "$D" "$key")" "$(plist_value "$R" "$key")"
 done
 # secret_presence <app>: "set", "empty" or "<missing>" for HistqBitbucketClientSecret; never the value.

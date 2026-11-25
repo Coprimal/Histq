@@ -126,8 +126,15 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         [
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .editComments, .deleteComments, .reactions, .newInlineComments, .multiLineInlineComments, .itemReactions,
-            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras,
+            .timelineEvents, .updateBranch, .deleteHeadBranch, .issueExtras, .pullRequestExtras, .editDescription,
+            .pendingReviews, .suggestions, .hideComments, .editPendingComments,
         ]
+    }
+
+    /// GitHub's `ReportedContentClassifiers`: github.com has all seven, Enterprise Server (3.19, 3.22) only four.
+    public var hideReasons: [String] {
+        host == "github.com" ? ["ABUSE", "DUPLICATE", "LOW_QUALITY", "OFF_TOPIC", "OUTDATED", "RESOLVED", "SPAM"]
+            : ["DUPLICATE", "OFF_TOPIC", "OUTDATED", "RESOLVED"]
     }
 
     public var mergeMethods: Set<HostedMergeMethod> { [.merge, .squash, .rebase] }
@@ -221,6 +228,8 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             pull.mergedBy = extra.mergedBy
             pull.mergeCommitSHA = extra.mergeCommitSHA
             pull.viewerCanPush = extra.base?.repo?.permissions?.push
+            // A push right edits any description; without it, only the author's own (left to the app).
+            if pull.viewerCanPush == true { pull.viewerCanEditDescription = true }
             pull.milestone = extra.milestone.map { HostedMilestone(title: $0.title, dueDate: $0.dueOn) }
         }
         return pull
@@ -283,7 +292,9 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     /// Whether each review thread of pull request `number` is resolved or outdated and whether the token's user may
     /// resolve it, which only GraphQL has; 100 threads a page, up to `maxPages` pages. `rootCommentID` joins a
-    /// state to the thread's root in `reviewComments(of:in:)`.
+    /// state to the thread's root in `reviewComments(of:in:)`, or, for a thread of the viewer's pending review (its
+    /// first comment's `state` PENDING: GitHub lists those threads too), to the root `pendingReview(of:in:)` maps, in
+    /// `HostedPendingReview.idBase`'s band (`HostedPendingReview.id`): a reply then goes into that thread.
     public func reviewThreadStates(of number: Int, in repo: HostedRepository) async throws
         -> [HostedReviewThreadState]
     {
@@ -309,7 +320,18 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             var isResolved, isOutdated, viewerCanResolve, viewerCanUnresolve: Bool
             var comments: Comments
         }
-        struct Comments: Decodable { var nodes: [DatabaseID] }
+        struct Comments: Decodable { var nodes: [Root] }
+        /// A thread's first comment: its database id, and whether it is still pending (a missing state: published).
+        struct Root: Decodable {
+            var id: Int?
+            var isPending: Bool
+            enum CodingKeys: CodingKey { case state }
+            init(from decoder: any Decoder) throws {
+                id = try? DatabaseID(from: decoder).id
+                isPending = (try? decoder.container(keyedBy: CodingKeys.self).decode(String.self, forKey: .state))
+                    == "PENDING"
+            }
+        }
         let query = """
             query ReviewThreadStates($owner: String!, $name: String!, $number: Int!, $after: String) {
               repository(owner: $owner, name: $name) {
@@ -317,7 +339,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                   reviewThreads(first: 100, after: $after) {
                     nodes {
                       id isResolved isOutdated viewerCanResolve viewerCanUnresolve
-                      comments(first: 1) { nodes { \(commentIDField) } }
+                      comments(first: 1) { nodes { \(commentIDField) state } }
                     }
                     pageInfo { hasNextPage endCursor }
                   }
@@ -333,10 +355,11 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                 query, variables: Variables(owner: repo.owner, name: repo.name, number: number, after: after))
             guard let threads = answer.repository?.pullRequest?.reviewThreads else { throw HostingError.notFound }
             states += threads.nodes.map {
-                HostedReviewThreadState(
+                let root = $0.comments.nodes.first
+                return HostedReviewThreadState(
                     id: $0.id, isResolved: $0.isResolved, isOutdated: $0.isOutdated,
                     viewerCanResolve: $0.viewerCanResolve, viewerCanUnresolve: $0.viewerCanUnresolve,
-                    rootCommentID: $0.comments.nodes.first?.id)
+                    rootCommentID: root?.id.map { root?.isPending == true ? HostedPendingReview.id($0) : $0 })
             }
             pages += 1
             after = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : nil
@@ -362,7 +385,8 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// servers may not know `fullDatabaseId`, so each host is asked only for the one it serves.
     private var commentIDField: String { host == "github.com" ? "fullDatabaseId" : "databaseId" }
 
-    /// `comments` with the token's user's rights and own reactions, which REST lacks: one GraphQL `nodes(ids:)`
+    /// `comments` with the token's user's rights, own reactions and hidden state (`Minimizable`), which REST lacks:
+    /// one GraphQL `nodes(ids:)`
     /// query per 100 comments that have a node id (`hostKey`), without connections (1 point each). A node joins its
     /// comment on (`__typename`, database id), not on the node id string, which GitHub may return in another format
     /// than REST's `node_id`; the issue-comment and review-comment ids are separate spaces. A comment gone since the
@@ -377,6 +401,10 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             var comment = comment
             comment.viewerCanEdit = state.canEdit
             comment.viewerCanDelete = state.canDelete
+            comment.isMinimized = state.hidden.isMinimized
+            comment.minimizedReason = state.hidden.reason
+            comment.viewerCanMinimize = state.hidden.canMinimize
+            comment.viewerCanUnminimize = state.hidden.canUnminimize
             for index in comment.reactions.indices where state.reacted.contains(comment.reactions[index].kind) {
                 comment.reactions[index].viewerReacted = true
             }
@@ -384,11 +412,9 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         }
     }
 
-    /// The `nodes(ids:)` part of `withViewerStates`: each found comment node's rights and the REST names of the
-    /// viewer's own reactions, keyed by `"<__typename> <database id>"`.
-    private func viewerStates(ofNodes ids: [String]) async
-        -> [String: (canEdit: Bool, canDelete: Bool, reacted: Set<String>)]
-    {
+    /// The `nodes(ids:)` part of `withViewerStates`: each found comment node's rights, the REST names of the
+    /// viewer's own reactions and its hidden state, keyed by `"<__typename> <database id>"`.
+    private func viewerStates(ofNodes ids: [String]) async -> [String: GitHubViewerState] {
         struct Variables: Encodable { var ids: [String] }
         struct Answer: Decodable { var nodes: [Node?] }
         struct Node: Decodable {
@@ -396,6 +422,8 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             var id: Int?
             var viewerCanUpdate, viewerCanDelete: Bool?
             var reactionGroups: [Group]?
+            var isMinimized, viewerCanMinimize, viewerCanUnminimize: Bool?
+            var minimizedReason: String?
             struct Group: Decodable {
                 var content: String
                 var viewerHasReacted: Bool
@@ -403,6 +431,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             enum CodingKeys: String, CodingKey {
                 case typename = "__typename"
                 case viewerCanUpdate, viewerCanDelete, reactionGroups
+                case isMinimized, minimizedReason, viewerCanMinimize, viewerCanUnminimize
             }
             init(from decoder: any Decoder) throws {
                 let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -411,9 +440,14 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                 viewerCanUpdate = try? values.decode(Bool.self, forKey: .viewerCanUpdate)
                 viewerCanDelete = try? values.decode(Bool.self, forKey: .viewerCanDelete)
                 reactionGroups = try? values.decode([Group].self, forKey: .reactionGroups)
+                isMinimized = try? values.decode(Bool.self, forKey: .isMinimized)
+                minimizedReason = try? values.decode(String.self, forKey: .minimizedReason)
+                viewerCanMinimize = try? values.decode(Bool.self, forKey: .viewerCanMinimize)
+                viewerCanUnminimize = try? values.decode(Bool.self, forKey: .viewerCanUnminimize)
             }
         }
-        let fields = "\(commentIDField) viewerCanUpdate viewerCanDelete reactionGroups { content viewerHasReacted }"
+        let fields = "\(commentIDField) viewerCanUpdate viewerCanDelete reactionGroups { content viewerHasReacted } "
+            + "isMinimized minimizedReason viewerCanMinimize viewerCanUnminimize"
         let query = """
             query CommentViewerStates($ids: [ID!]!) {
               nodes(ids: $ids) {
@@ -424,7 +458,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             }
             """
         let restByGraphQL = Dictionary(uniqueKeysWithValues: Self.reactionContents.map { ($0.graphQL, $0.rest) })
-        var states: [String: (canEdit: Bool, canDelete: Bool, reacted: Set<String>)] = [:]
+        var states: [String: GitHubViewerState] = [:]
         for start in stride(from: 0, to: ids.count, by: 100) {
             let chunk = Array(ids[start..<min(start + 100, ids.count)])
             let answer: Answer? = try? await graphQL(query, variables: Variables(ids: chunk), allowingNotFound: true)
@@ -433,8 +467,11 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                 guard let typename = node.typename, let id = node.id else { continue }
                 let reacted = (node.reactionGroups ?? []).filter(\.viewerHasReacted)
                     .compactMap { restByGraphQL[$0.content] }
+                let hidden = (isMinimized: node.isMinimized ?? false, reason: node.minimizedReason,
+                              canMinimize: node.viewerCanMinimize ?? false,
+                              canUnminimize: node.viewerCanUnminimize ?? false)
                 states["\(typename) \(id)"] =
-                    (node.viewerCanUpdate ?? false, node.viewerCanDelete ?? false, Set(reacted))
+                    (node.viewerCanUpdate ?? false, node.viewerCanDelete ?? false, Set(reacted), hidden)
             }
         }
         return states
@@ -586,6 +623,15 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             body: ["state": open ? "open" : "closed"])
     }
 
+    /// `PATCH /pulls/<n>` or `/issues/<n>` with the new `body`; GitHub refuses a user without the right (author or
+    /// push) with a 403.
+    public func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws {
+        struct Result: Decodable { var id: Int }
+        let kind = if case .pullRequest = item { "pulls" } else { "issues" }
+        let _: Result = try await send(
+            "PATCH", url(try repoPath(repo) + [kind, String(item.number)]), body: ["body": body])
+    }
+
     /// `PATCH` the comment's REST path (`issues/comments/<id>`, a pull request's conversation comments included, or
     /// `pulls/comments/<id>`): only the body changes.
     public func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
@@ -616,6 +662,46 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         try await setReaction(kind, on: comment, in: repo, added: false)
     }
 
+    /// GraphQL `minimizeComment` on the comment's node id with `reason` as its classifier; a reason this host lacks
+    /// (`hideReasons`) or a comment without a node id is refused unsent.
+    public func hideComment(
+        _ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, reason: String
+    ) async throws {
+        _ = try repoPath(repo)
+        guard hideReasons.contains(reason) else {
+            throw HostingError.validationFailed(message: "not a reason \(host) hides a comment for: \(reason)")
+        }
+        let subjectId = try Self.nodeID(of: comment)
+        struct Variables: Encodable { var subjectId, classifier: String }
+        struct Payload: Decodable {}
+        struct Answer: Decodable { var minimizeComment: Payload? }
+        let query = """
+            mutation MinimizeComment($subjectId: ID!, $classifier: ReportedContentClassifiers!) {
+              minimizeComment(input: {subjectId: $subjectId, classifier: $classifier}) {
+                minimizedComment { isMinimized }
+              }
+            }
+            """
+        let _: Answer = try await graphQL(query, variables: Variables(subjectId: subjectId, classifier: reason))
+    }
+
+    /// GraphQL `unminimizeComment` on the comment's node id; a comment without one is refused unsent.
+    public func unhideComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
+        async throws
+    {
+        _ = try repoPath(repo)
+        let subjectId = try Self.nodeID(of: comment)
+        struct Variables: Encodable { var subjectId: String }
+        struct Payload: Decodable {}
+        struct Answer: Decodable { var unminimizeComment: Payload? }
+        let query = """
+            mutation UnminimizeComment($subjectId: ID!) {
+              unminimizeComment(input: {subjectId: $subjectId}) { unminimizedComment { isMinimized } }
+            }
+            """
+        let _: Answer = try await graphQL(query, variables: Variables(subjectId: subjectId))
+    }
+
     /// `POST /pulls/<n>/comments` on `line` and `side` (`RIGHT` for an added or context line, `LEFT` for a removed
     /// one), and `start_line`/`start_side` for a range, on the head the patch was loaded at; never the deprecated
     /// `position`. A renamed file's comment goes on its new path, LEFT side included (not stated by GitHub).
@@ -635,20 +721,360 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                 case startSide = "start_side"
             }
         }
+        let lines = try Self.lines(position)
+        var comment: HostedReviewComment = try await send(
+            "POST", url(try repoPath(repo) + ["pulls", String(number), "comments"]),
+            body: Body(
+                body: body, commitID: position.headSHA, path: position.path, line: lines.line, side: lines.side,
+                startLine: lines.startLine, startSide: lines.startSide))
+        // The token's user wrote it: theirs to edit and delete (the REST answer does not say).
+        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
+        return comment
+    }
+
+    /// A position's line and side (`RIGHT` for an added or context line, `LEFT` for a removed one) and a range's first
+    /// line and side, as REST and GraphQL take them; a position without a line on its side is refused.
+    private static func lines(_ position: HostedInlinePosition) throws
+        -> (line: Int, side: String, startLine: Int?, startSide: String?)
+    {
         let (line, side) = position.lineKind == .removed ? (position.oldLine, "LEFT") : (position.newLine, "RIGHT")
         guard let line else { throw HostingError.validationFailed(message: "no line on the \(side) side") }
         let start: (line: Int, side: String)? =
             if let new = position.startNewLine { (new, "RIGHT") }
             else if let old = position.startOldLine { (old, "LEFT") }
             else { nil }
-        var comment: HostedReviewComment = try await send(
-            "POST", url(try repoPath(repo) + ["pulls", String(number), "comments"]),
-            body: Body(
-                body: body, commitID: position.headSHA, path: position.path, line: line, side: side,
-                startLine: start?.line, startSide: start?.side))
-        // The token's user wrote it: theirs to edit and delete (the REST answer does not say).
-        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
-        return comment
+        return (line, side, start?.line, start?.side)
+    }
+
+    // MARK: - Pending review
+
+    /// While the viewer has a pending review, GitHub holds immediate comments back: they go through it.
+    public var routesThroughPendingReview: Bool { true }
+
+    /// The viewer's pending review from GraphQL, `pullRequest.reviews(states: [PENDING], first: 1)` (a pending review
+    /// is visible to its author only, so it is the viewer's), and its first 100 comments, each mapped as a review
+    /// comment: `isPending`, its id in `HostedPendingReview.idBase`'s band, in no review (so its thread shows at its
+    /// time), a reply's root by `replyTo`, the viewer's rights as GitHub gives them (`viewerCanUpdate`,
+    /// `viewerCanDelete`, `viewerCanReact`; none when left out) and its reactions (`reactionGroups`, the viewer's
+    /// marked: a pending comment never goes through `withViewerStates`). GraphQL comments have no side: the diff hunk
+    /// ends at the commented line, and a removed one (`-`) is on the old side. With the pull request's node id, which
+    /// a new review is made on. Empty when there is none.
+    public func pendingReview(of number: Int, in repo: HostedRepository) async throws -> HostedPendingReview {
+        _ = try repoPath(repo)
+        struct Variables: Encodable { var owner, name: String; var number: Int }
+        struct Answer: Decodable { var repository: Repository? }
+        struct Repository: Decodable { var pullRequest: PullRequest? }
+        struct PullRequest: Decodable {
+            var id: String
+            var reviews: Nodes<Review>?
+        }
+        struct Nodes<Node: Decodable>: Decodable { var nodes: [Node?] }
+        struct Review: Decodable {
+            var id: String
+            var databaseID: Int?
+            var comments: Nodes<Comment>?
+            enum CodingKeys: CodingKey { case id, comments }
+            init(from decoder: any Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                id = try values.decode(String.self, forKey: .id)
+                comments = try? values.decode(Nodes<Comment>.self, forKey: .comments)
+                databaseID = try? DatabaseID(from: decoder).id
+            }
+        }
+        struct Author: Decodable {
+            var login: String
+            var avatarUrl: String?
+            var databaseId: Int?
+        }
+        struct Comment: Decodable {
+            var id: String
+            var databaseID: Int?
+            var body, bodyHTML, path, diffHunk: String?
+            var line, originalLine, startLine, originalStartLine: Int?
+            var createdAt: Date?
+            var author: Author?
+            var replyTo: Int?
+            var viewerCanUpdate, viewerCanDelete, viewerCanReact: Bool?
+            var reactionGroups: [ItemNode.Group]?
+            enum CodingKeys: CodingKey {
+                case id, body, bodyHTML, path, diffHunk, line, originalLine, startLine, originalStartLine, createdAt
+                case author, replyTo, viewerCanUpdate, viewerCanDelete, viewerCanReact, reactionGroups
+            }
+            init(from decoder: any Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                id = try values.decode(String.self, forKey: .id)
+                databaseID = try? DatabaseID(from: decoder).id
+                body = try? values.decode(String.self, forKey: .body)
+                bodyHTML = try? values.decode(String.self, forKey: .bodyHTML)
+                path = try? values.decode(String.self, forKey: .path)
+                diffHunk = try? values.decode(String.self, forKey: .diffHunk)
+                line = try? values.decode(Int.self, forKey: .line)
+                originalLine = try? values.decode(Int.self, forKey: .originalLine)
+                startLine = try? values.decode(Int.self, forKey: .startLine)
+                originalStartLine = try? values.decode(Int.self, forKey: .originalStartLine)
+                createdAt = try? values.decode(Date.self, forKey: .createdAt)
+                author = try? values.decode(Author.self, forKey: .author)
+                replyTo = (try? values.decode(DatabaseID.self, forKey: .replyTo))?.id
+                viewerCanUpdate = try? values.decode(Bool.self, forKey: .viewerCanUpdate)
+                viewerCanDelete = try? values.decode(Bool.self, forKey: .viewerCanDelete)
+                viewerCanReact = try? values.decode(Bool.self, forKey: .viewerCanReact)
+                reactionGroups = try? values.decode([ItemNode.Group].self, forKey: .reactionGroups)
+            }
+        }
+        let query = """
+            query ReadPendingReview($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  id
+                  reviews(states: [PENDING], first: 1) {
+                    nodes {
+                      id \(commentIDField)
+                      comments(first: 100) {
+                        nodes {
+                          id \(commentIDField) body bodyHTML path diffHunk line originalLine startLine
+                          originalStartLine createdAt viewerCanUpdate viewerCanDelete viewerCanReact
+                          reactionGroups { content viewerHasReacted reactors { totalCount } }
+                          author { login avatarUrl ... on User { databaseId } }
+                          replyTo { \(commentIDField) }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+        let answer: Answer = try await graphQL(
+            query, variables: Variables(owner: repo.owner, name: repo.name, number: number))
+        guard let pull = answer.repository?.pullRequest else { throw HostingError.notFound }
+        guard let review = pull.reviews?.nodes.compactMap({ $0 }).first else {
+            return HostedPendingReview(pullRequestKey: pull.id)
+        }
+        let nodes = (review.comments?.nodes ?? []).compactMap { $0 }
+        let pendingIDs = Set(nodes.compactMap(\.databaseID))
+        let comments = nodes.compactMap { node -> HostedReviewComment? in
+            guard let id = node.databaseID else { return nil }
+            let removed = node.diffHunk?.split(separator: "\n").last?.hasPrefix("-") == true
+            var comment = HostedReviewComment(
+                id: HostedPendingReview.id(id),
+                inReplyToID: node.replyTo.map { pendingIDs.contains($0) ? HostedPendingReview.id($0) : $0 },
+                path: node.path ?? "", line: node.line, originalLine: node.originalLine ?? node.line,
+                startLine: node.startLine, originalStartLine: node.originalStartLine ?? node.startLine,
+                side: removed ? "LEFT" : "RIGHT", diffHunk: node.diffHunk, body: node.body, bodyHTML: node.bodyHTML,
+                user: node.author.map { HostedUser(id: $0.databaseId ?? 0, login: $0.login, avatarURL: $0.avatarUrl) },
+                createdAt: node.createdAt)
+            comment.hostKey = node.id
+            comment.isPending = true
+            comment.viewerCanEdit = node.viewerCanUpdate ?? false
+            comment.viewerCanDelete = node.viewerCanDelete ?? false
+            comment.viewerCanReact = node.viewerCanReact ?? false
+            comment.reactions = Self.reactions(node.reactionGroups ?? [])
+            return comment
+        }
+        return HostedPendingReview(
+            hostKey: review.id, reviewID: review.databaseID, pullRequestKey: pull.id, comments: comments)
+    }
+
+    /// Into `review` where it exists: `addPullRequestReviewThread` on a line (and a range's first line) or
+    /// `addPullRequestReviewThreadReply` to the thread whose node id is `thread.hostKey` (the thread state's id; a
+    /// reply without one is refused unsent). Without one, a new pending review on the pull request's node id: one
+    /// `addPullRequestReview` with the line's thread (no `event`, so it stays pending; never the deprecated
+    /// `comments`), or one without, then the reply into it.
+    public func addPendingComment(
+        _ target: HostedPendingTarget, to review: HostedPendingReview, on number: Int, in repo: HostedRepository,
+        body: String
+    ) async throws {
+        struct Thread: Encodable {
+            var path: String
+            var line: Int
+            var side: String
+            var startLine: Int?
+            var startSide: String?
+            var body: String
+        }
+        func thread(_ position: HostedInlinePosition) throws -> Thread {
+            let lines = try Self.lines(position)
+            return Thread(path: position.path, line: lines.line, side: lines.side, startLine: lines.startLine,
+                          startSide: lines.startSide, body: body)
+        }
+        if case .reply(let ref) = target, ref.hostKey?.isEmpty ?? true {
+            throw HostingError.validationFailed(message: "an unknown GitHub thread: reload the pull request")
+        }
+        var reviewKey = review.hostKey
+        if reviewKey == nil {
+            struct Start: Encodable {
+                var pullRequestId: String
+                var commitOID: String?
+                var threads: [Thread]?
+            }
+            let pullRequestKey: String
+            if let key = review.pullRequestKey { pullRequestKey = key } else {
+                pullRequestKey = try await pullRequestNodeID(number, in: repo)
+            }
+            var start = Start(pullRequestId: pullRequestKey)
+            if case .line(let position) = target {
+                start.commitOID = position.headSHA
+                start.threads = [try thread(position)]
+            }
+            let key = try await reviewMutation(
+                "mutation StartPendingReview($input: AddPullRequestReviewInput!) { "
+                    + "addPullRequestReview(input: $input) { pullRequestReview { id } } }",
+                field: "addPullRequestReview", input: start)
+            if case .line = target { return }
+            reviewKey = key
+        }
+        guard let reviewKey else { throw HostingError.invalidResponse("no pending review in the answer") }
+        switch target {
+        case .line(let position):
+            struct Input: Encodable {
+                var pullRequestReviewId: String
+                var path: String
+                var line: Int
+                var side: String
+                var startLine: Int?
+                var startSide: String?
+                var body: String
+            }
+            let line = try thread(position)
+            struct Answer: Decodable { var addPullRequestReviewThread: Payload? }
+            struct Payload: Decodable { var thread: Node? }
+            struct Node: Decodable { var id: String }
+            let answer: Answer = try await graphQL(
+                "mutation AddPendingThread($input: AddPullRequestReviewThreadInput!) { "
+                    + "addPullRequestReviewThread(input: $input) { thread { id } } }",
+                variables: ["input": Input(
+                    pullRequestReviewId: reviewKey, path: line.path, line: line.line, side: line.side,
+                    startLine: line.startLine, startSide: line.startSide, body: body)])
+            guard answer.addPullRequestReviewThread?.thread != nil else {
+                throw HostingError.invalidResponse("no review thread in the answer")
+            }
+        case .reply(let ref):
+            struct Input: Encodable { var pullRequestReviewId, pullRequestReviewThreadId, body: String }
+            struct Answer: Decodable { var addPullRequestReviewThreadReply: Payload? }
+            struct Payload: Decodable { var comment: Node? }
+            struct Node: Decodable { var id: String }
+            let answer: Answer = try await graphQL(
+                "mutation AddPendingReply($input: AddPullRequestReviewThreadReplyInput!) { "
+                    + "addPullRequestReviewThreadReply(input: $input) { comment { id } } }",
+                variables: ["input": Input(
+                    pullRequestReviewId: reviewKey, pullRequestReviewThreadId: ref.hostKey ?? "", body: body)])
+            guard answer.addPullRequestReviewThreadReply?.comment != nil else {
+                throw HostingError.invalidResponse("no reply in the answer")
+            }
+        }
+    }
+
+    /// `submitPullRequestReview` of `review` with `event` (COMMENT, APPROVE, REQUEST_CHANGES) and the summary `body`
+    /// (left out when empty); a review without its node id is refused unsent.
+    public func submitPendingReview(
+        _ review: HostedPendingReview, on number: Int, in repo: HostedRepository, event: HostedReviewEvent,
+        body: String?
+    ) async throws {
+        struct Input: Encodable {
+            var pullRequestReviewId: String
+            var event: String
+            var body: String?
+        }
+        guard let key = review.hostKey else {
+            throw HostingError.validationFailed(message: "no pending review to submit: reload the pull request")
+        }
+        _ = try await reviewMutation(
+            "mutation SubmitPendingReview($input: SubmitPullRequestReviewInput!) { "
+                + "submitPullRequestReview(input: $input) { pullRequestReview { id } } }",
+            field: "submitPullRequestReview",
+            input: Input(pullRequestReviewId: key, event: event.rawValue, body: body.flatMap { $0.isEmpty ? nil : $0 }))
+    }
+
+    /// `deletePullRequestReview` of `review`, its comments with it; a review without its node id is refused unsent.
+    public func discardPendingReview(_ review: HostedPendingReview, on number: Int, in repo: HostedRepository)
+        async throws
+    {
+        guard let key = review.hostKey else {
+            throw HostingError.validationFailed(message: "no pending review to discard: reload the pull request")
+        }
+        _ = try await reviewMutation(
+            "mutation DiscardPendingReview($input: DeletePullRequestReviewInput!) { "
+                + "deletePullRequestReview(input: $input) { pullRequestReview { id } } }",
+            field: "deletePullRequestReview", input: ["pullRequestReviewId": key])
+    }
+
+    /// GraphQL `updatePullRequestReviewComment` on the pending comment's node id (`hostKey`) with the new `body`: a
+    /// pending comment has no REST id. One without a node id, or whose id is not a pending one, is refused unsent.
+    public func editPendingComment(
+        _ comment: HostedCommentRef, on number: Int, in repo: HostedRepository, body: String
+    ) async throws {
+        _ = try repoPath(repo)
+        let key = try Self.pendingNodeID(of: comment)
+        struct Input: Encodable { var pullRequestReviewCommentId, body: String }
+        struct Answer: Decodable { var updatePullRequestReviewComment: Payload? }
+        struct Payload: Decodable { var pullRequestReviewComment: Node? }
+        struct Node: Decodable { var id: String }
+        let answer: Answer = try await graphQL(
+            "mutation EditPendingComment($input: UpdatePullRequestReviewCommentInput!) { "
+                + "updatePullRequestReviewComment(input: $input) { pullRequestReviewComment { id } } }",
+            variables: ["input": Input(pullRequestReviewCommentId: key, body: body)])
+        guard answer.updatePullRequestReviewComment?.pullRequestReviewComment != nil else {
+            throw HostingError.invalidResponse("no review comment in the answer")
+        }
+    }
+
+    /// GraphQL `deletePullRequestReviewComment` on the pending comment's node id (`hostKey`); the review stays, with
+    /// its other comments. Refused unsent as `editPendingComment`.
+    public func deletePendingComment(_ comment: HostedCommentRef, on number: Int, in repo: HostedRepository)
+        async throws
+    {
+        _ = try repoPath(repo)
+        let key = try Self.pendingNodeID(of: comment)
+        struct Answer: Decodable { var deletePullRequestReviewComment: Payload? }
+        struct Payload: Decodable {}
+        let answer: Answer = try await graphQL(
+            "mutation DeletePendingComment($input: DeletePullRequestReviewCommentInput!) { "
+                + "deletePullRequestReviewComment(input: $input) { clientMutationId } }",
+            variables: ["input": ["id": key]])
+        guard answer.deletePullRequestReviewComment != nil else {
+            throw HostingError.invalidResponse("no deleted comment in the answer")
+        }
+    }
+
+    /// A pending comment's node id: refused for an id outside `HostedPendingReview.idBase`'s band (a published
+    /// comment's writes are REST) or without its node id.
+    private static func pendingNodeID(of comment: HostedCommentRef) throws -> String {
+        guard comment.kind == .review, HostedPendingReview.isPending(comment.id) else {
+            throw HostingError.validationFailed(message: "not a pending comment: reload the pull request")
+        }
+        return try nodeID(of: comment)
+    }
+
+    /// Runs a review mutation whose payload `field` holds `pullRequestReview { id }`, with `input` as its only variable,
+    /// and returns that id; a payload without one is an invalid answer.
+    private func reviewMutation<Input: Encodable>(_ query: String, field: String, input: Input) async throws -> String {
+        let answer: [String: ReviewPayload?] = try await graphQL(query, variables: ["input": input])
+        guard let id = answer[field]??.pullRequestReview?.id else {
+            throw HostingError.invalidResponse("no pending review in the answer")
+        }
+        return id
+    }
+
+    private struct ReviewPayload: Decodable {
+        struct Review: Decodable { var id: String }
+        var pullRequestReview: Review?
+    }
+
+    /// The pull request's GraphQL node id, which a new review is made on.
+    private func pullRequestNodeID(_ number: Int, in repo: HostedRepository) async throws -> String {
+        _ = try repoPath(repo)
+        struct Variables: Encodable { var owner, name: String; var number: Int }
+        struct Answer: Decodable {
+            struct Repository: Decodable { var pullRequest: Node? }
+            struct Node: Decodable { var id: String }
+            var repository: Repository?
+        }
+        let answer: Answer = try await graphQL(
+            "query PullRequestNodeID($owner: String!, $name: String!, $number: Int!) { "
+                + "repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } }",
+            variables: Variables(owner: repo.owner, name: repo.name, number: number))
+        guard let id = answer.repository?.pullRequest?.id else { throw HostingError.notFound }
+        return id
     }
 
     // MARK: - History entries
@@ -802,8 +1228,9 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     // MARK: - Issue extras
 
     /// The issue page's extras from GraphQL: the pinned comment, the type, the fields (the type's pinned ones, else
-    /// the repository's, each with its value, then any other field with a value), the relationships, and in a second
-    /// query the projects (their titles need the `read:project` scope: without it, only how many).
+    /// the repository's, each with its value, then any other field with a value), the relationships, whether the
+    /// token's user may edit the issue (`viewerCanUpdate`), and in a second query the projects (their titles need the
+    /// `read:project` scope: without it, only how many).
     public func issueExtras(_ number: Int, in repo: HostedRepository) async throws -> HostedIssueExtras {
         _ = try repoPath(repo)
         let variables = ItemVariables(owner: repo.owner, name: repo.name, number: number)
@@ -816,6 +1243,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             subIssuesCompleted: issue.subIssuesSummary?.completed ?? 0,
             blockedBy: issue.issueDependenciesSummary?.blockedBy ?? 0,
             blocking: issue.issueDependenciesSummary?.blocking ?? 0)
+        extras.viewerCanUpdate = issue.viewerCanUpdate
         if let parent = issue.parent { extras.parent = .init(number: parent.number, title: parent.title) }
         if let pinned = issue.pinnedIssueComment, let id = pinned.issueComment?.databaseId {
             let by = pinned.pinnedBy.map {
@@ -945,6 +1373,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
           repository(owner: $owner, name: $name) {
             pinnedIssueFields(first: 20) { nodes { ...FieldName } }
             issue(number: $number) {
+              viewerCanUpdate
               issueType { name pinnedFields { ...FieldName } }
               pinnedIssueComment {
                 pinnedAt
@@ -1024,6 +1453,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
                 var subIssuesSummary: SubIssues?
                 var issueDependenciesSummary: Dependencies?
                 var issueFieldValues: Values?
+                var viewerCanUpdate: Bool?
             }
             var pinnedIssueFields: Fields?
             var issue: Issue?
@@ -1036,8 +1466,13 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// The pull request's or issue's own reactions, from GraphQL `reactionGroups` (REST's `reactions` rollup has no
     /// viewer state): each kind with a reaction, in `reactionKinds` order, the token's user's marked.
     public func itemReactions(of item: HostedItem, in repo: HostedRepository) async throws -> [HostedReaction] {
-        let groups = try await itemNode(item, in: repo).reactionGroups ?? []
-        return Self.reactionContents.compactMap { content in
+        Self.reactions(try await itemNode(item, in: repo).reactionGroups ?? [])
+    }
+
+    /// GraphQL reaction groups as `HostedReaction`s: each kind with a reaction, in `reactionKinds` order, the token's
+    /// user's marked.
+    private static func reactions(_ groups: [ItemNode.Group]) -> [HostedReaction] {
+        reactionContents.compactMap { content in
             guard let group = groups.first(where: { $0.content == content.graphQL }),
                   let count = group.reactors?.totalCount, count > 0 else { return nil }
             return HostedReaction(kind: content.rest, count: count, viewerReacted: group.viewerHasReacted == true)
@@ -1111,9 +1546,22 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
 
     // MARK: - Requests
 
-    /// The REST path of a conversation (`issues/comments/<id>`) or review (`pulls/comments/<id>`) comment.
+    /// The REST path of a conversation (`issues/comments/<id>`) or review (`pulls/comments/<id>`) comment; a pending
+    /// comment's id (`HostedPendingReview.idBase`'s band, not a REST id) is refused: its writes are
+    /// `editPendingComment` and `deletePendingComment`.
     private func commentPath(_ comment: HostedCommentRef, in repo: HostedRepository) throws -> [String] {
-        try repoPath(repo) + [comment.kind == .general ? "issues" : "pulls", "comments", String(comment.id)]
+        guard !HostedPendingReview.isPending(comment.id) else {
+            throw HostingError.validationFailed(message: "a pending comment has no REST path: reload the pull request")
+        }
+        return try repoPath(repo) + [comment.kind == .general ? "issues" : "pulls", "comments", String(comment.id)]
+    }
+
+    /// The comment's GraphQL node id (`hostKey`); a comment without one is refused.
+    private static func nodeID(of comment: HostedCommentRef) throws -> String {
+        guard let id = comment.hostKey else {
+            throw HostingError.validationFailed(message: "the comment has no node id")
+        }
+        return id
     }
 
     /// Adds or removes the token's user's reaction `kind` (a REST name of `reactionKinds`) on the comment's node id;
@@ -1125,9 +1573,7 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         guard let content = Self.reactionContents.first(where: { $0.rest == kind })?.graphQL else {
             throw HostingError.validationFailed(message: "not a GitHub reaction: \(kind)")
         }
-        guard let subjectId = comment.hostKey else {
-            throw HostingError.validationFailed(message: "the comment has no node id")
-        }
+        let subjectId = try Self.nodeID(of: comment)
         struct Variables: Encodable { var subjectId, content: String }
         struct Payload: Decodable {}
         struct Answer: Decodable { var addReaction, removeReaction: Payload? }
@@ -1302,6 +1748,13 @@ private struct WithReactions<Comment: GitHubViewerStateful>: Decodable {
     }
 }
 
+/// A comment node's state from `viewerStates(ofNodes:)`: the token's user's rights, the REST names of their own
+/// reactions, and the comment's hidden state (`Minimizable`).
+private typealias GitHubViewerState = (
+    canEdit: Bool, canDelete: Bool, reacted: Set<String>,
+    hidden: (isMinimized: Bool, reason: String?, canMinimize: Bool, canUnminimize: Bool)
+)
+
 /// The fields `withViewerStates` fills on both comment kinds, and the GraphQL type a kind's node has.
 private protocol GitHubViewerStateful: Decodable {
     static var graphQLTypename: String { get }
@@ -1310,6 +1763,10 @@ private protocol GitHubViewerStateful: Decodable {
     var viewerCanEdit: Bool { get set }
     var viewerCanDelete: Bool { get set }
     var reactions: [HostedReaction] { get set }
+    var isMinimized: Bool { get set }
+    var minimizedReason: String? { get set }
+    var viewerCanMinimize: Bool { get set }
+    var viewerCanUnminimize: Bool { get set }
 }
 
 extension HostedComment: GitHubViewerStateful {

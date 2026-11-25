@@ -764,16 +764,22 @@ enum RepoMenus {
     }
 
     /// The web page of `target` (a branch, a commit) of the repository `remote`'s URL names: the connected provider's
-    /// page when `remote` is its remote, else in GitLab's URL layout when the profile has a GitLab account on the
-    /// remote's host, else in GitHub's; nil when the URL names no host/owner/repo.
+    /// page when `remote` is its remote, else in GitLab's (or Azure DevOps') URL layout when the profile has such an
+    /// account on the remote's host (`HostingStore.accountHost(forRemoteURL:)`), else in GitHub's; nil when the URL
+    /// names no host/owner/repo.
     private static func webLink(remote: String, _ target: HostedWebTarget, _ session: RepoSession) -> String? {
         if let api = session.github.api, api.remote == remote {
             return api.client.webURL(target, in: api.repository)?.absoluteString
         }
         guard let url = session.remotes.first(where: { $0.name == remote })?.url else { return nil }
-        if let host = RemoteURL(url)?.host, let account = session.profile?.account(forHost: host),
-           account.kind == .gitlab
-        {
+        let account = HostingStore.accountHost(forRemoteURL: url).flatMap { session.profile?.account(forHost: $0) }
+        if let account, account.kind == .azureDevOps {
+            // As GitLab's below: no request, no token.
+            guard let repo = AzureDevOpsClient.repository(fromRemoteURL: url) else { return nil }
+            return AzureDevOpsClient(token: { _ in throw HostingError.unauthorized }).webURL(target, in: repo)?
+                .absoluteString
+        }
+        if let host = RemoteURL(url)?.host, let account, account.kind == .gitlab {
             // No request is made: the client only lays out the URL, so it gets no token.
             guard let repo = account.kind.repository(fromRemoteURL: url, basePath: account.basePath),
                   let client = try? GitLabClient(host: host, basePath: account.basePath, token: { _ in

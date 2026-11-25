@@ -207,6 +207,47 @@ struct OAuthCodeFlowTests {
         #expect(stub.requests.first?.value(forHTTPHeaderField: "Authorization") == nil)
     }
 
+    @Test("Azure DevOps signs in with Entra as a public client: PKCE, scope, a localhost redirect without a path")
+    func azureDevOps() async throws {
+        let stub = StubServer { _ in .init(body: Self.tokens) }
+        let flow = try OAuthCodeFlow.azureDevOps(clientID: Self.clientID, port: 50123, session: stub.session)
+        let attempt = flow.start()
+        let query = Self.query(attempt.url)
+        let scope = "499b84ac-1321-427f-aa17-267ca6975798/.default offline_access"
+        let token = "https://login.microsoftonline.com/organizations/oauth2/v2.0/token"
+
+        #expect(attempt.url.absoluteString.hasPrefix(
+            "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"))
+        #expect(query["client_id"] == Self.clientID)
+        #expect(query["redirect_uri"] == "http://localhost:50123")
+        #expect(query["scope"] == scope)
+        #expect(query["code_challenge_method"] == "S256")
+        #expect(flow.callbackPath == "/")
+        let state = try #require(query["state"])
+        #expect(try flow.code(fromCallback: "/?code=abc123&state=\(state)", for: attempt) == "abc123")
+
+        _ = try await flow.exchange("the-code", for: attempt)
+        _ = try await flow.refresh("histq-fake-refresh")
+
+        let requests = stub.requests
+        #expect(requests.count == 2)
+        #expect(requests.allSatisfy {
+            $0.url?.absoluteString == token && $0.value(forHTTPHeaderField: "Authorization") == nil
+        })
+        let exchange = Self.form(requests.first)
+        #expect(exchange["grant_type"] == "authorization_code")
+        #expect(exchange["redirect_uri"] == "http://localhost:50123")
+        #expect(exchange["client_id"] == Self.clientID)
+        #expect(exchange["code_verifier"] != nil)
+        #expect(Self.form(requests.last) == [
+            "grant_type": "refresh_token", "refresh_token": "histq-fake-refresh", "client_id": Self.clientID,
+            "scope": scope,
+        ])
+        #expect(throws: OAuthCodeFlow.CodeFlowError.missingClient) {
+            try OAuthCodeFlow.azureDevOps(clientID: " ")
+        }
+    }
+
     @Test("endpoints must be https without userinfo, the redirect a 127.0.0.1 port, the client complete")
     func refusedSetups() {
         let https = URL(string: "https://example.test/token")!

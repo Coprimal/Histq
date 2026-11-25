@@ -29,14 +29,21 @@
 // The profile's account tokens (`GitCredential`, one per host) reach git only for network commands (`.network`,
 // `.backgroundFetch`): for the credential at index `<n>`, env vars `HISTQ_GIT_TOKEN_<n>` and `HISTQ_GIT_USER_<n>`
 // and a credential helper for its host alone, `credential.https://<host>.helper` reset (so the user's osxkeychain is
-// not asked, and nothing is stored there) and then set to a shell function that prints the two variables. A token or
-// a username is never in a config value or an argument (a process list shows those), and reads, local writes and the
-// terminal never get them. The core never reads the Keychain: the caller passes the credentials in.
+// not asked, and nothing is stored there) and then set to a shell function that prints the two variables. An Azure
+// DevOps credential (a Microsoft Entra access token, which Microsoft documents for git only as a header) instead gets
+// its host's helper reset with none after it (so no helper answers with a password, and no username reaches git),
+// `http.https://<host>/.extraHeader` reset and then set to `Authorization: Bearer <token>`, and
+// `http.https://<host>/.followRedirects` false (a later request to a host it was redirected to could carry the header
+// too). A token or a username is never in an argument or a config file (a process list shows the arguments; the
+// header is command-scope config, an environment variable), and reads, local writes and the terminal never get them.
+// The core never reads the Keychain: the caller passes the credentials in.
 //
 // Every child of git inherits its environment, so a command gets a token only when the gate
 // (`networkToken(for:credentials:base:runner:cwd:)`) lets it: every URL it contacts, after `insteadOf` and
-// `pushInsteadOf`, is `https://<host>/…` for the host of one of the credentials, and the repo's own config sets no
-// network key (`http.*`, a remote's proxy, `url.*.insteadOf`, `credential.*`) that could send a token elsewhere,
+// `pushInsteadOf`, is `https://<host>/…` for the host of one of the credentials (or, for an Azure DevOps account on
+// `dev.azure.com`, its legacy `https://<org>.visualstudio.com/…`, which gets that credential bound to its own host),
+// and the repo's own config sets no network key (`http.*`, a remote's proxy, `url.*.insteadOf`, `credential.*`) that
+// could send a token elsewhere,
 // and, for a fetch, no config scope has a remote group named like a remote it fetches (`remotes.<name>`: `git fetch
 // <name>` fetches a group's members before a remote of that name, so git would not contact the URLs the gate
 // checked; a push never resolves groups, and other groups, such as `remotes.all`, change nothing). The command then
@@ -187,9 +194,15 @@ public enum GitInvocation {
                 break
             }
             for (index, credential) in usable.enumerated() {
+                let key = "credential.https://\(credential.host).helper"
+                if credential.kind == .azureDevOps {
+                    let http = "http.https://\(credential.host)/"
+                    config += [(key, ""), (http + ".followRedirects", "false"), (http + ".extraHeader", ""),
+                               (http + ".extraHeader", "Authorization: Bearer \(credential.token)")]
+                    continue
+                }
                 env["HISTQ_GIT_TOKEN_\(index)"] = credential.token
                 env["HISTQ_GIT_USER_\(index)"] = credential.gitUsername
-                let key = "credential.https://\(credential.host).helper"
                 config += [(key, ""), (key, tokenHelper(index))]
             }
         }
@@ -209,14 +222,15 @@ public enum GitInvocation {
     /// The credentials git may get, in order, each with its host as `HostingHTTP.validatedHost` gives it (lowercase,
     /// with its port if it has one); the position in this list is the `<n>` of its variables. A credential is dropped
     /// when its host could widen or bend the config key (`*`, `/`, `@`, whitespace), its token could break the
-    /// helper's output lines (`HostingHTTP.isUsableToken`) or its username, or the one the helper answers
-    /// (`gitUsername`), is not `GitCredential.isSafeUsername`; a second credential for a host already listed is
-    /// dropped too.
+    /// helper's output lines (`HostingHTTP.isUsableToken`) or, but for Azure DevOps (whose token goes in a header, with
+    /// no username), its username or the one the helper answers (`gitUsername`) is not `GitCredential.isSafeUsername`;
+    /// a second credential for a host already listed is dropped too.
     static func usableCredentials(_ credentials: [GitCredential]) -> [GitCredential] {
         var usable: [GitCredential] = []
         for var credential in credentials {
             guard let host = HostingHTTP.validatedHost(credential.host), HostingHTTP.isUsableToken(credential.token),
-                  GitCredential.isSafeUsername(credential.username), GitCredential.isSafeUsername(credential.gitUsername),
+                  credential.kind == .azureDevOps || (GitCredential.isSafeUsername(credential.username)
+                      && GitCredential.isSafeUsername(credential.gitUsername)),
                   !usable.contains(where: { $0.host == host })
             else { continue }
             credential.host = host
@@ -383,8 +397,8 @@ public enum GitInvocation {
     /// Whether a network command gets credentials, which, and why not.
     public enum TokenDecision: Sendable, Equatable {
         /// Every URL is `https://<host>/…` for the host of one of these credentials (the usable ones whose host a URL
-        /// reaches, no other; hosts as `HostingHTTP.validatedHost` gives them) and the repo sets no network key of
-        /// its own.
+        /// reaches, no other; hosts as `HostingHTTP.validatedHost` gives them; an `<org>.visualstudio.com` URL gets
+        /// the Azure DevOps credential with that host) and the repo sets no network key of its own.
         case attach([GitCredential])
         /// No credential `usableCredentials(_:)` keeps.
         case noToken
@@ -409,8 +423,9 @@ public enum GitInvocation {
     /// nor for a submodule fetch, whose caller never recurses), no remote a fetch names is also the name of a remote
     /// group in any config scope (`remoteGroup`; a push and a submodule fetch never resolve groups, and a group named
     /// like no fetched remote changes nothing), and every URL `target` contacts passes
-    /// `isTokenURL(_:host:allowsUsername:)` (a bare username for a Bitbucket account) for the host of one of them
-    /// after the rewrites git applies (`remote get-url`:
+    /// `isTokenURL(_:host:allowsUsername:)` (a bare username for a Bitbucket or Azure DevOps account) for the host of
+    /// one of them, or is an Azure account's legacy `https://<org>.visualstudio.com/…` (`visualStudioCredential`), after
+    /// the rewrites git applies (`remote get-url`:
     /// `insteadOf`, and `pushInsteadOf` for a push; `ls-remote --get-url` for a clone). All or nothing: one URL on no
     /// credential's host and the command gets none. `.attach` carries the credentials of the hosts the URLs reach
     /// alone, so a command never gets the token of a host it does not contact. The git runs read config only, under a
@@ -456,15 +471,24 @@ public enum GitInvocation {
         }
         guard !urls.isEmpty else { return .otherURL }
         var reached: Set<String> = []
+        var legacyAzure: [GitCredential] = []
         for url in urls {
-            // A bare username only on Bitbucket, whose own clone links carry one. Elsewhere a username in the URL picks
-            // one of the user's own logins for that host (their helpers'), which the account's token must not replace.
-            guard let credential = usable.first(where: {
-                isTokenURL(url, host: $0.host, allowsUsername: $0.kind == .bitbucketCloud)
-            }) else { return .otherURL }
-            reached.insert(credential.host)
+            // A bare username only on Bitbucket (Cloud and Data Center) and Azure DevOps (`org@dev.azure.com`), whose
+            // own clone links carry one. Elsewhere a username in the URL picks one of the user's own logins for that
+            // host (their helpers'), which the account's token must not replace.
+            if let credential = usable.first(where: {
+                isTokenURL(
+                    url, host: $0.host,
+                    allowsUsername: [.bitbucketCloud, .bitbucketDataCenter, .azureDevOps].contains($0.kind))
+            }) {
+                reached.insert(credential.host)
+            } else if let credential = visualStudioCredential(for: url, in: usable) {
+                if !legacyAzure.contains(where: { $0.host == credential.host }) { legacyAzure.append(credential) }
+            } else {
+                return .otherURL
+            }
         }
-        let matched = usable.filter { reached.contains($0.host) }
+        let matched = usable.filter { reached.contains($0.host) } + legacyAzure
         // A clone has no repo yet; a submodule's caller never recurses (the parent has `.gitmodules` anyway).
         switch target {
         case .clone, .submodule: return .attach(matched)
@@ -477,6 +501,27 @@ public enum GitInvocation {
             return .lookupFailed
         }
         return .attach(matched)
+    }
+
+    /// The Azure DevOps account's credential (`kind` `.azureDevOps`, host `dev.azure.com`) bound to the legacy host of
+    /// `url`, `https://<org>.visualstudio.com/…`, where its organizations still answer: exactly one label before
+    /// `visualstudio.com`, of ASCII letters, digits and `-` (not first nor last), not `vs-ssh` (an ssh host), no port,
+    /// and the URL passes `isTokenURL(_:host:allowsUsername:)` for that host with a bare username. nil otherwise, so
+    /// no other host (`app.vssps.visualstudio.com`, `a.b.visualstudio.com`, a GitHub host) gets the Azure token.
+    static func visualStudioCredential(for url: String, in usable: [GitCredential]) -> GitCredential? {
+        guard var azure = usable.first(where: { $0.kind == .azureDevOps && $0.host == AzureDevOpsClient.host }),
+              url.hasPrefix("https://")
+        else { return nil }
+        let authority = url.dropFirst("https://".count).prefix { $0 != "/" }
+        let host = (authority.split(separator: "@", omittingEmptySubsequences: false).last ?? "").lowercased()
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count == 3, labels[1] == "visualstudio", labels[2] == "com", labels[0] != "vs-ssh",
+              let org = labels.first, (1...63).contains(org.count), !org.hasPrefix("-"), !org.hasSuffix("-"),
+              org.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-") }),
+              isTokenURL(url, host: host, allowsUsername: true)
+        else { return nil }
+        azure.host = host
+        return azure
     }
 
     /// The submodule recursion keys that are on in `cwd` (`submodule.recurse` true, `fetch.recurseSubmodules` or
@@ -666,11 +711,12 @@ public enum GitInvocation {
     /// stub's two commands itself, so nothing read later from the repo's file runs with a token. Any other hook runs
     /// with the same arguments and input after the wrapper puts back what it would see without the tokens, from `env`:
     /// `HISTQ_GIT_TOKEN_<n>` and `HISTQ_GIT_USER_<n>` of every one of `credentials` (the set the push runs with, as
-    /// `environment(profile:base:access:credentials:)` numbers it) unset, and `GIT_CONFIG_COUNT`,
-    /// `GIT_ALLOW_PROTOCOL`, `GIT_ASKPASS` and `SSH_ASKPASS` as `env` has them (unset when it has none). The
-    /// `.network` block and the tokens' entries all come after the write environment's own config entries, so the
-    /// count drops them: a `git` the hook runs (over ssh too) sees the write environment, the user's own credential
-    /// helpers and the repo's hooks, as in a push without the tokens.
+    /// `environment(profile:base:access:credentials:)` numbers it) unset, every `GIT_CONFIG_KEY_<n>` and
+    /// `GIT_CONFIG_VALUE_<n>` the push has at or above `env`'s count unset (an Azure DevOps header holds its token),
+    /// and `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `GIT_ALLOW_PROTOCOL`, `GIT_ASKPASS` and `SSH_ASKPASS` as `env`
+    /// has them (unset when it has none). The `.network` block and the tokens' entries all come after the write
+    /// environment's own config entries, so the count drops them: a `git` the hook runs (over ssh too) sees the write
+    /// environment, the user's own credential helpers and the repo's hooks, as in a push without the tokens.
     public static func prePushHooksFolder(
         runner: GitRunner, cwd: URL, env: [String: String], credentials: [GitCredential]
     ) async throws -> URL {
@@ -692,7 +738,12 @@ public enum GitInvocation {
             : "#!/bin/sh\nunset HISTQ_GIT_TOKEN\n"
                 // Every index `credentials` could use: never fewer than the usable ones it numbers from 0.
                 + credentials.indices.map { "unset HISTQ_GIT_TOKEN_\($0) HISTQ_GIT_USER_\($0)\n" }.joined()
-                + ["GIT_CONFIG_COUNT", "GIT_ALLOW_PROTOCOL", "GIT_ASKPASS", "SSH_ASKPASS"].map { key in
+                // The push's entries above the write environment's: the count put back below would only hide them.
+                + "i=\(Int(env["GIT_CONFIG_COUNT"] ?? "") ?? 0)\n"
+                + #"while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do unset "GIT_CONFIG_KEY_$i" "GIT_CONFIG_VALUE_$i"; "#
+                + "i=$((i + 1)); done\n"
+                + ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_ALLOW_PROTOCOL", "GIT_ASKPASS",
+                   "SSH_ASKPASS"].map { key in
                     env[key].map { "\(key)=\(shellQuoted($0))\nexport \(key)\n" } ?? "unset \(key)\n"
                 }.joined()
                 + "test -x \(shellQuoted(hook)) || exit 0\nexec \(shellQuoted(hook)) \"$@\"\n"
@@ -929,7 +980,7 @@ public struct GitCredential: Sendable, Equatable, CustomStringConvertible, Custo
     /// The host as the account has it, `HostingHTTP.validatedHost` style (with a port if it has one).
     public var host: String
     /// The username git sends with the token for kinds that need one; it must pass `isSafeUsername(_:)`, else the
-    /// credential is never used.
+    /// credential is never used. Not for Azure DevOps, whose token reaches git as a header without it.
     public var username: String
     public var token: String
 
@@ -943,18 +994,21 @@ public struct GitCredential: Sendable, Equatable, CustomStringConvertible, Custo
     /// What the token helper answers as the username: GitHub's `x-access-token`, whatever `username` says; for
     /// GitLab `username` (any name works with a personal access token; an OAuth account saves `oauth2`), else
     /// `oauth2`; Bitbucket Cloud's `x-token-auth`, which its API tokens and OAuth tokens both accept (Atlassian docs,
-    /// phase 11.0). Only a name `isSafeUsername(_:)` accepts is ever answered.
+    /// phase 11.0); Bitbucket Data Center's `username`, the account's own name, which its HTTP access tokens go with;
+    /// Azure DevOps' `username` too, which git never gets: its token goes in an `Authorization: Bearer` header. Only a
+    /// name `isSafeUsername(_:)` accepts is ever answered.
     var gitUsername: String {
         switch kind {
         case .github: "x-access-token"
         case .gitlab: Self.isSafeUsername(username) ? username : "oauth2"
         case .bitbucketCloud: "x-token-auth"
+        case .bitbucketDataCenter, .azureDevOps: username
         }
     }
 
     /// Printable ASCII without a space, `:`, `@`, `/`, quote, `$`, backslash or backquote, and not empty: nothing a
     /// shell, a URL or the credential protocol could read as more than a name.
-    static func isSafeUsername(_ username: String) -> Bool {
+    public static func isSafeUsername(_ username: String) -> Bool {
         !username.isEmpty && username.unicodeScalars.allSatisfy {
             (0x21...0x7E).contains($0.value) && !":@/'\"$\\`".unicodeScalars.contains($0)
         }

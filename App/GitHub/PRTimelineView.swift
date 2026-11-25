@@ -45,9 +45,18 @@ struct PRTimelineHTML: Sendable {
     var threadsStayOpen = false
     /// Each comment's Edit is an icon in its header, out of its "…" menu (`PRPageLayout.headerEdit`).
     var headerEdit = false
+    /// With `headerEdit`: the `cmenu-<key>` slot holds a Delete icon, not the "…" menu (`PRPageLayout.headerDelete`).
+    var headerDelete = false
     /// The description has its reaction row (`creact-d`): the item's own reactions
     /// (`PRPageLayout.descriptionReactions`).
     var descriptionReactions = false
+    /// The entries before any filter (the Activity's "Show everything (N)", `PRActivity.allTitle`).
+    var entryCount = 0
+    /// The comments hidden on the host that show collapsed (`PRGeneralOptions.hideReasons`), by
+    /// `PRCommentTarget.key`: each has a Show toggle in its header (`cshow-<key>`).
+    var hiddenComments: Set<String> = []
+    /// The reply rows put their buttons under the box (`PRGeneralOptions.stackedReplies`).
+    var stackedReplies = false
 
     /// The description's page and the comments' page (`PRPageLayout.commentsCard`), split at the page's
     /// `PRTimeline.commentsMarker`; nil for a page without it. Each keeps every map: a page draws only its own slots.
@@ -72,6 +81,8 @@ struct PRActivityPage: Sendable {
     let collapsesReplies: Bool
     /// Each comment's Edit is an icon in its header (`cpen-<key>`), and its "…" menu only holds Delete.
     var headerEdit = false
+    /// With `headerEdit`: Delete is an icon too, on the menu's slot (`cmenu-<key>`).
+    var headerDelete = false
     /// The badges of each comment's header (`PRPageLayout.roleBadges`): "Author" on the item author's, and the
     /// member role (`roles`, by user id: "Owner", "Developer") the host gave; nil draws none.
     var roles: [Int: String]? = nil
@@ -84,11 +95,21 @@ struct PRActivityPage: Sendable {
 /// are. Nothing on the page acts on such a comment or thread (no menu, no reactions, no reply row) until the reload
 /// brings the host's id: a write would name an id the host does not know. Only for comment and thread ids: a
 /// synthetic review or user id (`SyntheticIDs`) may be this high.
+/// A pending review's comments (`HostedPendingReview.idBase`, the band just below) are treated the same by
+/// `isPlaceholder` (Files changed's rows): no menu, reactions or reply row. The Conversation page tells the two apart
+/// (`isOptimistic`, `isPending`): on a host-like layout a pending comment gets its chrome through the host's pending
+/// calls (`PRGeneralOptions.pendingComments`), never the comment endpoints.
 enum PRPlaceholderID {
     /// The models count up from it (`PullRequestDetailModel.optimisticID`, `IssueDetailModel.optimisticID`).
     nonisolated static let base = 1 << 62
 
-    nonisolated static func isPlaceholder(_ id: Int) -> Bool { id >= base }
+    nonisolated static func isPlaceholder(_ id: Int) -> Bool { id >= HostedPendingReview.idBase }
+
+    /// What the host has not answered yet: an optimistic comment or thread.
+    nonisolated static func isOptimistic(_ id: Int) -> Bool { id >= base }
+
+    /// A comment or thread of the viewer's pending review (`HostedPendingReview.isPending`).
+    nonisolated static func isPending(_ id: Int) -> Bool { HostedPendingReview.isPending(id) }
 }
 
 /// A comment's reactions on the page, where the host has reactions (`PRGeneralOptions.reactions`): every comment but
@@ -109,15 +130,20 @@ struct PRReactionTarget: Equatable, Sendable {
     var ref: HostedCommentRef { HostedCommentRef(kind: kind, id: id, hostKey: hostKey) }
     /// Whether the page has a chip row for it.
     var hasRow: Bool { Self.hasRow(reactions) }
+    /// A comment of the viewer's pending review: its reaction goes by its node id (GitHub's GraphQL), as every one.
+    var isPending: Bool { kind == .review && PRPlaceholderID.isPending(id) }
 
     nonisolated static func hasRow(_ reactions: [HostedReaction]) -> Bool { reactions.contains { $0.count > 0 } }
 
-    /// The comment's reactions when `options` offer reactions; nil otherwise.
+    /// The comment's reactions when `options` offer reactions; nil otherwise, for an optimistic comment, and for a
+    /// pending one unless `options` give pending comments their chrome and the host lets the viewer react to it
+    /// (`canReact`, `HostedReviewComment.viewerCanReact`: GitHub's pending comments yes, GitLab's drafts no).
     nonisolated init?(
         _ kind: HostedCommentRef.Kind, id: Int, hostKey: String?, reactions: [HostedReaction], user: HostedUser?,
-        options: PRGeneralOptions
+        canReact: Bool? = nil, options: PRGeneralOptions
     ) {
-        guard !options.reactions.isEmpty, !PRPlaceholderID.isPlaceholder(id) else { return nil }
+        guard !options.reactions.isEmpty, !PRPlaceholderID.isOptimistic(id) else { return nil }
+        if PRPlaceholderID.isPending(id), !(options.pendingComments && canReact == true) { return nil }
         self.kind = kind
         self.id = id
         self.hostKey = hostKey
@@ -127,8 +153,8 @@ struct PRReactionTarget: Equatable, Sendable {
 }
 
 /// A comment the viewer may edit or delete on the page (the host's `editComments`/`deleteComments` and the comment's
-/// own rights): it has a "…" menu in its header (slot `cmenu-<key>`) and, after its body, the in-place editor's slot
-/// (`cedit-<key>`), shown only while it is edited.
+/// own rights), or quote in a reply (`quote`): it has a "…" menu in its header (slot `cmenu-<key>`) and, after its
+/// body when it may be edited or deleted, the in-place editor's slot (`cedit-<key>`), shown only while it is edited.
 struct PRCommentTarget: Equatable, Sendable {
     let kind: HostedCommentRef.Kind
     let id: Int
@@ -139,19 +165,50 @@ struct PRCommentTarget: Equatable, Sendable {
     let author: String
     let canEdit: Bool
     let canDelete: Bool
+    /// Where Quote reply puts its text (`PRGeneralOptions.quote`); nil: no Quote reply.
+    let quote: PRQuoteTarget?
+    /// What the menu offers on the comment's suggested change (`PRGeneralOptions.suggestions`); nil: nothing.
+    var suggestion: PRCommentSuggestion?
+    /// Hide (with a reason) or Unhide in the menu (`PRGeneralOptions.hideReasons`); nil: neither.
+    var hide: PRCommentHide?
+    /// The item's own description, not a comment (`init(description:user:)`): Edit only, saved with
+    /// `HostingProvider.editDescription`.
+    var isDescription = false
+    /// Copy Markdown in the menu: the raw `body` to the pasteboard (`PRGeneralOptions.copyMarkdown`, a comment with
+    /// text; never the description, whose lone Edit stays a pencil).
+    var copyMarkdown = false
 
     /// `g<id>` for a general comment, `r<id>` for a review comment: the two id spaces apart, digits after the letter,
-    /// as the page's slot ids are.
-    var key: String { "\(kind == .general ? "g" : "r")\(id)" }
+    /// as the page's slot ids are; `d` for the description (`cpen-d`, `cmenu-d`, `cedit-d`).
+    var key: String { isDescription ? "d" : "\(kind == .general ? "g" : "r")\(id)" }
+    /// What its Edit says it edits, for help and VoiceOver.
+    var subject: String { isDescription ? "the description" : "\(author)'s comment" }
     var ref: HostedCommentRef { HostedCommentRef(kind: kind, id: id, hostKey: hostKey) }
+    /// A comment of the viewer's pending review: Edit and Delete go through the host's pending calls
+    /// (`HostingProvider.editPendingComment`, `deletePendingComment`), never the comment endpoints.
+    var isPending: Bool { kind == .review && !isDescription && PRPlaceholderID.isPending(id) }
 
-    /// What `options` offer on a comment with these rights; nil when neither Edit nor Delete.
+    /// What `options` offer on a comment with these rights, quoted into `quote` (nil: the viewer cannot reply to it),
+    /// with `suggestion` on its suggested change and `hide` on hiding it; nil when neither Edit, Delete, Quote reply,
+    /// Copy Markdown, a suggestion's item nor Hide or Unhide. A comment without text has no Quote reply or Copy
+    /// Markdown. An optimistic comment has none, nor a pending one unless `options` give pending comments their chrome
+    /// (`pendingComments`).
     nonisolated init?(
         _ kind: HostedCommentRef.Kind, id: Int, hostKey: String?, body: String?, user: HostedUser?, canEdit: Bool,
-        canDelete: Bool, options: PRGeneralOptions
+        canDelete: Bool, quote: PRQuoteTarget? = nil, suggestion: PRCommentSuggestion? = nil,
+        hide: PRCommentHide? = nil, options: PRGeneralOptions
     ) {
+        guard !PRPlaceholderID.isOptimistic(id), options.pendingComments || !PRPlaceholderID.isPending(id) else {
+            return nil
+        }
         let edit = options.edit && canEdit, delete = options.delete && canDelete
-        guard edit || delete, !PRPlaceholderID.isPlaceholder(id) else { return nil }
+        let hasText = body.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let quote = options.quote && hasText ? quote : nil
+        let copy = options.copyMarkdown && hasText
+        guard edit || delete || quote != nil || copy || suggestion != nil || hide != nil else { return nil }
+        copyMarkdown = copy
+        self.suggestion = suggestion
+        self.hide = hide
         self.kind = kind
         self.id = id
         self.hostKey = hostKey
@@ -159,6 +216,139 @@ struct PRCommentTarget: Equatable, Sendable {
         author = user?.login ?? "ghost"
         self.canEdit = edit
         self.canDelete = delete
+        self.quote = quote
+    }
+
+    /// The description of an item by `user`, edited from its raw markdown `body` (the host's, never its HTML).
+    nonisolated init(description body: String?, user: HostedUser?) {
+        kind = .general
+        id = 0
+        hostKey = nil
+        self.body = body ?? ""
+        author = user?.login ?? "ghost"
+        canEdit = true
+        canDelete = false
+        quote = nil
+        isDescription = true
+    }
+}
+
+/// Where a comment's Quote reply puts its text: its review thread's reply box (`reply-<id>`), its general thread's
+/// (`greply-<root>`), or the page's comment box (a general comment without a reply box).
+enum PRQuoteTarget: Equatable, Sendable {
+    case thread(Int)
+    case general(root: Int)
+    case composer
+
+    /// The box's key in `PRGeneralThreadModel.quoteFocus`: its slot id, or `composer`.
+    var focusKey: String {
+        switch self {
+        case .thread(let id): "reply-\(id)"
+        case .general(let root): "greply-\(root)"
+        case .composer: "composer"
+        }
+    }
+
+    /// `draft` with `body` (the comment's raw markdown) quoted after it: `> ` before every line (`>` alone on an empty
+    /// one), then a blank line for the reply; after a blank line when `draft` has text.
+    static func appending(_ body: String, to draft: String) -> String {
+        let lines = body.trimmingCharacters(in: .newlines)
+            .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        let quoted = lines.map { $0.isEmpty ? ">" : "> " + $0 }.joined(separator: "\n") + "\n\n"
+        let kept = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "" : draft.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) + "\n\n"
+        return kept + quoted
+    }
+}
+
+/// What a review comment's "…" menu offers on its suggested change: Apply suggestion on the host's suggestion `id`
+/// (GitLab's apply endpoint), or "Apply on <host>", which opens the comment's page `url` (GitHub has no apply API).
+enum PRCommentSuggestion: Equatable, Sendable {
+    case apply(id: Int)
+    case open(url: String)
+
+    /// What `options` offer on `comment`: Apply suggestion on its first appliable, unapplied suggestion, or Apply on
+    /// <host> on a comment whose raw body holds a suggestion block and that has a page; nil otherwise.
+    nonisolated init?(_ comment: HostedReviewComment, options: PRGeneralOptions) {
+        switch options.suggestions {
+        case .apply?:
+            guard let suggestion = comment.suggestions.first(where: { $0.appliable && !$0.applied }) else { return nil }
+            self = .apply(id: suggestion.id)
+        case .open?:
+            guard let url = comment.htmlURL, let body = comment.body, !MarkdownHTML.suggestions(in: body).isEmpty
+            else { return nil }
+            self = .open(url: url)
+        case nil:
+            return nil
+        }
+    }
+
+    /// Whether `options` show `comment`'s suggestions as applied (an "Applied" capsule in its header): every one the
+    /// host lists is.
+    nonisolated static func isApplied(_ comment: HostedReviewComment, options: PRGeneralOptions) -> Bool {
+        options.suggestions == .apply && !comment.suggestions.isEmpty && comment.suggestions.allSatisfy(\.applied)
+    }
+}
+
+/// What a host-like page offers on suggested changes (`PRGeneralOptions.suggestions`): applying them through the API
+/// (`applySuggestions`), or only opening the comment on the host (`suggestions` without it).
+enum PRSuggestionMenu: Sendable {
+    case apply, open
+}
+
+/// What a comment's "…" menu offers on hiding it on the host for everyone (`PRGeneralOptions.hideReasons`): Hide with
+/// one of the host's reasons, where the viewer may and it is shown, or Unhide, where they may and it is hidden.
+enum PRCommentHide: Equatable, Sendable {
+    case hide(reasons: [String])
+    case unhide
+
+    /// What `options` offer on a comment hidden or not (`isMinimized`) with these rights; nil without hiding (another
+    /// host, `PRPageLayout.default`) or without the right.
+    nonisolated init?(isMinimized: Bool, canMinimize: Bool, canUnminimize: Bool, options: PRGeneralOptions) {
+        guard !options.hideReasons.isEmpty else { return nil }
+        if isMinimized {
+            guard canUnminimize else { return nil }
+            self = .unhide
+        } else {
+            guard canMinimize else { return nil }
+            self = .hide(reasons: options.hideReasons)
+        }
+    }
+}
+
+/// The words of a hidden comment's reason, read back (`HostedComment.minimizedReason`: GitHub's `outdated`,
+/// `off-topic`, `low-quality`…) or offered by Hide (`HostingProvider.hideReasons`: GitHub's `OUTDATED`,
+/// `LOW_QUALITY`…), from a fixed table: the host's string itself never reaches the page or a menu.
+enum PRHiddenReason {
+    private nonisolated static let words = [
+        "abuse": "abuse", "off-topic": "off-topic", "outdated": "outdated", "resolved": "resolved",
+        "duplicate": "duplicate", "spam": "spam", "low-quality": "low quality",
+    ]
+
+    /// A host value in the read-back form: lowercase, `-` for `_` (`OFF_TOPIC` is `off-topic`).
+    nonisolated static func readBack(_ reason: String) -> String {
+        reason.lowercased().replacingOccurrences(of: "_", with: "-")
+    }
+
+    /// "outdated", "low quality"; nil for no reason or one outside the table.
+    nonisolated static func words(_ reason: String?) -> String? {
+        reason.flatMap { words[readBack($0)] }
+    }
+
+    /// The page's header line: "This comment was hidden as outdated", or "This comment was hidden" without known
+    /// words.
+    nonisolated static func sentence(_ reason: String?) -> String {
+        words(reason).map { "This comment was hidden as \($0)" } ?? "This comment was hidden"
+    }
+
+    /// Files changed's note after the author: "hidden as outdated", or "hidden".
+    nonisolated static func note(_ reason: String?) -> String {
+        words(reason).map { "hidden as \($0)" } ?? "hidden"
+    }
+
+    /// Hide's menu item for a reason: "Outdated", "Low quality"; nil outside the table (not offered).
+    nonisolated static func title(_ reason: String) -> String? {
+        words(reason).map { $0.prefix(1).uppercased() + $0.dropFirst() }
     }
 }
 
@@ -187,15 +377,50 @@ struct PRGeneralOptions: Sendable {
     var delete = false
     /// The kinds the viewer may add, in the host's order; empty without `reactions` (no reaction row at all).
     var reactions: [String] = []
+    /// Quote reply on every comment the viewer may reply to (a host-like layout, never `PRPageLayout.default`).
+    var quote = false
+    /// Edit on the description, where the viewer may (`PRTimeline.mayEditDescription`): the host's `editDescription`
+    /// on a host-like layout, never `PRPageLayout.default`.
+    var editDescription = false
+    /// The suggested changes' menu item (`PRCommentSuggestion`) and "Applied" capsule: the host's `applySuggestions`
+    /// (`apply`) or `suggestions` (`open`) on a host-like layout, never `PRPageLayout.default`; nil: none.
+    var suggestions: PRSuggestionMenu?
+    /// The reasons Hide offers (`HostingProvider.hideReasons`, the host's `hideComments` on a host-like layout, never
+    /// `PRPageLayout.default`); empty: no Hide or Unhide, and a comment hidden on the host shows as any other.
+    var hideReasons: [String] = []
+    /// Each reply row's buttons on a line of their own under its box (a host-like layout, never
+    /// `PRPageLayout.default`, whose rows keep the buttons beside the box in a wide slot).
+    var stackedReplies = false
+    /// A comment whose "…" menu would hold Edit alone gets the Edit pencil instead (a host-like layout, never
+    /// `PRPageLayout.default`).
+    var editAloneAsIcon = false
+    /// Copy Markdown in each comment's "…" menu (a host-like layout with a menu, never `PRPageLayout.default` nor
+    /// Azure DevOps's icons, `headerDelete`).
+    var copyMarkdown = false
+    /// The viewer's pending comments (`HostedReviewComment.isPending`) get the others' chrome: Edit and Delete through
+    /// the host's pending calls (`editPendingComments`), reactions where the host lets them react
+    /// (`viewerCanReact`), Quote reply where their thread has a reply box, and Copy Markdown (a host-like layout,
+    /// never `PRPageLayout.default`). Without it they have none: a write would send a draft's id to the comment
+    /// endpoints.
+    var pendingComments = false
+    /// A thread of the pending review whose thread state the host gives gets its reply row, the reply going into the
+    /// pending review (`HostingProvider.routesThroughPendingReview`: GitHub's; GitLab's page has no reply box on a
+    /// draft).
+    var pendingReplies = false
+    /// The threads the viewer started in their pending review come first, right under the description (and the
+    /// Comments card's comment box), as on the host's page (a host-like layout, never `PRPageLayout.default`).
+    var pendingFirst = false
 
     init(replies: Bool = false, resolve: Bool = false, expanded: [Int: Bool] = [:], edit: Bool = false,
-         delete: Bool = false, reactions: [String] = []) {
+         delete: Bool = false, reactions: [String] = [], quote: Bool = false, editDescription: Bool = false) {
         self.replies = replies
         self.resolve = resolve
         self.expanded = expanded
         self.edit = edit
         self.delete = delete
         self.reactions = reactions
+        self.quote = quote
+        self.editDescription = editDescription
     }
 
     /// What `client` offers, with `expanded`.
@@ -204,7 +429,20 @@ struct PRGeneralOptions: Sendable {
         self.init(replies: capabilities.contains(.generalReplies),
                   resolve: capabilities.contains(.resolveGeneralThreads), expanded: expanded,
                   edit: capabilities.contains(.editComments), delete: capabilities.contains(.deleteComments),
-                  reactions: capabilities.contains(.reactions) ? client.reactionKinds : [])
+                  reactions: capabilities.contains(.reactions) ? client.reactionKinds : [],
+                  quote: PRPageLayout.for(client.kind) != .default,
+                  editDescription: capabilities.contains(.editDescription) && PRPageLayout.for(client.kind) != .default)
+        if PRPageLayout.for(client.kind) != .default {
+            stackedReplies = true
+            editAloneAsIcon = true
+            copyMarkdown = !PRPageLayout.for(client.kind).headerDelete
+            pendingComments = capabilities.contains(.editPendingComments)
+            pendingReplies = pendingComments && client.routesThroughPendingReview
+            pendingFirst = true
+            suggestions = capabilities.contains(.applySuggestions) ? .apply
+                : capabilities.contains(.suggestions) ? .open : nil
+            if capabilities.contains(.hideComments) { hideReasons = client.hideReasons }
+        }
     }
 }
 
@@ -220,6 +458,9 @@ enum PRGeneralAction: Equatable, Sendable {
     case delete(PRCommentTarget)
     /// `kind`: the host's name of the reaction; `add` false removes the viewer's.
     case react(PRReactionTarget, kind: String, add: Bool)
+    /// Hides the comment on the host for everyone; `reason`: one of the host's (`HostingProvider.hideReasons`).
+    case hide(PRCommentTarget, reason: String)
+    case unhide(PRCommentTarget)
 
     /// What the host's write takes: the root, a general comment, with its host key (GitLab's discussion id), or the
     /// edited, deleted or reacted comment.
@@ -227,7 +468,7 @@ enum PRGeneralAction: Equatable, Sendable {
         switch self {
         case .reply(let root, _), .resolve(let root, _):
             HostedCommentRef(kind: .general, id: root.id, hostKey: root.hostKey)
-        case .edit(let target, _), .delete(let target): target.ref
+        case .edit(let target, _), .delete(let target), .hide(let target, _), .unhide(let target): target.ref
         case .react(let target, _, _): target.ref
         }
     }
@@ -236,9 +477,11 @@ enum PRGeneralAction: Equatable, Sendable {
         switch self {
         case .reply: "Replying…"
         case .resolve(_, let resolved): resolved ? "Resolving…" : "Unresolving…"
-        case .edit: "Saving the comment…"
+        case .edit(let target, _): target.isDescription ? "Saving the description…" : "Saving the comment…"
         case .delete: "Deleting the comment…"
         case .react(_, _, let add): add ? "Adding the reaction…" : "Removing the reaction…"
+        case .hide: "Hiding the comment…"
+        case .unhide: "Unhiding the comment…"
         }
     }
 
@@ -246,9 +489,11 @@ enum PRGeneralAction: Equatable, Sendable {
         switch self {
         case .reply: "The reply was not posted"
         case .resolve(_, let resolved): resolved ? "Resolve failed" : "Unresolve failed"
-        case .edit: "The comment was not saved"
+        case .edit(let target, _): target.isDescription ? "The description was not saved" : "The comment was not saved"
         case .delete: "The comment was not deleted"
         case .react(_, _, let add): add ? "The reaction was not added" : "The reaction was not removed"
+        case .hide: "The comment was not hidden"
+        case .unhide: "The comment was not unhidden"
         }
     }
 
@@ -257,10 +502,14 @@ enum PRGeneralAction: Equatable, Sendable {
         switch self {
         case .reply: "The reply on \(number) was not posted"
         case .resolve(_, let resolved): resolved ? "Resolve on \(number) failed" : "Unresolve on \(number) failed"
-        case .edit: "The comment on \(number) was not saved"
+        case .edit(let target, _):
+            target.isDescription ? "The description of \(number) was not saved"
+                : "The comment on \(number) was not saved"
         case .delete: "The comment on \(number) was not deleted"
         case .react(_, _, let add): add ? "The reaction on \(number) was not added"
             : "The reaction on \(number) was not removed"
+        case .hide: "The comment on \(number) was not hidden"
+        case .unhide: "The comment on \(number) was not unhidden"
         }
     }
 
@@ -270,9 +519,12 @@ enum PRGeneralAction: Equatable, Sendable {
         switch self {
         case .reply: "greply"
         case .resolve(_, let resolved): resolved ? "gresolve" : "gunresolve"
-        case .edit: "edit-save"
-        case .delete: "delete-confirm"
-        case .react: "react"
+        case .edit(let target, _):
+            target.isDescription ? "edit-description" : target.isPending ? "pending-edit" : "edit-save"
+        case .delete(let target): target.isPending ? "pending-delete" : "delete-confirm"
+        case .react(let target, _, _): target.isPending ? "pending-react" : "react"
+        case .hide: "hide"
+        case .unhide: "unhide"
         }
     }
 
@@ -282,11 +534,28 @@ enum PRGeneralAction: Equatable, Sendable {
         case .reply(_, let body): _ = try await client.reply(toGeneral: ref, on: item, in: repository, body: body)
         case .resolve(_, let resolved):
             _ = try await client.setGeneralThread(ref, on: item, in: repository, resolved: resolved)
+        case .edit(let target, let body) where target.isDescription:
+            try await client.editDescription(of: item, in: repository, body: body)
+        // A pending comment's own calls (GitHub's GraphQL by node id, GitLab's draft notes): its id is no comment id.
+        case .edit(let target, let body) where target.isPending:
+            try await client.editPendingComment(ref, on: try Self.pullRequest(item), in: repository, body: body)
+        case .delete(let target) where target.isPending:
+            try await client.deletePendingComment(ref, on: try Self.pullRequest(item), in: repository)
         case .edit(_, let body): try await client.editComment(ref, on: item, in: repository, body: body)
         case .delete: try await client.deleteComment(ref, on: item, in: repository)
         case .react(_, let kind, true): try await client.addReaction(kind, to: ref, on: item, in: repository)
         case .react(_, let kind, false): try await client.removeReaction(kind, from: ref, on: item, in: repository)
+        case .hide(_, let reason): try await client.hideComment(ref, on: item, in: repository, reason: reason)
+        case .unhide: try await client.unhideComment(ref, on: item, in: repository)
         }
+    }
+
+    /// A pending comment's pull request number; an issue has no pending review.
+    private static func pullRequest(_ item: HostedItem) throws -> Int {
+        guard case .pullRequest(let number) = item else {
+            throw HostingError.validationFailed(message: "an issue has no pending review")
+        }
+        return number
     }
 
     /// `message` (the error's text), and when GitHub refused a reaction, which permission a fine-grained token needs
@@ -315,8 +584,14 @@ enum PRGeneralAction: Equatable, Sendable {
 extension PRGeneralAction {
     /// DEBUG `-HistqPRAction` or `-HistqIssueAction` `greply` (posts "stub reply" to the first general thread),
     /// `gresolve` (resolves the first resolvable one), `edit-save` (saves "edited" into the first own comment),
-    /// `react` (adds a reaction to the first comment with reactions) or `react-new` (the first reaction of the first
-    /// comment with none, whose row then comes in; both `launchReaction`): the first root of `comments`, as the host
+    /// `edit-description` (saves "Edited description" as the description, where the page offers its Edit),
+    /// `react` (adds a reaction to the first comment with reactions; with one kind, toggles it as the like button
+    /// does) or `react-new` (the first reaction of the first comment with none, whose row then comes in; both
+    /// `launchReaction`), `hide` (hides the first comment offering Hide as outdated) or `unhide` (shows the first one
+    /// offering Unhide again), `pending-edit` (saves "QA edited pending comment" into the first pending comment
+    /// offering Edit), `pending-delete` (deletes the first one offering Delete, no confirmation) or `pending-react` (the
+    /// first of the host's kinds the viewer has not given the first pending comment with reactions): the first root
+    /// of `comments`, as the host
     /// listed them, or the first comment `page` offers Edit on (`launchTarget`); nil when none fits. `delete-confirm`
     /// goes through the confirmation (`launchDelete`).
     static func launchAction(
@@ -329,8 +604,32 @@ extension PRGeneralAction {
         case "greply": roots.first.map { .reply(root: $0, body: "stub reply") }
         case "gresolve": roots.first { $0.resolvable == true }.map { .resolve(root: $0, resolved: true) }
         case "edit-save": target.map { .edit($0, body: "edited") }
+        // The description's Edit, offered where the viewer may (the page's `cpen-d`/`cmenu-d`/card title).
+        case "edit-description": page.comments["d"].map { .edit($0, body: "Edited description") }
         case "react", "react-new":
             launchReaction(in: comments, reviewComments: reviewComments, page: page, hasRow: name == "react")
+        // The first comment the page offers Hide on, hidden as outdated, or Unhide on, shown again.
+        case "hide", "unhide":
+            (comments.map { "g\($0.id)" } + reviewComments.map { "r\($0.id)" }).lazy.compactMap { page.comments[$0] }
+                .compactMap { target -> PRGeneralAction? in
+                    switch target.hide {
+                    case .hide?: name == "hide" ? .hide(target, reason: "OUTDATED") : nil
+                    case .unhide?: name == "unhide" ? .unhide(target) : nil
+                    case nil: nil
+                    }
+                }.first
+        // The viewer's pending comments (`-HistqStubPageSeed YES` seeds one on GitHub and GitLab), as the page offers
+        // their chrome.
+        case "pending-edit", "pending-delete":
+            reviewComments.filter(\.isPending).lazy.compactMap { page.comments["r\($0.id)"] }
+                .first { name == "pending-edit" ? $0.canEdit : $0.canDelete }
+                .map { name == "pending-edit" ? .edit($0, body: "QA edited pending comment") : .delete($0) }
+        case "pending-react":
+            reviewComments.filter(\.isPending).lazy.compactMap { page.reactions["r\($0.id)"] }.first
+                .flatMap { target in
+                    let mine = Set(target.reactions.filter(\.viewerReacted).map(\.kind))
+                    return page.reactionKinds.first { !mine.contains($0) }.map { .react(target, kind: $0, add: true) }
+                }
         default: nil
         }
     }
@@ -346,6 +645,10 @@ extension PRGeneralAction {
         guard let target = keys.lazy.compactMap({ page.reactions[$0] }).first(where: { $0.hasRow == hasRow })
         else { return nil }
         let mine = Set(target.reactions.filter(\.viewerReacted).map(\.kind))
+        // One kind (`PRLikeButton`): as its click, a toggle, so `react` on a liked comment removes the like.
+        if page.reactionKinds.count == 1, let kind = page.reactionKinds.first {
+            return .react(target, kind: kind, add: !mine.contains(kind))
+        }
         return page.reactionKinds.first { !mine.contains($0) }.map { .react(target, kind: $0, add: true) }
     }
 
@@ -360,6 +663,30 @@ extension PRGeneralAction {
         guard editing || name.hasPrefix("delete") else { return nil }
         let keys = comments.map { "g\($0.id)" } + reviewComments.map { "r\($0.id)" }
         return keys.lazy.compactMap { page.comments[$0] }.first { editing ? $0.canEdit : $0.canDelete }
+    }
+}
+
+extension PRGeneralThreadModel {
+    /// DEBUG `-HistqPRAction quote` / `-HistqIssueAction quote`: Quote reply on the first thread's first comment (the
+    /// first general root's when it has a thread reply box, else the first review thread's, else the first general
+    /// root's into the comment box, as the host listed them), logged `<kind> <number> action quote ok <the box's first
+    /// line>` (60 characters at most), or `failed <reason>`.
+    func launchQuote(
+        in comments: [HostedComment], threads: [HostedReviewThread] = [], page: PRTimelineHTML, kind: String,
+        number: Int
+    ) {
+        let general = comments.first { $0.parentID == nil }.map { "g\($0.id)" }
+        let hasBox = general.flatMap { page.comments[$0]?.quote }.map { $0 != .composer } ?? false
+        let key = hasBox ? general : threads.first?.comments.first.map { "r\($0.id)" } ?? general
+        guard let key else { return UITiming.content("\(kind) \(number) action quote failed no comment") }
+        guard let target = page.comments[key], target.quote != nil else {
+            return UITiming.content("\(kind) \(number) action quote failed no quote reply on \(key)")
+        }
+        guard let text = quote(target) else {
+            return UITiming.content("\(kind) \(number) action quote failed no box for \(key)")
+        }
+        let line = text.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        UITiming.content("\(kind) \(number) action quote ok \(line.prefix(60))")
     }
 }
 
@@ -386,9 +713,9 @@ enum PRLaunchActionGate {
         scrollIfAsked()
     }
 
-    /// DEBUG `-HistqPRScrollTo merge|activity` (stub launches only): the card the conversation column scrolls to, once,
-    /// on the next main-queue turn after the first page shows (its new height applied by then), so a shot can show
-    /// content below the fold. A card the column has not registered is logged `scroll-to <target> missing`.
+    /// DEBUG `-HistqPRScrollTo merge|activity` (stub launches only): the card the conversation column scrolls to on the
+    /// next main-queue turn after the first page shows (its new height applied by then), and again a second later, so
+    /// a shot can show content below the fold. A card the column has not registered is logged `scroll-to <target> missing`.
     private static let scrollTarget = GitHubStub.isEnabled ? AppState.launchFlag("-HistqPRScrollTo") : nil
     private static var scrolled = false
     private static var scroller: (ids: Set<String>, scroll: @MainActor (String) -> Void)?
@@ -407,6 +734,8 @@ enum PRLaunchActionGate {
             }
             scroller.scroll(target)
             UITiming.content("scroll-to \(target)")
+            // Once more a second later: a card above it (the merge box, as its checks arrive) may have grown since.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { scroller.scroll(target) }
         }
     }
 }
@@ -424,6 +753,12 @@ protocol PRGeneralThreadModel: AnyObject {
     var editingComments: Set<String> { get set }
     /// Each open editor's text, by `PRCommentTarget.key`.
     var commentEditDrafts: [String: String] { get set }
+    /// The comments hidden on the host whose text the user showed here (their Show toggle), by
+    /// `PRCommentTarget.key`; the host still hides them.
+    var revealedComments: Set<String> { get set }
+    /// The box a Quote reply filled (`PRQuoteTarget.focusKey`), until it shows and takes the focus: a thread it
+    /// expanded draws its reply row only once the page is measured again.
+    var quoteFocus: String? { get set }
     #if DEBUG
     /// DEBUG `-HistqPRAction`/`-HistqIssueAction` `delete` (`confirm` false) or `delete-confirm` (true): the comment
     /// whose delete confirmation the page opens (it holds the window's modal), and confirms when `confirm`.
@@ -434,9 +769,18 @@ protocol PRGeneralThreadModel: AnyObject {
     /// The general thread action running on item `number`, if the running one is one.
     func runningGeneral(on number: Int) -> PRGeneralAction?
     func perform(_ action: PRGeneralAction, on number: Int, github: HostingStore)
+    /// Quote reply on `target` (no network): its thread expanded, its text quoted into the reply box or the comment
+    /// box (`PRQuoteTarget.appending`), which takes the focus; returns that box's text, nil when it has none here.
+    @discardableResult func quote(_ target: PRCommentTarget) -> String?
+    /// Apply suggestion in a review comment's menu (`PRCommentSuggestion.apply`): the pull request's; nothing on an
+    /// issue.
+    func applySuggestion(_ target: PRCommentTarget, on number: Int, github: HostingStore)
 }
 
 extension PRGeneralThreadModel {
+    /// An issue has no suggested changes.
+    func applySuggestion(_ target: PRCommentTarget, on number: Int, github: HostingStore) {}
+
     /// Edit in a comment's menu: its editor opens in place of its body, holding its raw markdown.
     func beginEdit(_ target: PRCommentTarget) {
         commentEditDrafts[target.key] = target.body
@@ -466,6 +810,12 @@ extension PRGeneralThreadModel {
 extension PRTimeline {
     /// How many levels replies indent at most; deeper ones stay at the last level.
     private nonisolated static let maxReplyDepth = 4
+
+    /// Whether the viewer may edit an item's description: as the host says (`viewerCanEditDescription`), else only
+    /// its author (the viewer `viewerID`, nil when unknown: no Edit).
+    nonisolated static func mayEditDescription(_ hostSays: Bool?, author: HostedUser?, viewerID: Int?) -> Bool {
+        hostSays ?? (viewerID != nil && author?.id == viewerID)
+    }
     /// Between the description and the comments on a page with `commentFilter` (`PRTimelineHTML.split`).
     nonisolated static let commentsMarker = "<!--histq-comments-->"
 
@@ -479,7 +829,10 @@ extension PRTimeline {
     /// the description or a review's body) has an add-reaction button in its header (`cadd-<key>`), and one with
     /// reactions a row of chips after its body (`creact-<key>`). An issue's page has no
     /// reviews and no threads. Dates are relative to `now`, the detail load's (`PRPageDates`), with the absolute date in
-    /// the user's date format (Settings › Appearance, 24 h by default) as their tooltip.
+    /// the user's date format (Settings › Appearance, 24 h by default) as their tooltip. With `descriptionEditable`
+    /// the description has an Edit (`PRCommentTarget` `d`, from `markdown`): GitHub's "…" menu in its header
+    /// (`cmenu-d`), GitLab's pencil there (`cpen-d`), the card title's own on a description under its card's title
+    /// (`splitsDescription`, no slot), and in each case the editor's slot right after its body (`cedit-d`).
     nonisolated static func page(
         author: HostedUser?, action: String, date: Date?, html: String?, markdown: String?,
         comments: [HostedComment], reviews: [HostedReview] = [], threads: Loadable<PRThreads> = .idle,
@@ -487,7 +840,7 @@ extension PRTimeline {
         activity: PRActivityPage? = nil, roles pageRoles: [Int: String]? = nil, authorOnly: Bool = false,
         descriptionReactions: Bool = false, events pageEvents: [HostedTimelineEvent]? = nil,
         commentFilter: PRCommentFilter? = nil, viewerID: Int? = nil, pin: HostedIssueExtras.Pin? = nil,
-        splitsDescription: Bool = false
+        splitsDescription: Bool = false, descriptionEditable: Bool = false
     ) -> PRTimelineHTML {
         // GitHub's "Comments" card (`commentFilter`), Bitbucket's Description and Activity cards (`splitsDescription`):
         // the description's own page, then the rest's.
@@ -500,6 +853,21 @@ extension PRTimeline {
         var general: [Int: PRGeneralThread] = [:]
         var targets: [String: PRCommentTarget] = [:]
         var reactionTargets: [String: PRReactionTarget] = [:]
+        var hiddenKeys: Set<String> = []
+        // The reply rows' slot: taller where the buttons go under the box (`stackedReplies`).
+        let replyClass = options.stackedReplies ? "slot-reply stack" : "slot-reply"
+
+        /// A comment hidden on the host, where `options` show it collapsed (`hideReasons`): its key (`g<id>`, `r<id>`,
+        /// kept for its Show toggle `cshow-<key>`) and its header line; nil otherwise.
+        func hidden(_ kind: HostedCommentRef.Kind, id: Int, _ isMinimized: Bool, reason: String?)
+            -> (key: String, note: String)?
+        {
+            guard isMinimized, !options.hideReasons.isEmpty, !PRPlaceholderID.isPlaceholder(id) else { return nil }
+            let key = "\(kind == .general ? "g" : "r")\(id)"
+            hiddenKeys.insert(key)
+            let sentence = HostedHTML.escape(PRHiddenReason.sentence(reason))
+            return (key, "<span class=\"hidden-as\" title=\"\(sentence)\">\(sentence)</span>")
+        }
 
         /// The comment's menu and editor target when `options` offer Edit or Delete on it, kept for the overlays.
         func target(_ target: PRCommentTarget?) -> PRCommentTarget? {
@@ -510,14 +878,16 @@ extension PRTimeline {
         /// The comment's reaction row's slot, after its body and editor: only when it has reactions. Its key is `g`
         /// or `r` and an integer id, the format the measuring script accepts.
         func reactionSlot(_ target: PRReactionTarget?) -> String {
-            guard let target, target.hasRow else { return "" }
+            // One kind (Azure DevOps's like): its count is on the header's like button, no row.
+            guard let target, target.hasRow, options.reactions.count != 1 else { return "" }
             return "<div class=\"slot-react\" data-slot=\"creact-\(target.key)\"></div>"
         }
 
         /// The in-place editor's slot, right after the comment's body (the stylesheet hides that body while the slot
         /// is open): hidden, and so not measured, until the patch opens it.
         func editSlot(_ target: PRCommentTarget?) -> String {
-            target.map { "<div class=\"slot-edit\" data-slot=\"cedit-\($0.key)\"></div>" } ?? ""
+            target.flatMap { $0.canEdit || $0.canDelete ? $0 : nil }
+                .map { "<div class=\"slot-edit\" data-slot=\"cedit-\($0.key)\"></div>" } ?? ""
         }
 
         /// A date: relative, the absolute one as its tooltip.
@@ -531,33 +901,57 @@ extension PRTimeline {
         /// A header's content: the avatar slot, the login, what they did (none for a thread's comment), `extra` (a
         /// capsule), when, the add-reaction button's slot when `reactions` (kept for the overlays), and the "…" menu's
         /// slot when `menu` (the viewer's own comment). `named`: the account's name then its `@login` (GitLab's),
-        /// instead of the login alone.
+        /// instead of the login alone. `hidden`: a comment hidden on the host, its line after the date and its Show
+        /// toggle's slot first in the buttons (outside `.body`, whose slots the measuring script skips).
         func head(
             _ slot: String, _ user: HostedUser?, action: String?, badge: String? = nil, extra: String = "", date: Date?,
-            menu: PRCommentTarget? = nil, reactions: PRReactionTarget? = nil, named: Bool = false
+            menu: PRCommentTarget? = nil, reactions: PRReactionTarget? = nil, named: Bool = false,
+            hidden: (key: String, note: String)? = nil
         ) -> String {
             avatars[slot] = user
             let what = action.map { action in
                 " " + (badge.map { "<span class=\"badge \($0)\">\(HostedHTML.escape(action))</span>" }
                     ?? HostedHTML.escape(action))
             } ?? ""
-            let whenHTML = when(date)
-            // An Edit icon in the header (`headerEdit`, GitLab's): the "…" menu is left only for Delete.
-            let pen = named && activity?.headerEdit == true ? menu.flatMap { $0.canEdit ? $0 : nil } : nil
-            let menuTarget = pen == nil ? menu : menu.flatMap { $0.canDelete ? $0 : nil }
+            let whenHTML = when(date) + (hidden?.note ?? "")
             // A key is `g` or `r` and an integer id: the format the measuring script accepts.
-            let menu = menuTarget.map { "<span class=\"slot-menu\" data-slot=\"cmenu-\($0.key)\"></span>" } ?? ""
+            let show = hidden.map { "<span class=\"slot-show\" data-slot=\"cshow-\($0.key)\"></span>" } ?? ""
+            // An Edit icon in the header (`headerEdit`, GitLab's; the description's too): the "…" menu is left only
+            // for Delete.
+            // A menu that would hold Edit alone is its pencil instead (`editAloneAsIcon`, GitHub's description).
+            let editAlone = options.editAloneAsIcon && menu.map {
+                $0.canEdit && !$0.canDelete && $0.quote == nil && !$0.copyMarkdown && $0.suggestion == nil
+                    && $0.hide == nil
+            } == true
+            let pen = (named || menu?.isDescription == true) && activity?.headerEdit == true || editAlone
+                ? menu.flatMap { $0.canEdit ? $0 : nil } : nil
+            let menuTarget = pen == nil ? menu
+                : menu.flatMap {
+                    $0.canDelete || $0.quote != nil || $0.copyMarkdown || $0.suggestion != nil || $0.hide != nil
+                        ? $0 : nil
+                }
+            // Azure DevOps's icons (`headerDelete`): Quote reply and Delete side by side on the menu's slot, wider.
+            let pair = activity?.headerDelete == true && menuTarget.map { $0.canDelete && $0.quote != nil } == true
+            // A key is `g` or `r` and an integer id: the format the measuring script accepts.
+            let menu = menuTarget.map {
+                "<span class=\"slot-menu\(pair ? " pair" : "")\" data-slot=\"cmenu-\($0.key)\"></span>"
+            } ?? ""
             let penHTML = pen.map { "<span class=\"slot-menu\" data-slot=\"cpen-\($0.key)\"></span>" } ?? ""
             if let reactions { reactionTargets[reactions.key] = reactions }
-            let add = reactions.map { "<span class=\"slot-add\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
+            // One kind: the slot holds a like button with its count (`like`, wider).
+            let addClass = options.reactions.count == 1 ? "slot-add like" : "slot-add"
+            let add = reactions.map { "<span class=\"\(addClass)\" data-slot=\"cadd-\($0.key)\"></span>" } ?? ""
             // Slot ids are `avatar-d` or an integer id after a prefix, the formats the measuring script accepts
             // (`GitHubHTMLPage`); one made from a String would have to go through `HostedHTML.escape`.
             let who = named ? Self.named(user, handle: activity?.layout.handles ?? true)
                 : "<b>\(HostedHTML.escape(user?.login ?? "ghost"))</b>"
             if commentFilter != nil, slot == "avatar-d" {
-                // The description's own card (`commentsCard`): "Created by <login> <time>", no avatar.
-                return "<span>Created by</span> \(who)"
+                // The description's own card (`commentsCard`): "Created by <login> <time>", no avatar, its "…" menu
+                // (Edit) at the end.
+                let created = "<span>Created by</span> \(who)"
                     + whenHTML.replacingOccurrences(of: "class=\"date\"", with: "class=\"date near\"")
+                let tools = penHTML + menu
+                return tools.isEmpty ? created : created + "<span class=\"tools\">\(tools)</span>"
             }
             let start = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)\(whenHTML)"
             if !named, activity == nil, roles != nil {
@@ -565,12 +959,14 @@ extension PRTimeline {
                 // end (`date near`).
                 let near = "<span class=\"slot-avatar\" data-slot=\"\(slot)\"></span>\(who)\(what)\(extra)"
                     + whenHTML.replacingOccurrences(of: "class=\"date\"", with: "class=\"date near\"")
-                let tools = badges(user) + add + menu
+                let tools = badges(user) + show + add + penHTML + menu
                 return tools.isEmpty ? near : near + "<span class=\"tools\">\(tools)</span>"
             }
-            guard named, activity?.headerEdit == true || roles != nil else { return start + add + menu }
+            guard named, activity?.headerEdit == true || roles != nil else {
+                return start + show + add + penHTML + menu
+            }
             // GitLab's right-hand group: the badges, then the reaction, Edit and "…" buttons.
-            let tools = badges(user) + add + penHTML + menu
+            let tools = badges(user) + show + add + penHTML + menu
             return tools.isEmpty ? start : start + "<span class=\"tools\">\(tools)</span>"
         }
 
@@ -587,17 +983,51 @@ extension PRTimeline {
             return html
         }
 
-        /// A comment in a thread or a reply: its header (avatar slot, login, date, the add-reaction and menu slots),
-        /// its body, the editor's slot and the reaction row's.
+        /// The capsule of a comment of the viewer's pending review (`HostedReviewComment.isPending`): only they see it.
+        /// Plain HTML in the header, outside `.body`, no slot of its own (the comment's menu and reaction slots are
+        /// the others', `pendingComments`).
+        let pendingCap = "<span class=\"cap pending\">Pending</span>"
+
+        /// Whether a review thread has its reply row (and so a Quote reply target): every thread the host answered,
+        /// and a thread of the pending review whose thread state the host gives, where a reply goes into the pending
+        /// review (`pendingReplies`); never one the host has not answered yet (`PRPlaceholderID.isOptimistic`).
+        func repliable(_ thread: HostedReviewThread) -> Bool {
+            guard PRPlaceholderID.isPlaceholder(thread.id) else { return true }
+            return options.pendingReplies && PRPlaceholderID.isPending(thread.id)
+                && thread.state.map { !$0.id.isEmpty } == true
+        }
+
+        /// The capsule of a review comment whose suggested changes were applied (`PRCommentSuggestion.isApplied`):
+        /// plain HTML in the header, outside `.body`, no slot.
+        func appliedCap(_ comment: HostedReviewComment) -> String {
+            PRCommentSuggestion.isApplied(comment, options: options) ? "<span class=\"cap resolved\">Applied</span>" : ""
+        }
+
+        /// A review comment's menu and editor target, quoted into `quote`, with its suggested change's item.
+        func reviewTarget(_ comment: HostedReviewComment, quote: PRQuoteTarget?) -> PRCommentTarget? {
+            target(PRCommentTarget(
+                .review, id: comment.id, hostKey: comment.hostKey, body: comment.body, user: comment.user,
+                canEdit: comment.viewerCanEdit, canDelete: comment.viewerCanDelete, quote: quote,
+                suggestion: PRCommentSuggestion(comment, options: options),
+                hide: PRCommentHide(isMinimized: comment.isMinimized, canMinimize: comment.viewerCanMinimize,
+                                    canUnminimize: comment.viewerCanUnminimize, options: options),
+                options: options))
+        }
+
+        /// A comment in a thread or a reply: its header (avatar slot, login, the Pending capsule of a pending review's
+        /// comment, date, the add-reaction and menu slots), its body, the editor's slot and the reaction row's. One
+        /// hidden on the host (`hidden`) shows its header alone until its Show toggle opens (`minimized`).
         func commentHTML(
             _ slot: String, _ user: HostedUser?, date: Date?, body: String?, menu: PRCommentTarget? = nil,
-            reactions: PRReactionTarget? = nil
+            reactions: PRReactionTarget? = nil, pending: Bool = false, extra: String = "",
+            hidden: (key: String, note: String)? = nil
         ) -> String {
             let body = body.map { "<div class=\"body\">\($0)</div>" } ?? ""
-            let header = head(slot, user, action: nil, date: date, menu: menu, reactions: reactions,
-                              named: activity != nil)
-            return "<div class=\"comment\"><div class=\"comment-head\">\(header)</div>\(body)\(editSlot(menu))"
-                + "\(reactionSlot(reactions))</div>"
+            let header = head(slot, user, action: nil, extra: (pending ? pendingCap : "") + extra, date: date, menu: menu,
+                              reactions: reactions, named: activity != nil, hidden: hidden)
+            let minimized = hidden == nil ? "" : " minimized"
+            return "<div class=\"comment\(minimized)\"><div class=\"comment-head\">\(header)</div>\(body)"
+                + "\(editSlot(menu))\(reactionSlot(reactions))</div>"
         }
 
         /// Replies (their depth and HTML, each after the one it answers) in nested `replies` boxes, one per level up
@@ -620,20 +1050,21 @@ extension PRTimeline {
         /// app expand it without a reload.
         func thread(_ thread: HostedReviewThread) -> String {
             let collapsed = isCollapsed(thread, expanded: expanded)
+            let quote = repliable(thread) ? PRQuoteTarget.thread(thread.id) : nil
             let comments = thread.comments.map { comment in
                 commentHTML("avatar-c\(comment.id)", comment.user, date: comment.createdAt,
-                            body: bodyHTML(comment.bodyHTML, comment.body), menu: target(PRCommentTarget(
-                                .review, id: comment.id, hostKey: comment.hostKey, body: comment.body,
-                                user: comment.user, canEdit: comment.viewerCanEdit,
-                                canDelete: comment.viewerCanDelete, options: options)),
+                            body: bodyHTML(comment.bodyHTML, comment.body), menu: reviewTarget(comment, quote: quote),
                             reactions: PRReactionTarget(.review, id: comment.id, hostKey: comment.hostKey,
                                                         reactions: comment.reactions, user: comment.user,
-                                                        options: options))
+                                                        canReact: comment.viewerCanReact, options: options),
+                            pending: comment.isPending, extra: appliedCap(comment),
+                            hidden: hidden(.review, id: comment.id, comment.isMinimized,
+                                           reason: comment.minimizedReason))
             }
             // `thread.id` is an integer: it goes in unescaped (a String id would need `HostedHTML.escape`). A thread
-            // the host has not answered yet has no reply row (`PRPlaceholderID`).
-            let reply = PRPlaceholderID.isPlaceholder(thread.id)
-                ? "" : "<div class=\"slot-reply\" data-slot=\"reply-\(thread.id)\"></div>"
+            // the host has not answered yet has no reply row (`repliable`).
+            let reply = repliable(thread)
+                ? "<div class=\"\(replyClass)\" data-slot=\"reply-\(thread.id)\"></div>" : ""
             return "<div class=\"thread\(collapsed ? " collapsed" : "")\" id=\"thread-\(thread.id)\">"
                 + threadHead(thread, isResolved: thread.state?.isResolved == true) + excerptTable(thread)
                 + (comments.first ?? "") + replies(comments.dropFirst().map { (1, $0) }) + reply + "</div>"
@@ -646,7 +1077,7 @@ extension PRTimeline {
             _ slot: String, _ user: HostedUser?, _ action: String, badge: String? = nil, extra: String = "",
             date: Date?, body: String?, emptyText: String? = nil, threads: [HostedReviewThread] = [],
             replies: String = "", generalThread: PRGeneralThread? = nil, menu: PRCommentTarget? = nil,
-            reactions: PRReactionTarget? = nil, pinned: Bool = false
+            reactions: PRReactionTarget? = nil, pinned: Bool = false, hidden: (key: String, note: String)? = nil
         ) -> String {
             let content: String
             if let body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -659,9 +1090,12 @@ extension PRTimeline {
             let list = threads.isEmpty ? "" : "<div class=\"threads\">\(threads.map(thread).joined())</div>"
             let edit = editSlot(menu) + reactionSlot(reactions)
             guard let generalThread else {
-                let header = head(slot, user, action: action, badge: badge, extra: extra, date: date, menu: menu,
-                                  reactions: reactions)
-                return "<section class=\"item\(pinned ? " pinned-item" : "")\"><div class=\"head\">\(header)</div>"
+                // A comment hidden on the host: its header alone until its Show toggle opens (`minimized`), its line in
+                // place of what they did.
+                let header = head(slot, user, action: hidden == nil ? action : nil, badge: badge, extra: extra,
+                                  date: date, menu: menu, reactions: reactions, hidden: hidden)
+                let classes = (pinned ? " pinned-item" : "") + (hidden == nil ? "" : " minimized")
+                return "<section class=\"item\(classes)\"><div class=\"head\">\(header)</div>"
                     + "\(content)\(edit)\(replies)\(list)</section>"
             }
             // The root's id is an integer: it goes in unescaped (a String id would need `HostedHTML.escape`).
@@ -674,7 +1108,15 @@ extension PRTimeline {
             let collapsed = isCollapsed(generalThread, expanded: options.expanded) ? " collapsed" : ""
             return "<section class=\"item\(collapsed)\" id=\"gthread-\(id)\">"
                 + "<div class=\"head\">\(chevron)\(header)</div>\(content)\(edit)\(replies)\(list)"
-                + "<div class=\"slot-reply\" data-slot=\"greply-\(id)\"></div></section>"
+                + "<div class=\"\(replyClass)\" data-slot=\"greply-\(id)\"></div></section>"
+        }
+
+        /// A thread's status capsule as the Activity names it (`PRActivity.statusTitles`, green once resolved); nil
+        /// without titles.
+        func statusCap(_ status: String?, resolved: Bool) -> String? {
+            Self.statusTitle(status, resolved: resolved, titles: activity?.layout.statusTitles ?? [:]).map {
+                "<span class=\"cap\(resolved ? " resolved" : "")\">\(HostedHTML.escape($0))</span>"
+            }
         }
 
         /// The Activity's "Resolved <time> by X" line under a resolved thread's header (its parts the host gave).
@@ -723,21 +1165,25 @@ extension PRTimeline {
                                                 foldsReplies: folds && !list.isEmpty)
                 general[root.id] = generalThread
             }
-            let menu = target(Self.target(root, options))
+            let quote = options.replies ? PRQuoteTarget.general(root: root.id) : .composer
+            let menu = target(Self.target(root, options, quote: quote))
             let reactions = Self.reactions(root, options)
             let started = root.resolvable == true && activity?.layout.fileVerb == nil
+            let status = root.resolvable == true
+                ? statusCap(root.threadStatus, resolved: root.resolved == true) : nil
             let header = head("avatar-i\(root.id)", root.user,
-                              action: started ? "started a thread" : "commented", date: root.createdAt,
-                              menu: menu, reactions: reactions, named: true)
-            let resolved = generalThread?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
+                              action: started ? "started a thread" : "commented", extra: status ?? "",
+                              date: root.createdAt, menu: menu, reactions: reactions, named: true)
+            let resolved = generalThread?.isResolved == true && status == nil
+                ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
             let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
-            let replyRow = generalThread.map { "<div class=\"slot-reply\" data-slot=\"greply-\($0.root.id)\"></div>" }
+            let replyRow = generalThread.map { "<div class=\"\(replyClass)\" data-slot=\"greply-\($0.root.id)\"></div>" }
                 ?? ""
             let rows = list.map { reply in
                 (comment: HostedReviewComment?.none, general: Optional(reply.comment),
                  html: commentHTML("avatar-i\(reply.comment.id)", reply.comment.user, date: reply.comment.createdAt,
                                    body: bodyHTML(reply.comment.bodyHTML, reply.comment.body),
-                                   menu: target(Self.target(reply.comment, options)),
+                                   menu: target(Self.target(reply.comment, options, quote: quote)),
                                    reactions: Self.reactions(reply.comment, options)))
             }
             let tail: String
@@ -757,33 +1203,34 @@ extension PRTimeline {
         /// folded under a summary (none: the reply row alone).
         func activityThread(_ thread: HostedReviewThread) -> String {
             guard let root = thread.comments.first else { return "" }
-            let menu = target(PRCommentTarget(
-                .review, id: root.id, hostKey: root.hostKey, body: root.body, user: root.user,
-                canEdit: root.viewerCanEdit, canDelete: root.viewerCanDelete, options: options))
+            let quote = repliable(thread) ? PRQuoteTarget.thread(thread.id) : nil
+            let menu = reviewTarget(root, quote: quote)
             let reactions = PRReactionTarget(.review, id: root.id, hostKey: root.hostKey, reactions: root.reactions,
-                                             user: root.user, options: options)
+                                             user: root.user, canReact: root.viewerCanReact, options: options)
             let file = thread.path.split(separator: "/").last.map(String.init) ?? thread.path
             let verb = activity?.layout.fileVerb.map { "\($0) \(file)" } ?? "started a thread on the diff"
+            let status = thread.state.flatMap { statusCap($0.status, resolved: $0.isResolved) }
             let header = head("avatar-c\(root.id)", root.user, action: verb,
+                              extra: (status ?? "") + (root.isPending ? pendingCap : "") + appliedCap(root),
                               date: root.createdAt, menu: menu, reactions: reactions, named: true)
-            let resolved = thread.state?.isResolved == true ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt)
-                : ""
+            let resolved = thread.state?.isResolved == true && status == nil
+                ? resolvedLine(by: root.resolvedBy, at: root.resolvedAt) : ""
             let body = bodyHTML(root.bodyHTML, root.body).map { "<div class=\"body\">\($0)</div>" } ?? ""
             let snippet = "<div class=\"snippet\"><div class=\"thread\">"
                 + threadHead(thread, isResolved: false, chevron: false) + excerptTable(thread) + "</div></div>"
-            // `thread.id` is an integer: it goes in unescaped. A thread the host has not answered yet has no reply row.
-            let replyRow = PRPlaceholderID.isPlaceholder(thread.id)
-                ? "" : "<div class=\"slot-reply\" data-slot=\"reply-\(thread.id)\"></div>"
+            // `thread.id` is an integer: it goes in unescaped. A thread the host has not answered yet has no reply row
+            // (`repliable`).
+            let replyRow = repliable(thread)
+                ? "<div class=\"\(replyClass)\" data-slot=\"reply-\(thread.id)\"></div>" : ""
             let rows = thread.comments.dropFirst().map { comment in
                 (comment: Optional(comment), general: HostedComment?.none,
                  html: commentHTML("avatar-c\(comment.id)", comment.user, date: comment.createdAt,
-                                   body: bodyHTML(comment.bodyHTML, comment.body), menu: target(PRCommentTarget(
-                                       .review, id: comment.id, hostKey: comment.hostKey, body: comment.body,
-                                       user: comment.user, canEdit: comment.viewerCanEdit,
-                                       canDelete: comment.viewerCanDelete, options: options)),
+                                   body: bodyHTML(comment.bodyHTML, comment.body),
+                                   menu: reviewTarget(comment, quote: quote),
                                    reactions: PRReactionTarget(.review, id: comment.id, hostKey: comment.hostKey,
                                                                reactions: comment.reactions, user: comment.user,
-                                                               options: options)))
+                                                               canReact: comment.viewerCanReact, options: options),
+                                   pending: comment.isPending, extra: appliedCap(comment)))
             }
             let tail = rows.isEmpty ? replyRow
                 : !folds ? "<div class=\"replies\">\(rows.map(\.html).joined())</div>" + replyRow
@@ -822,6 +1269,7 @@ extension PRTimeline {
         var entries = HostedTimelineOrder.entries(
             comments: comments, reviews: activity?.events == nil ? shown : [], threads: threads.value?.all ?? [],
             events: activity?.events ?? pageEvents ?? [])
+        let entryCount = entries.count
         if let commentFilter, commentFilter != .all {
             entries = entries.compactMap { entry in
                 Self.filtered(entry, commentFilter, viewerID: viewerID)
@@ -851,6 +1299,9 @@ extension PRTimeline {
             }
             if activity.layout.newestFirst ?? activity.view.newestFirst { entries.reverse() }
         }
+        // The viewer's pending threads first, under the description (the Comments card's box), after any filter or
+        // reversal, as on the host's page; the rest in their order.
+        if options.pendingFirst { entries = HostedTimelineOrder.pendingFirst(entries) }
         let sorted = entries.map { entry in
             if activity != nil {
                 switch entry {
@@ -870,16 +1321,18 @@ extension PRTimeline {
                     general[root.id] = generalThread
                 }
                 let isPinned = pin?.commentID == root.id
+                let quote = options.replies ? PRQuoteTarget.general(root: root.id) : .composer
                 return item(
                     "avatar-i\(root.id)", root.user, "commented", extra: isPinned ? pinnedTag : "",
                     date: root.createdAt, body: bodyHTML(root.bodyHTML, root.body), replies: replies(list.map { reply in
                         (reply.depth, commentHTML("avatar-i\(reply.comment.id)", reply.comment.user,
                                                   date: reply.comment.createdAt,
                                                   body: bodyHTML(reply.comment.bodyHTML, reply.comment.body),
-                                                  menu: target(Self.target(reply.comment, options)),
+                                                  menu: target(Self.target(reply.comment, options, quote: quote)),
                                                   reactions: Self.reactions(reply.comment, options)))
-                    }), generalThread: generalThread, menu: target(Self.target(root, options)),
-                    reactions: Self.reactions(root, options), pinned: isPinned)
+                    }), generalThread: generalThread, menu: target(Self.target(root, options, quote: quote)),
+                    reactions: Self.reactions(root, options), pinned: isPinned,
+                    hidden: hidden(.general, id: root.id, root.isMinimized, reason: root.minimizedReason))
             case .review(let review, let threads):
                 let (action, badge): (String, String?) = switch review.state {
                 case "APPROVED": ("approved these changes", "approved")
@@ -894,14 +1347,17 @@ extension PRTimeline {
                 return "<div class=\"threads loose\">\(thread(loose))</div>"
             }
         }
+        // The description's Edit, kept for the overlays (its menu or pencil, its editor).
+        let descriptionTarget = descriptionEditable ? target(PRCommentTarget(description: markdown, user: author)) : nil
         var description = item(
             "avatar-d", author, action, date: date, body: bodyHTML(html, markdown),
-            emptyText: "No description provided.")
+            emptyText: "No description provided.", menu: descriptionTarget)
         if splitsDescription, commentFilter == nil {
-            // Under its card's own title (Bitbucket's "Description"): the text alone, no header or frame.
+            // Under its card's own title (Bitbucket's "Description"): the text alone, no header or frame; its Edit is
+            // the card title's, its editor right after the text.
             let text = bodyHTML(html, markdown).map { "<div class=\"body\">\($0)</div>" }
                 ?? "<div class=\"body empty\">No description provided.</div>"
-            description = "<section class=\"item desc bare\">\(text)</section>"
+            description = "<section class=\"item desc bare\">\(text)\(editSlot(descriptionTarget))</section>"
         } else if splits, description.hasPrefix("<section class=\"item\"") {
             // Alone in its card: no gap under it.
             description = "<section class=\"item desc\"" + String(description.dropFirst("<section class=\"item\"".count))
@@ -975,8 +1431,9 @@ extension PRTimeline {
             count: comments.count + (activity?.events == nil ? shown.count : 0),
             general: general, comments: targets, reactions: reactionTargets, reactionKinds: options.reactions,
             collapsesReplies: folds, threadsStayOpen: activity != nil && !folds,
-            headerEdit: activity?.headerEdit ?? false,
-            descriptionReactions: descriptionReactions)
+            headerEdit: activity?.headerEdit ?? false, headerDelete: activity?.headerDelete ?? false,
+            descriptionReactions: descriptionReactions, entryCount: entryCount, hiddenComments: hiddenKeys,
+            stackedReplies: options.stackedReplies)
     }
 
     /// A day heading as Bitbucket words it, relative to `now`: "Today", "Yesterday", the weekday within the last week
@@ -1044,10 +1501,16 @@ extension PRTimeline {
                          user: comment.user, options: options)
     }
 
-    /// A general comment's menu and editor target, when `options` offer Edit or Delete on it.
-    private nonisolated static func target(_ comment: HostedComment, _ options: PRGeneralOptions) -> PRCommentTarget? {
+    /// A general comment's menu and editor target, when `options` offer Edit, Delete or Quote reply (into `quote`) on
+    /// it.
+    private nonisolated static func target(
+        _ comment: HostedComment, _ options: PRGeneralOptions, quote: PRQuoteTarget
+    ) -> PRCommentTarget? {
         PRCommentTarget(.general, id: comment.id, hostKey: comment.hostKey, body: comment.body, user: comment.user,
-                        canEdit: comment.viewerCanEdit, canDelete: comment.viewerCanDelete, options: options)
+                        canEdit: comment.viewerCanEdit, canDelete: comment.viewerCanDelete, quote: quote,
+                        hide: PRCommentHide(isMinimized: comment.isMinimized, canMinimize: comment.viewerCanMinimize,
+                                            canUnminimize: comment.viewerCanUnminimize, options: options),
+                        options: options)
     }
 
     /// GitHub's badge words for each author's `author_association` (the first said wins), by user id: "Owner",
@@ -1069,13 +1532,24 @@ extension PRTimeline {
     }
 
     /// A thread's resolve button: "Resolve thread" / "Reopen thread" where the host's layout words it so
-    /// (`PRPageLayout.threadWords`, GitLab's), "Resolve" / "Reopen" (`shortResolveWords`, Bitbucket's), else "Resolve
-    /// conversation" / "Unresolve conversation".
+    /// (`PRPageLayout.threadWords`, GitLab's), "Resolve" / "Reopen" (`shortResolveWords`, Bitbucket's; Azure DevOps's
+    /// "Reactivate", `PRPageWords.reopenThread`), else "Resolve conversation" / "Unresolve conversation".
     static func resolveTitle(resolved: Bool, kind: HostingKind) -> String {
         let layout = PRPageLayout.for(kind)
         if layout.threadWords { return resolved ? "Reopen thread" : "Resolve thread" }
-        if layout.shortResolveWords { return resolved ? "Reopen" : "Resolve" }
+        if layout.shortResolveWords { return resolved ? layout.words.reopenThread ?? "Reopen" : "Resolve" }
         return resolved ? "Unresolve conversation" : "Resolve conversation"
+    }
+
+    /// A thread's status title (`titles`, by the host's raw `status`): the status's own while it agrees with
+    /// `resolved`, else the resolved or active one, as an optimistic resolve or reopen flips `resolved` before the
+    /// reload brings the host's status. nil without titles.
+    nonisolated static func statusTitle(_ status: String?, resolved: Bool, titles: [String: String]) -> String? {
+        guard !titles.isEmpty else { return nil }
+        if let status, let title = titles[status], (status == "active" || status == "pending") != resolved {
+            return title
+        }
+        return titles[resolved ? "fixed" : "active"]
     }
 
     /// Whether the general thread `thread` shows collapsed (its header only): only a resolvable one can be, a resolved
@@ -1133,7 +1607,7 @@ extension PRTimeline {
                 }
                 return comment
             }
-        case .edit(let target, let body) where target.kind == .general:
+        case .edit(let target, let body) where target.kind == .general && !target.isDescription:
             return comments.map { comment in
                 guard comment.id == target.id else { return comment }
                 var comment = comment
@@ -1164,7 +1638,24 @@ extension PRTimeline {
                 comment.reactions = toggled(comment.reactions, kind, add: add, kinds: kinds)
                 return comment
             }
-        case .edit, .delete, .react:
+        case .hide(let target, let reason) where target.kind == .general:
+            return comments.map { comment in
+                guard comment.id == target.id else { return comment }
+                var comment = comment
+                (comment.isMinimized, comment.minimizedReason) = (true, PRHiddenReason.readBack(reason))
+                // Who may hide it may show it again (the reload brings the host's rights).
+                comment.viewerCanUnminimize = true
+                return comment
+            }
+        case .unhide(let target) where target.kind == .general:
+            return comments.map { comment in
+                guard comment.id == target.id else { return comment }
+                var comment = comment
+                (comment.isMinimized, comment.minimizedReason) = (false, nil)
+                comment.viewerCanMinimize = true
+                return comment
+            }
+        case .edit, .delete, .react, .hide, .unhide:
             return comments
         }
     }
@@ -1196,7 +1687,9 @@ extension PRTimeline {
         var timeline = timeline
         let shown = timeline.reactions[target.key]?.reactions ?? target.reactions
         let reactions = toggled(shown, kind, add: add, kinds: timeline.reactionKinds)
-        guard PRReactionTarget.hasRow(shown) == PRReactionTarget.hasRow(reactions) else { return nil }
+        // One kind has no row (its count is on the like button): the HTML never changes.
+        guard timeline.reactionKinds.count == 1 || PRReactionTarget.hasRow(shown) == PRReactionTarget.hasRow(reactions)
+        else { return nil }
         timeline.reactions[target.key]?.reactions = reactions
         return timeline
     }
@@ -1243,6 +1736,25 @@ extension PRTimeline {
                     guard comment.id == target.id else { return comment }
                     var comment = comment
                     comment.reactions = toggled(comment.reactions, kind, add: add, kinds: kinds)
+                    return comment
+                }
+                return thread
+            }
+        case .hide(let target, _) where target.kind == .review, .unhide(let target) where target.kind == .review:
+            var hidden: (isMinimized: Bool, reason: String?) = (false, nil)
+            if case .hide(_, let reason) = action { hidden = (true, PRHiddenReason.readBack(reason)) }
+            patch = { thread in
+                var thread = thread
+                thread.comments = thread.comments.map { comment in
+                    guard comment.id == target.id else { return comment }
+                    var comment = comment
+                    (comment.isMinimized, comment.minimizedReason) = hidden
+                    // Who may hide it may show it again, and the other way round (the reload brings the host's).
+                    if hidden.isMinimized {
+                        comment.viewerCanUnminimize = true
+                    } else {
+                        comment.viewerCanMinimize = true
+                    }
                     return comment
                 }
                 return thread
@@ -1373,11 +1885,13 @@ struct PRTimelinePage: View {
         })
         // `cedit-<key>`, the editor slots' format the patch accepts.
         let editing = Set((general?.editingComments ?? []).map { "cedit-\($0)" })
+        // `cshow-<key>`: the hidden comments shown here (their Show toggle open).
+        let shown = Set((general?.revealedComments ?? []).intersection(timeline.hiddenComments).map { "cshow-\($0)" })
         // Read once for every comment menu, not by each.
         let busy = general?.isBusy(number) ?? false
         HostedHTMLView(
             html: timeline.html, measureKey: loadID,
-            patch: HostedHTMLPatch(slotHeights: replyHeights, collapsed: collapsed, editing: editing)
+            patch: HostedHTMLPatch(slotHeights: replyHeights, collapsed: collapsed, editing: editing, shown: shown)
         ) { [kind, number] in
             UITiming.content("\(kind) \(number) conversation html")
             #if DEBUG
@@ -1457,7 +1971,8 @@ struct PRTimelinePage: View {
                   timeline.threadsStayOpen
                     || !PRTimeline.isCollapsed(thread, expanded: expanded, collapsesReplies: timeline.collapsesReplies) {
             measured(PRReplyRow(session: session, number: number, thread: thread,
-                                resolveUnavailable: self.threads?.resolveUnavailable, width: slot.frame.width),
+                                resolveUnavailable: self.threads?.resolveUnavailable, width: slot.frame.width,
+                                stacked: timeline.stackedReplies),
                      slot: slot)
         } else if let general, let thread = Self.general(of: slot, "gchevron-", in: timeline.general) {
             let collapsed = PRTimeline.isCollapsed(thread, expanded: generalExpanded)
@@ -1468,8 +1983,20 @@ struct PRTimelinePage: View {
         } else if let general, let thread = Self.general(of: slot, "greply-", in: timeline.general),
                   !PRTimeline.isCollapsed(thread, expanded: generalExpanded) {
             measured(PRGeneralReplyRow(session: session, number: number, kind: kind, thread: thread, model: general,
-                                       width: slot.frame.width),
+                                       width: slot.frame.width, stacked: timeline.stackedReplies),
                      slot: slot)
+        } else if let general, let target = Self.comment(of: slot, "cmenu-", in: timeline.comments),
+                  timeline.headerDelete {
+            // Azure DevOps's icons on the menu's slot: Quote reply, then Delete.
+            HStack(spacing: 6) {
+                if target.quote != nil {
+                    PRCommentQuoteButton(target: target, model: general, busy: busy)
+                }
+                if target.canDelete {
+                    PRCommentDeleteButton(session: session, number: number, target: target, model: general,
+                                          window: window, busy: busy)
+                }
+            }
         } else if let general, let target = Self.comment(of: slot, "cmenu-", in: timeline.comments) {
             PRCommentMenu(session: session, number: number, kind: kind, target: target, model: general,
                           window: window, busy: busy, editsInHeader: timeline.headerEdit)
@@ -1478,6 +2005,11 @@ struct PRTimelinePage: View {
         } else if let general, let target = Self.comment(of: slot, "cedit-", in: timeline.comments),
                   general.editingComments.contains(target.key) {
             measured(PRCommentEditor(session: session, number: number, target: target, model: general), slot: slot)
+        } else if let general, slot.id.hasPrefix("cshow-") {
+            let key = String(slot.id.dropFirst("cshow-".count))
+            PRHiddenToggle(shown: general.revealedComments.contains(key)) {
+                if general.revealedComments.remove(key) == nil { general.revealedComments.insert(key) }
+            }
         } else if slot.id == "creact-d", let itemReactions {
             PRItemReactionRow(reactions: itemReactions)
         } else if let general, let target = Self.reactions(of: slot, "creact-", in: timeline.reactions) {
@@ -1602,6 +2134,8 @@ private struct PRReplyRow: View {
     let resolveUnavailable: String?
     /// The slot's width.
     let width: CGFloat
+    /// The buttons always on their own line under the box (`PRGeneralOptions.stackedReplies`).
+    var stacked = false
     @FocusState private var focused: Bool
 
     /// A box of about 200 pt beside Reply and "Unresolve conversation".
@@ -1616,9 +2150,15 @@ private struct PRReplyRow: View {
         }
         let text = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let running = model.busy[number]
+        // The pending review's: Reply goes into it where the host routes it (GitHub, while one exists), else a second
+        // button adds to it ("Start a review", "Add review comment").
+        let client = session.github.api?.client
+        let detail = model.state.value
+        let routes = client.map { detail?.routesIntoPending($0) ?? false } ?? false
+        let pendingTitle = client.flatMap { detail?.pendingButton($0) }
         // One layout that changes, not two branches: the box keeps its focus when the slot crosses `oneLineWidth`.
         // Beside the box, the buttons sit on its last line, so they stay by the caret as it grows.
-        let layout = width < Self.oneLineWidth
+        let layout = stacked || width < Self.oneLineWidth
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(alignment: .lastTextBaseline, spacing: 8))
         layout {
@@ -1631,17 +2171,34 @@ private struct PRReplyRow: View {
                 } label: {
                     HStack(spacing: 6) {
                         if replying(running) { DelayedSpinner(detail: "pr \(number) reply") }
-                        Text("Reply")
+                        Text(routes ? PullRequestDetail.addReviewComment : "Reply")
                     }
                 }
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
                 // Each expanded thread has a Reply button: the shortcut is only the focused row's.
                 .keyboardShortcut(focused ? KeyboardShortcut(.return, modifiers: .command) : nil)
                 .disabled(text.isEmpty || running != nil)
-                .help("Reply (⌘↩)")
+                .help(routes ? "Add to your pending review (⌘↩)" : "Reply (⌘↩)")
+                if let pendingTitle {
+                    Button {
+                        guard !text.isEmpty else { return }
+                        model.perform(.pendingReply(rootID: thread.id, body: text), on: number, github: session.github)
+                    } label: {
+                        Text(pendingTitle)
+                    }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .disabled(text.isEmpty || running != nil)
+                    .help("Add to your pending review, published when you finish it")
+                }
                 if session.github.offers(.resolveThreads) { resolveControl(running) }
             }
             .fixedSize()
+        }
+        .onChange(of: model.quoteFocus, initial: true) { _, key in
+            // Quote reply filled this box (`PullRequestDetailModel.quote`).
+            guard key == PRQuoteTarget.thread(thread.id).focusKey else { return }
+            focused = true
+            model.quoteFocus = nil
         }
     }
 
@@ -1669,10 +2226,12 @@ private struct PRReplyRow: View {
         }
     }
 
-    /// This thread's reply is posting.
+    /// This thread's reply is posting (or going into the pending review).
     private func replying(_ action: PullRequestAction?) -> Bool {
-        if case .reply(let root, _)? = action { return root == thread.id }
-        return false
+        switch action {
+        case .reply(let root, _)?, .pendingReply(let root, _)?: root == thread.id
+        default: false
+        }
     }
 
     /// This thread is being resolved or unresolved.
@@ -1750,6 +2309,8 @@ private struct PRGeneralReplyRow: View {
     let model: any PRGeneralThreadModel
     /// The slot's width.
     let width: CGFloat
+    /// The buttons always on their own line under the box (`PRGeneralOptions.stackedReplies`).
+    var stacked = false
     @FocusState private var focused: Bool
 
     /// A box of about 200 pt beside Reply and "Unresolve conversation" (`PRReplyRow`'s).
@@ -1768,7 +2329,7 @@ private struct PRGeneralReplyRow: View {
         let replying = if case .reply(let target, _)? = running { target.id == root.id } else { false }
         let resolving = if case .resolve(let target, _)? = running { target.id == root.id } else { false }
         let replies = session.github.offers(.generalReplies)
-        let layout = width < Self.oneLineWidth
+        let layout = stacked || width < Self.oneLineWidth
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(alignment: .lastTextBaseline, spacing: 8))
         layout {
@@ -1809,11 +2370,20 @@ private struct PRGeneralReplyRow: View {
             }
             .fixedSize()
         }
+        .onChange(of: model.quoteFocus, initial: true) { _, key in
+            // Quote reply filled this box (`PRGeneralThreadModel.quote`).
+            guard replies, key == PRQuoteTarget.general(root: root.id).focusKey else { return }
+            focused = true
+            model.quoteFocus = nil
+        }
     }
 }
 
-/// A comment's "…" menu, on the slot at the end of its header: Edit (its editor opens in place of its body at once) and
-/// Delete… (the app's own confirmation first), as the host and the comment's rights allow. Off while an action runs on
+/// A comment's "…" menu, on the slot at the end of its header: Edit (its editor opens in place of its body at once),
+/// Quote reply (`PRGeneralThreadModel.quote`), Copy Markdown (its raw text to the pasteboard), the suggestion's and
+/// Hide's items and Delete… (the app's own confirmation first), as the layout, the host and the comment's rights allow;
+/// a pending comment's Edit and Delete go through the host's pending calls (`PRGeneralAction.run`). Off while an
+/// action runs on
 /// the item. A glyph with a hover circle (`RowIconButtonStyle`'s look) that opens an `NSMenu` on click, not a `Menu` or
 /// a `Button`: a long page has one on each of the viewer's comments, and on the 600-comment stub PR (300 of them) the
 /// page settled about 125 ms later with `Menu`s or `Button`s, about 60 ms with this.
@@ -1843,14 +2413,32 @@ private struct PRCommentMenu: View {
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
             .onTapGesture { if !busy { open() } }
-            .help(editsInHeader ? "Delete the comment" : "Edit or delete the comment")
+            .help(help)
             .accessibilityElement()
             .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("Actions on \(target.author)'s comment")
+            .accessibilityLabel("Actions on \(target.subject)")
             .accessibilityAction { if !busy { open() } }
     }
 
-    /// The menu, under the pointer (the click's place).
+    /// "Edit, quote, copy or delete the comment", with what the menu holds.
+    private var help: String {
+        let hide: String? = switch target.hide {
+        case .hide?: "hide"
+        case .unhide?: "unhide"
+        case nil: nil
+        }
+        let verbs = [target.canEdit && !editsInHeader ? "edit" : nil, target.quote != nil ? "quote" : nil,
+                     target.copyMarkdown ? "copy" : nil, target.suggestion != nil ? "apply the suggestion of" : nil,
+                     hide, target.canDelete ? "delete" : nil]
+            .compactMap { $0 }
+        let list = verbs.count > 1 ? verbs.dropLast().joined(separator: ", ") + " or " + verbs[verbs.count - 1]
+            : verbs.first ?? ""
+        let subject = target.isDescription ? " the description" : " the comment"
+        return list.prefix(1).uppercased() + list.dropFirst() + subject
+    }
+
+    /// The menu, under the pointer (the click's place), in the host's order: Edit, Quote reply, Copy Markdown, the
+    /// suggestion's item, Hide or Unhide, Delete.
     private func open() {
         var entries: [MenuEntry] = []
         if target.canEdit, !editsInHeader {
@@ -1858,6 +2446,42 @@ private struct PRCommentMenu: View {
                 model.beginEdit(target)
                 UITiming.content("\(kind) \(number) action edit open")
             })
+        }
+        if target.quote != nil {
+            entries.append(.action("Quote reply") { [model, target] in model.quote(target) })
+        }
+        if target.copyMarkdown {
+            // The raw markdown as the host has it (never its HTML); no network.
+            entries.append(.action("Copy Markdown") { [target] in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(target.body, forType: .string)
+            })
+        }
+        switch target.suggestion {
+        case .apply?:
+            entries.append(.action("Apply suggestion") { [model, target, number, session] in
+                model.applySuggestion(target, on: number, github: session.github)
+            })
+        case .open(let url)?:
+            entries.append(.action("Apply on \(session.github.kind.name)") { GitHubLinks.open(url) })
+        case nil: break
+        }
+        switch target.hide {
+        case .hide(let reasons)?:
+            // The host's reasons (`PRHiddenReason`'s words); it collapses at once, its Show toggle closed.
+            entries.append(.submenu("Hide", reasons.compactMap { reason in
+                PRHiddenReason.title(reason).map { title in
+                    .action(title) { [model, target, number, session] in
+                        model.revealedComments.remove(target.key)
+                        model.perform(.hide(target, reason: reason), on: number, github: session.github)
+                    }
+                }
+            }))
+        case .unhide?:
+            entries.append(.action("Unhide") { [model, target, number, session] in
+                model.perform(.unhide(target), on: number, github: session.github)
+            })
+        case nil: break
         }
         if target.canDelete {
             entries.append(.action("Delete…", destructive: true) { [window, model, target, number, session] in
@@ -1881,10 +2505,35 @@ private struct PRCommentMenu: View {
     }
 }
 
+/// The Show / Hide toggle of a comment hidden on the host, on its header's slot (`cshow-<key>`): a click shows or hides
+/// its text here at once (the page's patch opens the slot), never on the host. A text with a tap, not a `Button`, as
+/// `PRCommentMenu`: a long page has many.
+private struct PRHiddenToggle: View {
+    let shown: Bool
+    let toggle: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Text(shown ? "Hide" : "Show")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(hovered ? .primary : .secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
+            .onTapGesture(perform: toggle)
+            .help(shown ? "Hide the hidden comment's text again" : "Show the hidden comment's text")
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(shown ? "Hide the comment's text" : "Show the hidden comment's text")
+            .accessibilityAction { toggle() }
+    }
+}
+
 /// A comment's Edit icon, on the slot in its header after the add-reaction button (GitLab's page, where the "…" menu
 /// holds Delete only): a pencil with `PRCommentMenu`'s hover circle; a click opens the in-place editor at once. Off
 /// while an action runs on the item. A glyph with a tap, not a `Button`, as `PRCommentMenu`: a long page has many.
-private struct PRCommentEditButton: View {
+struct PRCommentEditButton: View {
     let number: Int
     /// The timing log's word for the item (`pr`, `issue`).
     let kind: String
@@ -1904,16 +2553,79 @@ private struct PRCommentEditButton: View {
             .opacity(busy ? 0.45 : 1)
             .onHover { hovered = $0 }
             .onTapGesture { if !busy { edit() } }
-            .help("Edit the comment")
+            .help(target.isDescription ? "Edit the description" : "Edit the comment")
             .accessibilityElement()
             .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("Edit \(target.author)'s comment")
+            .accessibilityLabel("Edit \(target.subject)")
             .accessibilityAction { if !busy { edit() } }
     }
 
     private func edit() {
         model.beginEdit(target)
         UITiming.content("\(kind) \(number) action edit open")
+    }
+}
+
+/// A comment's Quote reply icon, on its "…" menu's slot before Delete (Azure DevOps's page,
+/// `PRPageLayout.headerDelete`): a quote glyph with `PRCommentMenu`'s hover circle; a click fills the reply box at
+/// once (`PRGeneralThreadModel.quote`). Off while an action runs on the item.
+private struct PRCommentQuoteButton: View {
+    let target: PRCommentTarget
+    let model: any PRGeneralThreadModel
+    let busy: Bool
+
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: "text.quote")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 18, height: 18)
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .contentShape(Rectangle())
+            .opacity(busy ? 0.45 : 1)
+            .onHover { hovered = $0 }
+            .onTapGesture { if !busy { model.quote(target) } }
+            .help("Quote reply")
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Quote \(target.author)'s comment in a reply")
+            .accessibilityAction { if !busy { model.quote(target) } }
+    }
+}
+
+/// A comment's Delete icon, on its "…" menu's slot (Azure DevOps's page, `PRPageLayout.headerDelete`): a trash with
+/// `PRCommentMenu`'s hover circle; a click opens the menu's Delete confirmation. Off while an action runs on the item.
+private struct PRCommentDeleteButton: View {
+    let session: RepoSession
+    let number: Int
+    let target: PRCommentTarget
+    let model: any PRGeneralThreadModel
+    let window: WindowModel
+    let busy: Bool
+
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: "trash")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 18, height: 18)
+            .background { Circle().fill(hovered && !busy ? Palette.hoverFill : .clear).padding(-5) }
+            .contentShape(Rectangle())
+            .opacity(busy ? 0.45 : 1)
+            .onHover { hovered = $0 }
+            .onTapGesture { if !busy { delete() } }
+            .help("Delete the comment")
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Delete \(target.author)'s comment")
+            .accessibilityAction { if !busy { delete() } }
+    }
+
+    private func delete() {
+        window.presentModal(.confirmation(PRCommentMenu.deleteConfirmation(
+            target, number: number, model: model, github: session.github)))
     }
 }
 
@@ -1949,10 +2661,10 @@ private struct PRItemReactionRow: View {
     }
 }
 
-/// A comment's in-place editor, on the slot after its body (hidden meanwhile): its raw markdown in a box that grows
-/// to 12 lines, Cancel and Save (⌘↩). Save shows the new body at once and writes it off the main actor
-/// (`PRGeneralAction.edit`); it is off while the box is empty or an action runs on the item. The text is the model's
-/// (`commentEditDrafts`), written on every keystroke and read here only.
+/// A comment's (or the description's) in-place editor, on the slot after its body (hidden meanwhile): its raw markdown
+/// in a box that grows to 12 lines, Cancel (Esc) and Save (⌘↩). Save shows the new body at once and writes it off the
+/// main actor (`PRGeneralAction.edit`); it is off while the box is empty or an action runs on the item. The text is
+/// the model's (`commentEditDrafts`), written on every keystroke and read here only.
 private struct PRCommentEditor: View {
     let session: RepoSession
     let number: Int
@@ -1971,10 +2683,14 @@ private struct PRCommentEditor: View {
         let isEmpty = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         VStack(alignment: .trailing, spacing: 8) {
             PRReplyEditor(draft: draft, focused: $focused, isFocused: focused, disabled: false,
-                          label: "Edit \(target.author)'s comment", placeholder: "Write a comment", maxLines: 12)
+                          label: "Edit \(target.subject)",
+                          placeholder: target.isDescription ? "Add a description" : "Write a comment", maxLines: 12)
             HStack(spacing: 8) {
                 Button("Cancel") { model.endEdit(key) }
                     .buttonStyle(RowTextButtonStyle(formRow: true))
+                    // Esc, only in the focused editor (as Save's ⌘↩).
+                    .keyboardShortcut(focused ? .cancelAction : nil)
+                    .help("Cancel (Esc)")
                 Button("Save") {
                     model.perform(.edit(target, body: draft.wrappedValue), on: number, github: session.github)
                 }
@@ -1986,6 +2702,8 @@ private struct PRCommentEditor: View {
             }
             .fixedSize()
         }
+        // The keyboard in the box as it opens (next turn, once it is in the window), so Esc and ⌘↩ are its own.
+        .onAppear { DispatchQueue.main.async { focused = true } }
     }
 }
 
@@ -2053,7 +2771,7 @@ struct PRReactionChip: View {
 
 /// A comment's add-reaction button, on its slot in the header before the "…" menu: a smiley with `PRCommentMenu`'s
 /// hover circle; a click opens the host's kinds under the pointer (the viewer's checked; a pick toggles one, through
-/// `model` as a chip's click). Off while an action runs on the item.
+/// `model` as a chip's click); a host with one kind gets `PRLikeButton` instead. Off while an action runs on the item.
 private struct PRReactionAddButton: View {
     let session: RepoSession
     let number: Int
@@ -2064,10 +2782,61 @@ private struct PRReactionAddButton: View {
     let busy: Bool
 
     var body: some View {
-        PRReactionPicker(kinds: kinds, reactions: target.reactions, busy: busy,
-                         label: "Add a reaction to \(target.author)'s comment") { kind, add in
-            model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+        if kinds.count == 1, let kind = kinds.first {
+            PRLikeButton(target: target, kind: kind, busy: busy) { add in
+                model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+            }
+        } else {
+            PRReactionPicker(kinds: kinds, reactions: target.reactions, busy: busy,
+                             label: "Add a reaction to \(target.author)'s comment") { kind, add in
+                model.perform(.react(target, kind: kind, add: add), on: number, github: session.github)
+            }
         }
+    }
+}
+
+/// A host with one reaction kind (Azure DevOps's like): a thumbs-up with the count, in the accent color when the
+/// viewer gave it; a click adds or removes the viewer's own at once, as a chip's click (no picker, no chip row).
+/// Trailing in its slot (`slot-add like`, wider for the count). Off while `busy`.
+private struct PRLikeButton: View {
+    let target: PRReactionTarget
+    let kind: String
+    let busy: Bool
+    let toggle: (_ add: Bool) -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        let reaction = target.reactions.first { $0.kind == kind }
+        let mine = reaction?.viewerReacted ?? false
+        let count = reaction?.count ?? 0
+        HStack(spacing: 3) {
+            // The kind's own emoji (yellow 👍 for a like), as the reaction chips draw it.
+            Text(PRReactionGlyph.glyph(kind))
+                .font(.system(size: 12))
+            if count > 0 {
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+            }
+        }
+        .foregroundStyle(mine ? Color.accentColor : .secondary)
+        .padding(.horizontal, 5)
+        .frame(height: 18)
+        .background {
+            Capsule().fill(mine ? Color.accentColor.opacity(0.18) : hovered && !busy ? Palette.hoverFill : .clear)
+        }
+        .contentShape(Capsule())
+        .opacity(busy ? 0.45 : 1)
+        .onHover { hovered = $0 }
+        .onTapGesture { if !busy { toggle(!mine) } }
+        .help(mine ? "Remove your like" : "Like")
+        .accessibilityElement()
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Like \(target.author)'s comment, \(count)\(mine ? ", including you" : "")")
+        .accessibilityAction { if !busy { toggle(!mine) } }
+        // A count wider than the slot grows to the left, never clipped.
+        .fixedSize()
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

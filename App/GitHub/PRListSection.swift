@@ -279,9 +279,8 @@ private struct ConnectGitHubCard: View {
         }
     }
 
-    private var connectTitle: String {
-        host.map { "Connect an account for \($0)…" } ?? "Connect an account…"
-    }
+    /// Short, so it stays on one line in the narrow card (user, 2026-11-25): the host is in the text above it.
+    private var connectTitle: String { "Connect an account" }
 
     private var detail: String {
         guard let account else {

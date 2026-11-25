@@ -248,6 +248,9 @@ public struct HostedPullRequest: Codable, Sendable, Equatable, Identifiable {
     public var closesSourceBranch: Bool? = nil
     /// How many of its tasks are open (Bitbucket's `task_count`); nil where the host has none. Not part of the JSON.
     public var openTaskCount: Int? = nil
+    /// Whether the token's user may edit the description (`editDescription`), where the host's mapping knows it; nil
+    /// leaves it to the author (the app compares the viewer with `user`). Not part of the JSON.
+    public var viewerCanEditDescription: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, number, title, state, draft, user, body, head, base, labels, assignees, merged, mergeable
@@ -289,6 +292,8 @@ public struct HostedIssue: Codable, Sendable, Equatable, Identifiable {
     /// The sidebar's milestone and time tracking, as `HostedPullRequest.milestone` and `timeStats`.
     public var milestone: HostedMilestone? = nil
     public var timeStats: HostedTimeStats? = nil
+    /// As `HostedPullRequest.viewerCanEditDescription`.
+    public var viewerCanEditDescription: Bool? = nil
 
     public struct PullRequestLink: Codable, Sendable, Equatable {
         public var url: String?
@@ -351,6 +356,16 @@ public struct HostedComment: Codable, Sendable, Equatable, Identifiable {
     /// A resolved root's resolver and when, where the host says (GitLab); not part of the JSON.
     public var resolvedBy: HostedUser? = nil
     public var resolvedAt: Date? = nil
+    /// A root's thread status in the host's own words, where it has more than resolved or not (Azure DevOps' `active`,
+    /// `pending`, `fixed`, `wontFix`, `closed`, `byDesign`); nil elsewhere. Not part of the JSON.
+    public var threadStatus: String? = nil
+    /// Hidden (minimized) on the host for everyone, and why in the host's words (GitHub's `minimizedReason`:
+    /// `outdated`, `off-topic`, `low-quality`…), and whether the token's user may hide or unhide it; false and nil
+    /// elsewhere. Not part of the JSON (GitHub's GraphQL read sets them).
+    public var isMinimized = false
+    public var minimizedReason: String? = nil
+    public var viewerCanMinimize = false
+    public var viewerCanUnminimize = false
 
     enum CodingKeys: String, CodingKey {
         case id, user, body
@@ -415,6 +430,11 @@ public struct HostedReview: Codable, Sendable, Equatable, Identifiable {
     public var submittedAt: Date?
     /// As in `HostedComment`.
     public var authorAssociation: String?
+    /// The reviewer's own vote where the host has more than the state (Azure DevOps' 10 approved, 5 approved with
+    /// suggestions, 0 no vote, -5 waiting for the author, -10 rejected), and whether they must review; nil elsewhere.
+    /// Not part of the JSON.
+    public var vote: Int? = nil
+    public var isRequired: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, user, state, body
@@ -463,6 +483,21 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     /// As in `HostedComment`: a resolved thread's resolver and when, on its root (GitLab).
     public var resolvedBy: HostedUser? = nil
     public var resolvedAt: Date? = nil
+    /// A comment of the token's user's pending review (`HostedPendingReview`), not published yet: its `id` is in
+    /// `HostedPendingReview.idBase`'s band. Not part of the JSON.
+    public var isPending = false
+    /// Whether the token's user may react to it, where the host says (GitHub's `viewerCanReact` on a pending comment;
+    /// false on GitLab's draft notes, which have no award emoji); nil: the host's reactions rule alone (any published
+    /// comment). Not part of the JSON.
+    public var viewerCanReact: Bool? = nil
+    /// The suggested changes of the comment's body as the host knows them (GitLab's), in the body's order; empty
+    /// elsewhere. Not part of the JSON.
+    public var suggestions: [HostedSuggestion] = []
+    /// As in `HostedComment`: hidden on the host, why, and the token's user's rights; not part of the JSON.
+    public var isMinimized = false
+    public var minimizedReason: String? = nil
+    public var viewerCanMinimize = false
+    public var viewerCanUnminimize = false
 
     enum CodingKeys: String, CodingKey {
         case id, path, line, side, body, user
@@ -480,6 +515,32 @@ public struct HostedReviewComment: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// A suggested change in a diff comment, as GitLab's discussions list it (`notes[].suggestions[]`): the new-side lines
+/// `fromLine...toLine` it replaces, their text then (`fromContent`) and its replacement (`toContent`), whether the
+/// token's user may apply it now (`appliable`) and whether it was applied.
+public struct HostedSuggestion: Sendable, Equatable {
+    public var id: Int
+    public var fromLine: Int?
+    public var toLine: Int?
+    public var appliable: Bool
+    public var applied: Bool
+    public var fromContent: String?
+    public var toContent: String?
+
+    public init(
+        id: Int, fromLine: Int? = nil, toLine: Int? = nil, appliable: Bool, applied: Bool, fromContent: String? = nil,
+        toContent: String? = nil
+    ) {
+        self.id = id
+        self.fromLine = fromLine
+        self.toLine = toLine
+        self.appliable = appliable
+        self.applied = applied
+        self.fromContent = fromContent
+        self.toContent = toContent
+    }
+}
+
 /// The state of a pull request's review thread, from GitHub's GraphQL API: REST has a thread's comments but not
 /// whether it is resolved. `rootCommentID` joins it to the thread's root `HostedReviewComment`.
 public struct HostedReviewThreadState: Sendable, Equatable, Identifiable {
@@ -494,10 +555,12 @@ public struct HostedReviewThreadState: Sendable, Equatable, Identifiable {
     /// The REST `id` of the thread's first comment (GraphQL's `fullDatabaseId`, else `databaseId`); nil when GitHub
     /// leaves both out.
     public var rootCommentID: Int?
+    /// As `HostedComment.threadStatus`: the host's own status next to `isResolved` (Azure DevOps); nil elsewhere.
+    public var status: String?
 
     public init(
         id: String, isResolved: Bool, isOutdated: Bool, viewerCanResolve: Bool, viewerCanUnresolve: Bool,
-        rootCommentID: Int? = nil
+        rootCommentID: Int? = nil, status: String? = nil
     ) {
         self.id = id
         self.isResolved = isResolved
@@ -505,7 +568,81 @@ public struct HostedReviewThreadState: Sendable, Equatable, Identifiable {
         self.viewerCanResolve = viewerCanResolve
         self.viewerCanUnresolve = viewerCanUnresolve
         self.rootCommentID = rootCommentID
+        self.status = status
     }
+}
+
+/// The token's user's pending review of a pull request (`HostingProvider.pendingReview(of:in:)`): comments only they
+/// see until they submit it. Empty (`isEmpty`) when there is none.
+public struct HostedPendingReview: Sendable, Equatable {
+    /// The review's own key (GitHub's `PullRequestReview` node id); nil when there is none, and on hosts whose drafts
+    /// belong to no review (GitLab's draft notes).
+    public var hostKey: String?
+    /// The review's REST id (GitHub's), so a published list that also returns its comments leaves them out.
+    public var reviewID: Int?
+    /// The pull request's own key a new review is made on (GitHub's node id); nil when unknown.
+    public var pullRequestKey: String?
+    /// Its comments on diff lines and replies to threads, each `isPending`, ids in the `idBase` band.
+    public var comments: [HostedReviewComment]
+
+    public init(
+        hostKey: String? = nil, reviewID: Int? = nil, pullRequestKey: String? = nil,
+        comments: [HostedReviewComment] = []
+    ) {
+        self.hostKey = hostKey
+        self.reviewID = reviewID
+        self.pullRequestKey = pullRequestKey
+        self.comments = comments
+    }
+
+    /// No review and no comment: nothing is pending.
+    public var isEmpty: Bool { hostKey == nil && comments.isEmpty }
+
+    /// The first id of the pending comments' band: digits only (the app's slot ids take them as they are), below the
+    /// app's optimistic ids (`1 << 62`) and above any id a host gives a comment, so a draft's id never meets a note's.
+    public static let idBase = 1 << 61
+
+    /// The id of the pending comment the host numbers `hostID`.
+    public static func id(_ hostID: Int) -> Int { idBase + (hostID & (idBase - 1)) }
+
+    /// Whether `id` is a pending comment's (`id(_:)`'s band, `idBase` up to the app's optimistic ids).
+    public static func isPending(_ id: Int) -> Bool { id >= idBase && id < idBase << 1 }
+
+    /// The host's own number of the pending comment `id` (a GitLab draft note's id), nil for an id outside the band:
+    /// a published comment's id never goes to a pending comment's endpoint, nor a draft's to a published one's.
+    public static func hostID(of id: Int) -> Int? { isPending(id) ? id - idBase : nil }
+
+    /// `published` (the host's review comments) without any comment of this review (a host that lists them there too),
+    /// then this review's comments, a reply the host names by its thread's key only (no `path`, no `inReplyToID`; the
+    /// key in `hostKey`, GitLab's `discussion_id`) joined to that thread's root, whose path it takes. A reply whose thread is not in `published` is left out: it has no line
+    /// to show on.
+    public func merged(into published: [HostedReviewComment]) -> [HostedReviewComment] {
+        let pendingIDs = Set(comments.map { $0.id - Self.idBase })
+        let kept = published.filter { comment in
+            !pendingIDs.contains(comment.id) && (reviewID == nil || comment.pullRequestReviewID != reviewID)
+        }
+        let roots = Dictionary(
+            kept.compactMap { comment in
+                comment.inReplyToID == nil ? comment.hostKey.map { ($0, comment) } : nil
+            },
+            uniquingKeysWith: { first, _ in first })
+        let joined = comments.compactMap { comment -> HostedReviewComment? in
+            guard comment.inReplyToID == nil, comment.path.isEmpty else { return comment }
+            guard let key = comment.hostKey, let root = roots[key] else { return nil }
+            var reply = comment
+            reply.inReplyToID = root.id
+            reply.path = root.path
+            return reply
+        }
+        return kept + joined
+    }
+}
+
+/// Where a pending comment goes: a diff line (a new thread) or a reply to a thread, `HostedThreadRef.hostKey` the
+/// thread's own key (GitHub's thread node id, GitLab's discussion id).
+public enum HostedPendingTarget: Sendable, Hashable {
+    case line(HostedInlinePosition)
+    case reply(HostedThreadRef)
 }
 
 /// A commit of a pull request (`GET .../pulls/<n>/commits`).
@@ -641,6 +778,8 @@ public struct HostedIssueExtras: Sendable, Equatable {
     public var subIssuesCompleted: Int
     public var blockedBy: Int
     public var blocking: Int
+    /// Whether the token's user may edit the issue (its description: `editDescription`); nil when not read.
+    public var viewerCanUpdate: Bool? = nil
 
     public struct Parent: Sendable, Equatable {
         public var number: Int

@@ -94,6 +94,24 @@ public struct RemoteFetchFailure: Error, Sendable {
     }
 }
 
+/// Why `pullRequestFiles` has no files to show.
+public enum PullRequestDiffError: Error, Equatable, Sendable {
+    /// A pull request from a fork: its branch is in another repository, which no remote fetches.
+    case fromFork
+    /// A pull request commit the fetch did not bring: a branch moved on the host since the pull request was read.
+    case changed
+    /// The two commits have no merge base (`git merge-base` exits 1).
+    case noCommonHistory
+
+    public var message: String {
+        switch self {
+        case .fromFork: "Files of pull requests from forks are shown on the web"
+        case .changed: "The pull request changed on the host. Reload it to see its files."
+        case .noCommonHistory: "These branches have no common history."
+        }
+    }
+}
+
 public struct GitOperations: Sendable {
     public enum ResetMode: String, Sendable { case soft, mixed, hard }
 
@@ -525,6 +543,55 @@ public struct GitOperations: Sendable {
             try await ops.networkExec(
                 ["fetch", "--end-of-options", remote, "\(sourceRef):refs/heads/\(branch)"],
                 target: .fetch(remotes: [remote]))
+        }
+    }
+
+    /// The files of a pull request whose host has no diff API, diffed here: in the lane, `remote`'s branches
+    /// `sourceBranch` and `targetBranch` are fetched through the gate with an empty refmap, no tags, no FETCH_HEAD and
+    /// no submodule, so the objects arrive and no ref or FETCH_HEAD changes (a stale tracking ref stays stale; a
+    /// `refs/histq/*` would show in `log --all`). Then `sourceCommit` is diffed against its merge base with
+    /// `targetCommit`, as the host does (a conflicting pull request too), each file parsed as the hosts' diffs are.
+    /// The diff takes `--submodule=short`: a global `diff.submodule=log|diff` would put `Submodule …` lines in the
+    /// patches. Throws `PullRequestDiffError.fromFork` before any git for a pull request from a fork, `.changed` when
+    /// either commit is still missing after the fetch, `.noCommonHistory` when they have no merge base, and
+    /// `GitOperationError` for a remote that is not one of `git remote`, a branch name `validateBranchName` refuses or
+    /// a commit that is not 40 or 64 hex digits.
+    public func pullRequestFiles(
+        remote: String, sourceBranch: String, targetBranch: String, sourceCommit: String, targetCommit: String,
+        fromFork: Bool
+    ) async throws -> [HostedPullRequestFile] {
+        if fromFork { throw PullRequestDiffError.fromFork }
+        for sha in [sourceCommit, targetCommit] where ![40, 64].contains(sha.utf8.count) || !Self.isObjectID(sha) {
+            throw GitOperationError.invalidObjectID(sha)
+        }
+        let remotes = try await GitInvocation.remoteNames(runner: runner, cwd: cwd, env: env)
+        guard !remote.hasPrefix("-"), remotes.contains(remote) else {
+            throw GitOperationError.invalidRemoteName(remote)
+        }
+        try await validateBranchName(sourceBranch)
+        try await validateBranchName(targetBranch)
+        return try await lane { ops in
+            try await ops.networkExec(
+                ["fetch", "--refmap=", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+                 "--end-of-options", remote, "refs/heads/\(sourceBranch)", "refs/heads/\(targetBranch)"],
+                target: .fetch(remotes: [remote]))
+            for sha in [sourceCommit, targetCommit] {
+                // `^{commit}`: a bare full-length id passes `--verify` even when its object is missing.
+                let found = try await ops.exec(
+                    ["rev-parse", "--verify", "--quiet", "--end-of-options", "\(sha)^{commit}"],
+                    allowedExitCodes: [0, 1])
+                if found.exitCode != 0 { throw PullRequestDiffError.changed }
+            }
+            let mergeBase = try await ops.exec(
+                ["merge-base", "--end-of-options", targetCommit, sourceCommit], allowedExitCodes: [0, 1])
+            if mergeBase.exitCode != 0 { throw PullRequestDiffError.noCommonHistory }
+            let base = mergeBase.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var arguments = DiffReader.compareArguments(base: base, head: sourceCommit, paths: [], context: nil)
+            if let options = arguments.firstIndex(of: "--end-of-options") {
+                arguments.insert("--submodule=short", at: options)
+            }
+            let diff = try await ops.exec(arguments)
+            return BitbucketCloudClient.files(fromDiff: diff.stdout)
         }
     }
 

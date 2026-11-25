@@ -116,6 +116,32 @@ struct NetworkTokenTests {
         #expect(!answer.contains("username=me\n"), "the URL's username reached the transport")
     }
 
+    @Test("a Data Center clone link https://user@<host>/scm/P/r.git gets the account's token, and git signs in as the account's username, not as user")
+    func bitbucketDataCenterUsernameURL() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let source = try await box.sandbox.makeRepo("scm/P/r.git")
+        try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "remote only"], in: source)
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "origin", "https://user@\(Self.host)\(source.path)"], in: repo)
+        let credentials = [
+            GitCredential(kind: .bitbucketDataCenter, host: Self.host, username: "jane.doe", token: Self.token)
+        ]
+
+        let decision = await box.decision(.fetch(remotes: ["origin"]), in: repo, credentials: credentials)
+        guard case .attach(let matched) = decision else {
+            Issue.record("expected .attach, got \(decision)")
+            return
+        }
+        #expect(matched.map(\.host) == [Self.host])
+        try await box.operations(naive: false, in: repo, credentials: credentials).fetch(remote: "origin")
+        #expect(try await box.hasRef("refs/remotes/origin/main", in: repo))
+        let answer = box.transportAnswer(host: Self.host)
+        let signedIn = answer.contains("password=\(Self.token)\n") && answer.contains("username=jane.doe\n")
+        #expect(signedIn, "the transport did not sign in with the token as the account's username")
+        #expect(!answer.contains("username=user\n"), "the URL's username reached the transport")
+    }
+
     @Test("the same username form on a GitHub or GitLab host, or user:pass@ on any host, gets no token")
     func usernameURLRefused() async throws {
         let box = try await TokenSandbox()
@@ -130,6 +156,269 @@ struct NetworkTokenTests {
         // On GitLab a username in the URL picks one of the user's own logins: their helpers sign in, not the account.
         let gitLab = [GitCredential(kind: .gitlab, host: Self.host, username: "oauth2", token: Self.token)]
         #expect(await box.decision(.fetch(remotes: ["gh"]), in: repo, credentials: gitLab) == .otherURL)
+    }
+
+    // MARK: - Azure DevOps hosts
+
+    static let azureToken = "HistqAzureFakePat0123456789abcdef"
+    /// An Azure DevOps account: on `dev.azure.com`, whatever URL form the remote uses.
+    static let azureCredential = GitCredential(
+        kind: .azureDevOps, host: AzureDevOpsClient.host, username: "jane", token: azureToken)
+    static let visualStudioHost = "org.visualstudio.com"
+
+    @Test("https://org@dev.azure.com/… gets the Azure account's token")
+    func azureUsernameURL() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "origin", "https://org@dev.azure.com/org/p/_git/r"], in: repo)
+        let decision = await box.decision(.fetch(remotes: ["origin"]), in: repo, credentials: [Self.azureCredential])
+        #expect(decision == .attach([Self.azureCredential]))
+    }
+
+    @Test("an <org>.visualstudio.com remote gets the Azure credential bound to its own host, and no other host does")
+    func visualStudioHosts() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let repo = try await box.sandbox.makeRepo("repo")
+        var bound = Self.azureCredential
+        bound.host = Self.visualStudioHost
+        let accepted = [
+            "https://org.visualstudio.com/p/_git/r",
+            "https://org.visualstudio.com/DefaultCollection/p/_git/r",
+            "https://ORG.visualstudio.com/p/_git/r",
+            "https://org@org.visualstudio.com/p/_git/r",
+        ]
+        for (index, url) in accepted.enumerated() {
+            try await box.sandbox.git(["remote", "add", "ok\(index)", url], in: repo)
+            let decision = await box.decision(
+                .fetch(remotes: ["ok\(index)"]), in: repo, credentials: [Self.azureCredential])
+            #expect(decision == .attach([bound]), "\(url)")
+        }
+        let refused = [
+            "https://vs-ssh.visualstudio.com/p/_git/r",
+            "https://app.vssps.visualstudio.com/p/_git/r",
+            "https://a.b.visualstudio.com/p/_git/r",
+            "https://visualstudio.com.evil.example/p/_git/r",
+            "https://visualstudio.com/p/_git/r",
+            "https://org.visualstudio.com:8443/p/_git/r",
+            "https://user:pw@org.visualstudio.com/p/_git/r",
+            "https://-org.visualstudio.com/p/_git/r",
+            "https://org_x.visualstudio.com/p/_git/r",
+            "https://org.visualstudio.com./p/_git/r",
+            "https://org.visualstudio.com",
+            "http://org.visualstudio.com/p/_git/r",
+        ]
+        for (index, url) in refused.enumerated() {
+            try await box.sandbox.git(["remote", "add", "no\(index)", url], in: repo)
+            let decision = await box.decision(
+                .fetch(remotes: ["no\(index)"]), in: repo, credentials: [Self.azureCredential])
+            #expect(decision == .otherURL, "\(url)")
+        }
+        // Only an Azure DevOps account on dev.azure.com reaches the legacy hosts: not a GitHub one, nor an Azure kind
+        // on another host.
+        let elsewhere = GitCredential(
+            kind: .azureDevOps, host: "azure.histq.invalid", username: "jane", token: Self.azureToken)
+        #expect(await box.decision(.fetch(remotes: ["ok0"]), in: repo) == .otherURL)
+        #expect(await box.decision(.fetch(remotes: ["ok0"]), in: repo, credentials: [elsewhere]) == .otherURL)
+        // A legacy URL and a dev.azure.com one in the same fetch: each host gets its own binding.
+        try await box.sandbox.git(
+            ["remote", "set-url", "--add", "ok0", "https://dev.azure.com/org/p/_git/r"], in: repo)
+        let both = await box.decision(.fetch(remotes: ["ok0"]), in: repo, credentials: [Self.azureCredential])
+        #expect(both == .attach([Self.azureCredential, bound]))
+    }
+
+    @Test("a GitHub host never gets the Azure token")
+    func gitHubHostNoAzureToken() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "gh", "https://\(Self.host)/o/r.git"], in: repo)
+        try await box.sandbox.git(["remote", "add", "dotcom", "https://github.com/o/r.git"], in: repo)
+        try await box.sandbox.git(["remote", "add", "legacy", "https://org.visualstudio.com/p/_git/r"], in: repo)
+        let credentials = [Self.credential, Self.azureCredential]
+        #expect(await box.decision(.fetch(remotes: ["gh"]), in: repo, credentials: credentials)
+            == .attach([Self.credential]))
+        #expect(await box.decision(.fetch(remotes: ["dotcom"]), in: repo, credentials: credentials) == .otherURL)
+        #expect(await box.decision(.fetch(remotes: ["dotcom"]), in: repo, credentials: [Self.azureCredential])
+            == .otherURL)
+        var bound = Self.azureCredential
+        bound.host = Self.visualStudioHost
+        #expect(await box.decision(.fetch(remotes: ["gh", "legacy"]), in: repo, credentials: credentials)
+            == .attach([Self.credential, bound]))
+    }
+
+    /// An Azure DevOps account whose login is an email, which no helper could answer: its token needs no username.
+    static var azureEmailCredential: GitCredential {
+        var credential = azureCredential
+        credential.username = "jane@contoso.example"
+        return credential
+    }
+
+    /// The `GIT_CONFIG_KEY_<n>` values of an `env` dump, lowercase.
+    static func configKeys(envDump dump: String) -> [String] {
+        dump.split(separator: "\n").filter { $0.hasPrefix("GIT_CONFIG_KEY_") }
+            .compactMap { $0.split(separator: "=", maxSplits: 1).last?.lowercased() }
+    }
+
+    @Test(
+        "a fetch from an Azure DevOps host sends the Entra token as a Bearer header bound to that host, with no helper",
+        arguments: [AzureDevOpsClient.host, visualStudioHost])
+    func azureFetchSendsBearerHeader(host: String) async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let (repo, _) = try await box.makeRepoWithRemote(host: host)
+
+        try await box.operations(naive: false, in: repo, credentials: [Self.credential, Self.azureEmailCredential])
+            .fetch(remote: "origin")
+        #expect(try await box.hasRef("refs/remotes/origin/main", in: repo))
+        // Compared first, so a failure never prints the token.
+        let bearer = box.transportHeader(host: host) == "Authorization: Bearer \(Self.azureToken)\n"
+        let password = box.transportAnswer(host: host).contains("password=")
+        let dump = try box.transportEnvironment(host: host)
+        let headerKeys = Self.configKeys(envDump: dump).filter { $0.hasSuffix(".extraheader") }
+        let scoped = !headerKeys.isEmpty && headerKeys.allSatisfy { $0 == "http.https://\(host)/.extraheader" }
+        let noRedirects = Self.configKeys(envDump: dump).contains("http.https://\(host)/.followredirects")
+        let helper = dump.contains("HISTQ_GIT_")
+        let otherToken = dump.contains(Self.token)
+        let email = dump.contains("contoso")
+        #expect(bearer, "the transport did not get the Azure token as a Bearer header")
+        #expect(!password, "a helper answered a password for \(host)")
+        #expect(scoped, "an extraHeader key not bound to \(host): \(headerKeys)")
+        #expect(noRedirects, "redirects are not off for \(host)")
+        #expect(!helper, "a token helper or its variables reached the transport")
+        #expect(!otherToken, "the GitHub token reached the transport")
+        #expect(!email, "the Azure login reached git")
+    }
+
+    @Test("a push to an Azure DevOps and a GitHub host: each gets its own credential, the pre-push hook neither")
+    func azurePushHookNeverSeesToken() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let (repo, source) = try await box.makeRepoWithRemote(host: AzureDevOpsClient.host)
+        try await box.sandbox.git(["commit", "-q", "--allow-empty", "-m", "to push"], in: repo)
+        let azureURL = box.url(source, host: AzureDevOpsClient.host)
+        try await box.sandbox.git(["config", "remote.origin.pushurl", azureURL], in: repo)
+        try await box.sandbox.git(["config", "--add", "remote.origin.pushurl", box.url(source)], in: repo)
+        // The hook records its whole environment and the header a `git` it runs would send to the Azure URL.
+        let root = box.sandbox.root.path
+        try Fixtures.writeScript("""
+            env > '\(root)/pre-push.envdump'
+            git config --get-urlmatch http.extraheader '\(azureURL)' > '\(root)/pre-push.header' 2>/dev/null
+            exit 0
+            """, to: repo.appending(path: ".git/hooks/pre-push"))
+
+        try await box.operations(naive: false, in: repo, credentials: [Self.credential, Self.azureCredential])
+            .push(branch: "main", to: "origin", as: "pushed")
+
+        let pushed = try await box.sandbox.git(["rev-parse", "pushed"], in: source)
+        let local = try await box.sandbox.git(["rev-parse", "main"], in: repo)
+        #expect(pushed == local, "the push landed")
+        // Positive control: the push carried the Azure token (its header, in git's environment) and GitHub's (its
+        // helper), each to its own host alone.
+        let azureBearer = box.transportHeader(host: AzureDevOpsClient.host)
+            == "Authorization: Bearer \(Self.azureToken)\n"
+        let pushHadToken = try box.transportEnvironment(host: AzureDevOpsClient.host).contains(Self.azureToken)
+        let azurePassword = box.transportAnswer(host: AzureDevOpsClient.host).contains("password=")
+        let gitHubSignedIn = box.transportGot(Self.token, host: Self.host)
+        let gitHubHeader = !box.transportHeader(host: Self.host).isEmpty
+        #expect(azureBearer && pushHadToken, "the Azure host did not get the token as a Bearer header")
+        #expect(!azurePassword, "a helper answered a password for the Azure host")
+        #expect(gitHubSignedIn, "the GitHub host did not sign in through its helper")
+        #expect(!gitHubHeader, "the GitHub host got a header")
+
+        let dump = try String(contentsOfFile: "\(root)/pre-push.envdump", encoding: .utf8)
+        let lines = dump.split(separator: "\n")
+        let azureToken = dump.contains(Self.azureToken)
+        let bearer = dump.contains("Bearer")
+        let configValue = lines.contains { $0.hasPrefix("GIT_CONFIG_VALUE_") && $0.contains(Self.azureToken) }
+        let parameters = lines.contains { $0.hasPrefix("GIT_CONFIG_PARAMETERS=") }
+        let credential = box.hasCredential(envDump: dump)
+        let hookSends = ((try? String(contentsOfFile: "\(root)/pre-push.header", encoding: .utf8)) ?? "?") != ""
+        #expect(!azureToken, "the pre-push hook's environment has the Azure token")
+        #expect(!bearer, "the pre-push hook's environment has a Bearer header")
+        #expect(!configValue, "a GIT_CONFIG_VALUE_<n> of the hook holds the Azure token")
+        #expect(!parameters, "the hook has GIT_CONFIG_PARAMETERS")
+        #expect(!credential, "the pre-push hook's environment has a credential")
+        #expect(!hookSends, "a git in the hook would send a header to the Azure host")
+    }
+
+    @Test("the Azure header is command-scope config bound to its own host, and never in another environment")
+    func azureHeaderEnvironment() {
+        var legacy = Self.azureCredential
+        legacy.host = Self.visualStudioHost
+        let base = ["PATH": "/usr/bin:/bin", "HOME": "/tmp"]
+        let credentials = [Self.credential, Self.azureCredential, legacy]
+        let network = GitInvocation.environment(
+            profile: Self.profile, base: base, access: .network(.fetch), credentials: credentials)
+        let azure = { (host: String) in [
+            "credential.https://\(host).helper=",
+            "http.https://\(host)/.followRedirects=false",
+            "http.https://\(host)/.extraHeader=",
+            "http.https://\(host)/.extraHeader=Authorization: Bearer \(Self.azureToken)",
+        ] }
+        let expected = ["credential.helper=", "credential.https://\(Self.host).helper=",
+                        "credential.https://\(Self.host).helper=\(GitInvocation.tokenHelper(0))"]
+            + azure(AzureDevOpsClient.host) + azure(Self.visualStudioHost)
+        // Compared first, so a failure never prints the token.
+        let entries = GitInvocationTests.configEntries(network)
+        let exact = Array(entries.suffix(expected.count)) == expected
+        let unscoped = entries.contains { $0.lowercased().hasPrefix("http.extraheader=") }
+        let tokenKeys = network.filter { $0.value.contains(Self.azureToken) }.map(\.key)
+        let histqKeys = network.keys.filter { $0.hasPrefix("HISTQ_") }.sorted()
+        #expect(exact, "the network config is not the GitHub helper then each Azure host's header")
+        #expect(!unscoped, "an unscoped http.extraHeader")
+        #expect(tokenKeys.count == 2 && tokenKeys.allSatisfy { $0.hasPrefix("GIT_CONFIG_VALUE_") }, "\(tokenKeys)")
+        // The GitHub credential alone has variables: the Azure ones have no index variables nor helper.
+        #expect(histqKeys == ["HISTQ_GIT_TOKEN_0", "HISTQ_GIT_USER_0"])
+
+        // A background fetch gets the same header after the user's replayed helpers, and no helper for the host.
+        let background = GitInvocationTests.configEntries(GitInvocation.environment(
+            profile: Self.profile, base: base, access: .backgroundFetch(credentialHelpers: [
+                .init(key: "credential.helper", value: "osxkeychain"),
+            ]), credentials: [Self.azureCredential]))
+        let backgroundExact = Array(background.suffix(5)) == ["credential.helper=osxkeychain"]
+            + azure(AzureDevOpsClient.host)
+        #expect(backgroundExact, "the background fetch's Azure entries")
+
+        // No other environment gets it: not a write, a read or the terminal (even from a base that held it).
+        let others: [(String, [String: String])] = [
+            ("write", GitInvocation.environment(
+                profile: Self.profile, base: base, access: .write, credentials: credentials)),
+            ("read", GitInvocation.environment(
+                profile: Self.profile, base: base, access: .read(filterDrivers: []), credentials: credentials)),
+            ("terminal", GitInvocation.terminalProcessEnvironment(base: network, profile: Self.profile)),
+        ]
+        for (name, env) in others {
+            let leaked = env.values.contains { $0.contains(Self.azureToken) || $0.contains("Bearer") }
+            let header = GitInvocationTests.configEntries(env).contains { $0.lowercased().contains("extraheader") }
+            #expect(!leaked, "\(name)")
+            #expect(!header, "\(name)")
+        }
+    }
+
+    @Test("an Azure DevOps login that is an email still gets the token, which needs no username; others still do not")
+    func azureEmailLoginAttaches() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let repo = try await box.sandbox.makeRepo("repo")
+        try await box.sandbox.git(["remote", "add", "origin", "https://dev.azure.com/org/p/_git/r"], in: repo)
+        let email = Self.azureEmailCredential
+        #expect(await box.decision(.fetch(remotes: ["origin"]), in: repo, credentials: [email]) == .attach([email]))
+        let env = GitInvocation.environment(
+            profile: Self.profile, base: box.base, access: .network(.fetch), credentials: [email])
+        let header = GitInvocationTests.configEntries(env)
+            .contains("http.https://\(AzureDevOpsClient.host)/.extraHeader=Authorization: Bearer \(Self.azureToken)")
+        let login = env.values.contains { $0.contains(email.username) }
+        #expect(header, "the Azure credential with an email login was dropped")
+        #expect(!login, "the email login is in the environment")
+
+        // The rule stays for the kinds whose username reaches git.
+        var gitHub = Self.credential
+        gitHub.username = email.username
+        let gitHubEnv = GitInvocation.environment(
+            profile: Self.profile, base: box.base, access: .network(.fetch), credentials: [gitHub])
+        #expect(!GitInvocationTests.hasCredentialVariable(gitHubEnv), "a GitHub credential with an unsafe username")
     }
 
     @Test("the gate resolves insteadOf, pushInsteadOf and pushurl, and runs no transport")
@@ -1002,9 +1291,11 @@ struct NetworkTokenTests {
 
 /// A `Sandbox` whose git reaches `https://<host>/<path>` as the local folder `<path>`: `GIT_EXEC_PATH` is a
 /// copy of git's exec path (links) with a fake `git-remote-https`. The fake first asks `git credential fill` for its
-/// own host, as git's https transport does (and keeps the answer in `transport.txt` and `transport.<host>.txt`, and
-/// its environment in `transport.<host>.env`), then for
-/// `other.histq.invalid`, as after a redirect, fails like GitHub without a password, and else serves the folder with
+/// own host, as git's https transport does (and keeps the answer in `transport.txt` and `transport.<host>.txt`, its
+/// environment in `transport.<host>.env`, and in `transport.<host>.header` the `http.extraHeader` git's config gives
+/// its URL, the header git's https transport sends), then for
+/// `other.histq.invalid`, as after a redirect, fails like GitHub without a password or a Bearer header, and else serves
+/// the folder with
 /// `git upload-pack`/`git receive-pack`. `fakeBin` comes first on PATH.
 struct TokenSandbox {
     let sandbox: Sandbox
@@ -1035,8 +1326,10 @@ struct TokenSandbox {
               | git credential fill > '\#(out)' 2>/dev/null
             cp '\#(out)' '\#(root)'"/transport.$host.txt"
             env > '\#(root)'"/transport.$host.env"
+            git config --get-urlmatch http.extraheader "$2" > '\#(root)'"/transport.$host.header" 2>/dev/null
             printf 'protocol=https\nhost=other.histq.invalid\n\n' | git credential fill > /dev/null 2>&1
-            grep -q '^password=' '\#(out)' || { echo "fatal: Authentication failed for '$2'" >&2; exit 128; }
+            grep -q '^password=' '\#(out)' || grep -q '^Authorization: Bearer ' '\#(root)'"/transport.$host.header" \
+              || { echo "fatal: Authentication failed for '$2'" >&2; exit 128; }
             while read -r line; do
               case "$line" in
                 capabilities) printf 'connect\n\n' ;;
@@ -1170,6 +1463,11 @@ struct TokenSandbox {
     /// Whether the transport's last run on `host` signed in with `token`.
     func transportGot(_ token: String, host: String) -> Bool {
         transportAnswer(host: host).contains("password=\(token)\n")
+    }
+
+    /// The `http.extraHeader` git's config gave the URL of the transport's last run on `host` (empty for none).
+    func transportHeader(host: String) -> String {
+        (try? String(contentsOf: sandbox.root.appending(path: "transport.\(host).header"), encoding: .utf8)) ?? ""
     }
 
     /// The environment the transport's last run on `host` had (`env`).

@@ -118,6 +118,78 @@ struct RemoteURLTests {
         #expect(BitbucketCloudClient.repository(fromRemoteURL: url) == expected)
     }
 
+    @Test("Bitbucket Data Center wants scm and the context path on https, neither on ssh, then a project and a repo",
+          arguments: [
+        ("https://bitbucket.example.com/scm/PROJ/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["PROJ", "repo"])),
+        ("https://Bitbucket.Example.com:8443/scm/PROJ/my.repo", nil,
+         HostedRepository(host: "bitbucket.example.com:8443", path: ["PROJ", "my.repo"])),
+        ("https://me@bitbucket.example.com/scm/PROJ/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["PROJ", "repo"])),
+        ("https://example.com/bitbucket/scm/PROJ/repo.git", "/bitbucket",
+         HostedRepository(host: "example.com", path: ["PROJ", "repo"])),
+        ("https://bitbucket.example.com/scm/~jdoe/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["~jdoe", "repo"])),
+        ("ssh://git@bitbucket.example.com:7999/proj/repo.git", "/bitbucket",
+         HostedRepository(host: "bitbucket.example.com", path: ["proj", "repo"])),
+        ("ssh://git@bitbucket.example.com:7999/~jdoe/repo.git", nil,
+         HostedRepository(host: "bitbucket.example.com", path: ["~jdoe", "repo"])),
+        // No scm, a wrong or missing context path, scm on ssh, a third segment, a password, a bare or doubled `~`.
+        ("https://bitbucket.example.com/PROJ/repo.git", nil, nil),
+        ("https://example.com/scm/PROJ/repo.git", "/bitbucket", nil),
+        ("https://example.com/other/scm/PROJ/repo.git", "/bitbucket", nil),
+        ("ssh://git@bitbucket.example.com:7999/scm/proj/repo.git", nil, nil),
+        ("https://bitbucket.example.com/scm/PROJ/sub/repo.git", nil, nil),
+        ("https://user:tok@bitbucket.example.com/scm/PROJ/repo.git", nil, nil),
+        ("https://bitbucket.example.com/scm/~/repo.git", nil, nil),
+        ("https://bitbucket.example.com/scm/PROJ/~repo.git", nil, nil),
+    ] as [(String, String?, HostedRepository?)])
+    func bitbucketDataCenterRepository(url: String, basePath: String?, expected: HostedRepository?) {
+        #expect(BitbucketDCClient.repository(fromRemoteURL: url, basePath: basePath) == expected)
+    }
+
+    @Test("Azure DevOps maps its https, legacy and ssh forms to org/project/repo on dev.azure.com", arguments: [
+        ("https://dev.azure.com/org/project/_git/repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("https://org@dev.azure.com/org/project/_git/repo.git",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("https://org.visualstudio.com/project/_git/repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("https://Org.VisualStudio.com/DefaultCollection/project/_git/repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("git@ssh.dev.azure.com:v3/org/project/repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("ssh://git@ssh.dev.azure.com/v3/org/project/repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("org@vs-ssh.visualstudio.com:v3/org/project/repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        ("https://dev.azure.com/org/My%20Project/_git/my%20repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "My Project", "my repo"])),
+        ("git@ssh.dev.azure.com:v3/org/My%20Project/my%20repo",
+         HostedRepository(host: "dev.azure.com", path: ["org", "My Project", "my repo"])),
+        // A password, no `_git`, an extra segment, a wrong host or port, `v3` missing on ssh, `v3` on https or `_git`
+        // on ssh, an ssh host on https, a two-label visualstudio.com host, a reserved character, a leading `_`, the
+        // legacy short form without a project.
+        ("https://user:pass@dev.azure.com/org/project/_git/repo", nil),
+        ("https://dev.azure.com/org/project/repo", nil),
+        ("https://dev.azure.com/org/project/_git/repo/extra", nil),
+        ("https://org.visualstudio.com/DefaultCollection/sub/project/_git/repo", nil),
+        ("https://dev.azure.example.com/org/project/_git/repo", nil),
+        ("https://dev.azure.com:8443/org/project/_git/repo", nil),
+        ("git@ssh.dev.azure.com:org/project/repo", nil),
+        ("https://dev.azure.com/v3/org/project/repo", nil),
+        ("git@ssh.dev.azure.com:v3/org/_git/repo", nil),
+        ("https://ssh.dev.azure.com/v3/org/project/repo", nil),
+        ("https://vs-ssh.visualstudio.com/project/_git/repo", nil),
+        ("https://app.vssps.visualstudio.com/project/_git/repo", nil),
+        ("https://dev.azure.com/org/project/_git/repo%3Fx", nil),
+        ("https://dev.azure.com/org/_project/_git/repo", nil),
+        ("https://org.visualstudio.com/DefaultCollection/_git/repo", nil),
+    ] as [(String, HostedRepository?)])
+    func azureDevOpsRepository(url: String, expected: HostedRepository?) {
+        #expect(AzureDevOpsClient.repository(fromRemoteURL: url) == expected)
+    }
+
     @Test("an account's kind resolves its remotes: GitLab subgroups and base paths, GitHub's two segments as before",
           arguments: [
         (HostingKind.gitlab, "https://gitlab.com/group/sub/proj.git", nil,
@@ -134,6 +206,12 @@ struct RemoteURLTests {
         (.github, "https://gitlab.com/group/sub/proj.git", nil, nil),
         (.bitbucketCloud, "git@bitbucket.org:ws/repo.git", nil, HostedRepository(host: "bitbucket.org", path: ["ws", "repo"])),
         (.bitbucketCloud, "https://github.com/octo/hello.git", nil, nil),
+        (.bitbucketDataCenter, "https://example.com/bitbucket/scm/PROJ/repo.git", "bitbucket",
+         HostedRepository(host: "example.com", path: ["PROJ", "repo"])),
+        (.bitbucketDataCenter, "https://github.com/octo/hello.git", nil, nil),
+        (.azureDevOps, "https://org.visualstudio.com/project/_git/repo", nil,
+         HostedRepository(host: "dev.azure.com", path: ["org", "project", "repo"])),
+        (.azureDevOps, "https://github.com/octo/hello.git", nil, nil),
     ] as [(HostingKind, String, String?, HostedRepository?)])
     func kindRepository(kind: HostingKind, url: String, basePath: String?, expected: HostedRepository?) {
         #expect(kind.repository(fromRemoteURL: url, basePath: basePath) == expected)

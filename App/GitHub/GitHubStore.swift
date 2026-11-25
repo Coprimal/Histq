@@ -345,20 +345,26 @@ final class HostingStore {
     }
 
     /// `origin` when it names a repository on the host of one of `profile`'s accounts, else the first remote that
-    /// does, with that repository and account. The account on the remote's host decides how its URL is read (its
-    /// kind, and a GitLab account's base path).
+    /// does, with that repository and account. The account on the remote's host (`accountHost(forRemoteURL:)`) decides
+    /// how its URL is read (its kind, and a GitLab account's base path).
     static func remote(
         in remotes: [RemoteInfo], profile: Profile
     ) -> (name: String, repository: HostedRepository, account: HostingAccount)? {
         let ordered = remotes.filter { $0.name == "origin" } + remotes.filter { $0.name != "origin" }
         return ordered.lazy
             .compactMap { remote in
-                RemoteURL(remote.url).flatMap { profile.account(forHost: $0.host) }.flatMap { account in
+                accountHost(forRemoteURL: remote.url).flatMap { profile.account(forHost: $0) }.flatMap { account in
                     account.kind.repository(fromRemoteURL: remote.url, basePath: account.basePath)
                         .map { (remote.name, $0, account) }
                 }
             }
             .first
+    }
+
+    /// The host of the account a remote URL belongs to: `dev.azure.com` for every Azure DevOps remote (its ssh hosts and
+    /// the legacy `<org>.visualstudio.com` too), else the URL's own host; nil when it names none.
+    nonisolated static func accountHost(forRemoteURL url: String) -> String? {
+        AzureDevOpsClient.repository(fromRemoteURL: url)?.host ?? RemoteURL(url)?.host
     }
 
     /// The client, the repository and its remote while connected: the PR detail loads and acts through them.
@@ -399,14 +405,19 @@ final class HostingStore {
         profileID: UUID, account: HostingAccount
     ) async -> (any HostingProvider)? {
         guard let token = await HostingTokens.token(for: account, profileID: profileID) else { return nil }
-        return try? client(for: account, profileID: profileID, token: token)
+        let client = try? client(for: account, profileID: profileID, token: token)
+        // Data Center offers drafts only once `currentUser()` read its version (copies share it), and `capabilities`
+        // is not observed: read it before the tab connects, so Create PR's Draft switch is right from the start.
+        if let dataCenter = client as? BitbucketDCClient { _ = try? await dataCenter.currentUser() }
+        return client
     }
 
-    /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; GitLab and Bitbucket ask
+    /// The client of `account`'s `kind`, given its token just read: GitHub keeps `token`; the others ask
     /// `HostingTokens.accessToken` on each request (off the main actor; an OAuth sign-in through the refresher, else
     /// cached, read again after a 401), so a token saved again in Settings or renewed is used at once. A sign-in that
     /// cannot be renewed reads as a refused token, so every list and the detail offer Reconnect. Throws `HostingError`
-    /// for a bad host or token (a Bitbucket account on another host than bitbucket.org).
+    /// for a bad host or token (a Bitbucket or Azure DevOps account on another host than bitbucket.org or
+    /// dev.azure.com, a GitLab or Data Center host or base path that is not plain).
     nonisolated static func client(
         for account: HostingAccount, profileID: UUID, token: String
     ) throws -> any HostingProvider {
@@ -432,6 +443,13 @@ final class HostingStore {
             return BitbucketCloudClient(token: accessToken)
         case .gitlab:
             return try GitLabClient(host: account.host, basePath: account.basePath, token: accessToken)
+        case .bitbucketDataCenter:
+            return try BitbucketDCClient(host: account.host, basePath: account.basePath, token: accessToken)
+        case .azureDevOps:
+            guard account.host.lowercased() == AzureDevOpsClient.host else {
+                throw HostingError.invalidHost(account.host)
+            }
+            return AzureDevOpsClient(token: accessToken)
         }
     }
 

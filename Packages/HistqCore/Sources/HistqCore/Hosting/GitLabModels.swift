@@ -210,6 +210,23 @@ struct GitLabNote: Decodable {
     var resolvedBy: GitLabUser?
     var resolvedAt: String?
     var position: Position?
+    /// A diff note's suggested changes (the discussions list only), in its body's order.
+    var suggestions: [Suggestion]?
+
+    struct Suggestion: Decodable {
+        var id: Int
+        var fromLine: Int?
+        var toLine: Int?
+        var appliable: Bool?
+        var applied: Bool?
+        var fromContent: String?
+        var toContent: String?
+
+        var hosted: HostedSuggestion {
+            HostedSuggestion(id: id, fromLine: fromLine, toLine: toLine, appliable: appliable ?? false,
+                             applied: applied ?? false, fromContent: fromContent, toContent: toContent)
+        }
+    }
 
     /// Where a diff note sits: an added line has only `newLine`, a removed one only `oldLine`, an unchanged one
     /// both. `headSha` is the head of the diff it sits on.
@@ -233,6 +250,15 @@ struct GitLabNote: Decodable {
     }
 
     var isDiffNote: Bool { type == "DiffNote" || position != nil }
+}
+
+/// A draft note of a merge request (`GET .../draft_notes`, GitLab 15.11+): the token's user's, unpublished. It has no
+/// author or date; a reply names its thread (`discussionId`), a diff note has a `position`, a general one neither.
+struct GitLabDraftNote: Decodable {
+    var id: Int
+    var note: String?
+    var discussionId: String?
+    var position: GitLabNote.Position?
 }
 
 /// A thread: `id` is a hex string, which replying and resolving take.

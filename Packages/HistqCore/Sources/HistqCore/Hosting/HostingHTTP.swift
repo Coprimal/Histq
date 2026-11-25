@@ -79,8 +79,9 @@ public enum HostingHTTP {
     }
 
     /// The message of an error body whose `message` is not a string (GitLab): an object's fields as `field: msg1,
-    /// msg2` (sorted, joined by `; `), an array's strings, else `error_description`, `error`, or the `message` of an
-    /// `error` object (Bitbucket); empty otherwise.
+    /// msg2` (sorted, joined by `; `), an array's strings, else `error_description`, `error`, the `message` of an
+    /// `error` object (Bitbucket Cloud), or the first `message` of an `errors` array (Bitbucket Data Center); empty
+    /// otherwise.
     private static func otherMessage(_ data: Data) -> String {
         guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
         func text(_ value: Any) -> String? {
@@ -95,7 +96,8 @@ public enum HostingHTTP {
         }
         if let message = body["message"].flatMap(text) { return message }
         if let error = body["error"] as? [String: Any], let message = error["message"] as? String { return message }
-        return (body["error_description"] as? String) ?? (body["error"] as? String) ?? ""
+        if let message = (body["error_description"] as? String) ?? (body["error"] as? String) { return message }
+        return ((body["errors"] as? [[String: Any]])?.first?["message"] as? String) ?? ""
     }
 
     /// The `rel="next"` URL of a `Link` header (`<url>; rel="next", <url>; rel="last"`).

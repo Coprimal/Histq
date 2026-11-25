@@ -1,12 +1,13 @@
 // The OAuth authorization code grant (RFC 6749 section 4.1) with a loopback redirect (RFC 8252 section 7.3), for hosts
-// without a device flow (Bitbucket Cloud). `start()` makes the authorize URL with a fresh random `state` (and, for a host
+// without a device flow (Bitbucket Cloud, Microsoft Entra for Azure DevOps). `start()` makes the authorize URL with a fresh random `state` (and, for a host
 // that takes it, a PKCE S256 challenge, RFC 7636); the app opens it in the browser and listens on the redirect URI's
 // loopback port; `code(fromCallback:for:)` reads the callback's request target and refuses another path and a missing,
 // repeated or wrong `state`; `exchange(_:for:)` trades the code at the token endpoint, and `refresh(_:)` a refresh
-// token (rotated on each use by Bitbucket) for new tokens, as `OAuthRefresher.Refresh` wants. Requests go only to the
+// token (rotated on each use by Bitbucket and Entra) for new tokens, as `OAuthRefresher.Refresh` wants. Requests go only to the
 // token endpoint (https; a redirect off its origin or path is not followed). A confidential client's secret (Bitbucket
 // requires one) is passed in by the app, kept in memory, sent only in the token requests' `Authorization: Basic`
-// header, and never shown by a description or an error, even when a server repeats it.
+// header, and never shown by a description or an error, even when a server repeats it. A public client (Entra) has no
+// secret: PKCE instead, and `client_id` in the form.
 import CryptoKit
 import Foundation
 
@@ -53,13 +54,16 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
 
     /// The callback URL registered on Histq's Bitbucket OAuth client.
     public static let bitbucketRedirectURI = URL(string: "http://127.0.0.1:47823/callback")!
+    /// The Azure DevOps API's resource (`/.default`: the permissions granted to Histq's Entra app) and a refresh token.
+    public static let azureDevOpsScopes = ["499b84ac-1321-427f-aa17-267ca6975798/.default", "offline_access"]
 
     public let authorizeEndpoint: URL
     public let tokenEndpoint: URL
     public let clientID: String
     /// The loopback URL the host sends the browser back to, exactly as registered.
     public let redirectURI: URL
-    /// Sent as `scope` when not empty (Bitbucket takes the scopes from the client's settings).
+    /// Sent as `scope` when not empty, in the authorize URL and the token requests (Bitbucket takes the scopes from the
+    /// client's settings).
     public let scopes: [String]
     public let usesPKCE: Bool
     private let clientSecret: String?
@@ -67,7 +71,7 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
 
     /// Throws `CodeFlowError.missingClient` for an empty client ID or secret, `HostingError.invalidHost` for an
     /// endpoint that is not https on a valid host (or has userinfo, a query or a fragment), or a redirect URI that is
-    /// not `http://127.0.0.1:<port>/<path>`.
+    /// neither `http://127.0.0.1:<port>/<path>` nor `http://localhost:<port>` (no path: Entra's registered form).
     public init(
         authorizeEndpoint: URL, tokenEndpoint: URL, clientID: String, clientSecret: String? = nil, redirectURI: URL,
         scopes: [String] = [], usesPKCE: Bool = false, session: URLSession = HostingHTTP.session
@@ -78,9 +82,13 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
                   endpoint.user() == nil, endpoint.password() == nil, endpoint.query() == nil, endpoint.fragment() == nil
             else { throw HostingError.invalidHost(endpoint.absoluteString) }
         }
-        guard redirectURI.scheme == "http", redirectURI.host() == "127.0.0.1", redirectURI.port != nil,
-              redirectURI.path().hasPrefix("/"), redirectURI.user() == nil, redirectURI.query() == nil,
-              redirectURI.fragment() == nil
+        let loopbackPath = switch redirectURI.host() {
+        case "127.0.0.1": redirectURI.path().hasPrefix("/")
+        case "localhost": redirectURI.path().isEmpty
+        default: false
+        }
+        guard redirectURI.scheme == "http", loopbackPath, redirectURI.port != nil, redirectURI.user() == nil,
+              redirectURI.query() == nil, redirectURI.fragment() == nil
         else { throw HostingError.invalidHost(redirectURI.absoluteString) }
         guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               clientSecret.map({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? true
@@ -106,6 +114,27 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
             authorizeEndpoint: URL(string: "https://bitbucket.org/site/oauth2/authorize")!,
             tokenEndpoint: URL(string: "https://bitbucket.org/site/oauth2/access_token")!,
             clientID: clientID, clientSecret: clientSecret, redirectURI: bitbucketRedirectURI, session: session)
+    }
+
+    /// Histq's Microsoft Entra app for Azure DevOps (a public client, any work or school tenant): authorize
+    /// `https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize`, token `…/oauth2/v2.0/token`, PKCE S256,
+    /// no secret, `azureDevOpsScopes`, redirect `http://localhost:<port>` (Entra ignores the port of a registered
+    /// `http://localhost`; the default picks one at random, so a sign-in never waits on a port the last one held). The
+    /// tokens are opaque: never decoded.
+    public static func azureDevOps(
+        clientID: String, port: UInt16 = .random(in: 49152...65535), session: URLSession = HostingHTTP.session
+    ) throws -> OAuthCodeFlow {
+        try OAuthCodeFlow(
+            authorizeEndpoint: URL(string: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize")!,
+            tokenEndpoint: URL(string: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token")!,
+            clientID: clientID, redirectURI: URL(string: "http://localhost:\(port)")!, scopes: azureDevOpsScopes,
+            usesPKCE: true, session: session)
+    }
+
+    /// The path the loopback callback comes on: the redirect URI's, `/` for one without a path.
+    public var callbackPath: String {
+        let path = redirectURI.path(percentEncoded: true)
+        return path.isEmpty ? "/" : path
     }
 
     public var description: String { "OAuthCodeFlow(\(tokenEndpoint.host() ?? ""))" }
@@ -135,7 +164,7 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
     /// code; `.accessDenied` or `.failed` for an OAuth error that carries the right `state`.
     public func code(fromCallback target: String, for attempt: Attempt) throws -> String {
         guard let components = URLComponents(string: target), components.scheme == nil, components.host == nil,
-              components.percentEncodedPath == redirectURI.path(percentEncoded: true)
+              components.percentEncodedPath == callbackPath
         else { throw CodeFlowError.invalidCallback }
         let items = components.queryItems ?? []
         /// The value of the one item `name`; nil when it is missing or repeated.
@@ -153,18 +182,21 @@ public struct OAuthCodeFlow: Sendable, CustomStringConvertible, CustomDebugStrin
     }
 
     /// Trades the callback's `code` for tokens (`grant_type=authorization_code`, the same `redirect_uri`, the PKCE
-    /// verifier when set). Throws `CodeFlowError.failed` for an OAuth error, else a `HostingError`.
+    /// verifier and `scope` when set). Throws `CodeFlowError.failed` for an OAuth error, else a `HostingError`.
     public func exchange(_ code: String, for attempt: Attempt) async throws -> DeviceFlow.Token {
         var form = ["grant_type": "authorization_code", "code": code, "redirect_uri": redirectURI.absoluteString]
         if let verifier = attempt.codeVerifier { form["code_verifier"] = verifier }
+        if !scopes.isEmpty { form["scope"] = scopes.joined(separator: " ") }
         return try await tokenRequest(form, isRefresh: false)
     }
 
-    /// New tokens for `refreshToken` (`grant_type=refresh_token`). A rejected grant throws as `OAuthRefresher.Refresh`
+    /// New tokens for `refreshToken` (`grant_type=refresh_token`, and `scope` when set). A rejected grant throws as `OAuthRefresher.Refresh`
     /// says: `HostingError.unauthorized` for a 401, `HostingError.http(status: 400, _)` for a 400 or an OAuth error in
     /// a 200 answer; any other failure is another `HostingError`.
     public func refresh(_ refreshToken: String) async throws -> DeviceFlow.Token {
-        try await tokenRequest(["grant_type": "refresh_token", "refresh_token": refreshToken], isRefresh: true)
+        var form = ["grant_type": "refresh_token", "refresh_token": refreshToken]
+        if !scopes.isEmpty { form["scope"] = scopes.joined(separator: " ") }
+        return try await tokenRequest(form, isRefresh: true)
     }
 
     /// The token endpoint's answer.

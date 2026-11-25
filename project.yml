@@ -43,7 +43,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.math2it.histq"
         GENERATE_INFOPLIST_FILE: YES
-        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID, HistqGitLabClientID, HistqBitbucketClient*, Sparkle's SU*), merged with the generated ones.
+        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID, HistqGitLabClientID, HistqBitbucketClient*, HistqAzureClientID, Sparkle's SU*), merged with the generated ones.
         INFOPLIST_FILE: App/Info.plist
         # The client ID of the GitHub OAuth App used by "Sign in with GitHub" (device flow; a public value, no secret).
         # Empty until one is registered: Settings › Integrations then shows how to set it, and paste/import still work.
@@ -55,6 +55,9 @@ targets:
         # redirect http://127.0.0.1:47823/callback; public). Its secret, HISTQ_BITBUCKET_CLIENT_SECRET, is never here:
         # it comes from the untracked Config/Secrets.xcconfig, and without it Bitbucket connects with an API token only.
         HISTQ_BITBUCKET_CLIENT_ID: "niJlylklLcAGhUoVOArgjecG2vtpxoZG"
+        # The Application (client) ID of Histq's Microsoft Entra app used by "Sign in with Microsoft" for Azure DevOps
+        # (authorization code + PKCE, loopback redirect http://localhost; multitenant public client, no secret).
+        HISTQ_AZURE_CLIENT_ID: "34b16aee-a5ef-44e1-aaaa-4c73db78c499"
         INFOPLIST_KEY_LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
         INFOPLIST_KEY_CFBundleDisplayName: "Histq"
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Coprimal"

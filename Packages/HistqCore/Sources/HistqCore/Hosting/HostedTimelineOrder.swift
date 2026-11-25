@@ -86,6 +86,17 @@ public enum HostedTimelineOrder {
         return keyed.sorted { $0.key < $1.key }.map(\.entry)
     }
 
+    /// `entries` with the threads whose root is a pending comment (`HostedReviewThread.comments.first?.isPending`, the
+    /// viewer's new threads of their pending review) moved to the front, as the host's own page lists them right under
+    /// the description; both parts keep their order (a stable partition), so it goes after any filter or reversal.
+    public static func pendingFirst(_ entries: [Entry]) -> [Entry] {
+        func isPending(_ entry: Entry) -> Bool {
+            if case .thread(let thread) = entry { return thread.comments.first?.isPending == true }
+            return false
+        }
+        return entries.filter(isPending) + entries.filter { !isPending($0) }
+    }
+
     private struct SortKey: Comparable {
         let date: Date?
         /// Comments 0, reviews 1, threads 2, entries 3.

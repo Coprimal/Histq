@@ -140,7 +140,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             .labels, .assignees, .issues, .requestChanges, .resolveThreads, .draft, .reopen, .reviewRequests,
             .unapprove, .generalReplies, .resolveGeneralThreads, .editComments, .deleteComments, .reactions,
             .newInlineComments, .multiLineInlineComments, .itemReactions, .rebaseSourceBranch, .startThreads,
-            .timelineEvents,
+            .timelineEvents, .editDescription, .pendingReviews, .suggestions, .applySuggestions, .editPendingComments,
         ]
     }
 
@@ -359,14 +359,17 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                 ? place.line.flatMap { line in patches[place.path].flatMap { Self.hunk($0, side: place.side, line: line) } }
                 : nil
             for note in notes {
+                let suggestions = (note.suggestions ?? []).map(\.hosted)
                 var comment = HostedReviewComment(
                     id: note.id, inReplyToID: note.id == root.id ? nil : root.id, path: place.path,
                     line: current ? place.line : nil, originalLine: place.line,
                     startLine: current ? place.startLine : nil, originalStartLine: place.startLine, side: place.side,
-                    diffHunk: hunk, body: note.body, bodyHTML: note.body.map(markdownHTML),
+                    diffHunk: hunk, body: note.body,
+                    bodyHTML: note.body.map { markdownHTML($0, suggestionsFrom: suggestions.map(\.fromContent)) },
                     user: note.author?.hosted, createdAt: GitLabDate.parse(note.createdAt),
                     htmlURL: Self.noteURL(page, note.id))
                 comment.hostKey = id
+                comment.suggestions = suggestions
                 if note.id == root.id { (comment.resolvedBy, comment.resolvedAt) = resolution }
                 let state = viewerState(of: note, in: load)
                 (comment.viewerCanEdit, comment.viewerCanDelete) = (state.canAdmin, state.canAdmin)
@@ -610,11 +613,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     public func reply(to thread: HostedThreadRef, on number: Int, in repo: HostedRepository, body: String)
         async throws -> HostedReviewComment
     {
-        let key = try projectID(repo) + "\u{0}\(number)\u{0}\(thread.rootCommentID)"
-        let mapped = memo.discussionByNote.withLock { $0[key] }
-        guard let discussion = thread.hostKey.flatMap({ $0.isEmpty ? nil : $0 }) ?? mapped else {
-            throw HostingError.validationFailed(message: "an unknown GitLab thread: reload the merge request")
-        }
+        let discussion = try discussionID(of: thread, on: number, in: repo)
         defer { forgetThreads(of: .pullRequest(number), in: repo) }
         let note: GitLabNote = try await send(
             "POST", url(try itemPath(.pullRequest(number), in: repo) + ["discussions", discussion, "notes"]),
@@ -626,6 +625,17 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             side: place?.side, body: note.body, bodyHTML: note.body.map(markdownHTML), user: note.author?.hosted,
             createdAt: GitLabDate.parse(note.createdAt),
             htmlURL: Self.noteURL(webURL(.pullRequest(number), in: repo), note.id))
+    }
+
+    /// The discussion id of review thread `thread`: its `hostKey`, else the one this client mapped for its root in
+    /// `reviewComments(of:in:)`; a thread with neither is refused.
+    private func discussionID(of thread: HostedThreadRef, on number: Int, in repo: HostedRepository) throws -> String {
+        let key = try projectID(repo) + "\u{0}\(number)\u{0}\(thread.rootCommentID)"
+        let mapped = memo.discussionByNote.withLock { $0[key] }
+        guard let discussion = thread.hostKey.flatMap({ $0.isEmpty ? nil : $0 }) ?? mapped else {
+            throw HostingError.validationFailed(message: "an unknown GitLab thread: reload the merge request")
+        }
+        return discussion
     }
 
     /// `PUT .../discussions/:discussion_id?resolved=`, for a thread this client mapped in `reviewThreadStates(of:in:)`
@@ -800,6 +810,21 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             "PUT", url(try itemPath(item, in: repo)), body: ["state_event": open ? "reopen" : "close"])
     }
 
+    /// `PUT` the merge request or issue with the new `description`. Its author and Developers may; the client reads
+    /// no access level of the token's user, so the action is offered (`viewerCanEditDescription`) and GitLab's 403
+    /// tells anyone else.
+    public func editDescription(of item: HostedItem, in repo: HostedRepository, body: String) async throws {
+        let _: Updated = try await send("PUT", url(try itemPath(item, in: repo)), body: ["description": body])
+    }
+
+    /// `PUT /suggestions/:id/apply` (no `commit_message`: GitLab's default one), a path under the API root, not the
+    /// project's. GitLab allows it to Developers and up and to the merge request's author, and refuses one that is not
+    /// appliable (403, 400). A project on another host is refused unsent, as every other call.
+    public func applySuggestion(_ id: Int, in repo: HostedRepository) async throws {
+        _ = try projectID(repo)
+        _ = try await perform("PUT", url(["suggestions", String(id), "apply"]))
+    }
+
     // MARK: - Comment interactions
 
     /// `POST .../discussions/:discussion_id/notes` on the merge request or issue: `comment` is the thread's root
@@ -862,21 +887,23 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     }
 
     /// `PUT .../notes/:note_id` with only the new body (never the deprecated `confidential`), on the merge request
-    /// or issue, a general or a diff note alike.
+    /// or issue, a general or a diff note alike; a draft note's id (`HostedPendingReview.idBase`'s band) is refused
+    /// unsent (`editPendingComment`).
     public func editComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository, body: String)
         async throws
     {
         struct Edited: Decodable { var id: Int }
-        let path = try itemPath(item, in: repo) + ["notes", String(comment.id)]
+        let path = try itemPath(item, in: repo) + ["notes", try Self.noteID(comment)]
         defer { forgetThreads(of: item, in: repo) }
         let _: Edited = try await send("PUT", url(path), body: ["body": body])
     }
 
-    /// `DELETE .../notes/:note_id` on the merge request or issue, answered 204 without a body.
+    /// `DELETE .../notes/:note_id` on the merge request or issue, answered 204 without a body; a draft note's id is
+    /// refused unsent (`deletePendingComment`).
     public func deleteComment(_ comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository)
         async throws
     {
-        let path = try itemPath(item, in: repo) + ["notes", String(comment.id)]
+        let path = try itemPath(item, in: repo) + ["notes", try Self.noteID(comment)]
         defer { forgetThreads(of: item, in: repo) }
         _ = try await perform("DELETE", url(path))
     }
@@ -886,14 +913,23 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     public func addReaction(
         _ kind: String, to comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws {
-        try await setAward(kind, on: "note\u{0}\(comment.id)", item: item, in: repo, added: true)
+        try await setAward(kind, on: "note\u{0}\(try Self.noteID(comment))", item: item, in: repo, added: true)
     }
 
     /// GraphQL `awardEmojiRemove` on the note's global id, as `addReaction(_:to:on:in:)`.
     public func removeReaction(
         _ kind: String, from comment: HostedCommentRef, on item: HostedItem, in repo: HostedRepository
     ) async throws {
-        try await setAward(kind, on: "note\u{0}\(comment.id)", item: item, in: repo, added: false)
+        try await setAward(kind, on: "note\u{0}\(try Self.noteID(comment))", item: item, in: repo, added: false)
+    }
+
+    /// A published note's id as its paths take it; a draft note's (`HostedPendingReview.idBase`'s band) is refused: a
+    /// draft has no note id, no award emoji, and its own endpoints.
+    private static func noteID(_ comment: HostedCommentRef) throws -> String {
+        guard !HostedPendingReview.isPending(comment.id) else {
+            throw HostingError.validationFailed(message: "a pending comment is not a note yet: reload the merge request")
+        }
+        return String(comment.id)
     }
 
     /// The merge request's or issue's own award emoji, from the load's GraphQL read (`threads(of:in:)`: the item's
@@ -927,6 +963,32 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     public func createInlineComment(
         at position: HostedInlinePosition, on number: Int, in repo: HostedRepository, body: String
     ) async throws -> HostedReviewComment {
+        struct Body: Encodable {
+            var body: String
+            var position: DiffPosition
+        }
+        let diffPosition = try await diffPosition(position, on: number, in: repo)
+        let path = try itemPath(.pullRequest(number), in: repo) + ["discussions"]
+        defer { forgetThreads(of: .pullRequest(number), in: repo) }
+        let discussion: GitLabDiscussion = try await send(
+            "POST", url(path), body: Body(body: body, position: diffPosition))
+        guard let note = discussion.notes.first else {
+            throw HostingError.invalidResponse("a new diff thread without its note")
+        }
+        let place = note.position.map(Self.place)
+        var comment = HostedReviewComment(
+            id: note.id, path: place?.path ?? position.path, line: place?.line, originalLine: place?.line,
+            startLine: place?.startLine, originalStartLine: place?.startLine, side: place?.side, body: note.body,
+            bodyHTML: note.body.map(markdownHTML), user: note.author?.hosted,
+            createdAt: GitLabDate.parse(note.createdAt),
+            htmlURL: Self.noteURL(webURL(.pullRequest(number), in: repo), note.id))
+        comment.hostKey = discussion.id
+        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
+        return comment
+    }
+
+    /// A diff note's `position`, as discussions and draft notes take it.
+    private struct DiffPosition: Encodable {
         struct Point: Encodable {
             var type: String?
             var oldLine, newLine: Int?
@@ -935,21 +997,28 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             }
         }
         struct LineRange: Encodable { var start, end: Point }
-        struct Position: Encodable {
-            var positionType = "text"
-            var baseSHA, startSHA, headSHA, oldPath, newPath: String
-            var oldLine, newLine: Int?
-            var lineRange: LineRange?
-            enum CodingKeys: String, CodingKey {
-                case positionType = "position_type", baseSHA = "base_sha", startSHA = "start_sha"
-                case headSHA = "head_sha", oldPath = "old_path", newPath = "new_path", oldLine = "old_line"
-                case newLine = "new_line", lineRange = "line_range"
-            }
+        var positionType = "text"
+        var baseSHA, startSHA, headSHA, oldPath, newPath: String
+        var oldLine, newLine: Int?
+        var lineRange: LineRange?
+        enum CodingKeys: String, CodingKey {
+            case positionType = "position_type", baseSHA = "base_sha", startSHA = "start_sha"
+            case headSHA = "head_sha", oldPath = "old_path", newPath = "new_path", oldLine = "old_line"
+            case newLine = "new_line", lineRange = "line_range"
         }
-        struct Body: Encodable {
-            var body: String
-            var position: Position
-        }
+    }
+
+    /// A text `position` on the merge request's current `diff_refs` (`base_sha`, `start_sha`, `head_sha`): `new_line`
+    /// for an added line, `old_line` for a removed one, both for a context line, `old_path`/`new_path` (the same
+    /// without a rename), and `line_range` from the start line for a range (each end's `type` `new` added, `old`
+    /// removed, none for context; no `line_code`, which needs both line numbers). Refused when a line its kind needs
+    /// is missing, when the merge request has no `diff_refs`, and (`HostingError.headChanged`) when its head is not
+    /// the one the patch was loaded at.
+    private func diffPosition(_ position: HostedInlinePosition, on number: Int, in repo: HostedRepository)
+        async throws -> DiffPosition
+    {
+        typealias Point = DiffPosition.Point
+        typealias LineRange = DiffPosition.LineRange
         func point(_ kind: HostedInlinePosition.LineKind, old: Int?, new: Int?) throws -> Point {
             switch (kind, old, new) {
             case (.added, _, let new?): Point(type: "new", newLine: new)
@@ -973,28 +1042,141 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             throw HostingError.validationFailed(message: "the merge request has no diff yet: reload it")
         }
         guard head == position.headSHA else { throw HostingError.headChanged }
-        let path = try itemPath(.pullRequest(number), in: repo) + ["discussions"]
-        defer { forgetThreads(of: .pullRequest(number), in: repo) }
-        let discussion: GitLabDiscussion = try await send(
-            "POST", url(path),
-            body: Body(
-                body: body,
-                position: Position(
-                    baseSHA: base, startSHA: start, headSHA: head, oldPath: position.oldPath ?? position.path,
-                    newPath: position.path, oldLine: end.oldLine, newLine: end.newLine, lineRange: range)))
-        guard let note = discussion.notes.first else {
-            throw HostingError.invalidResponse("a new diff thread without its note")
+        return DiffPosition(
+            baseSHA: base, startSHA: start, headSHA: head, oldPath: position.oldPath ?? position.path,
+            newPath: position.path, oldLine: end.oldLine, newLine: end.newLine, lineRange: range)
+    }
+
+    // MARK: - Draft notes (pending review)
+
+    /// The token's user's draft notes (`GET .../draft_notes`, GitLab 15.11+: an older GitLab answers 404, thrown as
+    /// `notFound`, and the app hides the feature): a diff note at its position's place, a reply with its discussion id
+    /// in `hostKey` and no path (`HostedPendingReview.merged(into:)` joins it to its thread), each `isPending` with its
+    /// id in `HostedPendingReview.idBase`'s band and the token's user as author (drafts name none); a general draft is
+    /// left out (published with the others, shown nowhere). No review key: draft notes belong to no review.
+    public func pendingReview(of number: Int, in repo: HostedRepository) async throws -> HostedPendingReview {
+        let drafts = try await draftNotes(of: number, in: repo)
+        guard !drafts.isEmpty else { return HostedPendingReview() }
+        let me = try? await currentUser()
+        let comments = drafts.compactMap { draft -> HostedReviewComment? in
+            var comment: HostedReviewComment
+            if let discussion = draft.discussionId, !discussion.isEmpty {
+                comment = HostedReviewComment(
+                    id: HostedPendingReview.id(draft.id), path: "", body: draft.note,
+                    bodyHTML: draft.note.map(markdownHTML), user: me)
+                comment.hostKey = discussion
+            } else if let position = draft.position, position.newPath != nil || position.oldPath != nil {
+                let place = Self.place(position)
+                comment = HostedReviewComment(
+                    id: HostedPendingReview.id(draft.id), path: place.path, line: place.line,
+                    originalLine: place.line, startLine: place.startLine, originalStartLine: place.startLine,
+                    side: place.side, body: draft.note, bodyHTML: draft.note.map(markdownHTML), user: me)
+            } else {
+                return nil
+            }
+            comment.isPending = true
+            // The token's user's own drafts: theirs to edit and delete (`editPendingComment`); no award emoji.
+            (comment.viewerCanEdit, comment.viewerCanDelete, comment.viewerCanReact) = (true, true, false)
+            return comment
         }
-        let place = note.position.map(Self.place)
-        var comment = HostedReviewComment(
-            id: note.id, path: place?.path ?? position.path, line: place?.line, originalLine: place?.line,
-            startLine: place?.startLine, originalStartLine: place?.startLine, side: place?.side, body: note.body,
-            bodyHTML: note.body.map(markdownHTML), user: note.author?.hosted,
-            createdAt: GitLabDate.parse(note.createdAt),
-            htmlURL: Self.noteURL(webURL(.pullRequest(number), in: repo), note.id))
-        comment.hostKey = discussion.id
-        (comment.viewerCanEdit, comment.viewerCanDelete) = (true, true)
-        return comment
+        return HostedPendingReview(comments: comments)
+    }
+
+    /// `POST .../draft_notes` with `note` and a diff line's `position` (as a new diff thread takes it), or a reply's
+    /// `in_reply_to_discussion_id`; drafts are independent of `review`. A 404 is a GitLab without draft notes.
+    public func addPendingComment(
+        _ target: HostedPendingTarget, to review: HostedPendingReview, on number: Int, in repo: HostedRepository,
+        body: String
+    ) async throws {
+        struct Body: Encodable {
+            var note: String
+            var position: DiffPosition?
+            var inReplyToDiscussionID: String?
+            enum CodingKeys: String, CodingKey {
+                case note, position, inReplyToDiscussionID = "in_reply_to_discussion_id"
+            }
+        }
+        let draft: Body = switch target {
+        case .line(let position): Body(note: body, position: try await diffPosition(position, on: number, in: repo))
+        case .reply(let thread):
+            Body(note: body, inReplyToDiscussionID: try discussionID(of: thread, on: number, in: repo))
+        }
+        try await withoutDraftNotesMessage {
+            let _: GitLabDraftNote = try await send(
+                "POST", url(try itemPath(.pullRequest(number), in: repo) + ["draft_notes"]), body: draft)
+        }
+    }
+
+    /// `POST .../draft_notes/bulk_publish` (no summary: it records no approval either), then the review as `review(_:in:
+    /// event:body:)` does it today: `APPROVE` approves and `REQUEST_CHANGES` requests changes, each posting a non-empty
+    /// `body` as a note; `COMMENT` posts a non-empty `body` as a note.
+    public func submitPendingReview(
+        _ review: HostedPendingReview, on number: Int, in repo: HostedRepository, event: HostedReviewEvent,
+        body: String?
+    ) async throws {
+        let text = body.flatMap { $0.isEmpty ? nil : $0 }
+        defer { forgetThreads(of: .pullRequest(number), in: repo) }
+        try await withoutDraftNotesMessage {
+            _ = try await perform(
+                "POST", url(try itemPath(.pullRequest(number), in: repo) + ["draft_notes", "bulk_publish"]))
+        }
+        switch event {
+        case .comment: if let text { _ = try await comment(on: .pullRequest(number), in: repo, body: text) }
+        case .approve, .requestChanges: _ = try await self.review(number, in: repo, event: event, body: text)
+        }
+    }
+
+    /// Every draft note of the token's user read again (`GET .../draft_notes`, so one written elsewhere goes too), then
+    /// `DELETE .../draft_notes/:id` each.
+    public func discardPendingReview(_ review: HostedPendingReview, on number: Int, in repo: HostedRepository)
+        async throws
+    {
+        let path = try itemPath(.pullRequest(number), in: repo) + ["draft_notes"]
+        for draft in try await draftNotes(of: number, in: repo) {
+            try await withoutDraftNotesMessage { _ = try await perform("DELETE", url(path + [String(draft.id)])) }
+        }
+    }
+
+    /// `PUT .../draft_notes/:draft_note_id` with the new `note` (its position kept, as GitLab does without one); the
+    /// draft's id is the pending comment's host id, and an id outside `HostedPendingReview.idBase`'s band is refused
+    /// unsent.
+    public func editPendingComment(
+        _ comment: HostedCommentRef, on number: Int, in repo: HostedRepository, body: String
+    ) async throws {
+        let path = try draftNotePath(comment, on: number, in: repo)
+        let _: GitLabDraftNote = try await send("PUT", url(path), body: ["note": body])
+    }
+
+    /// `DELETE .../draft_notes/:draft_note_id`, answered 204; refused unsent as `editPendingComment`.
+    public func deletePendingComment(_ comment: HostedCommentRef, on number: Int, in repo: HostedRepository)
+        async throws
+    {
+        _ = try await perform("DELETE", url(try draftNotePath(comment, on: number, in: repo)))
+    }
+
+    /// The path of the draft note behind pending comment `comment` of merge request `number`.
+    private func draftNotePath(_ comment: HostedCommentRef, on number: Int, in repo: HostedRepository) throws
+        -> [String]
+    {
+        guard let draft = HostedPendingReview.hostID(of: comment.id) else {
+            throw HostingError.validationFailed(message: "not a pending comment: reload the merge request")
+        }
+        return try itemPath(.pullRequest(number), in: repo) + ["draft_notes", String(draft)]
+    }
+
+    private func draftNotes(of number: Int, in repo: HostedRepository) async throws -> [GitLabDraftNote] {
+        try await list(url(try itemPath(.pullRequest(number), in: repo) + ["draft_notes"]))
+    }
+
+    /// A write's 404 said in words: draft notes need GitLab 15.11 or later (or the merge request is not visible).
+    private func withoutDraftNotesMessage(_ write: () async throws -> Void) async throws {
+        do {
+            try await write()
+        } catch HostingError.notFound {
+            throw HostingError.validationFailed(
+                message: "this GitLab has no pending reviews (draft notes need GitLab 15.11 or later), or it cannot "
+                    + "see this merge request.")
+        }
     }
 
     /// `POST .../discussions` with only the body: a new resolvable general thread on the merge request or issue
@@ -1222,7 +1404,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
                 deletesSourceBranch: mr.shouldRemoveSourceBranch ?? mr.forceRemoveSourceBranch,
                 squashOnMerge: mr.squashOnMerge, mergeError: mr.mergeError,
                 rebaseInProgress: mr.rebaseInProgress ?? false),
-            milestone: mr.milestone?.hosted, timeStats: mr.timeStats?.hosted)
+            milestone: mr.milestone?.hosted, timeStats: mr.timeStats?.hosted, viewerCanEditDescription: true)
     }
 
     private func issue(_ issue: GitLabIssue) -> HostedIssue {
@@ -1232,7 +1414,7 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
             htmlURL: issue.webUrl, labels: issue.labels?.map(\.hosted), assignees: issue.assignees?.map(\.hosted),
             comments: issue.userNotesCount, createdAt: GitLabDate.parse(issue.createdAt),
             updatedAt: GitLabDate.parse(issue.updatedAt), closedAt: GitLabDate.parse(issue.closedAt),
-            milestone: issue.milestone?.hosted, timeStats: issue.timeStats?.hosted)
+            milestone: issue.milestone?.hosted, timeStats: issue.timeStats?.hosted, viewerCanEditDescription: true)
     }
 
     /// The project's open merge requests whose `filter` (`author_id`, `reviewer_id`) is the token's user, as
@@ -1633,6 +1815,12 @@ public struct GitLabClient: HostingProvider, CustomStringConvertible, CustomDebu
     /// GitLab's page links them.
     private func markdownHTML(_ text: String) -> String {
         MarkdownHTML.html(text, mentionsAt: webRoot)
+    }
+
+    /// `markdownHTML`, each suggestion block with the lines it replaces (`suggestionsFrom`, GitLab's `from_content` of
+    /// each in the body's order) as its old lines.
+    private func markdownHTML(_ text: String, suggestionsFrom: [String?]) -> String {
+        MarkdownHTML.html(text, mentionsAt: webRoot, suggestionsFrom: suggestionsFrom)
     }
 
     /// A system note's markdown as HTML (`markdownHTML`), its root-relative links (GitLab's "Compare with previous

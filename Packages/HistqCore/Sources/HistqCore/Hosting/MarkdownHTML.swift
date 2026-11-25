@@ -5,7 +5,9 @@
 // for an https source (else its alt text shows). Tables, strikethrough and task lists are GFM's; a bare URL is not
 // linked (swift-markdown attaches no autolink extension), `<https://...>` is. swift-markdown builds its tree with one
 // recursion per nesting level and overflows a thread's stack at a few hundred levels (nested quotes, emphasis, images,
-// indented lists), so a document that nests deeper than `maxDepth` shows as its escaped source instead.
+// indented lists), so a document that nests deeper than `maxDepth` shows as its escaped source instead. A fenced
+// suggested change (info string `suggestion` or `suggestion:-N+M`, GitHub's and GitLab's) shows as a small diff: the
+// lines it replaces in red when the caller knows them, its new lines in green, all escaped text.
 import cmark_gfm
 import cmark_gfm_extensions
 import Foundation
@@ -19,12 +21,79 @@ public enum MarkdownHTML {
     /// (`https://gitlab.com`) under which each `@username` of the text (not in code or a link) links to that user's
     /// page, as GitLab's own page does; nil links none (another host's bodies). `origin`: the host's
     /// `https://host[:port]`, against which a link to a root-relative path (`/group/project/-/…`, GitLab's system
-    /// notes) resolves; nil keeps such a link as its text.
-    public static func html(_ markdown: String, mentionsAt mentionRoot: String?, origin: String? = nil) -> String {
+    /// notes) resolves; nil keeps such a link as its text. `suggestionsFrom`: the text each suggestion block replaces
+    /// (its old lines), in the document's order (GitLab's `from_content`); a block without one shows its new lines
+    /// only.
+    public static func html(
+        _ markdown: String, mentionsAt mentionRoot: String?, origin: String? = nil, suggestionsFrom: [String?] = []
+    ) -> String {
         if nestsDeeper(markdown, than: maxDepth) { return "<p class=\"plain\">\(escape(markdown))</p>\n" }
-        var renderer = Renderer(mentionRoot: mentionRoot, origin: origin)
+        var renderer = Renderer(mentionRoot: mentionRoot, origin: origin, suggestionsFrom: suggestionsFrom)
         renderer.visit(Document(parsing: markdown, options: [.disableSmartOpts]))
         return renderer.result
+    }
+
+    /// A suggested change of a comment's body: the lines it adds, and how many lines above and below the comment's
+    /// own it replaces (GitLab's `-N+M`; GitHub's plain `suggestion` replaces the comment's lines: 0 and 0).
+    public struct Suggestion: Sendable, Equatable {
+        public var above: Int
+        public var below: Int
+        public var lines: [String]
+    }
+
+    /// The suggested changes of `markdown`, in order: its fenced code blocks whose info string is `suggestion` or
+    /// `suggestion:-N+M` (none for a document nesting deeper than `maxDepth`).
+    public static func suggestions(in markdown: String) -> [Suggestion] {
+        guard markdown.contains("suggestion"), !nestsDeeper(markdown, than: maxDepth) else { return [] }
+        var finder = SuggestionFinder()
+        finder.visit(Document(parsing: markdown, options: [.disableSmartOpts]))
+        return finder.found
+    }
+
+    /// `markdown` without its suggestion blocks (their fences and lines, as `suggestions(in:)` finds them), for a
+    /// plain-text view that draws them apart.
+    public static func removingSuggestions(_ markdown: String) -> String {
+        guard markdown.contains("suggestion"), !nestsDeeper(markdown, than: maxDepth) else { return markdown }
+        var finder = SuggestionFinder()
+        finder.visit(Document(parsing: markdown, options: [.disableSmartOpts]))
+        guard !finder.sourceLines.isEmpty else { return markdown }
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        return lines.indices.filter { index in !finder.sourceLines.contains { $0.contains(index + 1) } }
+            .map { String(lines[$0]) }.joined(separator: "\n")
+    }
+
+    /// `info`'s first word as a suggestion's lines above and below: `suggestion` is 0 and 0, `suggestion:-N+M` N and
+    /// M (decimal digits only, each up to 4 of them); nil for any other info string.
+    static func suggestionRange(_ info: String?) -> (above: Int, below: Int)? {
+        guard let word = info?.split(whereSeparator: \.isWhitespace).first.map(String.init) else { return nil }
+        if word == "suggestion" { return (0, 0) }
+        guard word.hasPrefix("suggestion:-") else { return nil }
+        let parts = word.dropFirst("suggestion:-".count).split(separator: "+", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts.allSatisfy({ (1...4).contains($0.count) && $0.allSatisfy(\.isASCII)
+            && $0.allSatisfy(\.isNumber) }), let above = Int(parts[0]), let below = Int(parts[1])
+        else { return nil }
+        return (above, below)
+    }
+
+    /// A code block's or a host's text as lines, without the empty one after a final line break.
+    static func lines(_ text: String) -> [String] {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.last == "" { lines.removeLast() }
+        return lines
+    }
+
+    private struct SuggestionFinder: MarkupWalker {
+        var found: [Suggestion] = []
+        /// Each block's source lines (1-based, its fences included).
+        var sourceLines: [ClosedRange<Int>] = []
+
+        mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
+            guard let range = suggestionRange(codeBlock.language) else { return }
+            found.append(Suggestion(above: range.above, below: range.below, lines: lines(codeBlock.code)))
+            if let source = codeBlock.range, source.lowerBound.line <= source.upperBound.line {
+                sourceLines.append(source.lowerBound.line...source.upperBound.line)
+            }
+        }
     }
 
     /// The deepest node a rendered document may have. Measured in a Debug build on a test worker thread: every nesting
@@ -127,7 +196,10 @@ public enum MarkdownHTML {
     private struct Renderer: MarkupWalker {
         let mentionRoot: String?
         let origin: String?
+        let suggestionsFrom: [String?]
         var result = ""
+        /// The suggestion blocks rendered so far, the next one's index in `suggestionsFrom`.
+        var suggestionIndex = 0
 
         mutating func visitText(_ text: Text) {
             guard let mentionRoot, !Self.isInLink(text) else { return result += escape(text.string) }
@@ -187,6 +259,7 @@ public enum MarkdownHTML {
         }
 
         mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
+            if suggestionRange(codeBlock.language) != nil { return suggestion(codeBlock) }
             // The info string's first word, as a class only when it is a plain language name.
             let language = codeBlock.language?.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
             let isName = !language.isEmpty && language.unicodeScalars.allSatisfy {
@@ -195,6 +268,17 @@ public enum MarkdownHTML {
             result += isName ? "<pre><code class=\"language-\(language)\">" : "<pre><code>"
             result += escape(codeBlock.code)
             result += "</code></pre>\n"
+        }
+
+        /// A suggested change as a small diff, GitHub's "Suggested change" box: a title, then each line it replaces
+        /// (`suggestionsFrom`, when known) and each new line, one escaped `div` per line; fixed class names only.
+        private mutating func suggestion(_ codeBlock: CodeBlock) {
+            let old = suggestionIndex < suggestionsFrom.count ? suggestionsFrom[suggestionIndex] : nil
+            suggestionIndex += 1
+            result += "<div class=\"suggestion\"><div class=\"suggestion-head\">Suggested change</div>"
+            for line in old.map(lines) ?? [] { result += "<div class=\"del\">\(escape(line))</div>" }
+            for line in lines(codeBlock.code) { result += "<div class=\"add\">\(escape(line))</div>" }
+            result += "</div>\n"
         }
 
         mutating func visitLink(_ link: Link) {

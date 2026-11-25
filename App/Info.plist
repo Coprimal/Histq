@@ -9,6 +9,8 @@
 	<string>$(HISTQ_GITLAB_CLIENT_ID)</string>
 	<key>HistqBitbucketClientID</key>
 	<string>$(HISTQ_BITBUCKET_CLIENT_ID)</string>
+	<key>HistqAzureClientID</key>
+	<string>$(HISTQ_AZURE_CLIENT_ID)</string>
 	<!-- From the untracked Config/Secrets.xcconfig; empty without it (then no "Sign in with Bitbucket"). -->
 	<key>HistqBitbucketClientSecret</key>
 	<string>$(HISTQ_BITBUCKET_CLIENT_SECRET)</string>

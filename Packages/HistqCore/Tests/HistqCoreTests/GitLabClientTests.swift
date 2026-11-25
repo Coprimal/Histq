@@ -1281,6 +1281,7 @@ struct GitLabClientTests {
                 return .init(body: Self.restDiscussion(Self.threadID, [
                     Self.restNote(200, by: 8, resolvable: true, resolved: true),
                 ]))
+            case "PUT" where path == Self.mrPath + "/5": return .init(body: mrWithRefs)
             case "PUT": return .init(body: Self.restNote(200, by: 7))
             case "GET" where path == Self.mrPath + "/5": return .init(body: mrWithRefs)
             case "POST" where path == Self.graphQLPath:
@@ -1349,6 +1350,9 @@ struct GitLabClientTests {
             }),
             ("PUT", Self.issuePath + "/3/notes/500", nil, ["body": "new"], {
                 try await client.editComment(issueRoot, on: .issue(3), in: repo, body: "new")
+            }),
+            ("PUT", Self.mrPath + "/5", nil, ["description": "new"], {
+                try await client.editDescription(of: .pullRequest(5), in: repo, body: "new")
             }),
             ("DELETE", Self.mrPath + "/5/notes/200", nil, nil, {
                 try await client.deleteComment(mrRoot, on: .pullRequest(5), in: repo)
@@ -1584,6 +1588,239 @@ struct GitLabClientTests {
         #expect(client.reactionKinds == [
             "thumbsup", "thumbsdown", "laughing", "tada", "confused", "heart", "rocket", "eyes",
         ])
+    }
+
+    // MARK: - Suggested changes
+
+    @Test("a diff note's suggestions come from the discussions list onto its comment, old lines in its HTML; applying one PUTs /suggestions/:id/apply under the API root, without a body; another host's project is refused unsent")
+    func suggestionsReadAndApply() async throws {
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            switch (request.httpMethod ?? "", path) {
+            case ("GET", Self.mrPath + "/5/discussions"):
+                return .init(body: """
+                    [{"id": "\(Self.diffID)", "notes": [{"id": 10, "type": "DiffNote", "resolvable": true,
+                      "body": "Shorter:\\n\\n```suggestion:-0+0\\nlet a = <b>\\n```",
+                      "position": {"new_path": "a.swift", "old_path": "a.swift", "new_line": 3},
+                      "suggestions": [{"id": 77, "from_line": 3, "to_line": 3, "appliable": true, "applied": false,
+                                       "from_content": "let a = 1 & 2\\n", "to_content": "let a = <b>\\n"},
+                                      {"id": 78, "appliable": false, "applied": true}]},
+                     {"id": 11, "type": "DiffNote", "body": "ok", "resolvable": true,
+                      "position": {"new_path": "a.swift", "old_path": "a.swift", "new_line": 3}}]}]
+                    """)
+            case ("PUT", "/gitlab/api/v4/suggestions/77/apply"):
+                return .init(body: #"{"id": 77, "appliable": false, "applied": true}"#)
+            default: return .init(status: 404, body: "{}")
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        #expect(client.capabilities.isSuperset(of: [.suggestions, .applySuggestions]))
+
+        let comments = try await client.reviewComments(of: 5, in: Self.writeRepo)
+        #expect(comments.map(\.suggestions.count) == [2, 0])
+        #expect(comments[0].suggestions[0] == HostedSuggestion(
+            id: 77, fromLine: 3, toLine: 3, appliable: true, applied: false, fromContent: "let a = 1 & 2\n",
+            toContent: "let a = <b>\n"))
+        #expect(comments[0].suggestions[1].applied && !comments[0].suggestions[1].appliable)
+        #expect(comments[0].bodyHTML?.contains(#"<div class="del">let a = 1 &amp; 2</div>"#
+            + #"<div class="add">let a = &lt;b&gt;</div>"#) == true, "from_content as the old lines, all escaped")
+
+        try await client.applySuggestion(77, in: Self.writeRepo)
+        let apply = try #require(stub.requests.last)
+        #expect(apply.httpMethod == "PUT")
+        #expect(apply.url?.absoluteString == "https://git.example.com/gitlab/api/v4/suggestions/77/apply")
+        #expect(apply.httpBody?.isEmpty ?? true)
+        #expect(apply.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+
+        let sent = stub.requests.count
+        await #expect(throws: HostingError.self) {
+            try await client.applySuggestion(77, in: HostedRepository(host: "gitlab.com", path: ["group", "proj"]))
+        }
+        #expect(stub.requests.count == sent)
+    }
+
+    // MARK: - Draft notes (pending review)
+
+    @Test("the pending review is the user's draft notes: a diff draft at its place, a reply named by its discussion (joined to its thread on merge), a general draft left out, each pending with an id in its own band, the user as author, theirs to edit and delete, no reactions; none is empty")
+    func draftNotesRead() async throws {
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            if path == "/gitlab/api/v4/user" { return .init(body: Self.user(7, "me")) }
+            if path == Self.mrPath + "/6/draft_notes" { return .init(body: "[]") }
+            return .init(body: """
+                [{"id": 5, "author_id": 7, "merge_request_id": 11, "resolve_discussion": false, "discussion_id": null,
+                  "note": "On a line", "commit_id": null, "line_code": null,
+                  "position": {"base_sha": "b0", "start_sha": "s0", "head_sha": "abc1", "old_path": "a.swift",
+                               "new_path": "a.swift", "position_type": "text", "old_line": null, "new_line": 4,
+                               "line_range": null}},
+                 {"id": 6, "author_id": 7, "discussion_id": "disc-1", "note": "A reply", "position": null},
+                 {"id": 7, "author_id": 7, "discussion_id": null, "note": "General",
+                  "position": {"base_sha": null, "start_sha": null, "head_sha": null, "old_path": null,
+                               "new_path": null, "position_type": "text", "old_line": null, "new_line": null,
+                               "line_range": null}}]
+                """)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        let review = try await client.pendingReview(of: 5, in: Self.writeRepo)
+
+        #expect(review.hostKey == nil && !review.isEmpty)
+        #expect(review.comments.map(\.id) == [5, 6].map(HostedPendingReview.id))
+        #expect(review.comments.allSatisfy { $0.isPending && $0.user?.login == "me" })
+        #expect(review.comments.allSatisfy { $0.viewerCanEdit && $0.viewerCanDelete && $0.viewerCanReact == false })
+        #expect(review.comments[0].path == "a.swift" && review.comments[0].line == 4
+            && review.comments[0].side == "RIGHT")
+        #expect(review.comments[1].path.isEmpty && review.comments[1].hostKey == "disc-1")
+        #expect(stub.requests.first?.url?.path(percentEncoded: true) == Self.mrPath + "/5/draft_notes")
+        var root = try JSONDecoder().decode(HostedReviewComment.self, from: Data(#"{"id": 300, "path": "b.swift"}"#.utf8))
+        root.hostKey = "disc-1"
+        let merged = review.merged(into: [root])
+        #expect(merged.map(\.id) == [300, HostedPendingReview.id(5), HostedPendingReview.id(6)])
+        #expect(merged.last?.inReplyToID == 300 && merged.last?.path == "b.swift")
+
+        #expect(try await client.pendingReview(of: 6, in: Self.writeRepo).isEmpty)
+    }
+
+    @Test("draft note writes: a line's draft has the diff position of a new thread, a reply its discussion; submit bulk-publishes then approves or posts the summary as a note; discard deletes each draft read again")
+    func draftNoteWrites() async throws {
+        let mrWithRefs = """
+            {"id": 9005, "iid": 5, "title": "T", "state": "opened", "sha": "abc1",
+             "web_url": "https://git.example.com/gitlab/group/proj/-/merge_requests/5",
+             "source_branch": "feature", "target_branch": "main",
+             "diff_refs": {"base_sha": "b0", "start_sha": "s0", "head_sha": "abc1"}}
+            """
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            switch (request.httpMethod ?? "", path) {
+            case ("GET", "/gitlab/api/v4/user"): return .init(body: Self.user(7, "me"))
+            case ("GET", Self.mrPath + "/5"): return .init(body: mrWithRefs)
+            case ("GET", Self.mrPath + "/5/draft_notes"):
+                return .init(body: #"[{"id": 21, "note": "a", "position": null}, {"id": 22, "note": "b"}]"#)
+            case ("POST", Self.mrPath + "/5/draft_notes"): return .init(status: 201, body: #"{"id": 30, "note": "x"}"#)
+            case ("POST", Self.mrPath + "/5/draft_notes/bulk_publish"), ("DELETE", _): return .init(status: 204, body: "")
+            case ("POST", Self.mrPath + "/5/approve"):
+                return .init(status: 201, body: #"{"approved_by": [{"user": \#(Self.user(7, "me"))}]}"#)
+            case ("POST", Self.mrPath + "/5/notes"): return .init(status: 201, body: Self.restNote(400, by: 7))
+            default: return .init(status: 404, body: "{}")
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        let repo = Self.writeRepo
+        let position = HostedInlinePosition(
+            path: "a.swift", oldLine: nil, newLine: 5, lineKind: .added, startNewLine: 3, headSHA: "abc1")
+
+        try await client.addPendingComment(.line(position), to: HostedPendingReview(), on: 5, in: repo, body: "Line")
+        let line = try #require(stub.requests.last)
+        #expect(line.httpMethod == "POST" && line.url?.path(percentEncoded: true) == Self.mrPath + "/5/draft_notes")
+        #expect(NSDictionary(dictionary: Self.json(line)).isEqual(to: [
+            "note": "Line",
+            "position": ["position_type": "text", "base_sha": "b0", "start_sha": "s0", "head_sha": "abc1",
+                         "old_path": "a.swift", "new_path": "a.swift", "new_line": 5,
+                         "line_range": ["start": ["type": "new", "new_line": 3], "end": ["type": "new", "new_line": 5]]],
+        ]), "\(Self.json(line))")
+        try await client.addPendingComment(
+            .reply(HostedThreadRef(rootCommentID: 300, hostKey: "disc-1")), to: HostedPendingReview(), on: 5, in: repo,
+            body: "Reply")
+        #expect(NSDictionary(dictionary: Self.json(try #require(stub.requests.last))).isEqual(to: [
+            "note": "Reply", "in_reply_to_discussion_id": "disc-1",
+        ]))
+
+        var sent = stub.requests.count
+        try await client.submitPendingReview(HostedPendingReview(), on: 5, in: repo, event: .approve, body: nil)
+        #expect(stub.requests.dropFirst(sent).map { "\($0.httpMethod ?? "") \($0.url?.path(percentEncoded: true) ?? "")" }
+            .filter { !$0.hasSuffix("/user") } == [
+                "POST \(Self.mrPath)/5/draft_notes/bulk_publish", "POST \(Self.mrPath)/5/approve",
+            ])
+        let publish = stub.requests[sent]
+        #expect(publish.httpBody?.isEmpty ?? true, "no summary in bulk_publish: it records no approval")
+        sent = stub.requests.count
+        try await client.submitPendingReview(HostedPendingReview(), on: 5, in: repo, event: .comment, body: "Summary")
+        let summary = stub.requests.dropFirst(sent)
+        #expect(summary.map { $0.url?.path(percentEncoded: true) ?? "" } == [
+            "\(Self.mrPath)/5/draft_notes/bulk_publish", "\(Self.mrPath)/5/notes",
+        ])
+        #expect(Self.json(try #require(summary.last))["body"] as? String == "Summary")
+
+        sent = stub.requests.count
+        try await client.discardPendingReview(HostedPendingReview(), on: 5, in: repo)
+        #expect(stub.requests.dropFirst(sent).map { "\($0.httpMethod ?? "") \($0.url?.path(percentEncoded: true) ?? "")" } == [
+            "GET \(Self.mrPath)/5/draft_notes",
+            "DELETE \(Self.mrPath)/5/draft_notes/21", "DELETE \(Self.mrPath)/5/draft_notes/22",
+        ])
+        #expect(stub.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)" })
+    }
+
+    @Test("a pending comment's edit and delete are PUT and DELETE .../draft_notes/:draft_note_id with the draft's own id (the band taken off), never the notes endpoints; a published id is refused unsent, and the note edit, delete and award writes refuse a draft's id unsent")
+    func draftNoteEditAndDelete() async throws {
+        let stub = StubServer { request in
+            switch request.httpMethod ?? "" {
+            case "PUT": return .init(body: #"{"id": 21, "note": "New", "position": null}"#)
+            default: return .init(status: 204, body: "")
+            }
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+        let draft = HostedCommentRef(kind: .review, id: HostedPendingReview.id(21))
+        #expect(client.capabilities.contains(.editPendingComments))
+
+        try await client.editPendingComment(draft, on: 5, in: Self.writeRepo, body: "New")
+        try await client.deletePendingComment(draft, on: 5, in: Self.writeRepo)
+
+        #expect(stub.requests.map { "\($0.httpMethod ?? "") \($0.url?.path(percentEncoded: true) ?? "")" } == [
+            "PUT \(Self.mrPath)/5/draft_notes/21", "DELETE \(Self.mrPath)/5/draft_notes/21",
+        ])
+        #expect(NSDictionary(dictionary: Self.json(stub.requests[0])).isEqual(to: ["note": "New"]))
+        #expect(stub.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)" })
+
+        let count = stub.requests.count
+        let published = HostedCommentRef(kind: .review, id: 21)
+        await #expect(throws: HostingError.self) {
+            try await client.editPendingComment(published, on: 5, in: Self.writeRepo, body: "x")
+        }
+        await #expect(throws: HostingError.self) { try await client.deletePendingComment(published, on: 5, in: Self.writeRepo) }
+        await #expect(throws: HostingError.self) {
+            try await client.editComment(draft, on: .pullRequest(5), in: Self.writeRepo, body: "x")
+        }
+        await #expect(throws: HostingError.self) {
+            try await client.deleteComment(draft, on: .pullRequest(5), in: Self.writeRepo)
+        }
+        await #expect(throws: HostingError.self) {
+            try await client.addReaction("thumbsup", to: draft, on: .pullRequest(5), in: Self.writeRepo)
+        }
+        #expect(stub.requests.count == count, "refused unsent")
+    }
+
+    @Test("a GitLab without draft notes (404): the read throws notFound (the app hides the feature), a write says it in words; GitLab never routes immediate writes through drafts")
+    func draftNotesUnavailable() async throws {
+        let stub = StubServer { request in
+            let path = request.url?.path(percentEncoded: true) ?? ""
+            if path == "/gitlab/api/v4/user" { return .init(body: Self.user(7, "me")) }
+            if path.hasSuffix("/discussions/disc-1/notes") {
+                return .init(status: 201, body: Self.restNote(401, by: 7))
+            }
+            return .init(status: 404, body: #"{"message": "404 Not Found"}"#)
+        }
+        let client = try Self.client(stub, refreshes: Self.refreshed())
+
+        await #expect(throws: HostingError.notFound) {
+            _ = try await client.pendingReview(of: 5, in: Self.writeRepo)
+        }
+        do {
+            try await client.addPendingComment(
+                .reply(HostedThreadRef(rootCommentID: 300, hostKey: "disc-1")), to: HostedPendingReview(), on: 5,
+                in: Self.writeRepo, body: "x")
+            Issue.record("expected a refusal")
+        } catch HostingError.validationFailed(let message) {
+            #expect(message.contains("15.11"))
+        }
+        #expect(client.capabilities.contains(.pendingReviews) && !client.routesThroughPendingReview)
+        var pending = try JSONDecoder().decode(HostedReviewComment.self, from: Data(#"{"id": 1, "path": "a"}"#.utf8))
+        pending.isPending = true
+        let sent = stub.requests.count
+        try await client.reply(
+            to: HostedThreadRef(rootCommentID: 300, hostKey: "disc-1"), on: 5, in: Self.writeRepo, body: "now",
+            pending: HostedPendingReview(comments: [pending]))
+        #expect(stub.requests.dropFirst(sent).map { $0.url?.path(percentEncoded: true) ?? "" }
+            == ["\(Self.mrPath)/5/discussions/disc-1/notes"])
     }
 
     // MARK: - Approval box and merge box
