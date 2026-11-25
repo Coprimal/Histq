@@ -3,8 +3,8 @@
 // a `URLSession` whose only protocol is `AIStubProtocol`, which answers every request itself and never passes one on
 // to the network: a canned SSE stream in the request's wire format (Anthropic Messages for `/messages`, chat
 // completions otherwise), sent in small chunks over about a second so the preview streams and Cancel can stop it. The
-// answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, an
-// explanation, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
+// answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, a pull
+// request, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
 // prompt asks for one; a chat request (the chat system prompt, no boundary) gets a short Markdown answer without
 // markers (a heading, a list and a fenced code block); any other request without one (Test connection) gets "OK".
 // A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`. `error` answers
@@ -197,14 +197,12 @@ enum AIStub {
         } else if system.contains("Write a pull request title") {
             answer = "Add a canned pull request from the AI stub\n\n## Summary\n\nWritten by the **DEBUG AI stub** "
                 + "(-HistqAIStub); no provider was called.\n\n- The prompt held \(user.utf8.count) bytes.\n"
-        } else if system.contains("Resolve one git merge conflict") {
-            // LF only, as models usually answer: Apply must convert it to a CRLF file's line breaks.
+        } else {
+            // A resolution, the only other marker prompt ("Resolve one git merge conflict"). LF only, as models
+            // usually answer: Apply must convert it to a CRLF file's line breaks.
             answer = (terminated(block(in: user, token: token, label: "A: ours"))
                 + terminated(block(in: user, token: token, label: "B: theirs")))
                 .replacingOccurrences(of: "\r\n", with: "\n")
-        } else {
-            answer = "This change was explained by the **DEBUG AI stub**.\n\n- No provider was called.\n- The "
-                + "prompt held \(user.utf8.count) bytes.\n"
         }
         var reasonText = "The stub keeps side A, then side B."
         if let custom = customAnswer {

@@ -62,6 +62,8 @@ struct AIChatBubble: View {
                 }
             }
         }
+        // Mounted with the tab while AI features show: the menus' Explain reads `isReady` from this first key read.
+        .onAppear { AISetup.shared.loadKeysIfNeeded() }
         // A card closed mid-resize (Esc) never ends its drag: drop the live resize.
         .onChange(of: model.isExpanded) {
             widthDrag = 0

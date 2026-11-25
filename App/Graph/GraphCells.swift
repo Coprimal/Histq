@@ -24,6 +24,8 @@ struct RefBadge: Hashable {
     struct PullRequest: Hashable, Sendable {
         let number: Int
         let isDraft: Bool
+        /// Its base branch by remote-tracking name (`origin/main`): an AI reference's base (`branchReference`).
+        let base: String
         /// What goes before the number: the host's (`HostingKind.numberPrefix`, `!` on GitLab).
         var numberPrefix = "#"
     }

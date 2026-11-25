@@ -25,11 +25,13 @@ public struct AIChatEntry: Codable, Sendable, Equatable, Identifiable {
     /// `AIIgnore.digest` of the `.aiignore` the hidden context was filtered with. A context is replayed only while
     /// it matches the worktree's current one; nil (unknown) never does.
     public var ignoreDigest: String?
+    /// What the user attached to this message (chips; the hidden context holds what they resolved to at send).
+    public var references: [AIChatReference]?
     public var isError: Bool
 
     public init(
         id: UUID = UUID(), role: Role, text: String, modelText: String? = nil, hiddenContext: String? = nil,
-        ignoreDigest: String? = nil, isError: Bool = false
+        ignoreDigest: String? = nil, references: [AIChatReference]? = nil, isError: Bool = false
     ) {
         self.id = id
         self.role = role
@@ -37,11 +39,12 @@ public struct AIChatEntry: Codable, Sendable, Equatable, Identifiable {
         self.modelText = modelText
         self.hiddenContext = hiddenContext
         self.ignoreDigest = ignoreDigest
+        self.references = references
         self.isError = isError
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, text, modelText, hiddenContext, ignoreDigest, isError
+        case id, role, text, modelText, hiddenContext, ignoreDigest, references, isError
     }
 
     public init(from decoder: any Decoder) throws {
@@ -52,6 +55,9 @@ public struct AIChatEntry: Codable, Sendable, Equatable, Identifiable {
         modelText = try container.decodeIfPresent(String.self, forKey: .modelText)
         hiddenContext = try container.decodeIfPresent(String.self, forKey: .hiddenContext)
         ignoreDigest = try container.decodeIfPresent(String.self, forKey: .ignoreDigest)
+        // Lenient: a reference kind this build does not know drops that reference, never the entry or its text.
+        references = (try? container.decodeIfPresent([Lenient<AIChatReference>].self, forKey: .references))?
+            .compactMap(\.value)
         isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
     }
 }

@@ -1,7 +1,8 @@
 // A tab's AI chat (`AIChatModel`): its saved chats live in `StatePaths.directory("ai-chat")/<stateKey>.json`, so each
-// worktree has its own. Explain jobs open in the chat; their context is read off the main actor as `aiPrompt(for:)`
-// reads the Explain prompts (read environment, `.aiignore`), and each send reads the `.aiignore` digest that decides
-// which saved contexts may be sent again. Only closing the tab or the window stops a running chat.
+// worktree has its own. Explain jobs open in the chat; their context is read off the main actor with the read
+// environment and the worktree's `.aiignore`, and each send reads the `.aiignore` digest that decides which saved
+// contexts may be sent again (one that can't be read fails the turn: nothing is sent). Only closing the tab or the
+// window stops a running chat.
 import Foundation
 import HistqCore
 
@@ -11,6 +12,7 @@ extension RepoSession {
     func makeAIChat() -> AIChatModel {
         let file = StatePaths.directory("ai-chat")
             .appending(path: "\(Self.stateKey(url)).json", directoryHint: .notDirectory)
+        let url = url
         return AIChatModel(
             storeURL: file,
             system: {
@@ -20,7 +22,11 @@ extension RepoSession {
             },
             ignoreDigest: { [weak self] in
                 guard let worktree = try? await self?.backend().directories.worktree else { return nil }
-                return await Self.aiIgnoreDigest(worktree: worktree)
+                return try await Self.aiIgnoreDigest(worktree: worktree)
+            },
+            resolve: { [weak self] references in
+                guard let backend = try await self?.backend() else { throw CancellationError() }
+                return try await Self.aiChatContext(references, backend: backend, cwd: url)
             })
     }
 
@@ -48,6 +54,80 @@ extension RepoSession {
         }
     }
 
+    /// Add to AI Chat: `references` become chips of the current chat and the card opens; nothing is read or sent.
+    func addToAIChat(_ references: [AIChatReference]) {
+        aiChat.attach(references)
+        aiChat.isExpanded = true
+    }
+
+    /// Explain on references: a new chat opens in the expanded card and sends at once (read off the main actor).
+    func explainInChat(refs references: [AIChatReference]) {
+        aiChat.isExpanded = true
+        aiChat.explain(references)
+    }
+
+    /// The commits of the graph's selection an AI action takes, in graph order (newest first): the WIP row, stashes
+    /// and other worktrees' rows are left out (as `RepoMenus.patchSelection` reads them).
+    var aiSelection: [String] {
+        graphSelection.compactMap { item in
+            if case .commit(let hash) = item { hash } else { nil }
+        }
+    }
+
+    /// Local branch `name` as a `.branch` reference, both as full ref names (a tag of the same name never wins). Its
+    /// base: the base of the open pull request whose head is its upstream (the badge's chip), else the remote default
+    /// branch (`origin/HEAD`, read off the main actor), else the local `main` or `master`; only refs that exist, never
+    /// the branch itself. Nil when the branch or every base is missing.
+    func branchReference(_ name: String) async -> AIChatReference? {
+        guard let refs = refs.value, let branch = refs.localBranches.first(where: { $0.name == name }) else {
+            return nil
+        }
+        let reference = { (base: String) in AIChatReference.branch(name: branch.refName, base: base) }
+        if let base = branch.upstream.flatMap({ github.branchPullRequests[$0] })?.base,
+           let tracking = refs.remoteBranches.first(where: { $0.name == base }) {
+            return reference(tracking.refName)
+        }
+        if let backend = try? await backend(), let head = await Self.remoteDefaultBranch(backend: backend, cwd: url),
+           refs.remoteBranches.contains(where: { $0.refName == head }) {
+            return reference(head)
+        }
+        let fallback = ["main", "master"].lazy.compactMap { main in
+            refs.localBranches.first { $0.name == main && $0.refName != branch.refName }
+        }.first
+        return fallback.map { reference($0.refName) }
+    }
+
+    /// `origin/HEAD`'s target (`refs/remotes/origin/main`), read with the read environment; nil when it is not set.
+    @concurrent
+    private nonisolated static func remoteDefaultBranch(backend: Backend, cwd: URL) async -> String? {
+        guard let env = try? await backend.readEnvironment(cwd: cwd),
+              let result = try? await backend.runner.run(
+                  ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1]),
+              result.exitCode == 0
+        else { return nil }
+        let ref = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ref.hasPrefix("refs/remotes/") ? ref : nil
+    }
+
+    /// The open pull request `pull` as a `.pullRequest` reference (its detail page): title and description as the
+    /// model has them at the click, head and base as full local ref names on the hosting remote (the
+    /// remote-tracking branch, else the local branch of that name). Nothing is fetched: a missing branch, or the head
+    /// of a fork (a same-named branch here is another one), is left empty, so only the description is sent.
+    func pullRequestReference(_ pull: HostedPullRequest) -> AIChatReference {
+        let remote = github.api?.remote
+        let refs = refs.value
+        func local(_ branch: String) -> String {
+            guard let refs else { return "" }
+            if let remote, let tracking = refs.remoteBranches.first(where: { $0.name == "\(remote)/\(branch)" }) {
+                return tracking.refName
+            }
+            return refs.localBranches.first { $0.name == branch }?.refName ?? ""
+        }
+        return .pullRequest(
+            number: pull.number, title: pull.title, body: pull.body ?? "", base: local(pull.base.ref),
+            head: pull.isFromSameRepository ? local(pull.head.ref) : "")
+    }
+
     /// The header's AI button: shows or hides the chat card (a running turn goes on).
     func toggleAIChat() {
         aiChat.isExpanded.toggle()
@@ -59,9 +139,9 @@ extension RepoSession {
     }
 
     /// The hidden context of an Explain turn: the commit's or the working changes' diff read with the read environment
-    /// (never a profile), without what the worktree's `.aiignore` and the skip list leave out, as the Explain prompts
-    /// of `aiPrompt` get it, with the digest of that `.aiignore`. Throws `noChanges` for a bad hash or no working
-    /// changes, and for a job that is not an Explain.
+    /// (never a profile), without what the worktree's `.aiignore` and the skip list leave out (`AIPrompts.filtered`),
+    /// with the digest of that `.aiignore`. Throws `noChanges` for a bad hash or no working changes, and for a job
+    /// that is not an Explain.
     @concurrent
     nonisolated static func aiChatContext(
         _ job: AIJob, backend: Backend, cwd: URL
@@ -88,6 +168,23 @@ extension RepoSession {
         }
     }
 
+    /// The hidden context of attached references (`AIChatReference.resolve`) read with the read environment, filtered
+    /// with the worktree's `.aiignore` (an unreadable one throws `aiIgnoreUnreadable`: nothing is resolved unfiltered),
+    /// with the digest of that same `.aiignore`. When nothing resolved to data no request is sent: throws `allIgnored`
+    /// when `.aiignore` left out every file of a diff, else `noChanges` (every diff empty, such as unstaged changes
+    /// that are only untracked files, or a branch with nothing past its base).
+    @concurrent
+    nonisolated static func aiChatContext(
+        _ references: [AIChatReference], backend: Backend, cwd: URL
+    ) async throws -> AIChatModel.Context {
+        let ignore = try aiIgnore(worktree: backend.directories.worktree)
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let resolved = try await AIChatReference.resolve(
+            references, runner: backend.runner, cwd: cwd, env: env, ignore: ignore)
+        guard resolved.hasData else { throw resolved.allIgnored ? AIJobError.allIgnored : AIJobError.noChanges }
+        return (resolved.text, AIIgnore.digest(ignore))
+    }
+
     /// `aiFiltered` with the digest of the very `.aiignore` it filtered with (read once, so the two always agree).
     private nonisolated static func aiChatFiltered(_ diff: String, worktree: URL) throws -> (String, String) {
         let ignore = try aiIgnore(worktree: worktree)
@@ -95,10 +192,10 @@ extension RepoSession {
         return (kept, AIIgnore.digest(ignore))
     }
 
-    /// The worktree's current `AIIgnore.digest`, read off the main actor; nil when `.aiignore` can't be read, so
-    /// every saved context counts as stale.
+    /// The worktree's current `AIIgnore.digest`, read off the main actor; throws `aiIgnoreUnreadable` when
+    /// `.aiignore` can't be read, so the turn records that error and sends nothing.
     @concurrent
-    nonisolated static func aiIgnoreDigest(worktree: URL) async -> String? {
-        do { return AIIgnore.digest(try aiIgnore(worktree: worktree)) } catch { return nil }
+    nonisolated static func aiIgnoreDigest(worktree: URL) async throws -> String {
+        AIIgnore.digest(try aiIgnore(worktree: worktree))
     }
 }

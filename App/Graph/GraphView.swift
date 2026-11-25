@@ -174,7 +174,7 @@ struct GraphView: NSViewRepresentable {
     /// The text columns hidden (`PrefKey.graphShowMessage`, `graphShowAuthor`, `graphShowDate`); a change applies at
     /// once, without a reload.
     var hiddenColumns: Set<GraphColumn> = []
-    /// Esc while the table has the focus; true when it was used (the open search bar closed).
+    /// Esc while the table has the focus; true when it was used (the open search bar closed, else the AI chat card).
     var onEscape: @MainActor () -> Bool = { false }
     /// Where the tab's graph was when its last view went away (`GraphScrollPosition`): a new view starts there, else on
     /// the top with the selection revealed. `onScroll` gets the position when the view goes away.
@@ -339,7 +339,7 @@ final class GraphTableView: NSTableView {
     }
 
     override func keyDown(with event: NSEvent) {
-        // Escape: closes the graph search bar when it is open.
+        // Escape: closes the graph search bar when it is open, else the expanded AI chat card.
         if event.keyCode == 53, event.modifierFlags.isDisjoint(with: [.command, .control, .option, .shift]),
            (delegate as? GraphTableController)?.escape() == true
         {
@@ -934,7 +934,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     // MARK: Search
 
-    /// Esc in the table: the view's `onEscape` (closes the open search bar). False when it did nothing.
+    /// Esc in the table: the view's `onEscape` (closes the open search bar, else the AI chat card). False when it did
+    /// nothing.
     func escape() -> Bool {
         view?.onEscape() ?? false
     }

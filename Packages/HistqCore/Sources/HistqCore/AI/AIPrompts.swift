@@ -157,8 +157,14 @@ public enum AIDataLabel: String, Sendable, CaseIterable {
     case commitDiff = "commit diff"
     case commitMessage = "commit message"
     case workingChangesDiff = "working changes diff"
+    case stagedDiff = "staged changes diff"
+    case unstagedDiff = "unstaged changes diff"
+    case fileDiff = "file diff"
+    case branchDiff = "branch diff"
     case filePath = "file path"
     case branchName = "branch name"
+    case baseBranchName = "base branch name"
+    case prTitle = "PR title"
     case prDescription = "PR description"
     case gitOutput = "git output"
     case toolArguments = "tool arguments"
@@ -173,6 +179,68 @@ public struct AIDataBlock: Sendable, Equatable {
     public init(label: AIDataLabel, text: String) {
         self.label = label
         self.text = text
+    }
+}
+
+/// A quick action of the AI chat: a chip that sends a fixed request about the chat's references. `label` is the chip
+/// (and the user line shown); `instruction` is the message text the model gets, a fixed app sentence that never holds
+/// repository text (that only comes in the references' data blocks).
+public enum AIQuickAction: String, CaseIterable, Codable, Sendable {
+    case review, releaseNotes, summarizeBranch, whatCouldBreak
+
+    public var label: String {
+        switch self {
+        case .review: "Review my changes"
+        case .releaseNotes: "Write release notes"
+        case .summarizeBranch: "Summarize this branch"
+        case .whatCouldBreak: "What could break?"
+        }
+    }
+
+    public var instruction: String {
+        switch self {
+        case .review:
+            "Review the changes in the data blocks as a careful code reviewer: list bugs, risky edits, missing tests "
+                + "and unclear code, most important first. Say so when nothing stands out."
+        case .releaseNotes:
+            "Write release notes for the changes in the data blocks: short Markdown bullet points for users, grouped "
+                + "as new features, fixes and other changes. Never invent issue numbers or links."
+        case .summarizeBranch:
+            "Summarize what the branch in the data blocks changes: one sentence on its purpose, then a few short "
+                + "bullet points for its main changes."
+        case .whatCouldBreak:
+            "What could the changes in the data blocks break? List the risky spots (changed behavior, edge cases, "
+                + "affected callers or data), most likely first, and say how to check each."
+        }
+    }
+
+    /// Whether a chat with `reference` attached offers this action.
+    public func isOffered(for reference: AIChatReference) -> Bool {
+        switch self {
+        case .review:
+            switch reference {
+            case .wip, .commits, .fileInCommit: true
+            case .branch, .pullRequest: false
+            }
+        case .releaseNotes:
+            switch reference {
+            case .commits, .branch, .pullRequest: true
+            case .wip, .fileInCommit: false
+            }
+        case .summarizeBranch:
+            switch reference {
+            case .branch, .pullRequest: true
+            case .commits, .wip, .fileInCommit: false
+            }
+        case .whatCouldBreak:
+            true
+        }
+    }
+
+    /// The actions offered for `references`, in `allCases` order: each that at least one reference offers; none
+    /// without a reference.
+    public static func actions(for references: [AIChatReference]) -> [AIQuickAction] {
+        allCases.filter { action in references.contains(where: action.isOffered(for:)) }
     }
 }
 
@@ -237,34 +305,6 @@ public enum AIPrompts {
             data: data,
             languageRule: languageRule(language, answer: "the commit message"), summaryOnly: summaryOnly,
             token: token)
-    }
-
-    /// An explanation of one commit: its message and its diff (`git show --format= <commit>` output). `instructions`
-    /// (Settings › AI) is added after the default rules, as for a commit message; blank adds nothing.
-    public static func explainCommit(
-        message: String, diff: String, language: AIResponseLanguage = .english, instructions: String = "",
-        budget: Int = diffBudget, token: () -> String = randomToken
-    ) -> AIPrompt {
-        make(
-            kind: .explanation, task: explainRules + instructionsRule(instructions, for: "their explanations"),
-            request: "Explain this commit.",
-            data: [
-                ("commit message", String(message.prefix(maxMessageCharacters))),
-                ("commit diff", budgeted(diff, budget: budget)),
-            ], languageRule: languageRule(language, answer: "your answer"), token: token)
-    }
-
-    /// An explanation of the uncommitted changes (the working tree and index diff against HEAD). `instructions` as
-    /// for `explainCommit`.
-    public static func explainWorkingChanges(
-        diff: String, language: AIResponseLanguage = .english, instructions: String = "", budget: Int = diffBudget,
-        token: () -> String = randomToken
-    ) -> AIPrompt {
-        make(
-            kind: .explanation, task: explainRules + instructionsRule(instructions, for: "their explanations"),
-            request: "Explain these uncommitted changes.",
-            data: [("uncommitted diff", budgeted(diff, budget: budget))],
-            languageRule: languageRule(language, answer: "your answer"), token: token)
     }
 
     /// A resolution of one conflict region of `path`: A (ours), B (theirs) and their common base (nil for an
@@ -476,7 +516,7 @@ public enum AIPrompts {
 
     /// The hidden context of an Explain commit turn: the Explain rules, then the commit message (cut to
     /// `maxMessageCharacters`) and its diff in data blocks. `diff` is already filtered (`filteredUnlessAllIgnored`
-    /// with the worktree's `.aiignore`), as for `explainCommit`; it is cut to `budget` here.
+    /// with the worktree's `.aiignore`); it is cut to `budget` here.
     public static func chatExplainCommitContext(
         message: String, diff: String, budget: Int = diffBudget, token: () -> String = randomToken
     ) -> String {
@@ -493,6 +533,12 @@ public enum AIPrompts {
     ) -> String {
         explainRules + "\n\n" + dataBlocks(
             [AIDataBlock(label: .workingChangesDiff, text: budgeted(diff, budget: budget))], candidate: token)
+    }
+
+    /// The hidden context of an Explain turn on references: the Explain rules, then `resolved`
+    /// (`AIChatReference.resolve`, already data blocks and app notes).
+    public static func chatExplainReferencesContext(_ resolved: String) -> String {
+        explainRules + "\n\n" + resolved
     }
 
     /// `blocks` as chat data blocks, a blank line between them. Each gets a fresh token that occurs nowhere in its

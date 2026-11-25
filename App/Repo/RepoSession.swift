@@ -1331,7 +1331,7 @@ final class RepoSession: Identifiable {
                     // The worktree and submodule menus need the worktrees and the submodules, read after the first log
                     // page.
                     if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil,
-                       self?.debugSubmodulesReady(spec) == true { break }
+                       self?.debugSubmodulesReady(spec) == true, self?.debugAIReady(spec) == true { break }
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 guard let self else { return }
@@ -1343,7 +1343,7 @@ final class RepoSession: Identifiable {
             Task { [weak self] in
                 for _ in 0..<100 {
                     if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil,
-                       self?.debugSubmodulesReady(step) == true { break }
+                       self?.debugSubmodulesReady(step) == true, self?.debugAIReady(step) == true { break }
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 guard let self else { return }
@@ -4540,13 +4540,14 @@ final class RepoSession: Identifiable {
         return (language(.aiResponseLanguage), language(.aiCommitLanguage))
     }
 
-    /// The job's prompt: the staged (or, when amending, the whole amended commit's), WIP or commit diff read with the
+    /// The job's prompt: the staged (or, when amending, the whole amended commit's) or commit diff read with the
     /// read environment (never a profile), without what the worktree's `.aiignore` and the skip list leave out
     /// (`AIPrompts.filtered`), cut to the prompt's budget. `instructions` are the job's own (Settings › AI); `branch`
     /// (taken at the click) and the last commit subjects go only into a commit message's prompt. A resolution's text
     /// was taken at the click; it is never translated. Its intent (`resolutionIntent`) is read here, after the
     /// `.aiignore` check. A pull request's: the full messages of its last 50 commits (`noCommits` without one), the
     /// branch diff (`PatchSource.branch`) and the template at `templateRef`, in the commit messages' language.
+    /// Explain jobs open in the chat (`explainInChat`) and throw `noChanges` here.
     @concurrent
     nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
@@ -4565,13 +4566,9 @@ final class RepoSession: Identifiable {
             return AIPrompts.commitMessage(stagedDiff: filtered, language: languages.commit, summaryOnly: summaryOnly,
                                            instructions: instructions, branch: branch, recentSubjects: subjects,
                                            currentMessage: amend && !current.isEmpty ? currentMessage : nil)
-        case .explainCommit(let hash, let message):
-            guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
-            let env = try await backend.readEnvironment(cwd: cwd)
-            let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
-            return AIPrompts.explainCommit(
-                message: message, diff: try aiFiltered(diff, worktree: worktree),
-                language: languages.response, instructions: instructions)
+        case .explainCommit, .explainWorkingChanges:
+            // Explain opens in the tab's chat (`startAI` → `explainInChat`), so it never gets a prompt here.
+            throw AIJobError.noChanges
         case .improveMessage(let hash, let message):
             // Never summary only: Apply replaces the whole message, so the body must stay.
             guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
@@ -4584,16 +4581,6 @@ final class RepoSession: Identifiable {
             // The messages only (no diff, so nothing for `.aiignore` to leave out).
             return AIPrompts.squashMessage(commitMessages: messages, language: languages.commit,
                                            instructions: instructions)
-        case .explainWorkingChanges:
-            // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
-            let env = try await backend.readEnvironment(cwd: cwd)
-            async let staged = DiffReader.patchText(.staged, runner: backend.runner, cwd: cwd, env: env)
-            async let unstaged = DiffReader.patchText(.unstaged, runner: backend.runner, cwd: cwd, env: env)
-            let diff = try await staged + unstaged
-            guard !diff.isEmpty else { throw AIJobError.noChanges }
-            return AIPrompts.explainWorkingChanges(
-                diff: try aiFiltered(diff, worktree: worktree), language: languages.response,
-                instructions: instructions)
         case .resolution(let target):
             if try aiIgnore(worktree: worktree)?.matches(target.path) == true { throw AIJobError.fileIgnored }
             return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b,
@@ -4940,6 +4927,13 @@ final class RepoSession: Identifiable {
             $0.hasPrefix("submodule:") || $0.hasPrefix("submodules|") || $0.hasPrefix("repo|Submodules|")
         }
         return !usesSubmodules || submodules.value != nil
+    }
+
+    /// DEBUG `-HistqRun` / `-HistqShow`: a spec that reaches an "AI" submenu waits for the first Keychain read (its
+    /// Explain is off until then), and on the WIP row for the status too (its items are off for an empty part).
+    func debugAIReady(_ spec: String) -> Bool {
+        guard spec.contains("|AI") else { return true }
+        return AISetup.shared.keysLoaded && (!spec.contains("wip|") || status.value != nil)
     }
     #endif
 

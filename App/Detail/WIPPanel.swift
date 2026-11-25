@@ -788,7 +788,7 @@ private struct CommitBox: View {
             }
             .padding(.top, SectionCardMetrics.accessoryGap)
         } accessory: {
-            // AI (task 12.3): each opens the result card; nothing is sent before the click.
+            // AI: Explain opens the tab's AI chat, Generate Message the result card; nothing is sent before the click.
             HStack(spacing: 6) {
                 AIHookButton(title: "Explain", help: "Explain the uncommitted changes with AI",
                              unavailable: changeCount == 0 ? "No changes to explain" : nil, seam: "explain-wip",

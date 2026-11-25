@@ -84,7 +84,10 @@ struct CommitDetailPanel: View {
                             let patch = commit.parents.count > 1 || file.kind == .unchanged ? []
                                 : RepoMenus.filePatch(path: file.path, originalPath: file.originalPath,
                                                       source: .commit(commit.hash), session: session)
-                            return RepoMenus.checkoutFile(file, commit: commit.hash, session: session) + patch
+                            // AI only where `patch` has a change to read.
+                            let ai = patch.isEmpty ? []
+                                : RepoMenus.aiFile(path: file.path, commit: commit.hash, session: session)
+                            return RepoMenus.checkoutFile(file, commit: commit.hash, session: session) + patch + ai
                         }
                         .onSelectFile(selected: openPath) { [session, commit] file in
                             session.selectFile(FileTarget(source: .commit(commit.hash), file: file))
@@ -577,7 +580,7 @@ private struct CommitInfoCard: View {
                     .help("Edit message")
                     .accessibilityLabel("Edit message")
                 }
-                // AI (task 12.3): opens the result card; nothing is sent before the click.
+                // AI: Explain opens the tab's AI chat; nothing is sent before the click.
                 AIHookButton(title: "Explain", systemImage: "sparkles",
                              help: commit.isStash ? "Explain this stash with AI" : "Explain this commit with AI",
                              seam: "explain", small: true) {

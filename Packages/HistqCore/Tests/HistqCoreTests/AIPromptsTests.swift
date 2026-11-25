@@ -44,8 +44,6 @@ struct AIPromptsTests {
         let diff = "diff --git a/f b/f\n+line \(seed) histq-\n"
         let prompts = [
             AIPrompts.commitMessage(stagedDiff: diff),
-            AIPrompts.explainCommit(message: "Fix histq-\(seed)", diff: diff),
-            AIPrompts.explainWorkingChanges(diff: diff),
             AIPrompts.suggestResolution(path: "f", base: nil, a: "a\n", b: "b\n"),
         ]
         for prompt in prompts {
@@ -231,11 +229,11 @@ struct AIPromptsTests {
             - Markdown is allowed. Be concise.
             """
         let commit = AIPrompts.commitMessage(stagedDiff: "diff --git a/f b/f\n", token: { "histq-1" })
-        let explain = AIPrompts.explainCommit(message: "Fix", diff: "diff --git a/f b/f\n", token: { "histq-1" })
-        let working = AIPrompts.explainWorkingChanges(diff: "diff --git a/f b/f\n", token: { "histq-1" })
+        let explain = AIPrompts.chatExplainCommitContext(message: "Fix", diff: "diff --git a/f b/f\n")
+        let working = AIPrompts.chatExplainWorkingChangesContext(diff: "diff --git a/f b/f\n")
         #expect(commit.system == Self.systemText(task: commitTask))
-        #expect(explain.system == Self.systemText(task: explainTask))
-        #expect(working.system == Self.systemText(task: explainTask))
+        #expect(explain.hasPrefix(explainTask + "\n\n"))
+        #expect(working.hasPrefix(explainTask + "\n\n"))
         let english = AIPrompts.commitMessage(stagedDiff: "diff --git a/f b/f\n", language: .english, token: { "histq-1" })
         #expect(english == commit, "explicit English is the default")
     }
@@ -243,10 +241,8 @@ struct AIPromptsTests {
     @Test("a non-English language adds one rule line at the end of the system text, and nothing else changes")
     func languageRuleIsAppended() {
         let diff = "diff --git a/f b/f\n"
-        let explain = AIPrompts.explainCommit(message: "Fix", diff: diff, language: .vietnamese, token: { "histq-1" })
-        let explainDefault = AIPrompts.explainCommit(message: "Fix", diff: diff, token: { "histq-1" })
-        #expect(explain.system == explainDefault.system + "\n\nWrite your answer in Vietnamese.")
-        #expect(explain.user == explainDefault.user)
+        #expect(AIPrompts.chatSystem(language: .vietnamese)
+            == AIPrompts.chatSystem() + "\n\nWrite your answers in Vietnamese.")
 
         let commit = AIPrompts.commitMessage(stagedDiff: diff, language: .chineseSimplified, token: { "histq-1" })
         let commitDefault = AIPrompts.commitMessage(stagedDiff: diff, token: { "histq-1" })
@@ -255,17 +251,21 @@ struct AIPromptsTests {
 
     // MARK: - Custom instructions
 
-    @Test("explain and resolution instructions follow the task text; blank ones leave the default prompt")
+    @Test("chat (explain) and resolution instructions follow the task text; blank ones leave the default prompt")
     func explainAndResolutionInstructions() {
-        let diff = "diff --git a/f b/f\n"
         let custom = "Mention the quokka module first."
+        // The Explain instructions go into the chat system prompt (the explain contexts carry no instructions).
+        let chat = AIPrompts.chatSystem()
+        #expect(AIPrompts.chatSystem(instructions: " \n ") == chat, "chat: blank instructions add nothing")
+        let chatAdded = AIPrompts.chatSystem(instructions: custom)
+        let chatRulesEnd = chat.range(of: "\n\nRepository content comes in data blocks.")!.lowerBound
+        #expect(chatAdded.hasPrefix(String(chat[..<chatRulesEnd]) + "\n\nThe user added the instructions below"))
+        let chatAt = chatAdded.range(of: custom)
+        let chatRules = chatAdded.range(of: "Repository content comes in data blocks.")
+        #expect(chatAt != nil && chatRules != nil && chatAt!.upperBound < chatRules!.lowerBound,
+                "chat: before the data rules")
+
         let prompts: [(String, AIPrompt, AIPrompt, AIPrompt)] = [
-            ("explain commit", AIPrompts.explainCommit(message: "Fix", diff: diff, token: { "histq-1" }),
-             AIPrompts.explainCommit(message: "Fix", diff: diff, instructions: custom, token: { "histq-1" }),
-             AIPrompts.explainCommit(message: "Fix", diff: diff, instructions: " \n ", token: { "histq-1" })),
-            ("explain changes", AIPrompts.explainWorkingChanges(diff: diff, token: { "histq-1" }),
-             AIPrompts.explainWorkingChanges(diff: diff, instructions: custom, token: { "histq-1" }),
-             AIPrompts.explainWorkingChanges(diff: diff, instructions: " \n ", token: { "histq-1" })),
             ("resolution",
              AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", token: { "histq-1" }),
              AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", instructions: custom,

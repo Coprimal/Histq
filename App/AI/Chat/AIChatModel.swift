@@ -1,7 +1,8 @@
 // One repo tab's AI chat (structure from Dblore's `AIAssistantViewModel`): the conversation shown, the draft, the
 // turn being streamed and the saved chats for the history list. A click (Send, Explain) appends its entries in its
 // own frame; the hidden context is built off the main actor, then the answer streams into the assistant entry,
-// shown at most every 50 ms as `AIRun` does. Every turn carries a generation token: Stop, New Chat, opening or
+// shown at most every 50 ms as `AIRun` does. Attached references (chips) are only kept until a send, an Explain or a
+// quick action resolves them off the main actor; the entry keeps them, and their resolved text as its hidden context. Every turn carries a generation token: Stop, New Chat, opening or
 // deleting a chat and a new Explain bump it, so an old stream's text never lands anywhere. Switching while a turn
 // runs stops it first and saves its partial answer in its own conversation. The store is only called from tasks,
 // one after another in call order, and its errors are logged, never shown in the chat.
@@ -24,6 +25,8 @@ final class AIChatModel {
 
     private(set) var entries: [AIChatEntry] = []
     var draft = ""
+    /// The references attached to the next message (chips above the composer); nothing is read until it is sent.
+    private(set) var attachments: [AIChatReference] = []
     private(set) var isGenerating = false
     var isExpanded = false
     /// The saved chats, newest first (loaded by `loadConversations()`, refreshed by each save or delete).
@@ -40,9 +43,12 @@ final class AIChatModel {
     private let store: AIConversationStore
     /// The system prompt of a turn, read at its click (Settings › AI's language and instructions as they are then).
     private let system: @MainActor () -> String
-    /// The worktree's current `AIIgnore.digest`, read at each send (nil when `.aiignore` can't be read): a saved
-    /// hidden context filtered with other rules is never sent again.
-    private let ignoreDigest: @Sendable () async -> String?
+    /// The worktree's current `AIIgnore.digest`, read at each send (throws when `.aiignore` can't be read, so the turn
+    /// sends nothing): a saved hidden context filtered with other rules is never sent again.
+    private let ignoreDigest: @Sendable () async throws -> String?
+    /// The hidden context of `references` (data blocks), with the digest of the `.aiignore` it was filtered with;
+    /// throws when nothing may be sent. Called at send, off the main actor.
+    private let resolve: @Sendable ([AIChatReference]) async throws -> Context
     /// The saved chats by id, so opening one needs no read.
     @ObservationIgnored private var saved: [UUID: AIConversation] = [:]
     /// Not observed, so `deinit` (nonisolated) can cancel it.
@@ -59,11 +65,13 @@ final class AIChatModel {
 
     init(
         storeURL: URL, system: @escaping @MainActor () -> String,
-        ignoreDigest: @escaping @Sendable () async -> String?
+        ignoreDigest: @escaping @Sendable () async throws -> String?,
+        resolve: @escaping @Sendable ([AIChatReference]) async throws -> Context
     ) {
         store = AIConversationStore(url: storeURL)
         self.system = system
         self.ignoreDigest = ignoreDigest
+        self.resolve = resolve
     }
 
     deinit {
@@ -73,28 +81,90 @@ final class AIChatModel {
 
     // MARK: Actions
 
-    /// Sends the draft as a follow-up in the current conversation.
+    /// The quick actions the attachments offer (none without one).
+    var quickActions: [AIQuickAction] { AIQuickAction.actions(for: attachments) }
+
+    /// Sends the draft as a follow-up in the current conversation, with the attachments (resolved off the main actor).
     func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating, !text.isEmpty else { return }
         draft = ""
-        let user = AIChatEntry(role: .user, text: text)
+        let references = attachments
+        attachments = []
+        let user = AIChatEntry(role: .user, text: text, references: references.isEmpty ? nil : references)
         let assistant = AIChatEntry(role: .assistant, text: "")
         entries += [user, assistant]
-        startTurn(userID: user.id, assistantID: assistant.id, logName: "chat-send", context: nil)
+        var context: (@Sendable () async throws -> Context)?
+        if !references.isEmpty {
+            let resolve = resolve
+            context = { try await resolve(references) }
+        }
+        startTurn(userID: user.id, assistantID: assistant.id, logName: "chat-send", context: context)
+    }
+
+    /// Add to AI Chat: `references` become chips of the next message (each once); nothing is read or sent.
+    func attach(_ references: [AIChatReference]) {
+        for reference in references where !attachments.contains(reference) {
+            attachments.append(reference)
+        }
+    }
+
+    /// A chip's x: `reference` is no longer attached.
+    func detach(_ reference: AIChatReference) {
+        attachments.removeAll { $0 == reference }
+    }
+
+    /// Explain on references: a new conversation that sends at once, the Explain rules before the resolved blocks.
+    func explain(_ references: [AIChatReference]) {
+        guard !references.isEmpty else { return }
+        let resolve = resolve
+        startExplain(
+            label: Self.explainLabel(references), modelText: "Explain the changes in the data blocks.",
+            logName: "explain-refs", references: references
+        ) {
+            let resolved = try await resolve(references)
+            return (AIPrompts.chatExplainReferencesContext(resolved.text), resolved.ignoreDigest)
+        }
+    }
+
+    /// A quick action chip: a new conversation that sends at once with the action's label as the user's line, its
+    /// fixed instruction for the model and the attachments (which it uses up) as the hidden context.
+    func runQuickAction(_ action: AIQuickAction) {
+        let references = attachments
+        guard !references.isEmpty else { return }
+        attachments = []
+        let resolve = resolve
+        startExplain(
+            label: action.label, modelText: action.instruction, logName: "quick-\(action.rawValue)",
+            references: references
+        ) { try await resolve(references) }
+    }
+
+    /// The user's line of an Explain on references (UI only).
+    private static func explainLabel(_ references: [AIChatReference]) -> String {
+        guard references.count == 1, let reference = references.first else {
+            return "Explain these \(references.count) references"
+        }
+        return switch reference {
+        case .commits(let hashes) where hashes.count > 1: "Explain these \(hashes.count) commits"
+        case .commits(let hashes): "Explain commit \(hashes.first?.prefix(7) ?? "")"
+        case .wip(let staged): staged ? "Explain staged changes" : "Explain unstaged changes"
+        case .branch, .fileInCommit, .pullRequest: "Explain \(reference.label)"
+        }
     }
 
     /// An Explain (or any action that starts its own chat): a new conversation with `label` shown as the user's line
     /// and the empty answer, in this call. `modelText` is the fixed sentence the model gets in place of `label`;
     /// `context` builds the hidden context (data blocks) off the main actor, with the digest of the `.aiignore` it
-    /// was filtered with, and throws when nothing may be sent;
+    /// was filtered with, and throws when nothing may be sent; `references` are kept on the user entry.
     /// `logName` names the turn in the timing log (`ai <logName>`).
     func startExplain(
-        label: String, modelText: String, logName: String, context: @escaping @Sendable () async throws -> Context
+        label: String, modelText: String, logName: String, references: [AIChatReference]? = nil,
+        context: @escaping @Sendable () async throws -> Context
     ) {
         leaveConversation()
         conversationID = UUID()
-        let user = AIChatEntry(role: .user, text: label, modelText: modelText)
+        let user = AIChatEntry(role: .user, text: label, modelText: modelText, references: references)
         let assistant = AIChatEntry(role: .assistant, text: "")
         entries = [user, assistant]
         startTurn(userID: user.id, assistantID: assistant.id, logName: logName, context: context)
@@ -162,7 +232,7 @@ final class AIChatModel {
             do {
                 let hidden = try await context?()
                 // Read after the context, so a `.aiignore` changed meanwhile omits that context too.
-                let digest = await ignoreDigest()
+                let digest = try await ignoreDigest()
                 try Task.checkCancellation()
                 guard let request = self?.request(
                     token: token, userID: userID, hidden: hidden, ignoreDigest: digest, model: model,

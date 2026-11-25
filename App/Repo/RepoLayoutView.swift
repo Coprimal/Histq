@@ -688,9 +688,15 @@ private struct CommitListPanel: View {
                           bottomInset: session.graphSearch.isOpen ? GraphSearchBar.overlayHeight : 0,
                           onTable: { [search = session.graphSearch] table in search.table = table },
                           hiddenColumns: hiddenColumns,
-                          onEscape: { [search = session.graphSearch] in
-                              guard search.isOpen else { return false }
-                              search.close()
+                          // The search bar first; else the expanded AI chat card (only while the bubble is mounted).
+                          onEscape: { [session] in
+                              if session.graphSearch.isOpen {
+                                  session.graphSearch.close()
+                                  return true
+                              }
+                              guard Preferences.defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue),
+                                    session.aiChat.isExpanded else { return false }
+                              session.aiChat.isExpanded = false
                               return true
                           },
                           scrollPosition: session.graphScroll,

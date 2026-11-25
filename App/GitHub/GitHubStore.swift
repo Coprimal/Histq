@@ -587,7 +587,8 @@ final class HostingStore {
             let branch = "\(remote)/\(pull.head.ref)"
             if result[branch] == nil {
                 result[branch] = RefBadge.PullRequest(
-                    number: pull.number, isDraft: pull.draft ?? false, numberPrefix: numberPrefix)
+                    number: pull.number, isDraft: pull.draft ?? false, base: "\(remote)/\(pull.base.ref)",
+                    numberPrefix: numberPrefix)
             }
         }
         return result

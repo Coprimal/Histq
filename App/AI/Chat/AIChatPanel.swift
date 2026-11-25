@@ -1,6 +1,7 @@
 // The AI chat card (structure from Dblore's `AIAssistantPanel`): a header (title, Settings › AI, the saved chats,
 // New Chat, Collapse), the body (set up a provider, the empty chat, or the messages, kept scrolled to the bottom) and
-// the composer (Return sends, Shift+Return adds a line, an IME composition never sends; Stop while an answer
+// the attached references (removable chips) with the quick actions they offer (each sends at once in a new chat),
+// and the composer (Return sends, Shift+Return adds a line, an IME composition never sends; Stop while an answer
 // streams). It fills the frame its container gives it. Header, messages and composer are their own views, so a
 // keystroke or a streamed piece redraws only the part that reads it.
 import AppKit
@@ -22,6 +23,7 @@ struct AIChatPanel: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
+            AIChatAttachments(model: model)
             AIChatComposer(model: model, composerFocused: $composerFocused)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -270,6 +272,79 @@ private struct AIChatMessageList: View {
                 proxy.scrollTo(AIChatPanelMetrics.bottomID, anchor: .bottom)
             }
         }
+    }
+}
+
+// MARK: - Attachments
+
+/// The references attached to the next message, each with an x, and the quick actions they offer. Each row scrolls
+/// sideways, so many chips never grow the card.
+private struct AIChatAttachments: View {
+    let model: AIChatModel
+
+    var body: some View {
+        if !model.attachments.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                row {
+                    ForEach(model.attachments, id: \.self) { reference in
+                        AIChatReferenceChip(label: reference.label) { model.detach(reference) }
+                    }
+                }
+                let actions = model.quickActions
+                if !actions.isEmpty {
+                    row {
+                        ForEach(actions, id: \.self) { action in
+                            Button(action.label) { model.runQuickAction(action) }
+                                .font(.caption)
+                                .buttonStyle(RaisedButtonStyle(height: 22, horizontalPadding: 10))
+                                .disabled(!AISetup.shared.isReady)
+                                .help("Ask in a new chat about the attached changes")
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+        }
+    }
+
+    private func row(@ViewBuilder _ content: () -> some View) -> some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6, content: content)
+        }
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize)
+    }
+}
+
+/// One attached reference: its label (UI only) and an x that removes it.
+private struct AIChatReferenceChip: View {
+    let label: String
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(verbatim: label)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 200, alignment: .leading)
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Remove")
+            .accessibilityLabel("Remove \(label)")
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 5)
+        .frame(height: 22)
+        .background(Capsule().fill(Palette.tabFill))
+        .help(label)
     }
 }
 

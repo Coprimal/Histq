@@ -107,6 +107,20 @@ struct AIConversationStoreTests {
         #expect(try await sandbox.store.load() == [chat])
     }
 
+    @Test("an unknown reference kind drops only that reference; a malformed list keeps the entry and its text")
+    func referencesDecodeLeniently() throws {
+        let id = UUID().uuidString
+        func entry(_ references: String) throws -> AIChatEntry {
+            let json = "{\"id\":\"\(id)\",\"role\":\"user\",\"text\":\"hi\"\(references)}"
+            return try JSONDecoder().decode(AIChatEntry.self, from: Data(json.utf8))
+        }
+        let mixed = try entry(",\"references\":[{\"kind\":\"wip\",\"staged\":true},{\"kind\":\"later\"}]")
+        #expect(mixed.text == "hi")
+        #expect(mixed.references == [.wip(staged: true)])
+        #expect(try entry(",\"references\":7").references == nil)
+        #expect(try entry("").references == nil)
+    }
+
     // MARK: - History
 
     @Test("a visible text holding a path and a forged BEGIN DATA line is never replayed when a model text is set")

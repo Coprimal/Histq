@@ -197,7 +197,7 @@ enum RepoMenus {
             .separator,
             .action("Stash All Changes") { session.run(.stashPush(message: nil), title: "Stash", key: .stash) },
             .separator,
-        ] + wipPatch(session) + [
+        ] + wipPatch(session) + aiMenu(aiWorkingTree(session)) + [
             .separator,
             .action("Discard All Changes…", destructive: true) {
                 session.confirm("Discard all changes in \(session.url.lastPathComponent)?",
@@ -407,6 +407,7 @@ enum RepoMenus {
             },
         ]
         entries += [.separator] + (onBadge ? [.submenu("Patch", patchEntries)] : patchEntries)
+        entries += aiMenu([aiCommit(hash, session)])
         let emoji = onBadge ? [] : commit.map { authorEmoji(email: $0.authorEmail, name: $0.authorName, session) } ?? []
         return [.submenu("Copy", copies)] + emoji + [.separator] + entries
     }
@@ -507,12 +508,18 @@ enum RepoMenus {
 
     /// The menu of a graph badge: its ref's menu (grouped), then its commit's, without what the ref's part already has
     /// (its own checkout and its submenu), and without "Interactive Rebase from Here…" when it cannot run (the ref is
-    /// off the current branch).
+    /// off the current branch). One "AI" submenu, before Reveal in Finder: a local branch's items, then the commit's.
     static func badge(_ ref: SidebarItem, on item: GraphItem, session: RepoSession) -> [MenuEntry] {
-        let refEntries = self.ref(ref, session, grouped: true)
+        guard case .commit(let hash) = item else {
+            return self.ref(ref, session, grouped: true) + revealBranch(of: ref, session)
+        }
+        let isAI = { (entry: MenuEntry) -> Bool in
+            if case .submenu = entry.kind { entry.title == "AI" } else { false }
+        }
+        let refEntries = self.ref(ref, session, grouped: true).filter { !isAI($0) }
+        let branchAI: [AITarget] = if case .local(let name) = ref { [aiBranch(name, session)] } else { [] }
         // Reveal in Finder ends the menu.
-        let reveal: [MenuEntry] = if case .local(let name) = ref { [.separator, revealBranch(name, session)] } else { [] }
-        guard case .commit(let hash) = item else { return refEntries + reveal }
+        let reveal = aiMenu(branchAI + [aiCommit(hash, session)]) + revealBranch(of: ref, session)
         let actionTitles = Set(refEntries.compactMap { entry -> String? in
             if case .action = entry.kind { entry.title } else { nil }
         })
@@ -521,7 +528,7 @@ enum RepoMenus {
             case .action:
                 !actionTitles.contains(entry.title)
                     && !(entry.title == "Interactive Rebase from Here…" && !entry.isEnabled)
-            case .submenu, .lazySubmenu: entry.title != ref.menuTitle
+            case .submenu, .lazySubmenu: entry.title != ref.menuTitle && !isAI(entry)
             case .separator: true
             }
         }
@@ -534,6 +541,11 @@ enum RepoMenus {
         else { return refEntries + [.separator] + commitEntries + reveal }
         return [.submenu("Copy", refCopies + [.separator] + commitCopies), .separator]
             + refEntries.filter { !isCopy($0) } + [.separator] + commitEntries.filter { !isCopy($0) } + reveal
+    }
+
+    /// A local branch badge's "Reveal in Finder", after a separator; nothing for another ref.
+    private static func revealBranch(of ref: SidebarItem, _ session: RepoSession) -> [MenuEntry] {
+        if case .local(let name) = ref { [.separator, revealBranch(name, session)] } else { [] }
     }
 
     /// A local branch badge's "Reveal in Finder": the folder of the worktree that has it checked out (this repo's or a
@@ -621,6 +633,7 @@ enum RepoMenus {
         }
         entries += grouped ? group("Delete", deletes) : deletes
         entries += visibility(ref, canHide: !isCurrent, session)
+        entries += aiMenu([aiBranch(name, session)])
         let copies: [MenuEntry] = [.action("Branch Name") { copy(name) }] + (upstream.map { [copyLink(to: $0, session)] } ?? [])
         entries += [.separator, .submenu("Copy", copies)]
         return entries
@@ -1514,6 +1527,88 @@ enum RepoMenus {
         ]
     }
 
+    // MARK: AI
+
+    /// What one pair of "AI" items acts on. `noun` names it in a submenu of several ("Explain Branch", "Add Branch to
+    /// AI Chat"); `reason` disables both items (nothing to explain).
+    struct AITarget {
+        let noun: String
+        var reason: String?
+        let explain: @MainActor () -> Void
+        let add: @MainActor () -> Void
+    }
+
+    /// The "AI" submenu, after a separator: each target's Explain (a new chat that sends at once; disabled with the
+    /// set-up hint until a provider is set up), then each one's Add to AI Chat (it only attaches, so it stays enabled).
+    /// One target: "Explain" and "Add to AI Chat". Nothing while Settings › AI › Show AI features is off.
+    static func aiMenu(_ targets: [AITarget]) -> [MenuEntry] {
+        let setup = AISetup.shared
+        guard setup.showFeatures, !targets.isEmpty else { return [] }
+        let hint = setup.isReady ? nil : AISetup.setUpHint
+        let several = targets.count > 1
+        let explains = targets.map { target in
+            let reason = target.reason ?? hint
+            return MenuEntry.action(several ? "Explain \(target.noun)" : "Explain", enabled: reason == nil,
+                                    toolTip: reason, target.explain)
+        }
+        let adds = targets.map { target in
+            MenuEntry.action(several ? "Add \(target.noun) to AI Chat" : "Add to AI Chat", enabled: target.reason == nil,
+                             toolTip: target.reason, target.add)
+        }
+        return [.separator, .submenu("AI", explains + adds)]
+    }
+
+    /// The clicked commit, or the selected commits (`aiSelection`, as one reference) when it is one of several.
+    private static func aiCommit(_ hash: String, _ session: RepoSession) -> AITarget {
+        let selection = session.aiSelection
+        let reference = AIChatReference.commits(selection.count >= 2 && selection.contains(hash) ? selection : [hash])
+        return AITarget(noun: "Commit", explain: { session.explainInChat(refs: [reference]) },
+                        add: { session.addToAIChat([reference]) })
+    }
+
+    /// Local branch `name` against its base (`branchReference`). The card opens in the click; the base may be read off
+    /// the main actor first, and a branch without one gets a warning toast.
+    private static func aiBranch(_ name: String, _ session: RepoSession) -> AITarget {
+        func withReference(_ perform: @escaping @MainActor (AIChatReference) -> Void) {
+            session.aiChat.isExpanded = true
+            Task {
+                guard let reference = await session.branchReference(name) else {
+                    session.postToast(.warning("AI Chat", detail: "\(name) has no base branch to compare with."))
+                    return
+                }
+                perform(reference)
+            }
+        }
+        return AITarget(noun: "Branch", explain: { withReference { session.explainInChat(refs: [$0]) } },
+                        add: { withReference { session.addToAIChat([$0]) } })
+    }
+
+    /// The WIP row's staged and unstaged changes, each off when that part is empty (an unread status leaves both on).
+    private static func aiWorkingTree(_ session: RepoSession) -> [AITarget] {
+        let status = session.status.value
+        return [(true, "Staged", status?.staged.isEmpty), (false, "Unstaged", status?.unstaged.isEmpty)]
+            .map { staged, noun, isEmpty in
+                let reference = AIChatReference.wip(staged: staged)
+                return AITarget(noun: noun, reason: isEmpty == true ? "No \(noun.lowercased()) changes." : nil,
+                                explain: { session.explainInChat(refs: [reference]) },
+                                add: { session.addToAIChat([reference]) })
+            }
+    }
+
+    /// A commit's file row (the commit details): the file's change in that commit.
+    static func aiFile(path: String, commit hash: String, session: RepoSession) -> [MenuEntry] {
+        let reference = AIChatReference.fileInCommit(hash: hash, path: path)
+        return aiMenu([AITarget(noun: "File", explain: { session.explainInChat(refs: [reference]) },
+                                add: { session.addToAIChat([reference]) })])
+    }
+
+    /// The open pull request's page (`pullRequestReference`, built at the click).
+    static func aiPullRequest(_ pull: HostedPullRequest, session: RepoSession) -> [MenuEntry] {
+        aiMenu([AITarget(noun: "Pull Request",
+                         explain: { session.explainInChat(refs: [session.pullRequestReference(pull)]) },
+                         add: { session.addToAIChat([session.pullRequestReference(pull)]) })])
+    }
+
     // MARK: DEBUG
 
     #if DEBUG
@@ -1612,6 +1707,7 @@ enum RepoMenus {
             let file = value.split(separator: ":", maxSplits: 1).map(String.init)
             guard file.count == 2 else { return [] }
             return checkoutFile(FileChange(kind: .modified, path: file[1]), commit: file[0], session: session)
+                + aiFile(path: file[1], commit: file[0], session: session)
         case "wipfile":
             let entry = session.status.value?.entries.first { $0.path == value }
             let untracked = entry?.kind == .untracked
