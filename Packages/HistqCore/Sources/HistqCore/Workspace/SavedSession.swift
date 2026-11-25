@@ -101,8 +101,11 @@ public struct SavedTab: Codable, Equatable, Sendable {
     public var profile: SavedProfile?
     /// The tab's alias (its menu's Set Alias…); nil shows the folder's name. Absent from files of older builds.
     public var alias: String?
-    /// The tab's emoji (its menu's Set Emoji…); nil shows none. Absent from files of older builds.
+    /// The tab's emoji (its menu's Set Icon…); nil shows none. Absent from files of older builds.
     public var emoji: String?
+    /// The uploaded image's file name in the Icons folder (`CustomIcon`), set instead of `emoji`; nil for none.
+    /// Absent from files of older builds.
+    public var icon: String?
     /// The tab is pinned; nil reads as false, and an unpinned tab is written as nil so files stay small. Absent from
     /// files of older builds.
     public var pinned: Bool?
@@ -117,15 +120,36 @@ public struct SavedTab: Codable, Equatable, Sendable {
     public var tabGroup: UUID?
 
     public init(path: String? = nil, profile: SavedProfile? = nil, alias: String? = nil, emoji: String? = nil,
-                pinned: Bool? = nil, iconColor: Int? = nil, archived: Bool? = nil, tabGroup: UUID? = nil) {
+                icon: String? = nil, pinned: Bool? = nil, iconColor: Int? = nil, archived: Bool? = nil,
+                tabGroup: UUID? = nil) {
         self.path = path
         self.profile = profile
         self.alias = alias
         self.emoji = emoji
+        self.icon = icon
         self.pinned = pinned
         self.iconColor = iconColor
         self.archived = archived
         self.tabGroup = tabGroup
+    }
+
+    /// The tab's icon slot as the app holds it: an uploaded image's reference (`CustomIcon.ref`) when `icon` is a
+    /// valid file name, else the emoji. Setting a valid reference stores its file name in `icon` and clears `emoji`;
+    /// anything else goes to `emoji` and clears `icon`.
+    public var mark: String? {
+        get {
+            if let icon, CustomIcon.isValidFileName(icon) { return CustomIcon.ref(fileName: icon) }
+            return emoji
+        }
+        set {
+            if let name = newValue.flatMap({ CustomIcon.fileName(ref: $0) }) {
+                icon = name
+                emoji = nil
+            } else {
+                emoji = newValue
+                icon = nil
+            }
+        }
     }
 
     /// The alias, else the repo folder's name, or "New Tab" for a Welcome tab: an archived tab's row in the archive's

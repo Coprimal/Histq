@@ -166,7 +166,7 @@ enum TourStops {
     private static func tabs(_ target: SpotlightTarget) -> TourStop {
         TourStop(
             target: target, title: "Tabs",
-            message: "Each repository opens in its own tab. Right-click a tab to set an emoji, pin it, add it to a "
+            message: "Each repository opens in its own tab. Right-click a tab to set an icon, pin it, add it to a "
                 + "group, or archive it: the archive button brings it back.",
             icons: ["pin", "archivebox"])
     }

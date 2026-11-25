@@ -822,7 +822,7 @@ enum TabPress {
 /// Close Tabs on a multi-selection; then the group items (`groupEntries`): Add Tab to New Group, Add Tab to Group ›
 /// and Remove from Group, plural on a multi-selection, which they act on whole when the tab is in it; then
 /// Copy Path (off for a Welcome tab), Reveal in Finder (the tab's repo or worktree folder; off for a Welcome tab or a
-/// missing folder), Set Alias…, Set Emoji…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Worktree Tabs / Unpin
+/// missing folder), Set Alias…, Set Icon…, Icon Color (the book's), Pin Tab / Unpin Tab (Pin Worktree Tabs / Unpin
 /// Worktree Tabs for a tab of a worktree box, which pins with it) and Archive This Tab, these five off for a Welcome
 /// tab, then Move Tab to Window › (`moveToWindow`). On the popped-out archived tab, Unarchive Tab replaces Archive This Tab, and Pin Tab and Close Tabs to the
 /// Right (Below) are off. Every item but Close Tabs and the group items acts on the right-clicked tab alone, even in a
@@ -862,7 +862,7 @@ enum TabMenu {
             .action("Set Alias…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to name.") {
                 model.presentModal(.tabAlias(tabID: id))
             },
-            .action("Set Emoji…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to mark.") {
+            .action("Set Icon…", enabled: isRepo, toolTip: isRepo ? nil : "A new tab has no repository to mark.") {
                 model.presentModal(.tabEmoji(tabID: id))
             },
             isRepo ? .submenu("Icon Color", iconColors(id, tab, model))
@@ -1072,9 +1072,10 @@ struct TabGroupLine: Shape {
     }
 }
 
-/// One tab: its icon (`TabIcon`: the emoji, else the book) in the slot before its name, with the profile's color dot on
-/// the icon's corner; the name centered (the close button's slot balances the icon's) and cut with "…", and a close
-/// button while hovered. A pinned tab shows only its icon, with no close button; its tooltip carries the name.
+/// One tab: its icon (`TabIcon`: the emoji or uploaded image, else the book) in the slot before its name, with the
+/// profile's color dot on the icon's corner; the name centered (the close button's slot balances the icon's) and cut
+/// with "…", and a close button while hovered. A pinned tab shows only its icon, with no close button; its tooltip
+/// carries the name.
 struct TabItem: View {
     let title: String
     let help: String
@@ -1206,14 +1207,15 @@ struct TabItem: View {
     }
 }
 
-/// A tab's icon in a `size` square: its emoji, else its symbol (`symbol(of:)`, the book of a repo tab) in its icon
-/// color, with the profile's color dot on its lower-right corner in a white ring. A book with neither its own emoji nor
-/// its own color takes Settings › Appearance's default tab icon: its emoji, else its color. The top tabs and the
-/// vertical tabs share it.
+/// A tab's icon in a `size` square: its emoji or uploaded image (Set Icon…; an image whose file is missing counts
+/// as none), else its symbol (`symbol(of:)`, the book of a repo tab) in its icon color, with the profile's color dot
+/// on its lower-right corner in a white ring. A book with neither its own icon nor its own color takes
+/// Settings › Appearance's default tab icon: its emoji or image, else its color. The top tabs and the vertical tabs
+/// share it.
 struct TabIcon: View {
-    /// The tab's own emoji (`WindowModel.Tab.emoji`); nil for none.
+    /// The tab's own emoji or image reference (`WindowModel.Tab.emoji`); nil for none.
     let emoji: String?
-    /// The SF Symbol drawn when there is no emoji.
+    /// The SF Symbol drawn when there is no emoji or image.
     let symbol: String
     /// The tab's own book color (`WindowModel.Tab.iconColor`), an index into `Palette.graphLanes`; nil for none.
     let iconColor: Int?
@@ -1233,14 +1235,31 @@ struct TabIcon: View {
     private static let dotInset: CGFloat = 2.5
     @AppStorage(PrefKey.defaultTabEmoji.rawValue, store: Preferences.defaults) private var defaultEmoji = ""
     @AppStorage(PrefKey.defaultTabIconColor.rawValue, store: Preferences.defaults) private var defaultColor = -1
+    /// Bumped on `CustomIconImages.didChange`, so an image that loaded (or was found missing) redraws the icon.
+    @State private var imagesVersion = 0
 
+    /// The tab's own emoji or image reference; an image found missing counts as none.
+    private var ownIcon: String? { Self.present(emoji) }
     /// The tab's own choice, else the default for a book that has none.
-    private var usesDefault: Bool { emoji == nil && iconColor == nil && symbol == Self.book }
+    private var usesDefault: Bool { ownIcon == nil && iconColor == nil && symbol == Self.book }
 
     var body: some View {
-        let emoji = emoji ?? (usesDefault ? TabEmoji.normalized(defaultEmoji) : nil)
+        let _ = imagesVersion
+        let fallback = CustomIcon.isRef(defaultEmoji) ? Self.present(defaultEmoji) : TabEmoji.normalized(defaultEmoji)
+        let emoji = ownIcon ?? (usesDefault ? fallback : nil)
+        let ref = CustomIcon.isRef(emoji) ? emoji : nil
         ZStack {
-            if let emoji {
+            if let ref {
+                // Fitted in the emoji's square, never cropped; empty until the image has loaded.
+                Group {
+                    if let image = CustomIconImages.shared.image(for: ref) {
+                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: size * Self.emojiScale, height: size * Self.emojiScale)
+            } else if let emoji {
                 Text(emoji)
                     .font(.system(size: size * Self.emojiScale))
                     .lineLimit(1)
@@ -1253,6 +1272,11 @@ struct TabIcon: View {
             }
         }
         .frame(width: size, height: size)
+        // Keyed on the version too: an upload drops the cached image of its reference, which then loads again.
+        .task(id: "\(ref ?? "")#\(imagesVersion)") {
+            if let ref { await CustomIconImages.shared.load(ref) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CustomIconImages.didChange)) { _ in imagesVersion &+= 1 }
         .overlay(alignment: .bottomTrailing) {
             if let profileColor {
                 let ring = TabStripMetrics.iconDot / 2 + TabStripMetrics.iconDotRing
@@ -1270,6 +1294,12 @@ struct TabIcon: View {
                     .accessibilityHidden(true)
             }
         }
+    }
+
+    /// `value`, or nil when it is an image reference whose image was found missing.
+    private static func present(_ value: String?) -> String? {
+        guard let value, CustomIcon.isRef(value), CustomIconImages.shared.isMissing(value) else { return value }
+        return nil
     }
 
     /// A tab's symbol: the book of a repo tab (as the toolbar's repo icon); a missing repo and a Welcome tab get their
