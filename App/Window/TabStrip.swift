@@ -58,10 +58,10 @@ enum TabStripMetrics {
 
     /// A worktree box (`WorktreeBoxShape`): this far in from its first and last tab's edges, so two boxes side by side
     /// (and a box beside a plain tab) keep a clear line between them; from the tabs' top to the hover fill's bottom,
-    /// clear of the sheet and of a group's line. A capsule: with that inset its round ends sit inside the selected
-    /// tab's top arcs, so a selected first or last tab hides the box's end.
+    /// 3 pt clear of a group's line along the strip's bottom (and of the sheet). A capsule: with that inset its round
+    /// ends sit inside the selected tab's top arcs, so a selected first or last tab hides the box's end.
     static let boxInset: CGFloat = 1.5
-    static let boxBottomInset: CGFloat = 3
+    static let boxBottomInset: CGFloat = 4.5
     static let boxRadius: CGFloat = .infinity
 
     /// A group's chip width for its name: a square without one.
@@ -739,7 +739,7 @@ private struct ArchiveCluster: View {
         return TabGroupLine(opening: opening,
                             openingEnd: opening + TabStripMetrics.archivedTabWidth + 2 * TabStripMetrics.flare)
             .fill(TabGroupColors.archiveLine)
-            .frame(width: tabStart + TabStripMetrics.archivedTabWidth, height: TabStripMetrics.groupLine)
+            .frame(width: tabStart + TabStripMetrics.archivedTabWidth)
             .allowsHitTesting(false)
     }
 
@@ -1034,7 +1034,7 @@ private struct TabGroupChip<Press: Gesture>: View {
             if !collapsed {
                 TabGroupLine(opening: opening, openingEnd: opening + openingWidth)
                     .fill(TabGroupColors.line(group.group.colorIndex))
-                    .frame(width: span, height: TabStripMetrics.groupLine)
+                    .frame(width: span)
                     .allowsHitTesting(false)
             }
         }
@@ -1049,7 +1049,9 @@ private struct TabGroupChip<Press: Gesture>: View {
 
 /// A group's line along the strip's bottom, open from `opening` to `openingEnd` (its own x), where the selected tab's
 /// outline takes over: its ends meet the outline's flares, with no spur. Animatable, so the opening slides with the
-/// selected tab's shape when the selection changes. The archive's line (`ArchiveCluster`) is one too.
+/// selected tab's shape when the selection changes. The archive's line (`ArchiveCluster`) is one too. It fills the
+/// bottom `groupLine` of a tab-tall rect, not a rect that tall: SwiftUI rounds a view's frame to whole pixels, so a
+/// 1.5 pt frame would stand up to half a pixel off the outline on a 1x screen.
 struct TabGroupLine: Shape {
     var opening: CGFloat
     var openingEnd: CGFloat
@@ -1065,9 +1067,11 @@ struct TabGroupLine: Shape {
     func path(in rect: CGRect) -> Path {
         let start = min(max(opening, 0), rect.width)
         let end = min(max(openingEnd, start), rect.width)
+        let line = TabStripMetrics.groupLine
+        let top = rect.maxY - line
         var path = Path()
-        if start > 0 { path.addRect(CGRect(x: 0, y: rect.minY, width: start, height: rect.height)) }
-        if end < rect.width { path.addRect(CGRect(x: end, y: rect.minY, width: rect.width - end, height: rect.height)) }
+        if start > 0 { path.addRect(CGRect(x: 0, y: top, width: start, height: line)) }
+        if end < rect.width { path.addRect(CGRect(x: end, y: top, width: rect.width - end, height: line)) }
         return path
     }
 }
@@ -1115,12 +1119,11 @@ struct TabItem: View {
                         .fill(Palette.sheet)
                         .overlay {
                             // A grouped tab's outline in the group's color, its flares meeting the group's line
-                            // (`TabGroupLine`); inset half the line so the strip does not clip it.
+                            // (`TabGroupLine`); the open shape insets half the line so the strip does not clip it.
                             if let groupColor {
                                 TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare,
                                               closed: false)
                                     .stroke(groupColor, lineWidth: TabStripMetrics.groupLine)
-                                    .padding(.vertical, TabStripMetrics.groupLine / 2)
                             }
                         }
                         .padding(.horizontal, -TabStripMetrics.flare)
@@ -1128,7 +1131,7 @@ struct TabItem: View {
                 } else {
                     Capsule(style: .circular)
                         .fill(multiSelected ? Palette.multiSelectFill : hovered || dragged ? Palette.tabFill : .clear)
-                        .padding(.bottom, 3)
+                        .padding(.bottom, TabStripMetrics.boxBottomInset)
                 }
             }
             .contentShape(Capsule(style: .circular))
@@ -1334,10 +1337,13 @@ struct TabIcon: View {
 struct TabSheetShape: Shape {
     let radius: CGFloat
     let flare: CGFloat
-    /// False leaves out the bottom edge: the outline a grouped tab strokes.
+    /// False leaves out the bottom edge: the outline a grouped tab strokes, inset half a `groupLine` top and bottom
+    /// inside the path (not by padding, whose frame SwiftUI rounds to whole pixels), so the stroke meets the group's
+    /// line (`TabGroupLine`) exactly.
     var closed = true
 
     func path(in rect: CGRect) -> Path {
+        let rect = closed ? rect : rect.insetBy(dx: 0, dy: TabStripMetrics.groupLine / 2)
         let left = rect.minX + flare
         let right = rect.maxX - flare
         var path = Path()
