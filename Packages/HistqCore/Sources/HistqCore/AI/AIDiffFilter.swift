@@ -5,6 +5,7 @@
 // read (fail closed). `AIPrompts.filtered` applies both before `budgeted`. `AIIgnore.load` reads a worktree's
 // `.aiignore` (throwing on anything but a small regular file), and `filteredUnlessAllIgnored` reports a diff that
 // `.aiignore` emptied, so neither case sends unfiltered or empty content.
+import CryptoKit
 import Foundation
 
 /// The patterns of a `.aiignore` file: `#` comments, blank lines, `*` and `?` (never across `/`), `**` (any number of
@@ -206,6 +207,19 @@ public struct AIIgnore: Sendable, Equatable {
               let data = try? handle.read(upToCount: limit + 1) ?? Data(), data.count <= limit
         else { throw LoadError.unreadable }
         return AIIgnore(text: String(decoding: data, as: UTF8.self))
+    }
+
+    /// A fingerprint of the rules `ignore` applies (nil: no `.aiignore`), so a saved AI chat context can tell whether
+    /// it was filtered with the rules in force now. Comments and blank lines do not change it.
+    public static func digest(_ ignore: AIIgnore?) -> String {
+        guard let ignore else { return "none" }
+        // Every part length-prefixed, so two rule lists never write the same text.
+        var text = ""
+        for rule in ignore.rules {
+            text += "\(rule.anchored ? 1 : 0)\(rule.foldersOnly ? 1 : 0)\(rule.segments.count);"
+            for segment in rule.segments { text += "\(segment.utf8.count):\(segment)" }
+        }
+        return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
 

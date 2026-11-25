@@ -906,9 +906,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let model = entries.first { $0.window === window }?.model
         // An open palette holds row closures over the window's sessions; drop it so they are freed with the window.
         model?.closePalette()
-        // The closed window's views can keep its sessions (and their AI runs) alive a while: a running AI job stops
-        // now, before it sends the diff.
-        model?.sessions.values.forEach { $0.closeAI() }
+        // The closed window's views can keep its sessions (and their AI runs and chats) alive a while: a running AI
+        // job or chat turn stops now, before it sends the diff.
+        model?.sessions.values.forEach {
+            $0.closeAI()
+            $0.stopAIChat()
+        }
         // Closing a window never calls the sessions' `close()`: their shells end here.
         model?.sessions.values.forEach { $0.endTerminal() }
         // Its onboarding ends, not done (it shows again by itself when nothing else changed): the demo tab closes and

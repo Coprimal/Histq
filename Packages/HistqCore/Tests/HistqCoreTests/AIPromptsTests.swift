@@ -5,7 +5,8 @@
 // the resolution text tests check that an applied answer gets the file's line breaks and never a final newline the
 // file did not have. The language tests check that the default prompts are unchanged and that another language adds
 // one fixed rule line. The pull request test checks that its commit messages, template and diff go only into data
-// blocks, with exact labels.
+// blocks, with exact labels. The chat test checks that the explain contexts keep the message and diff inside data
+// blocks and carry no answer marker.
 import Foundation
 import HistqCore
 import Testing
@@ -382,5 +383,34 @@ struct AIPromptsTests {
         let manyCut = AIPrompts.budgeted(many, budget: AIPrompts.diffBudget)
         #expect(manyCut.utf8.count <= AIPrompts.diffBudget, "notes count against the budget too")
         #expect(manyCut.hasSuffix("more changed files left out to fit the size limit]\n"))
+    }
+
+    // MARK: - Chat
+
+    @Test("chat explain contexts keep the message and diff inside data blocks and carry no answer marker")
+    func chatExplainContextKeepsDataInBlocks() {
+        let message = "Fix the okapi importer"
+        let diff = "diff --git a/src/tapir.swift b/src/tapir.swift\n+let narwhal = 1\n"
+        let commit = AIPrompts.chatExplainCommitContext(message: message, diff: diff, token: { "histq-1" })
+        let working = AIPrompts.chatExplainWorkingChangesContext(diff: diff, token: { "histq-1" })
+
+        for (context, values) in [(commit, [message, diff]), (working, [diff])] {
+            var outside = context
+            while let begin = outside.range(of: "\nBEGIN DATA histq-1\n"),
+                  let end = outside.range(of: "END DATA histq-1\n", range: begin.upperBound..<outside.endIndex) {
+                outside.removeSubrange(begin.lowerBound..<end.upperBound)
+            }
+            for value in values {
+                #expect(context.contains("\nBEGIN DATA histq-1\n" + value + (value.hasSuffix("\n") ? "" : "\n")
+                    + "END DATA histq-1\n"))
+            }
+            for word in ["okapi", "tapir", "narwhal"] {
+                #expect(!outside.contains(word), "\(word) outside a data block")
+            }
+            #expect(!context.contains("ANSWER"))
+        }
+        #expect(commit.hasPrefix("Explain the change in the data blocks below"))
+        #expect(!AIPrompts.chatSystem().contains("ANSWER"))
+        #expect(!AIPrompts.chatSystem(language: .vietnamese, instructions: "Be brief.").contains("ANSWER"))
     }
 }

@@ -5,10 +5,11 @@
 // completions otherwise), sent in small chunks over about a second so the preview streams and Cancel can stop it. The
 // answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, an
 // explanation, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
-// prompt asks for one; a request without one (Test connection) gets "OK". A `GET …/models` (Load models) gets two
-// model ids, `stub-model-a` and `models/stub-model-b`. `error` answers HTTP 401 instead. Each chat request logs its
-// prompt's language rule (`language <name|default>`) and its data blocks' labels (`blocks [<label>, ...]`, never
-// their content).
+// prompt asks for one; a chat request (the chat system prompt, no boundary) gets a short Markdown answer without
+// markers (a heading, a list and a fenced code block); any other request without one (Test connection) gets "OK".
+// A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`. `error` answers
+// HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`) and its data blocks'
+// labels (`blocks [<label>, ...]`, never their content).
 // With `-HistqKeychain memory`, every built-in provider gets a fake key in the in-memory Keychain, so the AI buttons
 // are enabled.
 //
@@ -157,7 +158,12 @@ enum AIStub {
     static func replyText(body: Data) -> String {
         guard let parts = prompt(body: body) else { return "OK" }
         let (system, user) = (parts.system, parts.user)
-        guard let token = boundary(system: system) else { return "OK" }
+        guard let token = boundary(system: system) else {
+            guard system.hasPrefix(chatOpening) else { return "OK" }
+            return customAnswer?.answer ?? "# DEBUG AI stub\n\nThis chat answer was written by the **DEBUG AI stub** "
+                + "(-HistqAIStub).\n\n- No provider was called.\n- The last message held \(user.utf8.count) bytes.\n\n"
+                + "```sh\ngit log --oneline -3\n```\n"
+        }
         var answer: String
         if system.contains("Write a git commit message") {
             answer = "Add a canned change from the AI stub\n\nWritten by the DEBUG AI stub (-HistqAIStub); no "
@@ -183,6 +189,9 @@ enum AIStub {
             ? "BEGIN REASON \(token)\n\(reasonText)\nEND REASON \(token)\n" : ""
         return "Here is the answer.\n\(reason)BEGIN ANSWER \(token)\n\(terminated(answer))END ANSWER \(token)\n"
     }
+
+    /// The chat system prompt's fixed first line: it never depends on the language or the instructions.
+    private static let chatOpening = String(AIPrompts.chatSystem().prefix { $0 != "\n" })
 
     /// `-HistqAIStubAnswer <file.json>` (`{"answer": "…", "reason": "…"}`, reason optional): the text every chat request
     /// gets instead of the canned one, for screenshots without stub wording.

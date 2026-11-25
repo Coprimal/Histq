@@ -1009,6 +1009,9 @@ final class RepoSession: Identifiable {
     private(set) var aiRun: AIRun?
     /// The Suggest All card (`AIBatchSheet`): every unresolved conflict region of the open file, asked in turn.
     private(set) var aiBatch: AIBatch?
+    /// The tab's AI chat (`RepoSession+AIChat`): views observe the model itself. Only `close()` stops it, never
+    /// `closeAI()` or `closeModals()`, so a tab switch leaves a running chat alone.
+    @ObservationIgnored lazy var aiChat = makeAIChat()
     /// The conflict editor's Save asks how to write the conflicts left unresolved (`ConflictSaveModal`).
     var conflictSavePrompt = false
     /// Leaving a conflict editor with unsaved ticks or edits, or the file editor with unsaved text, asks first
@@ -1477,8 +1480,9 @@ final class RepoSession: Identifiable {
         profileTask?.cancel()
         github.stop()
         // The tab is removed before the selection moves, so `ModalHost` never closes its modals: a running AI job
-        // must stop here, before it sends the diff.
+        // must stop here, before it sends the diff. The chat too (and its partial answer is saved).
         closeAI()
+        stopAIChat()
         endTerminal()
     }
 
@@ -4520,7 +4524,7 @@ final class RepoSession: Identifiable {
     }
 
     /// The languages of Settings › AI: explanations, then commit messages (English for a missing or unknown value).
-    private static func aiLanguages() -> (response: AIResponseLanguage, commit: AIResponseLanguage) {
+    nonisolated static func aiLanguages() -> (response: AIResponseLanguage, commit: AIResponseLanguage) {
         func language(_ key: PrefKey) -> AIResponseLanguage {
             Preferences.defaults.string(forKey: key.rawValue).flatMap(AIResponseLanguage.init(rawValue:)) ?? .english
         }
@@ -4535,7 +4539,7 @@ final class RepoSession: Identifiable {
     /// `.aiignore` check. A pull request's: the full messages of its last 50 commits (`noCommits` without one), the
     /// branch diff (`PatchSource.branch`) and the template at `templateRef`, in the commit messages' language.
     @concurrent
-    private nonisolated static func aiPrompt(
+    nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
         languages: (response: AIResponseLanguage, commit: AIResponseLanguage), instructions: String, branch: String?
     ) async throws -> AIPrompt {
@@ -4631,7 +4635,7 @@ final class RepoSession: Identifiable {
 
     /// `diff` through `AIPrompts.filtered` with the worktree's `.aiignore`; throws `allIgnored` when `.aiignore` left
     /// out every file (only the closing note would be sent). An empty diff is returned as it is.
-    private nonisolated static func aiFiltered(_ diff: String, worktree: URL) throws -> String {
+    nonisolated static func aiFiltered(_ diff: String, worktree: URL) throws -> String {
         guard let kept = AIPrompts.filteredUnlessAllIgnored(diff, ignore: try aiIgnore(worktree: worktree))
         else { throw AIJobError.allIgnored }
         return kept
@@ -4639,7 +4643,7 @@ final class RepoSession: Identifiable {
 
     /// The worktree's `.aiignore` (`AIIgnore.load`): nil when it is missing; one that can't be read safely throws
     /// `aiIgnoreUnreadable`, so nothing is sent unfiltered. Its text is never sent.
-    private nonisolated static func aiIgnore(worktree: URL) throws -> AIIgnore? {
+    nonisolated static func aiIgnore(worktree: URL) throws -> AIIgnore? {
         do { return try AIIgnore.load(worktree: worktree) } catch { throw AIJobError.aiIgnoreUnreadable }
     }
 
