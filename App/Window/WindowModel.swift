@@ -596,6 +596,11 @@ final class WindowModel {
         }
     }
 
+    /// The toolbar's AI button: the selected repo tab's chat card.
+    func toggleAIChat() {
+        actionSession?.toggleAIChat()
+    }
+
     /// The toolbar's Terminal button and View › Show Terminal (⌃`): the selected repo tab's drawer.
     func toggleTerminal() {
         actionSession?.toggleTerminal()

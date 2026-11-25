@@ -3,7 +3,7 @@
 // tabs, recent repos, Open…), the branch menu (checks out the picked branch),
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge the green Update button while Sparkle has an update
 // (`Updater`), then capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, Row Height ▾ (the graph's
-// row heights), then Terminal / Search / Settings. On a Welcome tab the repo actions are disabled, not removed.
+// row heights), then AI Chat / Terminal / Search / Settings (AI Chat hidden while "Show AI features" is off). On a Welcome tab the repo actions are disabled, not removed.
 // Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it. While the onboarding runs
 // no item takes a click, and a spotlight dims every item but its target (`Hold`); `frame(of:)` tells the spotlight
 // where its toolbar targets are.
@@ -30,13 +30,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private let updater: Updater
 
     // Fixed widths, so the items after them never move between tabs or branches (titles cut with "…"). Each keeps
-    // the title's room it had before the icon's gap (`ToolbarDropdown.iconGap`) was added.
+    // the title's room it had before the icon's gap (`ToolbarDropdown.iconGap`) was added. Before macOS 26 each is
+    // `fallbackTrim` narrower: the Tools group's buttons are wider there, and need the room at the default width.
     private let repoItem = ToolbarDropdown(
-        ID.repo, label: "Repository", width: 150 + ToolbarDropdown.iconGap,
+        ID.repo, label: "Repository", width: 150 - fallbackTrim + ToolbarDropdown.iconGap,
         image: NSImage(systemSymbolName: "book.closed", accessibilityDescription: "Repository"))
     private let branchItem = ToolbarDropdown(
-        ID.branch, label: "Branch", width: 160 + ToolbarDropdown.iconGap,
+        ID.branch, label: "Branch", width: 160 - fallbackTrim + ToolbarDropdown.iconGap,
         image: NSImage.icon("lucide-git-branch", accessibilityDescription: "Branch"))
+    private static let fallbackTrim: CGFloat = PlatformFeatures.liquidGlass ? 0 : 20
     /// As wide as its title (already cut at 24 characters), after its color dot.
     private let profileItem = ToolbarDropdown(ID.profile, label: "Profile", width: nil, image: nil)
     /// The color the profile chip's dot shows ("" for no profile, `missingProfileKey` for the warning), so the image is
@@ -61,6 +63,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Pulls down the graph's row heights (`PrefKey.rowDensity`, as Settings › Appearance › Row height), its own
     /// capsule before Tools.
     private let rowHeightItem = NSMenuToolbarItem(itemIdentifier: ID.rowHeight)
+    /// Shows or hides the tab's AI chat card; hidden while Settings › AI "Show AI features" is off.
+    private let aiChatItem = NSToolbarItem(itemIdentifier: ID.aiChat)
     private let terminalItem = NSToolbarItem(itemIdentifier: ID.terminal)
     private let searchItem = NSToolbarItem(itemIdentifier: ID.search)
     private let settingsItem = NSToolbarItem(itemIdentifier: ID.settings)
@@ -117,6 +121,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         static let stash = NSToolbarItem.Identifier("stash")
         static let pop = NSToolbarItem.Identifier("pop")
         static let rowHeight = NSToolbarItem.Identifier("rowHeight")
+        static let aiChat = NSToolbarItem.Identifier("aiChat")
         static let terminal = NSToolbarItem.Identifier("terminal")
         static let search = NSToolbarItem.Identifier("search")
         static let settings = NSToolbarItem.Identifier("settings")
@@ -157,10 +162,14 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         configureButton(redoItem, label: "Redo", systemImage: Self.redoSymbol)
         undoItem.action = #selector(undo(_:))
         redoItem.action = #selector(redo(_:))
+        // The app's logo (full color, not a template), as the chat's bubble; `sparkles` if the asset is missing.
+        configureButton(aiChatItem, label: "AI Chat", systemImage: "sparkles")
+        if let logo = Self.aiChatLogo() { aiChatItem.image = logo }
+        aiChatItem.action = #selector(toggleAIChat(_:))
         configureButton(terminalItem, label: "Terminal", systemImage: "terminal")
         terminalItem.action = #selector(toggleTerminal(_:))
         configureButton(searchItem, label: "Search", systemImage: "command")
-        for item in [undoItem, redoItem, terminalItem] { item.isEnabled = false }
+        for item in [undoItem, redoItem, aiChatItem, terminalItem] { item.isEnabled = false }
         searchItem.label = "Command Palette"
         searchItem.toolTip = "Command Palette (⌘K)"
         searchItem.action = #selector(togglePalette(_:))
@@ -226,14 +235,14 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             // a group of view items shares one.
             for item in [pullItem, pushItem, fetchItem] { groups[item.itemIdentifier] = item }
             groups[ID.branchGroup] = row(ID.branchGroup, title: "Branch", [createBranchItem, stashItem, popItem])
-            groups[ID.toolsGroup] = row(ID.toolsGroup, title: "Tools", [terminalItem, searchItem, settingsItem])
+            groups[ID.toolsGroup] = row(ID.toolsGroup, title: "Tools", [aiChatItem, terminalItem, searchItem, settingsItem])
         } else {
             updateItem.image = updateItem.image?.withSymbolConfiguration(
                 NSImage.SymbolConfiguration(paletteColors: [.systemGreen]))
             groups[ID.historyGroup] = group(ID.historyGroup, [undoItem, redoItem])
             groups[ID.syncGroup] = group(ID.syncGroup, [pullItem, pushItem, fetchItem])
             groups[ID.branchGroup] = group(ID.branchGroup, [createBranchItem, stashItem, popItem])
-            groups[ID.toolsGroup] = group(ID.toolsGroup, [terminalItem, searchItem, settingsItem])
+            groups[ID.toolsGroup] = group(ID.toolsGroup, [aiChatItem, terminalItem, searchItem, settingsItem])
         }
         for (id, item) in groups { if let palette = Self.palette[id] { item.paletteLabel = palette.label } }
     }
@@ -397,8 +406,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
     /// window's workspace (name, path, read-only and write state), the selected tab's repo, its session's refs,
     /// running operations, status, stashes, remotes, profile, undo status, operation in progress and terminal drawer,
-    /// the profile store, the page, the Settings modal, whether the onboarding runs, the spotlight's target and whether
-    /// Sparkle has an update are read, so other tabs and the content's own state never wake the toolbar.
+    /// the profile store, the page, the Settings modal, whether the onboarding runs, the spotlight's target, whether
+    /// Sparkle has an update and whether AI features show (`AISetup.showFeatures`) are read, so other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -491,6 +500,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         logUndoItem()
         #endif
 
+        set(aiChatItem, enabled: session != nil)
+        setAIChatHidden(!AISetup.shared.showFeatures)
+
         let isTerminalOpen = session?.isTerminalOpen ?? false
         set(terminalItem, enabled: session != nil)
         // A pending drawer: the button starts its shell, so it does not offer to hide it.
@@ -518,7 +530,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// The button items, each with its view on macOS 26 (`view(of:)`).
     private var buttonItems: [NSToolbarItem] {
         [undoItem, redoItem, pullItem, pushItem, fetchItem, createBranchItem, stashItem, popItem, rowHeightItem,
-         terminalItem, searchItem, settingsItem, updateItem]
+         aiChatItem, terminalItem, searchItem, settingsItem, updateItem]
     }
 
     private var dropdowns: [ToolbarDropdown] { [workspaceItem, repoItem, branchItem, profileItem] }
@@ -666,6 +678,23 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         if item.isHidden != hidden { item.isHidden = hidden }
     }
 
+    /// Hides the AI button wherever it shows: the item (and before macOS 26 its group's subitem), and on macOS 26 its
+    /// button in the Tools capsule and that button's overflow entry, which `item.isHidden` alone leaves visible.
+    private func setAIChatHidden(_ hidden: Bool) {
+        set(aiChatItem, hidden: hidden)
+        guard let button = hoverButtons[ObjectIdentifier(aiChatItem)] else { return }
+        if button.isHidden != hidden { button.isHidden = hidden }
+        if button.menuForm.isHidden != hidden { button.menuForm.isHidden = hidden }
+    }
+
+    /// The logo at a toolbar icon's size: a copy, so the catalog's shared instance keeps its size.
+    private static func aiChatLogo() -> NSImage? {
+        guard let image = NSImage(named: "histq-logo")?.copy() as? NSImage else { return nil }
+        image.size = NSSize(width: 18, height: 18)
+        image.accessibilityDescription = "AI Chat"
+        return image
+    }
+
     private var symbols: [ObjectIdentifier: String] = [:]
 
     private func set(_ item: NSToolbarItem, systemImage: String, label: String) {
@@ -775,6 +804,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     @objc private func toggleSettings(_ sender: Any?) {
         if hold == .none { model.toggleSettings() }
+    }
+
+    @objc private func toggleAIChat(_ sender: Any?) {
+        if hold == .none { model.toggleAIChat() }
     }
 
     @objc private func toggleTerminal(_ sender: Any?) {

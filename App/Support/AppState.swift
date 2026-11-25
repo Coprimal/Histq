@@ -265,6 +265,11 @@ enum PrefKey: String, CaseIterable {
     case aiConflictInstructions
     /// The user's own instructions added to the pull request Generate prompt (empty: none).
     case aiPullRequestInstructions
+    /// The AI chat logo's place along the graph column's bottom edge, 0 (left) ... 1 (right); shared by all tabs.
+    case aiChatBubblePosition
+    /// The AI chat card's width and height in points, shared by all tabs; 0 = the default size.
+    case aiChatCardWidth
+    case aiChatCardHeight
     /// The operation toasts shown: a `ToastLevel` raw value, "all" or "errors" (a failure always shows).
     case toastLevel
     /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
@@ -334,6 +339,8 @@ enum PrefKey: String, CaseIterable {
         case .aiCommitLanguage: "english"
         case .aiCommitSummaryOnly: false
         case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
+        case .aiChatBubblePosition: 1.0
+        case .aiChatCardWidth, .aiChatCardHeight: 0.0
         case .toastLevel: "all"
         case .hiddenRefs: [String: [String]]()
         case .onboardingDone: false

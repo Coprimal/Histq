@@ -366,7 +366,7 @@ struct AIResultSheet: View {
     }
 
     /// Inline markdown (bold, italic, code) with the line breaks kept; links are shown as plain text, never opened.
-    private static func markdown(_ text: String) -> AttributedString {
+    static func markdown(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var styled = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
         // The answer is steered by untrusted repo content (a commit message or diff can ask for a link), so no run

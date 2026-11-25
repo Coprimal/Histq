@@ -30,6 +30,10 @@
 // soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
 // reads its content (Suggest All: while the batch runs);
 // `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
+// `explain` and `explain-wip` open in the tab's chat: there `cancel` stops the turn as soon as the first words show
+// (`AIChatModel.stop()`), and `close-tab` / `close-window` close the tab or window right after the click, before the
+// context is sent. `-HistqAIChatSend <text>` then sends `text` as a follow-up once the first chat answer finishes
+// (`chat-send` in ai.log, `ai chat-send` in timing.log); each chat turn logs `chat finished` or `chat failed`.
 // `generate` waits until the refs are read (the branch name). A hook whose button is disabled for a reason of its own
 // (AI set up) logs `unavailable <hook>: <reason>` once per reason. Evidence goes to `<stateDir>/ai.log` (never a key).
 import Foundation
@@ -97,6 +101,28 @@ enum AIStub {
     static func logUnavailable(_ hook: String, reason: String) {
         guard seamParts.first == hook, unavailableLogged.insert(reason).inserted else { return }
         log("unavailable \(hook): \(reason)")
+    }
+
+    /// `explain` and `explain-wip` open in the tab's chat (`RepoSession.explainInChat`), not in the result card.
+    private static var hookOpensChat: Bool { seamHook == "explain" || seamHook == "explain-wip" }
+
+    @MainActor private static var chatOptionsTaken: Set<String> = []
+
+    /// `cancel`, `close-tab` or `close-window` of a chat hook: true once per launch, after its click.
+    @MainActor
+    static func takeChatOption(_ option: String) -> Bool {
+        guard seamTaken, hookOpensChat, seamOptions.contains(option) else { return false }
+        return chatOptionsTaken.insert(option).inserted
+    }
+
+    /// `-HistqAIChatSend <text>` (stub runs only): the follow-up the chat sends once its first answer finishes.
+    @MainActor private static var chatSendText: String? = isEnabled ? AppState.launchFlag("-HistqAIChatSend") : nil
+
+    /// The `-HistqAIChatSend` text, once per launch.
+    @MainActor
+    static func takeChatSend() -> String? {
+        defer { chatSendText = nil }
+        return chatSendText
     }
 
     @MainActor private static var regenerateTaken = false

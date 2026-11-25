@@ -72,6 +72,9 @@ final class AISetup {
     private(set) var keyStored: [AIProvider: Bool] = [:]
     /// The first Keychain read has finished.
     private(set) var keysLoaded = false
+    /// Settings › AI "Show AI features" (`PrefKey.aiShowFeatures`), observed: AppKit code (the toolbar's AI button)
+    /// reads it here, as a `UserDefaults` read is not tracked.
+    private(set) var showFeatures: Bool
     private var loadTask: Task<Void, Never>?
 
     private init() {
@@ -79,6 +82,16 @@ final class AISetup {
         provider = defaults.string(forKey: PrefKey.aiProvider.rawValue).flatMap(AIProvider.init(rawValue:)) ?? .openAI
         models = defaults.dictionary(forKey: PrefKey.aiModels.rawValue) as? [String: String] ?? [:]
         customBaseURL = defaults.string(forKey: PrefKey.aiCustomBaseURL.rawValue) ?? ""
+        showFeatures = defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue)
+        // Posted for every key, possibly off the main thread; only a change of the switch is written.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let shown = Preferences.defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue)
+                if AISetup.shared.showFeatures != shown { AISetup.shared.showFeatures = shown }
+            }
+        }
     }
 
     func setProvider(_ provider: AIProvider) {

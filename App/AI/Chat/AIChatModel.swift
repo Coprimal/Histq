@@ -181,6 +181,13 @@ final class AIChatModel {
                     }
                     flushReply()
                     shown = .now
+                    #if DEBUG
+                    if AIStub.takeChatOption("cancel") {
+                        AIStub.log("cancel \(logName) after reply chars \(reply.count)")
+                        stop()
+                        return
+                    }
+                    #endif
                 }
                 try Task.checkCancellation()
                 self?.finishTurn(token: token)
@@ -217,6 +224,14 @@ final class AIChatModel {
         endTurn()
         logContent()
         save()
+        #if DEBUG
+        AIStub.log("chat finished \(turnDetail) chars \(reply.count)")
+        if let text = AIStub.takeChatSend() {
+            AIStub.log("chat-send \(AIStub.quoted(text))")
+            draft = text
+            send()
+        }
+        #endif
     }
 
     /// The partial answer stays; the error shows in its own entry after it (an answer still empty is removed).
@@ -226,6 +241,9 @@ final class AIChatModel {
         entries.append(AIChatEntry(role: .assistant, text: String(describing: error), isError: true))
         logContent()
         save()
+        #if DEBUG
+        AIStub.log("chat failed \(turnDetail): \(error)")
+        #endif
     }
 
     /// Cancels the turn, bumps the token, keeps what came of the answer and drops an answer still empty.

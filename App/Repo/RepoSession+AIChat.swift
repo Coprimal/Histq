@@ -35,7 +35,7 @@ extension RepoSession {
             label = "Explain commit \(hash.prefix(7))" + (subject.isEmpty ? "" : " \(subject)")
             modelText = "Explain this commit."
         case .explainWorkingChanges:
-            label = "Explain working changes"
+            label = "Explain the uncommitted changes"
             modelText = "Explain these working changes."
         case .commitMessage, .improveMessage, .squashMessage, .resolution, .pullRequest:
             return

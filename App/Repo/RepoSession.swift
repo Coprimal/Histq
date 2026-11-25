@@ -4467,7 +4467,16 @@ final class RepoSession: Identifiable {
     /// An AI button's click: the result card opens in this call (its skeleton shows in the click's frame); the job's
     /// content is read and its prompt built off the main actor, then the answer streams in. Only a click gets here.
     /// `onApply`: a form's AI button (the card shows over the form) gets the answer at Apply instead of the job's own.
+    /// Explain (commit or working changes) opens in the tab's chat instead (`explainInChat`).
     func startAI(_ job: AIJob, onApply: (@MainActor (String) -> Void)? = nil) {
+        // Read-only jobs open in the tab's chat, which logs their timing itself.
+        switch job {
+        case .explainCommit, .explainWorkingChanges:
+            explainInChat(job)
+            return
+        case .commitMessage, .improveMessage, .squashMessage, .resolution, .pullRequest:
+            break
+        }
         aiRun?.cancel()
         let setup = AISetup.shared
         let run = AIRun(job: job, provider: setup.provider, model: setup.model(for: setup.provider), onApply: onApply)
