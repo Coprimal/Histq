@@ -366,9 +366,10 @@ struct ActionPanelRow: ViewModifier {
 
 /// The row above the open file's diff: the mode tabs in their own track (Diff / Split / Full file, and Edit for an
 /// editable file; none for a submodule or an image's versions), the File History and Blame toggles in a capsule of
-/// their own (a tracked file), Checkout This Version on its own (a commit's file), the action panel (`ActionPanelRow`)
-/// with Follow renames (while a file history shows), Previous / Next Change, Ignore Whitespace and Wrap Lines, then
-/// close (Esc) in its own round card (user 2026-11-24). As the row narrows, Checkout This Version turns into an icon.
+/// their own (a tracked file), Checkout This Version as an icon in its own round card (a commit's file), then at the
+/// trailing end the action panel (`ActionPanelRow`, hugging its buttons) with Follow renames (while a file history
+/// shows), Previous / Next Change, Ignore Whitespace and Wrap Lines, and close (Esc) in its own round card
+/// (user 2026-11-24, 2026-11-25).
 /// `target` nil (a file history with no diff open yet): Follow renames and close, at the same height.
 struct DiffControlsCard: View {
     let session: RepoSession
@@ -381,13 +382,6 @@ struct DiffControlsCard: View {
     private static let buttonSpacing: CGFloat = 12
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            row(checkoutAsIcon: false)
-            row(checkoutAsIcon: true)
-        }
-    }
-
-    private func row(checkoutAsIcon: Bool) -> some View {
         HStack(spacing: SectionCardMetrics.spacing) {
             if let target {
                 if hasModes(target) {
@@ -395,17 +389,17 @@ struct DiffControlsCard: View {
                         .fixedSize()
                 }
                 toolToggles(target)
-                checkout(target, asIcon: checkoutAsIcon)
+                checkout(target)
             }
+            Spacer(minLength: 0)
             HStack(spacing: Self.groupSpacing) {
                 followRenames
-                Spacer(minLength: 0)
                 if target != nil {
                     viewControls
                 }
             }
             .frame(height: ActionPanelRow.rowHeight)
-            .modifier(ActionPanelRow())
+            .modifier(ActionPanelRow(fills: false))
             closeButton
         }
     }
@@ -460,25 +454,12 @@ struct DiffControlsCard: View {
         }
     }
 
-    /// Checkout This Version (a commit's file that the commit did not delete), on its own beside the action panel, as
-    /// a button or a round icon.
-    @ViewBuilder private func checkout(_ target: FileTarget, asIcon: Bool) -> some View {
+    /// Checkout This Version (a commit's file that the commit did not delete): an icon in its own round card, as close.
+    @ViewBuilder private func checkout(_ target: FileTarget) -> some View {
         if case .commit = target.source, target.file.kind != .deleted {
-            if asIcon {
-                Button { session.checkoutVersion(of: target) } label: {
-                    Image(systemName: "arrow.down.doc")
-                        .font(.system(size: ActionPanelRow.iconFont, weight: .semibold))
-                }
-                .buttonStyle(RowTextButtonStyle(formRow: true, circle: true))
-                .help("Checkout This Version")
+            Self.roundButton("arrow.down.doc") { session.checkoutVersion(of: target) }
+                .help("Checkout This Version: replace the file in the working tree with this commit's version")
                 .accessibilityLabel("Checkout This Version")
-            } else {
-                Button("Checkout This Version") { session.checkoutVersion(of: target) }
-                    .buttonStyle(RowTextButtonStyle())
-                    .lineLimit(1)
-                    .fixedSize()
-                    .help("Replace the file in the working tree with this commit's version")
-            }
         }
     }
 
@@ -506,19 +487,21 @@ struct DiffControlsCard: View {
         }
     }
 
-    private var closeButton: some View {
-        Button {
-            session.closeFileAsking()
-        } label: {
-            Image(systemName: "xmark")
+    /// An icon button in its own round card, as tall as the action panel; the hover circle is concentric with it.
+    private static func roundButton(_ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
                 .font(.system(size: ActionPanelRow.iconFont, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: ActionPanelRow.iconSize, height: ActionPanelRow.iconSize)
         }
         .buttonStyle(RowIconButtonStyle())
-        // Its own round card, as tall as the action panel; the hover circle is concentric with it.
         .padding((ActionPanelRow.height - ActionPanelRow.iconSize) / 2)
         .modifier(GlassCard(cornerRadius: ActionPanelRow.height / 2))
+    }
+
+    private var closeButton: some View {
+        Self.roundButton("xmark") { session.closeFileAsking() }
         .keyboardShortcut(.cancelAction)
         .help(closesPane ? "Close the diff (Esc)"
             : closesHistory ? "Close the File History (Esc)" : "Back to the \(backName) (Esc)")
