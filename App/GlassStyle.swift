@@ -1342,7 +1342,7 @@ extension TextFieldStyle where Self == SettingsTextFieldStyle {
     static var settings: SettingsTextFieldStyle { SettingsTextFieldStyle() }
 }
 
-/// The one field of a single-input modal (Set Alias…, Set Emoji…): `.textFieldStyle(.modal)`, straight
+/// The one field of a single-input modal (Set Alias…, Set Icon…): `.textFieldStyle(.modal)`, straight
 /// on the modal's container with no card around it (user, 2026-11-18). Larger than `.settings`, on a darker fill, with
 /// no focus ring: the caret shows the focus.
 @MainActor

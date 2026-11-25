@@ -3,6 +3,7 @@
 // the sidebar's sections (shown, and their order in each tab), the graph's text columns, the file lists' layout and
 // file sizes, the WIP panel's order, and the diffs' default view and whitespace.
 // No theme choice: Histq is dark only. The window, the graph and `AvatarStore` read these keys and update at once.
+import HistqCore
 import SwiftUI
 
 struct AppearanceSettings: View {
@@ -12,6 +13,10 @@ struct AppearanceSettings: View {
     @AppStorage(PrefKey.defaultTabEmoji.rawValue, store: Preferences.defaults) private var tabEmoji = ""
     @AppStorage(PrefKey.defaultTabIconColor.rawValue, store: Preferences.defaults) private var tabIconColor = -1
     @FocusState private var emojiFocused: Bool
+    /// Bumped on `CustomIconImages.didChange`: a default image found missing enables the icon color again.
+    @State private var iconVersion = 0
+    /// For the toast of a refused image, shown over Settings.
+    @Environment(WindowModel.self) private var model
     @AppStorage(PrefKey.avatarMode.rawValue, store: Preferences.defaults) private var avatarMode = "generated"
     @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
@@ -56,27 +61,32 @@ struct AppearanceSettings: View {
                 .settingsSearchAnchor("Tab position")
                 SettingsDivider()
                 LabeledContent {
-                    HStack(spacing: 8) {
-                        TextField("Emoji", text: $tabEmoji, prompt: Text("None"))
-                            .textFieldStyle(.settings)
-                            .frame(width: 64)
-                            .labelsHidden()
-                            .autocorrectionDisabled()
-                            .focused($emojiFocused)
-                            .onChange(of: tabEmoji) { _, new in
-                                // One emoji only, as a tab's Set Emoji… keeps it.
-                                let kept = TabEmoji.normalized(new) ?? ""
-                                if kept != new { tabEmoji = kept }
-                            }
-                        Button("Choose", action: chooseEmoji)
-                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                    VStack(alignment: .trailing, spacing: 8) {
+                        HStack(spacing: 8) {
+                            TextField("Emoji", text: emojiText, prompt: Text("None"))
+                                .textFieldStyle(.settings)
+                                .frame(width: 64)
+                                .labelsHidden()
+                                .autocorrectionDisabled()
+                                .focused($emojiFocused)
+                                .onChange(of: tabEmoji) { _, new in
+                                    // One emoji only, as a tab's Set Icon… keeps it; an image's reference stays.
+                                    guard !CustomIcon.isRef(new) else { return }
+                                    let kept = TabEmoji.normalized(new) ?? ""
+                                    if kept != new { tabEmoji = kept }
+                                }
+                            Button("Choose", action: chooseEmoji)
+                                .buttonStyle(RowTextButtonStyle(formRow: true))
+                        }
+                        IconLibraryPicker(selection: imageRef, model: model)
+                            .frame(maxWidth: 260, alignment: .trailing)
                     }
                 } label: {
-                    Text("Default tab emoji")
-                    SettingsHint("Shown instead of the book on tabs without their own emoji or icon color. Empty: "
+                    Text("Default tab icon")
+                    SettingsHint("Shown instead of the book on tabs without their own icon or icon color. Empty: "
                         + "the book.")
                 }
-                .settingsSearchAnchor("Default tab emoji")
+                .settingsSearchAnchor("Default tab icon")
                 SettingsDivider()
                 LabeledContent {
                     CapsuleMenuPicker(label: "Default icon color", selection: $tabIconColor,
@@ -86,12 +96,20 @@ struct AppearanceSettings: View {
                             Self.colorTitle(index).tag(index)
                         }
                     }
-                    .disabled(!tabEmoji.isEmpty)
+                    .disabled(!tabEmoji.isEmpty
+                        && !(CustomIcon.isRef(tabEmoji) && CustomIconImages.shared.isMissing(tabEmoji)))
                 } label: {
                     Text("Default icon color")
                     SettingsHint("The book's color on tabs without their own. Default: the tab's text color.")
                 }
                 .settingsSearchAnchor("Default icon color")
+                // Loads a default image so a missing one is known; keyed on the version too, which redraws the row.
+                .task(id: "\(tabEmoji)#\(iconVersion)") {
+                    if CustomIcon.isRef(tabEmoji) { await CustomIconImages.shared.load(tabEmoji) }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: CustomIconImages.didChange)) { _ in
+                    iconVersion &+= 1
+                }
             }
             SettingsGroup("Panels") {
                 LabeledContent {
@@ -363,6 +381,25 @@ struct AppearanceSettings: View {
 
     private var formats: [String] {
         Self.dateFormats.contains(dateFormat) ? Self.dateFormats : Self.dateFormats + [dateFormat]
+    }
+
+    /// The emoji field's text: empty while the default is an image. A keystroke that leaves no emoji keeps the image
+    /// (the `onChange` above then keeps one emoji of what it writes).
+    private var emojiText: Binding<String> {
+        Binding(get: { CustomIcon.isRef(tabEmoji) ? "" : tabEmoji },
+                set: { new in
+                    if TabEmoji.normalized(new) == nil, CustomIcon.isRef(tabEmoji) { return }
+                    tabEmoji = new
+                })
+    }
+
+    /// The default's uploaded image, for `IconLibraryPicker`: nil while it is an emoji or empty. Deselecting clears
+    /// only an image, never an emoji.
+    private var imageRef: Binding<String?> {
+        Binding(get: { CustomIcon.isRef(tabEmoji) ? tabEmoji : nil },
+                set: { new in
+                    if let new { tabEmoji = new } else if CustomIcon.isRef(tabEmoji) { tabEmoji = "" }
+                })
     }
 
     /// Focuses the emoji field, then opens the Character Viewer on the next turn, so its pick goes into the field.

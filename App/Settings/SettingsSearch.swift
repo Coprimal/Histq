@@ -157,7 +157,8 @@ struct SettingsSearchItem: Identifiable {
 
         // Appearance
         .init(section: .appearance, group: "Tabs", title: "Tab position", keywords: ["top", "left", "tab strip"]),
-        .init(section: .appearance, group: "Tabs", title: "Default tab emoji", keywords: ["emoji", "icon", "book"]),
+        .init(section: .appearance, group: "Tabs", title: "Default tab icon",
+              keywords: ["emoji", "icon", "image", "book"]),
         .init(section: .appearance, group: "Tabs", title: "Default icon color", keywords: ["color", "icon", "book"]),
         .init(section: .appearance, group: "Panels", title: "Layout",
               keywords: ["classic", "stacked", "columns", "focus", "panels"]),

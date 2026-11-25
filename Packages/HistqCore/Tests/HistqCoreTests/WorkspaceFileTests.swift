@@ -1,7 +1,7 @@
 // Key-feature tests for workspace files (workspaces plan, phase 1 task 5), in a temp folder with fake repos (a folder
 // with a `.git` folder) and a fake home inside it: the version-1 contract, `session.json` after the move, how stored
-// `path` / `home` strings resolve and come back unchanged, lossless reads, the writer's empty refusal, a write and
-// paths through a symlink, Save As to another folder and the file's identity key.
+// `path` / `home` strings resolve and come back unchanged (an uploaded tab icon too), lossless reads, the writer's
+// empty refusal, a write and paths through a symlink, Save As to another folder and the file's identity key.
 import Foundation
 import HistqCore
 import Testing
@@ -233,6 +233,25 @@ struct WorkspaceFileTests {
         #expect(rebuilt == read.file)
         let encoded = try Self.jsonObject(JSONEncoder().encode(rebuilt))
         #expect(encoded == (try Self.jsonObject(Data(try Self.teamFile().utf8))))
+
+        // An uploaded image on the emoji tab: written as `icon` without `emoji`, read back as the same mark.
+        let iconName = String(repeating: "0123456789abcdef", count: 4) + ".png"
+        let ref = CustomIcon.ref(fileName: iconName)
+        var windows = resolved.windows
+        windows[0].tabs[1].mark = ref
+        let withIcon = WorkspaceFile(windows: windows, views: resolved.views, profiles: [Self.personal, Self.work],
+                                     carried: resolved.carried, originals: resolved.originals,
+                                     repoOrder: resolved.repoOrder, profileOrder: resolved.profileOrder,
+                                     fileURL: fileURL, homeURL: sandbox.home)
+        try withIcon.write(to: fileURL)
+        let tabs = try #require((Self.jsonObject(Data(contentsOf: fileURL))["windows"] as? [NSDictionary])?
+            .first?["tabs"] as? [NSDictionary])
+        #expect(tabs[1]["icon"] as? String == iconName && tabs[1]["emoji"] == nil)
+        let reread = try WorkspaceFile.read(fileURL)
+        #expect(reread.isLossless)
+        let back = reread.file.resolved(fileURL: fileURL, homeURL: sandbox.home,
+                                        isRepository: SavedSession.isRepository)
+        #expect(back.windows[0].tabs[1].mark == ref)
     }
 
     @Test("a closed group's tabs resolve like open tabs and the file reads lossless and comes back unchanged")

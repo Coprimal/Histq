@@ -75,6 +75,8 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
         public var profile: SavedProfile?
         public var alias: String?
         public var emoji: String?
+        /// The uploaded image's file name, set instead of `emoji`; nil for none.
+        public var icon: String?
         public var pinned: Bool?
         public var iconColor: Int?
         public var archived: Bool?
@@ -82,13 +84,14 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
         public var group: UUID?
 
         public init(path: String? = nil, home: String? = nil, profile: SavedProfile? = nil, alias: String? = nil,
-                    emoji: String? = nil, pinned: Bool? = nil, iconColor: Int? = nil, archived: Bool? = nil,
-                    group: UUID? = nil) {
+                    emoji: String? = nil, icon: String? = nil, pinned: Bool? = nil, iconColor: Int? = nil,
+                    archived: Bool? = nil, group: UUID? = nil) {
             self.path = path
             self.home = home
             self.profile = profile
             self.alias = alias
             self.emoji = emoji
+            self.icon = icon
             self.pinned = pinned
             self.iconColor = iconColor
             self.archived = archived
@@ -285,7 +288,7 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
         func live(_ tab: Tab) -> SavedTab {
             let key = resolve(path: tab.path, home: tab.home)
             if let key, !key.found { missing.insert(key.key) }
-            return SavedTab(path: key?.key, profile: tab.profile, alias: tab.alias, emoji: tab.emoji,
+            return SavedTab(path: key?.key, profile: tab.profile, alias: tab.alias, emoji: tab.emoji, icon: tab.icon,
                             pinned: tab.pinned, iconColor: tab.iconColor, archived: tab.archived, tabGroup: tab.group)
         }
 
@@ -333,8 +336,8 @@ public struct WorkspaceFile: Codable, Sendable, Equatable {
         func fileTab(_ tab: SavedTab) -> Tab {
             let strings = tab.path.map(stored)
             return Tab(path: strings?.path, home: strings?.home, profile: tab.profile, alias: tab.alias,
-                       emoji: tab.emoji, pinned: tab.pinned, iconColor: tab.iconColor, archived: tab.archived,
-                       group: tab.tabGroup)
+                       emoji: tab.emoji, icon: tab.icon, pinned: tab.pinned, iconColor: tab.iconColor,
+                       archived: tab.archived, group: tab.tabGroup)
         }
 
         let windows = windows.map { window in

@@ -25,7 +25,7 @@ enum WindowModal: Identifiable {
     case generateKey(profileID: UUID)
     /// A tab's menu › Set Alias… for the tab `tabID`.
     case tabAlias(tabID: UUID)
-    /// A tab's menu › Set Emoji… for the tab `tabID`.
+    /// A tab's menu › Set Icon… for the tab `tabID`.
     case tabEmoji(tabID: UUID)
     /// The palette's File History…, Blame… or Edit File… (`mode`): a search of the tab `tabID`'s files.
     case fileSearch(tabID: UUID, mode: FileSearchMode)
@@ -155,6 +155,9 @@ struct ModalHost: View {
                         }
                     }
                     .animation(covered ? Motion.sheet : Motion.exit, value: covered)
+                    // The window's toasts while a window modal is up (Set Icon…'s refused image), over its card, not
+                    // under the scrim.
+                    .overlay(alignment: .bottomTrailing) { ToastHost(model: model, overModal: true) }
                     // The scrim fills the window under the toolbar: a tall form fits its card in that (`CreatePRView`).
                     .onGeometryChange(for: CGFloat.self, of: \.size.height) { layerHeight = $0 }
                     // A new view per modal: the focus to restore starts over.
@@ -330,20 +333,23 @@ private struct TabAliasModal: View {
     }
 }
 
-/// A tab's menu › Set Emoji…: the tab's emoji in one field that keeps only the last emoji typed or picked
-/// (`TabEmoji.normalized`), with Choose… for the Character Viewer. Return saves; an empty field removes the emoji, as
-/// Remove does.
+/// A tab's menu › Set Icon…: the tab's emoji in one field that keeps only the last emoji typed or picked
+/// (`TabEmoji.normalized`), with Choose… for the Character Viewer, or an uploaded image under it (`IconLibraryPicker`);
+/// one clears the other. Return saves; an empty field and no image remove the icon, as Remove does.
 private struct TabEmojiModal: View {
     let model: WindowModel
     let tabID: UUID
     let onClose: () -> Void
     @State private var emoji = ""
+    /// The chosen uploaded image's reference (`CustomIcon`); nil for none.
+    @State private var image: String?
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
         let tab = model.tabs.first { $0.id == tabID }
-        ModalCard(title: "Set an emoji for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
-                  subtitle: "The tab shows this emoji at its left, and a pinned tab shows only it. Leave it empty for none.",
+        ModalCard(title: "Set an icon for \(tab?.repoURL?.lastPathComponent ?? "this tab")",
+                  subtitle: "The tab shows this emoji or image at its left, and a pinned tab shows only it. "
+                      + "Leave it empty for none.",
                   width: 420) {
             HStack(spacing: 8) {
                 TextField("Emoji", text: $emoji, prompt: Text("Emoji"))
@@ -355,11 +361,17 @@ private struct TabEmojiModal: View {
                     .onChange(of: emoji) { _, new in
                         let kept = TabEmoji.normalized(new) ?? ""
                         if kept != new { emoji = kept }
+                        if !kept.isEmpty { image = nil }
                     }
                 Button("Choose", action: choose)
                     .buttonStyle(RowTextButtonStyle(formRow: true))
             }
             .padding(.horizontal, ModalFooterMetrics.trailingPadding)
+            IconLibraryPicker(selection: $image, model: model)
+                .padding(.horizontal, ModalFooterMetrics.trailingPadding)
+                .onChange(of: image) { _, new in
+                    if new != nil { emoji = "" }
+                }
         } actions: {
             if tab?.emoji != nil {
                 Button("Remove", action: remove)
@@ -373,7 +385,8 @@ private struct TabEmojiModal: View {
                 .keyboardShortcut(.defaultAction)
         }
         .onAppear {
-            emoji = tab?.emoji ?? ""
+            // An image's reference goes to the picker, never into the field.
+            if CustomIcon.isRef(tab?.emoji) { image = tab?.emoji } else { emoji = tab?.emoji ?? "" }
             // The card is installed on this turn; the field takes the focus on the next one.
             DispatchQueue.main.async { fieldFocused = true }
         }
@@ -391,7 +404,7 @@ private struct TabEmojiModal: View {
     }
 
     private func save() {
-        model.setEmoji(emoji.isEmpty ? nil : emoji, for: tabID)
+        model.setEmoji(image ?? (emoji.isEmpty ? nil : emoji), for: tabID)
         onClose()
     }
 }

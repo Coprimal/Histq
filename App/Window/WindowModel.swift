@@ -24,7 +24,8 @@ final class WindowModel {
         var repoKey: String?
         /// The name the user gave the tab (its menu's Set Alias…); nil shows the folder's name.
         var alias: String?
-        /// The emoji the user gave the tab (its menu's Set Emoji…), one `Character`; nil shows none.
+        /// The emoji the user gave the tab (its menu's Set Icon…), one `Character`, or an uploaded image's reference
+        /// (`CustomIcon.ref`); nil shows none.
         var emoji: String?
         /// The tab sits in the pinned area at the far left (`pinnedCount`); a worktree box is pinned whole. A pinned
         /// tab is in no manual group.
@@ -814,7 +815,7 @@ final class WindowModel {
             let isMissing = tab.path.map(missing.contains) ?? false
             return Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
                        isMissing: isMissing, repoKey: archived || isMissing ? nil : tab.path.flatMap { repoKeys[$0] },
-                       alias: tab.alias, emoji: tab.emoji,
+                       alias: tab.alias, emoji: tab.mark,
                        pinned: archived ? false : tab.pinned ?? false, iconColor: tab.iconColor, archived: archived,
                        groupID: archived ? nil : tab.tabGroup)
         }
@@ -889,7 +890,7 @@ final class WindowModel {
             var saved = restored[tab.id] ?? SavedTab()
             saved.path = path
             saved.alias = tab.alias
-            saved.emoji = tab.emoji
+            saved.mark = tab.emoji
             saved.pinned = tab.pinned ? true : nil
             saved.iconColor = tab.iconColor
             saved.archived = tab.archived ? true : nil
@@ -898,9 +899,11 @@ final class WindowModel {
         }
         // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
         let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
-        return SavedTab(path: path, profile: profile, alias: tab.alias, emoji: tab.emoji,
-                        pinned: tab.pinned ? true : nil, iconColor: tab.iconColor, archived: tab.archived ? true : nil,
-                        tabGroup: tab.groupID)
+        var saved = SavedTab(path: path, profile: profile, alias: tab.alias,
+                             pinned: tab.pinned ? true : nil, iconColor: tab.iconColor,
+                             archived: tab.archived ? true : nil, tabGroup: tab.groupID)
+        saved.mark = tab.emoji
+        return saved
     }
 
     /// "Repo not found" › Locate: the tab opens `url` instead (the tab that already shows it when there is one, or
@@ -1214,7 +1217,7 @@ final class WindowModel {
         let url = URL(fileURLWithPath: path, isDirectory: true)
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
-        var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias, emoji: closed.saved.emoji,
+        var tab = Tab(repoURL: url, isMissing: !exists, alias: closed.saved.alias, emoji: closed.saved.mark,
                       pinned: closed.saved.pinned ?? false, iconColor: closed.saved.iconColor, archived: false)
         tab.repoKey = closed.repoKey
         if let group = closed.group {
@@ -1378,7 +1381,7 @@ final class WindowModel {
         let url = URL(fileURLWithPath: path, isDirectory: true)
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
-        let tab = Tab(repoURL: url, isMissing: !exists, alias: entry.alias, emoji: entry.emoji, pinned: false,
+        let tab = Tab(repoURL: url, isMissing: !exists, alias: entry.alias, emoji: entry.mark, pinned: false,
                       iconColor: entry.iconColor, archived: true)
         // The popped-out tab is always the last one.
         tabs.append(tab)
@@ -1432,11 +1435,11 @@ final class WindowModel {
         tabs[index].alias = trimmed.isEmpty ? nil : trimmed
     }
 
-    /// A tab's menu › Set Emoji…: `emoji` marks the tab, its last emoji only (`TabEmoji.normalized`); nil, or text
-    /// with no emoji, removes it.
+    /// A tab's menu › Set Icon…: `emoji` marks the tab, an uploaded image's reference (`CustomIcon.isRef`) as is, else
+    /// its last emoji only (`TabEmoji.normalized`); nil, or text with no emoji, removes it.
     func setEmoji(_ emoji: String?, for id: Tab.ID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
-        tabs[index].emoji = emoji.flatMap(TabEmoji.normalized)
+        tabs[index].emoji = CustomIcon.isRef(emoji) ? emoji : emoji.flatMap(TabEmoji.normalized)
     }
 
     /// A tab's menu › Icon Color: the book icon's color, an index into `Palette.graphLanes`; nil for the default.
@@ -1854,7 +1857,7 @@ final class WindowModel {
                tabs.contains(where: { $0.repoURL?.path == path }) || archivedIndex(of: path) != nil { continue }
             let tab = Tab(repoURL: member.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
                           isMissing: member.path.map { !Self.folderExists($0) } ?? false, alias: member.alias,
-                          emoji: member.emoji, pinned: false, iconColor: member.iconColor, archived: false,
+                          emoji: member.mark, pinned: false, iconColor: member.iconColor, archived: false,
                           groupID: id)
             tabs.insert(tab, at: normalEnd)
             restored[tab.id] = member
@@ -2457,7 +2460,7 @@ final class WindowModel {
     }
 }
 
-/// A tab's emoji, as Set Emoji… keeps it: one emoji `Character` (a flag or a ZWJ sequence is one, kept whole).
+/// A tab's emoji, as Set Icon… keeps it: one emoji `Character` (a flag or a ZWJ sequence is one, kept whole).
 enum TabEmoji {
     /// The last emoji of `text` once trimmed (typing "a😀b🔥" gives "🔥"); nil when it has none ("1", plain text). A
     /// character counts when one of its scalars shows as an emoji by default, or is an emoji followed by U+FE0F
