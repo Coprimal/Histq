@@ -942,6 +942,14 @@ private struct CommitBox: View {
                     toast.action = OperationToast.Action(title: "Put Back Message") { [weak session] in
                         session?.commitDraft = draft
                     }
+                    // As `report` (not on conflicts): git's error and the message as separate parts, each cut on
+                    // its own (`chatErrorContext`).
+                    let conflict = if case .conflict = error as? GitError { true } else { false }
+                    if !conflict {
+                        toast.askAI = { [weak session] in
+                            session?.askAIAboutFailure(title: title, message: text, commitMessage: sent)
+                        }
+                    }
                     session.postToast(toast)
                 }
             }

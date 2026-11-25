@@ -229,9 +229,9 @@ final class WindowModel {
     // MARK: Toasts
 
     /// Shows an operation's outcome from the tab `tabID` when Settings' level shows its kind, naming the tab when it is
-    /// not the one on screen. Its action first selects that tab, where it shows its dialog. Past `ToastHost.limit` the
-    /// oldest closes, one without an action first. A toast with an action has no timer. `tabID` nil: the window's own
-    /// toast (Settings), which names no tab.
+    /// not the one on screen. Its action first selects that tab, where it shows its dialog; so does Ask AI, where it
+    /// opens the tab's chat. Past `ToastHost.limit` the oldest closes, one without an action first. A toast with an
+    /// action has no timer. `tabID` nil: the window's own toast (Settings), which names no tab.
     func showToast(_ toast: OperationToast, from tabID: Tab.ID? = nil) {
         guard ToastLevel.current.shows(toast.kind) else { return }
         var toast = toast
@@ -241,6 +241,12 @@ final class WindowModel {
             toast.action = OperationToast.Action(title: action.title, destructive: action.destructive) { [weak self] in
                 self?.selectTab(id: tabID)
                 action.perform()
+            }
+        }
+        if let askAI = toast.askAI {
+            toast.askAI = { [weak self] in
+                self?.selectTab(id: tabID)
+                askAI()
             }
         }
         appendToast(toast)

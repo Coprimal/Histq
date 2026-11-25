@@ -54,6 +54,126 @@ extension RepoSession {
         }
     }
 
+    /// Explain Conflict: a new chat for the conflict region `target` (captured at the click) opens in this call and the
+    /// card expands; the `.aiignore` check and the context are built off the main actor, then sent.
+    func explainConflictInChat(_ target: AIResolutionTarget) {
+        aiChat.isExpanded = true
+        aiChat.startExplain(
+            label: "Explain conflict \(target.conflict + 1) of \(target.path)",
+            modelText: "Explain this merge conflict.", logName: "explain-conflict"
+        ) { [weak self] in
+            guard let worktree = try await self?.backend().directories.worktree else { throw CancellationError() }
+            return try await Self.aiChatContext(target, worktree: worktree)
+        }
+    }
+
+    /// Ask AI on a failure toast: a new chat shown as "Why did Push main fail?" opens in this call and the card
+    /// expands; `title` (the operation, "Push main"), git's `message` (hook output included) and a failed commit's
+    /// `commitMessage`, captured at the click, are filtered, redacted and cut off the main actor
+    /// (`aiChatErrorContext`), then sent.
+    func askAIAboutFailure(title: String, message: String, commitMessage: String? = nil) {
+        let shown = String(AIPrompts.redactingSecrets(title).prefix(200))
+        aiChat.isExpanded = true
+        aiChat.startExplain(
+            label: "Why did \(shown) fail?",
+            modelText: "Explain why this git operation failed and how to fix it.", logName: "ask-ai"
+        ) { [weak self] in
+            guard let worktree = try await self?.backend().directories.worktree else { throw CancellationError() }
+            return try await Self.aiChatErrorContext(
+                title: title, message: message, commitMessage: commitMessage, worktree: worktree)
+        }
+    }
+
+    /// A form the AI card can show over is up (`CreatePRView`, `InteractiveRebaseView`): Continue in Chat leaves it
+    /// open, so the chat is seen only once it closes.
+    var hasFormModal: Bool {
+        pullRequestForm != nil || rebaseRequest != nil
+    }
+
+    /// Continue in Chat on a finished Apply-type card: closes only the AI card (a form under it stays, with its
+    /// input), then a new chat is seeded in this call with the job's title as the user's line, a fixed sentence for
+    /// the model, the job's data blocks (`AIPrompt.data`, never `AIPrompt.user`) as the hidden context, stamped with
+    /// the digest of the `.aiignore` they were filtered with (`AIRun.ignoreDigest`), and the answer as the assistant's
+    /// entry. Nothing is sent until the user follows up. The card opens at once, or once the form closes
+    /// (`openAIChatAfterForm`).
+    func continueInChat(run: AIRun) {
+        guard let prompt = run.prompt, let answer = run.answer, let modelText = Self.seedModelText(run.job) else {
+            return
+        }
+        closeAI()
+        aiChat.seed(label: run.job.title, modelText: modelText, context: AIPrompts.chatSeedContext(prompt.data),
+                    answer: Self.seedAnswer(answer), ignoreDigest: run.ignoreDigest)
+        if hasFormModal {
+            aiChatOpensAfterForm = true
+        } else {
+            aiChat.isExpanded = true
+        }
+    }
+
+    /// A form closed (`rebaseRequest` or `pullRequestForm` set): opens the chat card Continue in Chat seeded over it,
+    /// once no form is left.
+    func openAIChatAfterForm() {
+        guard aiChatOpensAfterForm, !hasFormModal else { return }
+        aiChatOpensAfterForm = false
+        aiChat.isExpanded = true
+    }
+
+    /// Continue in Chat on Suggest All's card: the regions that finished, each one's blocks after its "Conflict k:"
+    /// line in one hidden context cut to `AIPrompts.diffBudget`, and one assistant entry listing their answers. The
+    /// context is stamped with the regions' `.aiignore` digest only when every region was built with the same one;
+    /// otherwise it has none, so it is omitted from every request.
+    func continueInChat(batch: AIBatch) {
+        let done = batch.targets.indices.compactMap { index -> (AIResolutionTarget, AIPrompt, String, String?)? in
+            let run = batch.runs[index]
+            guard let prompt = run.prompt, let answer = run.answer else { return nil }
+            return (batch.targets[index], prompt, answer, run.ignoreDigest)
+        }
+        guard let first = done.first else { return }
+        let path = first.0.path
+        let ignoreDigest = done.allSatisfy { $0.3 == first.3 } ? first.3 : nil
+        closeAI()
+        let context = AIPrompts.chatSeedContext(conflicts: done.map { ($0.0.conflict + 1, $0.1.data) })
+        let answers = done.map { target, _, answer, _ in
+            let text = Self.seedAnswer(answer)
+            let fence = String(repeating: "`", count: max(3, Self.longestBacktickRun(text) + 1))
+            return "Conflict \(target.conflict + 1):\n\n\(fence)\n\(text)\(text.utf8.last == 0x0A ? "" : "\n")\(fence)"
+        }
+        aiChat.seed(
+            label: "Suggest All for \(path)",
+            modelText: "Earlier you wrote conflict resolutions for the data below; your answers follow.",
+            context: context, answer: answers.joined(separator: "\n\n"), ignoreDigest: ignoreDigest)
+        aiChat.isExpanded = true
+    }
+
+    /// The fixed sentence the model gets for a seeded job (no names or paths); nil for a job that is not Apply-type.
+    private static func seedModelText(_ job: AIJob) -> String? {
+        let what: String? = switch job {
+        case .commitMessage: "a commit message"
+        case .resolution: "a conflict resolution"
+        case .pullRequest: "a pull request description"
+        case .squashMessage: "a squash message"
+        case .improveMessage: "an improved commit message"
+        case .explainCommit, .explainWorkingChanges: nil
+        }
+        return what.map { "Earlier you wrote \($0) for the data below; your answer follows." }
+    }
+
+    /// The assistant's entry of a seed: an empty resolution ("delete both sides") as an app note, since an empty
+    /// entry is never kept.
+    private static func seedAnswer(_ answer: String) -> String {
+        answer.allSatisfy(\.isWhitespace) ? "(An empty resolution: delete both sides.)" : answer
+    }
+
+    private static func longestBacktickRun(_ text: String) -> Int {
+        var longest = 0
+        var run = 0
+        for character in text {
+            run = character == "`" ? run + 1 : 0
+            longest = max(longest, run)
+        }
+        return longest
+    }
+
     /// Add to AI Chat: `references` become chips of the current chat and the card opens; nothing is read or sent.
     func addToAIChat(_ references: [AIChatReference]) {
         aiChat.attach(references)
@@ -185,8 +305,40 @@ extension RepoSession {
         return (resolved.text, AIIgnore.digest(ignore))
     }
 
-    /// `aiFiltered` with the digest of the very `.aiignore` it filtered with (read once, so the two always agree).
-    private nonisolated static func aiChatFiltered(_ diff: String, worktree: URL) throws -> (String, String) {
+    /// The hidden context of an Explain Conflict turn (`AIPrompts.chatConflictContext`), with the digest of the
+    /// worktree's `.aiignore`. Throws `fileIgnored` when that `.aiignore` excludes the file (as `.resolution` does) and
+    /// `aiIgnoreUnreadable` when it can't be read, so nothing is sent.
+    @concurrent
+    nonisolated static func aiChatContext(
+        _ target: AIResolutionTarget, worktree: URL
+    ) async throws -> AIChatModel.Context {
+        let ignore = try aiIgnore(worktree: worktree)
+        if ignore?.matches(target.path) == true { throw AIJobError.fileIgnored }
+        let text = AIPrompts.chatConflictContext(
+            path: target.path, base: target.base, a: target.a, b: target.b, labels: target.labels,
+            operation: target.operation)
+        return (text, AIIgnore.digest(ignore))
+    }
+
+    /// The hidden context of an Ask AI turn (`AIPrompts.chatErrorContext`), with the digest of the worktree's
+    /// `.aiignore`. git's output can quote repository files (a hook's linter, test or secret-scanner output), so its
+    /// lines that name a file that `.aiignore` excludes are left out, and URL credentials and token-shaped secrets are
+    /// masked, before it is cut. The digest is of the very `.aiignore` that filtered it, so a later change omits the
+    /// context from follow-ups. Throws `aiIgnoreUnreadable` when `.aiignore` can't be read, so nothing is sent.
+    @concurrent
+    nonisolated static func aiChatErrorContext(
+        title: String, message: String, commitMessage: String?, worktree: URL
+    ) async throws -> AIChatModel.Context {
+        let ignore = try aiIgnore(worktree: worktree)
+        let text = AIPrompts.chatErrorContext(
+            title: title, message: message, commitMessage: commitMessage, ignore: ignore)
+        return (text, AIIgnore.digest(ignore))
+    }
+
+    /// `diff` through `AIPrompts.filtered` with the worktree's `.aiignore`, and the digest of that very `.aiignore`
+    /// (read once, so the two always agree); throws `allIgnored` when `.aiignore` left out every file (only the
+    /// closing note would be sent). An empty diff is returned as it is.
+    nonisolated static func aiChatFiltered(_ diff: String, worktree: URL) throws -> (String, String) {
         let ignore = try aiIgnore(worktree: worktree)
         guard let kept = AIPrompts.filteredUnlessAllIgnored(diff, ignore: ignore) else { throw AIJobError.allIgnored }
         return (kept, AIIgnore.digest(ignore))

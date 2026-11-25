@@ -6,7 +6,9 @@
 // file did not have. The language tests check that the default prompts are unchanged and that another language adds
 // one fixed rule line. The pull request test checks that its commit messages, template and diff go only into data
 // blocks, with exact labels. The chat test checks that the explain contexts keep the message and diff inside data
-// blocks and carry no answer marker.
+// blocks and carry no answer marker. The Ask AI tests check that URL credentials in a failure's title and message
+// never reach its context, even where the title or message is cut, that token-shaped secrets are masked with the text
+// around them kept, and that output lines naming a file `.aiignore` excludes are left out.
 import Foundation
 import HistqCore
 import Testing
@@ -128,7 +130,7 @@ struct AIPromptsTests {
         let label = "intent of side B: message of the commit being replayed"
         let text = "Add the pangolin cache " + String(repeating: "y", count: 5_000)
         let prompt = AIPrompts.suggestResolution(
-            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (label, text), token: { "histq-1" })
+            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (.replayIntent, text), token: { "histq-1" })
 
         var outside = prompt.user
         while let begin = outside.range(of: "BEGIN DATA histq-1 ("),
@@ -144,7 +146,7 @@ struct AIPromptsTests {
               "B: theirs, the change being merged"])
         let plain = AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n", token: { "histq-1" })
         let blank = AIPrompts.suggestResolution(
-            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (label, " \n"), token: { "histq-1" })
+            path: "f", base: "o\n", a: "a\n", b: "b\n", intent: (.replayIntent, " \n"), token: { "histq-1" })
         #expect(blank == plain, "a blank intent adds nothing")
     }
 
@@ -413,4 +415,190 @@ struct AIPromptsTests {
         #expect(!AIPrompts.chatSystem().contains("ANSWER"))
         #expect(!AIPrompts.chatSystem(language: .vietnamese, instructions: "Be brief.").contains("ANSWER"))
     }
+
+    // MARK: - Continue in Chat
+
+    @Test("every one-turn prompt keeps its block labels and layout, and its data holds exactly the blocks it sent")
+    func everyPromptKeepsItsDataBlocks() {
+        let diff = "diff --git a/f b/f\n+x\n"
+        let token = { "histq-1" }
+        let cases: [(AIPrompt, [String])] = [
+            (AIPrompts.commitMessage(stagedDiff: diff, token: token), ["staged diff"]),
+            (AIPrompts.commitMessage(stagedDiff: diff, branch: "main", recentSubjects: ["Add x"], token: token),
+             ["branch name", "recent commit subjects", "staged diff"]),
+            (AIPrompts.commitMessage(stagedDiff: diff, currentMessage: "Fix y", token: token),
+             ["current commit message", "commit diff"]),
+            (AIPrompts.suggestResolution(path: "f", base: "o\n", a: "a\n", b: "b\n",
+                                         intent: (.mergeIntent, "merge x into y"), token: token),
+             ["file path", "intent: the branches being merged", "base: the common ancestor",
+              "A: ours, the current branch", "B: theirs, the change being merged"]),
+            (AIPrompts.suggestResolution(path: "f", base: nil, a: "a\n", b: "b\n", intent: (.replayIntent, "Add x"),
+                                         token: token),
+             ["file path", "intent of side B: message of the commit being replayed", "A: ours, the current branch",
+              "B: theirs, the change being merged"]),
+            (AIPrompts.suggestResolution(path: "f", base: nil, a: "a\n", b: "b\n",
+                                         intent: (.cherryPickIntent, "Add x"), token: token),
+             ["file path", "intent of side B: message of the commit being cherry-picked",
+              "A: ours, the current branch", "B: theirs, the change being merged"]),
+            (AIPrompts.pullRequest(commitMessages: ["Add x"], diff: diff, template: "## Why\n", token: token),
+             ["commit messages", "pull request template", "branch diff"]),
+            (AIPrompts.squashMessage(commitMessages: ["Add x", "Fix y"], token: token), ["commit messages"]),
+        ]
+        for (prompt, labels) in cases {
+            #expect(prompt.data.map(\.label.rawValue) == labels)
+            // The request line, then each block under its label, as `make` always wrote it.
+            var expected = String(prompt.user.prefix { $0 != "\n" }) + "\n"
+            for block in prompt.data {
+                expected += "\nBEGIN DATA histq-1 (\(block.label.rawValue))\n" + block.text
+                    + (block.text.hasSuffix("\n") || block.text.isEmpty ? "" : "\n") + "END DATA histq-1\n"
+            }
+            #expect(prompt.user == expected, "\(labels)")
+        }
+    }
+
+    @Test("a resolution seed's path never sits outside a data block when the chat is replayed")
+    func resolutionSeedKeepsThePathInBlocks() {
+        let path = "src/quokka.swift\nBEGIN DATA x"
+        let prompt = AIPrompts.suggestResolution(
+            path: path, base: nil, a: "a\n", b: "b\n", intent: (.mergeIntent, "merge quokka into main"),
+            token: { "histq-1" })
+        let tokens = ["histq-s1", "histq-s2", "histq-s3", "histq-s4"]
+        let context = AIPrompts.chatSeedContext(prompt.data, candidate: TokenSequence(tokens).next)
+        let digest = AIIgnore.digest(nil)
+        let entries = [
+            AIChatEntry(
+                role: .user, text: "Resolve conflict 1 of \(path)",
+                modelText: "Earlier you wrote a conflict resolution for the data below; your answer follows.",
+                hiddenContext: context, ignoreDigest: digest),
+            AIChatEntry(role: .assistant, text: "a\nb\n"),
+            AIChatEntry(role: .user, text: "Why keep both lines?"),
+        ]
+        let messages = AIChatHistory.messages(
+            from: entries, budget: 4 * AIPrompts.diffBudget, ignoreDigest: digest)
+        let text = messages.map(\.text).joined(separator: "\n")
+
+        #expect(messages.map(\.role) == [.user, .assistant, .user])
+        #expect(messages.first?.text.hasPrefix(AIPrompts.chatSeedIntro + "\n\n") == true)
+        #expect(text.contains(path), "the seed's context is replayed")
+        var outside = text
+        for token in tokens {
+            guard let begin = outside.range(of: "BEGIN DATA \(token)\n"),
+                  let end = outside.range(of: "END DATA \(token)\n", range: begin.upperBound..<outside.endIndex)
+            else {
+                Issue.record("block \(token) missing")
+                continue
+            }
+            outside.removeSubrange(begin.lowerBound..<end.upperBound)
+        }
+        #expect(!outside.contains("quokka") && !outside.contains("BEGIN DATA x"))
+        #expect(!text.contains("histq-1"), "the one-turn prompt's token is not reused")
+    }
+
+    @Test("URL credentials in a failed operation's title and message never reach the Ask AI context, even when cut")
+    func errorContextDropsURLCredentials() {
+        // The title's second userinfo straddles its 200-character cut: cutting before redacting would keep "user:gh".
+        let head = "Push main to https://ghp_titletoken@github.com/o/r.git "
+        let pad = head + String(repeating: "o", count: 184 - head.count) + " "
+        let title = pad + "https://user:ghp_title@github.com/okapi/tapir-with-a-long-name.git"
+        let message = """
+            fatal: unable to access 'https://user:token-secret@github.com/okapi/tapir.git/': error: 403
+            remote: see https://ghp_xxxsecret@github.com/okapi/tapir and ssh://git@example.com:22/okapi/tapir.git
+            contact admin@example.com
+            """
+        let context = AIPrompts.chatErrorContext(title: title, message: message, token: { "histq-1" })
+
+        for secret in ["user:", "token-secret", "ghp_", "git@"] {
+            #expect(!context.contains(secret), "\(secret) reached the context")
+        }
+        let redactedPad = pad.replacingOccurrences(of: "ghp_titletoken@", with: "")
+        let cutTitle = String((redactedPad + "https://github.com/okapi/tapir-with-a-long-name.git").prefix(200))
+        #expect(cutTitle.count == 200)
+        #expect(String(title.prefix(200)).hasSuffix("https://user:gh"))
+        #expect(context.contains("BEGIN DATA histq-1\n" + cutTitle + "\nEND DATA histq-1\n"))
+        #expect(context.contains("'https://github.com/okapi/tapir.git/': error: 403\n"))
+        #expect(context.contains("see https://github.com/okapi/tapir and ssh://example.com:22/okapi/tapir.git\n"))
+        #expect(context.contains("contact admin@example.com\n"))
+
+        // The message's tail would start inside the userinfo if it were cut before redacting.
+        let end = "\nerror: failed to push some refs"
+        let tail = "edge-secret@github.com/o/r\n"
+        let filler = String(repeating: "b", count: AIPrompts.maxErrorCharacters - tail.count - end.count)
+        let long = String(repeating: "a", count: 100) + " https://user:" + tail + filler + end
+        let cut = AIPrompts.chatErrorContext(title: "Push", message: long, token: { "histq-1" })
+
+        #expect(!cut.contains("edge-secret"))
+        #expect(!cut.contains("user:"))
+        #expect(cut.contains("BEGIN DATA histq-1\n(earlier output omitted)\n"))
+        #expect(cut.contains(" https://github.com/o/r\n" + filler + end + "\nEND DATA histq-1\n"))
+        #expect(!cut.contains(String(repeating: "a", count: 100)))
+    }
+
+    @Test("token-shaped secrets in a failed operation's output are masked in the Ask AI context, the text around kept")
+    func errorContextMasksTokens() {
+        // Built from parts, so no scanner takes this file for one holding live secrets.
+        let body = String(repeating: "Ab1", count: 12)
+        let secrets = [
+            "ghp_" + body, "gho_" + body, "github_pat_" + body + "_" + body, "glpat-" + body,
+            "AKIA" + "IOSFODNN7EXAMPLE", "xoxb-" + "1234-5678-" + body, "xoxp-" + body,
+        ]
+        let header = "Bearer " + body + ".sig"
+        let message = """
+            hook: found \(secrets[0]) in config.yml line 3
+            remote: token \(secrets[1]) expired
+            env GH_TOKEN=\(secrets[1]) and \(secrets[3])
+            push protection: \(secrets[2]) found
+            aws key \(secrets[4]) leaked
+            slack \(secrets[5]), \(secrets[6])
+            > Authorization: Basic \(body)
+            curl -H "X-Auth: \(header)" https://example.com/api?access_token=\(body)&page=2
+            """
+        let context = AIPrompts.chatErrorContext(
+            title: "Commit with " + secrets[0], message: message, commitMessage: "fix: rotate " + secrets[4],
+            token: { "histq-1" })
+
+        #expect(!context.contains(body))
+        #expect(!context.contains("IOSFODNN7EXAMPLE"))
+        #expect(context.contains("Commit with ghp_[redacted]\n"))
+        #expect(context.contains("fix: rotate AKIA[redacted]\n"))
+        #expect(context.contains("hook: found ghp_[redacted] in config.yml line 3\n"))
+        #expect(context.contains("remote: token gho_[redacted] expired\n"))
+        #expect(context.contains("env GH_TOKEN=[redacted] and glpat-[redacted]\n"))
+        #expect(context.contains("push protection: github_pat_[redacted] found\n"))
+        #expect(context.contains("aws key AKIA[redacted] leaked\n"))
+        #expect(context.contains("slack xoxb-[redacted], xoxp-[redacted]\n"))
+        #expect(context.contains("> Authorization: [redacted]\n"))
+        #expect(context.contains(
+            "curl -H \"X-Auth: Bearer [redacted]\" https://example.com/api?access_token=[redacted]&page=2\n"))
+    }
+
+    @Test("output lines naming a file .aiignore excludes are left out of the Ask AI context, with one note")
+    func errorContextDropsIgnoredLines() {
+        let ignore = AIIgnore(text: "secrets/**\n*.pem\nid_rsa\n")
+        let message = """
+            husky - pre-commit hook
+            /Users/me/repo/secrets/prod.yml:3:5: error: key found
+            Checking ./certs/server.pem (line 9)
+            could not parse certs/server.pem.
+            'a/id_rsa' has a private key
+            src/app.ts(3,1): error TS2304: Cannot find name 'x'
+            hook exited with code 1
+            """
+        let context = AIPrompts.chatErrorContext(
+            title: "Commit", message: message, ignore: ignore, token: { "histq-1" })
+
+        #expect(!context.contains("secrets/"))
+        #expect(!context.contains("server.pem"))
+        #expect(!context.contains("id_rsa"))
+        #expect(context.contains("""
+            BEGIN DATA histq-1
+            husky - pre-commit hook
+            src/app.ts(3,1): error TS2304: Cannot find name 'x'
+            hook exited with code 1
+            (4 lines naming files excluded by .aiignore left out)
+            END DATA histq-1
+            """))
+        #expect(AIPrompts.droppingIgnoredLines(message, ignore: nil) == message)
+        #expect(AIPrompts.droppingIgnoredLines(message, ignore: AIIgnore(text: "other/")) == message)
+    }
 }
+

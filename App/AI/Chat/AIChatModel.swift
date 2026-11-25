@@ -170,6 +170,21 @@ final class AIChatModel {
         startTurn(userID: user.id, assistantID: assistant.id, logName: logName, context: context)
     }
 
+    /// Continue in Chat: a new conversation holding an earlier one-turn job, in this call, and saved; nothing is sent
+    /// until the user follows up. `label` is the user's line (UI only), `modelText` the fixed sentence the model gets
+    /// in its place, `context` the job's data blocks (`AIPrompts.chatSeedContext`) and `answer` the job's answer, as
+    /// the assistant's entry. `ignoreDigest` is the digest of the `.aiignore` the job's prompt was filtered with
+    /// (`AIRun.ignoreDigest`), never the current one: a `.aiignore` changed since the job omits the context from every
+    /// request, and nil (unknown) always does (never sent unchecked).
+    func seed(label: String, modelText: String, context: String, answer: String, ignoreDigest: String?) {
+        leaveConversation()
+        conversationID = UUID()
+        let user = AIChatEntry(
+            role: .user, text: label, modelText: modelText, hiddenContext: context, ignoreDigest: ignoreDigest)
+        entries = [user, AIChatEntry(role: .assistant, text: answer)]
+        save()
+    }
+
     /// Stops the turn (its partial answer stays) and saves the conversation.
     func stop() {
         guard isGenerating else { return }

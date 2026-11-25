@@ -3,7 +3,7 @@
 // failure with an action ("Delete Anyway") stays until its action or its x.
 // The pointer over the cards holds their timers until it leaves. Settings › General › Notifications picks whether the
 // successes show (`ToastLevel`); a failure always shows, as the only place it is reported: its hint, the hint's
-// action (`FailureHints`) and a button that copies git's whole message. The automatic fetch never shows one.
+// action (`FailureHints`), a button that copies git's whole message and, with AI features shown, Ask AI. The automatic fetch never shows one.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -30,6 +30,8 @@ struct OperationToast: Identifiable, Equatable {
     /// A failure's whole message (git's output), which the copy button copies with the title and the detail.
     var message: String?
     var action: Action?
+    /// A failure's Ask AI: opens the tab's AI chat on it (shown only with Settings › AI's "Show AI features").
+    var askAI: (@MainActor () -> Void)?
 
     static func == (lhs: OperationToast, rhs: OperationToast) -> Bool { lhs.id == rhs.id }
 
@@ -178,12 +180,14 @@ struct ToastHost: View {
     }
 }
 
-/// A toast: its icon, what ran, the outcome, a failure's action and copy button, and the x.
+/// A toast: its icon, what ran, the outcome, a failure's action, Ask AI and copy buttons, and the x.
 private struct ToastCard: View {
     let toast: OperationToast
     let dismiss: () -> Void
     /// The copy button shows a checkmark for a moment after a click.
     @State private var copied = false
+    @AppStorage(PrefKey.aiShowFeatures.rawValue, store: Preferences.defaults)
+    private var showAIFeatures = true
 
     var body: some View {
         // Green for a success, orange for a warning, red for a failure.
@@ -233,6 +237,22 @@ private struct ToastCard: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Opens the chat; the toast stays (its action, such as "Put Back Message", stays usable). Off until AI is
+            // set up, as the other AI buttons.
+            if let askAI = toast.askAI, showAIFeatures {
+                let reason = AISetup.shared.isReady ? nil : AISetup.setUpHint
+                Button(action: askAI) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(RowIconButtonStyle())
+                .disabled(reason != nil)
+                .help(reason.map { "Ask AI: \($0)" }
+                    ?? "Ask AI why it failed (sends git's output, with credentials removed)")
+                .accessibilityLabel("Ask AI")
+                .onAppear { AISetup.shared.loadKeysIfNeeded() }
+            }
             if toast.message != nil {
                 Button(action: copy) {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")

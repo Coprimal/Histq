@@ -123,6 +123,11 @@ struct AIBatchSheet: View {
                 Button("Close", action: onClose)
                     .buttonStyle(RowTextButtonStyle(formRow: true))
                     .keyboardShortcut(.cancelAction)
+                if batch.runs.contains(where: { $0.answer != nil && $0.prompt != nil }) {
+                    Button("Continue in Chat") { session.continueInChat(batch: batch) }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                        .help("Close this card and go on in the chat")
+                }
             }
             Button("Apply \(count)", action: apply)
                 .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))

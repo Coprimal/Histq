@@ -234,6 +234,39 @@ extension AIPrompts {
         return kept == diff || hasFile ? kept : nil
     }
 
+    /// `text` (git's or a hook's output) without the lines that name a file `ignore` excludes, and a closing line
+    /// "(N lines naming files excluded by .aiignore left out)" when any went (the lines then end in `\n`); nil
+    /// `ignore`, or no such line, returns `text` as it is. Fails closed: a line is split into words at every character
+    /// a path rarely holds (spaces, quotes, `:`, brackets, commas), and each word, as written and without its closing
+    /// dots, is checked whole and from each of its folders on (so `/abs/repo/secrets/key`, `a/secrets/key` and
+    /// `./secrets/key` all match `secrets/**`). Only the naming line goes: output printed under it without the path
+    /// (a code frame) stays.
+    public static func droppingIgnoredLines(_ text: String, ignore: AIIgnore?) -> String {
+        guard let ignore else { return text }
+        var dropped = 0
+        let kept = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).filter { line in
+            let named = line.split { !isPathCharacter($0) }.contains { word in
+                // As written and without a sentence's closing dots ("see certs/server.pem.").
+                let trimmed = word.prefix(through: word.lastIndex { $0 != "." } ?? word.startIndex)
+                return [word, trimmed].contains { word in
+                    let parts = word.split(separator: "/").filter { !$0.allSatisfy { $0 == "." } }
+                    return parts.indices.contains { ignore.matches(parts[$0...].joined(separator: "/")) }
+                }
+            }
+            if named { dropped += 1 }
+            return !named
+        }
+        guard dropped > 0 else { return text }
+        var out = kept.joined(separator: "\n")
+        if !out.isEmpty, !out.hasSuffix("\n") { out += "\n" }
+        return out + "(\(dropped) line\(dropped == 1 ? "" : "s") naming files excluded by .aiignore left out)"
+    }
+
+    /// A character a word of `droppingIgnoredLines` keeps: letters, digits and `/ . _ - ~ @ + \` (C-quoted bytes).
+    private static func isPathCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || "/._-~@+\\".contains(character)
+    }
+
     /// Lock and generated files, by name: their contents are left out of AI requests (the header stays).
     static let skippedNames = [
         "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Package.resolved", "Podfile.lock", "Cargo.lock",

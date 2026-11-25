@@ -103,8 +103,11 @@ enum AIStub {
         log("unavailable \(hook): \(reason)")
     }
 
-    /// `explain` and `explain-wip` open in the tab's chat (`RepoSession.explainInChat`), not in the result card.
-    private static var hookOpensChat: Bool { seamHook == "explain" || seamHook == "explain-wip" }
+    /// `explain`, `explain-wip` and `explain-conflict` open in the tab's chat (`RepoSession.explainInChat`,
+    /// `explainConflictInChat`), not in the result card.
+    private static var hookOpensChat: Bool {
+        seamHook == "explain" || seamHook == "explain-wip" || seamHook == "explain-conflict"
+    }
 
     @MainActor private static var chatOptionsTaken: Set<String> = []
 

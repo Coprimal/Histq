@@ -998,11 +998,15 @@ final class RepoSession: Identifiable {
     /// The host-key sheet: the scan of the failure's host, then "Trust host".
     var hostKeyCheck: HostKeyCheck?
     /// The interactive rebase or squash sheet (`InteractiveRebaseView`); it builds its todo once it shows.
-    var rebaseRequest: RebaseRequest?
+    var rebaseRequest: RebaseRequest? {
+        didSet { openAIChatAfterForm() }
+    }
     /// The Add Worktree form (`AddWorktreeView`).
     var worktreeForm: WorktreeForm?
     /// The Create Pull Request form (`CreatePRView`).
-    var pullRequestForm: PullRequestForm?
+    var pullRequestForm: PullRequestForm? {
+        didSet { openAIChatAfterForm() }
+    }
     /// The Apply Patch preview (`ApplyPatchModal`), loading or read.
     var patchPreview: PatchPreviewRequest?
     /// The AI result card (`AIResultSheet`, task 12.3): the job it shows, running or finished.
@@ -1012,6 +1016,9 @@ final class RepoSession: Identifiable {
     /// The tab's AI chat (`RepoSession+AIChat`): views observe the model itself. Only `close()` stops it, never
     /// `closeAI()` or `closeModals()`, so a tab switch leaves a running chat alone.
     @ObservationIgnored lazy var aiChat = makeAIChat()
+    /// Continue in Chat ran over a form (`hasFormModal`): the chat card opens once the form closes, so its composer
+    /// never takes the keyboard from the form (`openAIChatAfterForm`).
+    @ObservationIgnored var aiChatOpensAfterForm = false
     /// The conflict editor's Save asks how to write the conflicts left unresolved (`ConflictSaveModal`).
     var conflictSavePrompt = false
     /// Leaving a conflict editor with unsaved ticks or edits, or the file editor with unsaved text, asks first
@@ -4487,7 +4494,7 @@ final class RepoSession: Identifiable {
 
     /// What `AIRun.start` runs for `job` (the result card's, or a Suggest All region's): Settings › AI's languages and
     /// the job's instructions as they are now, then `aiPrompt` off the main actor. Holds the session weakly.
-    func aiPrompt(for job: AIJob) -> @Sendable () async throws -> AIPrompt {
+    func aiPrompt(for job: AIJob) -> @Sendable () async throws -> (prompt: AIPrompt, ignoreDigest: String?) {
         let url = url
         let languages = Self.aiLanguages()
         let instructionsKey: PrefKey = switch job {
@@ -4547,12 +4554,15 @@ final class RepoSession: Identifiable {
     /// was taken at the click; it is never translated. Its intent (`resolutionIntent`) is read here, after the
     /// `.aiignore` check. A pull request's: the full messages of its last 50 commits (`noCommits` without one), the
     /// branch diff (`PatchSource.branch`) and the template at `templateRef`, in the commit messages' language.
-    /// Explain jobs open in the chat (`explainInChat`) and throw `noChanges` here.
+    /// Explain jobs open in the chat (`explainInChat`) and throw `noChanges` here. Each job reads `.aiignore` once and
+    /// returns its `AIIgnore.digest` with the prompt, so a chat seeded with the prompt's data (Continue in Chat) is
+    /// stamped with the rules that filtered it; nil for a squash whose `.aiignore` can't be read (nothing to filter, so
+    /// the job still runs, but a seeded chat omits its context).
     @concurrent
     nonisolated static func aiPrompt(
         _ job: AIJob, backend: Backend, cwd: URL,
         languages: (response: AIResponseLanguage, commit: AIResponseLanguage), instructions: String, branch: String?
-    ) async throws -> AIPrompt {
+    ) async throws -> (prompt: AIPrompt, ignoreDigest: String?) {
         let worktree = backend.directories.worktree
         switch job {
         case .commitMessage(let summaryOnly, let amend, let currentMessage):
@@ -4560,12 +4570,13 @@ final class RepoSession: Identifiable {
             let diff = try await DiffReader.patchText(
                 amend ? .stagedAgainstParent : .staged, runner: backend.runner, cwd: cwd, env: env)
             guard amend || !diff.isEmpty else { throw AIJobError.nothingStaged }
-            let filtered = try aiFiltered(diff, worktree: worktree)
+            let (filtered, digest) = try aiChatFiltered(diff, worktree: worktree)
             let subjects = (try? await readSubjects(backend, cwd: cwd, range: amend ? "HEAD^" : "HEAD", limit: 5)) ?? []
             let current = currentMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            return AIPrompts.commitMessage(stagedDiff: filtered, language: languages.commit, summaryOnly: summaryOnly,
-                                           instructions: instructions, branch: branch, recentSubjects: subjects,
-                                           currentMessage: amend && !current.isEmpty ? currentMessage : nil)
+            let prompt = AIPrompts.commitMessage(
+                stagedDiff: filtered, language: languages.commit, summaryOnly: summaryOnly, instructions: instructions,
+                branch: branch, recentSubjects: subjects, currentMessage: amend && !current.isEmpty ? currentMessage : nil)
+            return (prompt, digest)
         case .explainCommit, .explainWorkingChanges:
             // Explain opens in the tab's chat (`startAI` → `explainInChat`), so it never gets a prompt here.
             throw AIJobError.noChanges
@@ -4574,18 +4585,24 @@ final class RepoSession: Identifiable {
             guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
             let env = try await backend.readEnvironment(cwd: cwd)
             let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
-            return AIPrompts.commitMessage(
-                stagedDiff: try aiFiltered(diff, worktree: worktree), language: languages.commit, summaryOnly: false,
-                instructions: instructions, currentMessage: message)
+            let (filtered, digest) = try aiChatFiltered(diff, worktree: worktree)
+            let prompt = AIPrompts.commitMessage(
+                stagedDiff: filtered, language: languages.commit, summaryOnly: false, instructions: instructions,
+                currentMessage: message)
+            return (prompt, digest)
         case .squashMessage(let messages):
-            // The messages only (no diff, so nothing for `.aiignore` to leave out).
-            return AIPrompts.squashMessage(commitMessages: messages, language: languages.commit,
-                                           instructions: instructions)
+            // The messages only (no diff, so nothing for `.aiignore` to leave out): an unreadable `.aiignore` only
+            // leaves the digest out.
+            let prompt = AIPrompts.squashMessage(commitMessages: messages, language: languages.commit,
+                                                 instructions: instructions)
+            return (prompt, try? AIIgnore.digest(aiIgnore(worktree: worktree)))
         case .resolution(let target):
-            if try aiIgnore(worktree: worktree)?.matches(target.path) == true { throw AIJobError.fileIgnored }
-            return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b,
-                                               intent: await resolutionIntent(target, backend: backend, cwd: cwd),
-                                               instructions: instructions)
+            let ignore = try aiIgnore(worktree: worktree)
+            if ignore?.matches(target.path) == true { throw AIJobError.fileIgnored }
+            let prompt = AIPrompts.suggestResolution(
+                path: target.path, base: target.base, a: target.a, b: target.b,
+                intent: await resolutionIntent(target, backend: backend, cwd: cwd), instructions: instructions)
+            return (prompt, AIIgnore.digest(ignore))
         case .pullRequest(let base, let head, let templateRef, let kind):
             let env = try await backend.readEnvironment(cwd: cwd)
             let log = try await backend.runner.run(
@@ -4596,12 +4613,15 @@ final class RepoSession: Identifiable {
             guard !messages.isEmpty else { throw AIJobError.noCommits }
             let diff = try await DiffReader.patchText(
                 .branch(base: base, head: head), runner: backend.runner, cwd: cwd, env: env)
-            let filtered = try aiFiltered(diff, worktree: worktree)
+            let ignore = try aiIgnore(worktree: worktree)
+            guard let filtered = AIPrompts.filteredUnlessAllIgnored(diff, ignore: ignore) else {
+                throw AIJobError.allIgnored
+            }
             let template = await PullRequestTemplate.read(
-                ref: templateRef, runner: backend.runner, cwd: cwd, env: env, ignore: try aiIgnore(worktree: worktree),
-                kind: kind)
-            return AIPrompts.pullRequest(commitMessages: messages, diff: filtered, template: template,
-                                         language: languages.commit, instructions: instructions)
+                ref: templateRef, runner: backend.runner, cwd: cwd, env: env, ignore: ignore, kind: kind)
+            let prompt = AIPrompts.pullRequest(commitMessages: messages, diff: filtered, template: template,
+                                               language: languages.commit, instructions: instructions)
+            return (prompt, AIIgnore.digest(ignore))
         }
     }
 
@@ -4610,15 +4630,15 @@ final class RepoSession: Identifiable {
     /// labels). nil for a revert, no operation, or when git can't read the message.
     private nonisolated static func resolutionIntent(
         _ target: AIResolutionTarget, backend: Backend, cwd: URL
-    ) async -> (label: String, text: String)? {
-        let (label, ref): (String, String)
+    ) async -> (label: AIDataLabel, text: String)? {
+        let (label, ref): (AIDataLabel, String)
         switch target.operation {
         case .merge:
-            return ("intent: the branches being merged", "merge \(target.labels.b) into \(target.labels.a)")
+            return (.mergeIntent, "merge \(target.labels.b) into \(target.labels.a)")
         case .rebase:
-            (label, ref) = ("intent of side B: message of the commit being replayed", "REBASE_HEAD")
+            (label, ref) = (.replayIntent, "REBASE_HEAD")
         case .cherryPick:
-            (label, ref) = ("intent of side B: message of the commit being cherry-picked", "CHERRY_PICK_HEAD")
+            (label, ref) = (.cherryPickIntent, "CHERRY_PICK_HEAD")
         case .revert, .am, .none:
             return nil
         }
@@ -4627,14 +4647,6 @@ final class RepoSession: Identifiable {
                 ["log", "-1", "--no-show-signature", "--format=%B", "--end-of-options", ref, "--"], cwd: cwd, env: env)
         else { return nil }
         return (label, output.text)
-    }
-
-    /// `diff` through `AIPrompts.filtered` with the worktree's `.aiignore`; throws `allIgnored` when `.aiignore` left
-    /// out every file (only the closing note would be sent). An empty diff is returned as it is.
-    nonisolated static func aiFiltered(_ diff: String, worktree: URL) throws -> String {
-        guard let kept = AIPrompts.filteredUnlessAllIgnored(diff, ignore: try aiIgnore(worktree: worktree))
-        else { throw AIJobError.allIgnored }
-        return kept
     }
 
     /// The worktree's `.aiignore` (`AIIgnore.load`): nil when it is missing; one that can't be read safely throws
@@ -6155,7 +6167,8 @@ final class RepoSession: Identifiable {
     }
 
     /// Keeps `failure` as the last failure and shows it in its toast, the only place it is reported: its hint, the
-    /// hint's action and git's whole message (the toast's copy button).
+    /// hint's action, git's whole message (the toast's copy button) and Ask AI (not on a stop on conflicts, which
+    /// Explain Conflict covers).
     func report(_ failure: OperationFailure) {
         self.failure = failure
         let hint = FailureHints.hint(for: failure)
@@ -6165,8 +6178,14 @@ final class RepoSession: Identifiable {
                 FailureHints.perform(action, for: failure, in: self)
             }
         }
-        postToast(.failure(failure.title, error: failure.error, message: failure.message, hint: hint.text,
-                           action: action))
+        var toast = OperationToast.failure(failure.title, error: failure.error, message: failure.message,
+                                           hint: hint.text, action: action)
+        let conflict = if case .conflict = failure.error as? GitError { true } else { false }
+        if !conflict {
+            let (title, message) = (failure.title, failure.message)
+            toast.askAI = { [weak self] in self?.askAIAboutFailure(title: title, message: message) }
+        }
+        postToast(toast)
     }
 
     /// Whether the action bar's `key` operation is running.
