@@ -1,6 +1,7 @@
 // Where git comes from: the gitPath override, else the first git in an ordered list of folders (fully qualified ones
 // only), checked to be at least 2.36. The Windows folder order is pure string work and is tested on every OS; the
-// rules that need Windows paths or .exe files run on Windows only.
+// rules that need Windows paths or .exe files run on Windows only. Automatic reads need no login shell: the whole read
+// setup runs on the resolved git and the base environment, and the read environment keeps every read-safety key.
 namespace Histq.Core.Tests;
 
 public sealed class GitToolchainTests
@@ -29,6 +30,61 @@ public sealed class GitToolchainTests
         Assert.True(new GitVersion(2, 35, 9) < GitExecutable.MinimumVersion);
         Assert.True(new GitVersion(2, 36, 0) >= GitExecutable.MinimumVersion);
         Assert.True(new GitVersion(3, 0) > new GitVersion(2, 99, 99));
+    }
+
+    // Reads.
+
+    // The whole read setup (git, base environment, read environment, status) runs on the resolved git and the base
+    // environment alone, with the fixed PATH off Windows.
+    [Fact]
+    public async Task ReadSetupNeedsNoLoginShell()
+    {
+        using var sandbox = await Sandbox.CreateAsync();
+        var repo = await sandbox.MakeRepoAsync("repo");
+        var git = await GitExecutable.ResolveAsync(ct: Token);
+        var runner = new GitRunner(git.ExecutablePath);
+        var @base = GitInvocation.BaseEnvironment(gitExecutable: git.ExecutablePath);
+        var read = await GitInvocation.ReadEnvironmentAsync(null, @base, runner, repo, ct: Token);
+        await StatusReader.ReadAsync(runner, repo, read, Token);
+
+        Assert.Equal(@base["PATH"], read["PATH"]);
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(GitExecutable.FixedPath, @base["PATH"]);
+        }
+    }
+
+    // The read environment keeps every read-safety key, with the fixed PATH and only the agent variables inherited.
+    [Fact]
+    public void ReadSafetyKeysAreUnchanged()
+    {
+        var @base = GitInvocation.PosixBaseEnvironment(
+            GitExecutable.FixedPath, "/Users/someone",
+            new Dictionary<string, string> { ["SSH_AUTH_SOCK"] = "/tmp/agent", ["USER"] = "someone", ["SECRET"] = "no" });
+        var read = GitInvocation.Environment(null, @base, GitInvocation.Access.Read(["lfs"], ["img"]));
+        (string Key, string Value)[] config =
+        [
+            ("core.fsmonitor", "false"), ("log.showSignature", "false"), ("diff.submodule", "short"),
+            ("diff.autoRefreshIndex", "false"), ("core.hooksPath", GitInvocation.NoHooksPath), ("diff.external", ""),
+            ("i18n.logOutputEncoding", "UTF-8"),
+            ("filter.lfs.clean", ""), ("filter.lfs.smudge", ""), ("filter.lfs.process", ""),
+            ("filter.lfs.required", "false"), ("diff.img.textconv", ""), ("diff.img.command", ""),
+        ];
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            ["HOME"] = "/Users/someone", ["SSH_AUTH_SOCK"] = "/tmp/agent", ["USER"] = "someone",
+            ["GIT_TERMINAL_PROMPT"] = "0", ["LC_ALL"] = "C", ["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes",
+            ["GIT_OPTIONAL_LOCKS"] = "0", ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_ALLOW_PROTOCOL"] = "",
+            ["GIT_CONFIG_COUNT"] = config.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+        for (var index = 0; index < config.Length; index++)
+        {
+            expected[$"GIT_CONFIG_KEY_{index}"] = config[index].Key;
+            expected[$"GIT_CONFIG_VALUE_{index}"] = config[index].Value;
+        }
+
+        GitInvocationTests.AssertSameEnvironment(expected, read, "the read environment changed");
     }
 
     // Fixed-folder git.

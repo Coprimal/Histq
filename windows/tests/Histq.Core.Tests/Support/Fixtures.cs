@@ -207,13 +207,16 @@ internal static class Fixtures
         throw new FileNotFoundException($"No Git install with bin\\bash.exe above {git}.");
     }
 
-    /// <summary><paramref name="path"/> with every link in it resolved (the Mac's /var is /private/var); unchanged on Windows.</summary>
+    /// <summary>
+    /// <paramref name="path"/> with every link in it resolved (the Mac's /var is /private/var); on Windows in its long
+    /// form, since git reports long names and a runner's temp folder can be a short (8.3) one such as <c>RUNNER~1</c>.
+    /// </summary>
     private static string ResolveLinks(string path)
     {
         var full = Path.GetFullPath(path);
         if (OperatingSystem.IsWindows())
         {
-            return full;
+            return LongPath(full);
         }
 
         var current = Path.GetPathRoot(full)!;
@@ -228,6 +231,19 @@ internal static class Fixtures
 
         return current;
     }
+
+    /// <summary>The long form of the existing Windows path <paramref name="path"/>; unchanged when it cannot be had.</summary>
+    private static string LongPath(string path)
+    {
+        var buffer = new char[1024];
+        var length = GetLongPathNameW(path, buffer, (uint)buffer.Length);
+        return length > 0 && length < buffer.Length ? new string(buffer, 0, (int)length) : path;
+    }
+
+    [System.Runtime.InteropServices.DllImport(
+        "kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathNameW(
+        string shortPath, [System.Runtime.InteropServices.Out] char[] longPath, uint bufferLength);
 
     private static void CopyDirectory(string source, string destination)
     {
