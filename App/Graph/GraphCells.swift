@@ -136,6 +136,8 @@ final class RefBadgeCellView: NSView {
     /// Another worktree's faded row, or a row of a branch the graph search did not match: its badges and line are
     /// faded (`Palette.graphOtherWorktreeAlpha`).
     var isFaded = false
+    /// The branches (`RefBadge.name`) that hold the selected commit: drawn as bright as the checked-out branch's badge.
+    var litBranches: Set<String> = []
     /// The logos of the remotes' owners by remote name (`AvatarStore.ownerAvatar`): drawn in place of the cloud.
     var remoteAvatars: [String: NSImage] = [:]
     var metrics = GraphMetrics(density: "regular")
@@ -489,9 +491,11 @@ final class RefBadgeCellView: NSView {
         for (index, rect, level) in layout.badges {
             let badge = badges[index]
             // A ghost is faded as a whole (one transparency layer), so its fill and text do not show through each other;
-            // outside the stack, every badge but the checked-out branch's is a little fainter, so that one stands out.
+            // outside the stack, every badge but the checked-out branch's and the selected commit's branch's is a little
+            // fainter, so those stand out.
             let alpha: CGFloat? = badge.isGhost ? Palette.graphGhostAlpha
-                : stack == nil && !badge.isHead ? Palette.graphNotHeadBadgeAlpha : nil
+                : stack == nil && !badge.isHead && !litBranches.contains(badge.name)
+                ? Palette.graphNotHeadBadgeAlpha : nil
             if let alpha {
                 context.saveGState()
                 context.setAlpha(alpha)

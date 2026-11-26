@@ -532,6 +532,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private var ghost: Ghost?
+    /// The branches that hold the selected commit (`RefBadgeCellView.litBranches`).
+    private var litBranches: Set<String> = []
     private var wipChanges: WorktreeChanges?
     private var dateFormat: String?
     private let formatter = DateFormatter()
@@ -1193,6 +1195,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             if let ghostBadge { cell.badges.append(ghostBadge) }
             cell.color = graphRow.color
             cell.isFaded = isFaded(row: row)
+            cell.litBranches = litBranches
             cell.remoteAvatars = remoteAvatars
             cell.metrics = metrics
             // A reloaded row keeps its hover stack, made again from its new badges (a click on the stack selects
@@ -1552,6 +1555,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// goes to.
     private func refreshGhost() {
         guard let table else { return }
+        refreshLitBranches(table)
         let new = wantedGhost()
         guard new != ghost else { return }
         let rows = IndexSet([ghost?.row, new?.row].compactMap { $0 }.filter { $0 < table.numberOfRows })
@@ -1560,6 +1564,30 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             .filter { $0 >= 0 })
         guard !rows.isEmpty, !columns.isEmpty else { return }
         table.reloadData(forRowIndexes: rows, columnIndexes: columns)
+    }
+
+    /// The branches that hold the one selected commit: its own branch badges, else the branch it is on (the ghost's).
+    private func wantedLitBranches() -> Set<String> {
+        guard let table, table.selectedRowIndexes.count == 1, let row = table.selectedRowIndexes.first,
+              case .commit(let index) = log.entry(at: row) else { return [] }
+        let own = (badges[log.commits[index].hash] ?? []).filter { if case .branch = $0.kind { true } else { false } }
+        if !own.isEmpty { return Set(own.map(\.name)) }
+        return branchMap.branch(at: index, in: log).map { Set([$0]) } ?? []
+    }
+
+    /// Lights the selected commit's branches: redraws the made badge cells, without a reload.
+    private func refreshLitBranches(_ table: NSTableView) {
+        let new = wantedLitBranches()
+        guard new != litBranches else { return }
+        litBranches = new
+        let column = table.column(withIdentifier: GraphColumn.refs.identifier)
+        guard column >= 0 else { return }
+        table.enumerateAvailableRowViews { rowView, _ in
+            guard column < rowView.numberOfColumns, let cell = rowView.view(atColumn: column) as? RefBadgeCellView
+            else { return }
+            cell.litBranches = new
+            cell.needsDisplay = true
+        }
     }
 
     /// A click: the selection already changed at mouse down; a click that did not change it reports nothing new.
