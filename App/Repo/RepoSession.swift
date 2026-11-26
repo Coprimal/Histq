@@ -673,9 +673,9 @@ final class RepoSession: Identifiable {
         case fetchRemote(String, prune: Bool)
         /// `autostash`: `--autostash` (git stashes the local changes and puts them back after the pull).
         case pull(GitOperations.PullMode, autostash: Bool = false)
-        /// A branch that is not checked out, fast-forwarded to `remoteBranch` of `remote` (its upstream) by a fetch
-        /// straight into it; git refuses anything but a fast-forward.
-        case pullBranch(String, remote: String, remoteBranch: String)
+        /// A branch that is not checked out, pulled from `remoteBranch` of `remote` (its upstream) without a checkout:
+        /// fast-forwarded, or merged or rebased in memory as `mode` says (`GitOperations.pullBranch`).
+        case pullBranch(String, remote: String, remoteBranch: String, mode: GitOperations.PullMode)
         case push(branch: String, remote: String, remoteBranch: String?, setUpstream: Bool, forceWithLease: String?)
         case pushTag(String, remote: String)
         case pushMirror(remote: String)
@@ -788,7 +788,7 @@ final class RepoSession: Identifiable {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
                  .deleteRemoteBranch(_, let remote), .deleteBranchAndRemote(_, let remote, _),
-                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _), .fetchRemote(let remote, _),
+                 .deleteRemoteTag(_, let remote), .pullBranch(_, let remote, _, _), .fetchRemote(let remote, _),
                  .pruneMergedBranch(_, let remote):
                 remote
             case .checkoutPullRequest(.branch(let remote, _), _, _), .checkoutPullRequest(_, _, let remote):
@@ -5662,8 +5662,8 @@ final class RepoSession: Identifiable {
         case .fetchRemote(let remote, let prune): try await ops.fetch(remote: remote, prune: prune)
         case .pruneMergedBranch(let branch, let remote):
             if try await ops.pruneRemoteBranchIfDeleted(remote: remote, branch: branch) { outcome = .remoteBranchPruned }
-        case .pullBranch(let branch, let remote, let remoteBranch):
-            try await ops.fetchRefspec(remote: remote, refspec: "heads/\(remoteBranch):\(branch)")
+        case .pullBranch(let branch, let remote, let remoteBranch, let mode):
+            try await ops.pullBranch(branch, remote: remote, remoteBranch: remoteBranch, mode: mode)
         case .pull(let mode, let autostash):
             if try await ops.pull(mode, autostash: autostash) == .autostashPending { outcome = .autostashPending }
         case .push(let branch, let remote, let remoteBranch, let setUpstream, let lease):
@@ -5924,7 +5924,7 @@ final class RepoSession: Identifiable {
                         Self.message(for: error)
                     }
                     let failure = OperationFailure(title: title, write: write, error: error, message: message)
-                    if !offerForcePush(after: failure, key: key) { report(failure) }
+                    if !offerForcePush(after: failure, key: key), !offerCheckoutPull(after: failure) { report(failure) }
                 }
             }
             running.removeAll { $0.id == operation.id }
@@ -6205,15 +6205,16 @@ final class RepoSession: Identifiable {
 
     /// Asks for a confirmation before `write` (a destructive operation); `OperationDialogs` shows it, naming the
     /// target, and runs the write on confirm. `secondary`: a second button and its write; `asksAlways`: the auto-stash
-    /// dialog's "Always do this" (`OperationConfirmation.asksAlways`).
+    /// dialog's "Always do this" (`OperationConfirmation.asksAlways`); `cancel`: the cancel button's title.
     func confirm(_ title: String, message: String, button: String, write: Write, operation: String,
                  key: ActionBarAction? = nil, isDestructive: Bool = true,
-                 secondary: (button: String, write: Write)? = nil, asksAlways: Bool = false,
+                 secondary: (button: String, write: Write)? = nil, asksAlways: Bool = false, cancel: String = "Cancel",
                  then afterSuccess: (@MainActor () -> Void)? = nil)
     {
         confirmation = OperationConfirmation(
             title: title, message: message, button: button, write: write, operation: operation, key: key,
-            isDestructive: isDestructive, secondary: secondary, asksAlways: asksAlways, afterSuccess: afterSuccess)
+            isDestructive: isDestructive, secondary: secondary, asksAlways: asksAlways, afterSuccess: afterSuccess,
+            cancel: cancel)
     }
 
     /// The checked-out branch; nil on a detached HEAD or before the refs are read.
@@ -6442,6 +6443,13 @@ final class RepoSession: Identifiable {
                     + (paths.isEmpty ? "" : " in " + ListFormatter.localizedString(
                         byJoining: paths.count > 5 ? Array(paths.prefix(4)) + ["\(paths.count - 4) other files"] : paths))
                     + ", so nothing was changed: the branch and your changes are as they were."
+            case .pullWouldConflict(let branch, let paths):
+                "Pulling \(branch) would stop on conflicts"
+                    + (paths.isEmpty ? "" : " in " + ListFormatter.localizedString(
+                        byJoining: paths.count > 5 ? Array(paths.prefix(4)) + ["\(paths.count - 4) other files"] : paths))
+                    + ", so nothing was changed: \(branch) is as it was."
+            case .pullNeedsCheckout(let branch, let reason):
+                "\(branch) can only be pulled once it is checked out (\(reason)), so nothing was changed."
             }
         case let error as SubmoduleOperationError:
             switch error {

@@ -63,7 +63,7 @@ struct OperationToast: Identifiable, Equatable {
             if before.head.commit == new { return "Already up to date. Nothing to pull." }
             if case .branch(let name, _) = after.head { return "\(name) is now at \(new.prefix(7))." }
             return "HEAD is now at \(new.prefix(7))."
-        case .pullBranch(let branch, _, _):
+        case .pullBranch(let branch, _, _, _):
             let old = before.localBranches.first { $0.name == branch }?.commit
             guard let new = after.localBranches.first(where: { $0.name == branch })?.commit else { return nil }
             return old == new ? "Already up to date. Nothing to pull." : "\(branch) is now at \(new.prefix(7))."

@@ -70,6 +70,8 @@ struct OperationConfirmation: Identifiable {
     var asksAlways = false
     /// Runs after the button's write went through (not the secondary's): Create Pull Request's push opens the form.
     var afterSuccess: (@MainActor () -> Void)?
+    /// The cancel button's title ("Abort" after a pull that stopped with nothing changed).
+    var cancel = "Cancel"
 }
 
 /// A confirmation that is not a repo write (a profile's deletion, a WIP file's discard): `WindowModel.modal` shows it
@@ -92,6 +94,7 @@ struct ConfirmationModal: View {
     let isDestructive: Bool
     var secondary: String?
     var always: Binding<Bool>?
+    var cancel = "Cancel"
     let onConfirm: () -> Void
     let onCancel: () -> Void
     var onSecondary: () -> Void = {}
@@ -106,7 +109,7 @@ struct ConfirmationModal: View {
                     .padding(.horizontal, SettingsMetrics.cardPadding)
             }
         } actions: {
-            Button("Cancel", action: onCancel)
+            Button(cancel, action: onCancel)
                 .buttonStyle(RowTextButtonStyle(formRow: true))
                 .keyboardShortcut(.cancelAction)
             if let secondary {

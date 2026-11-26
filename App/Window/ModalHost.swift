@@ -215,7 +215,7 @@ struct ModalHost: View {
         case .confirmation(let session, let confirmation):
             ConfirmationModal(title: confirmation.title, message: confirmation.message, button: confirmation.button,
                               isDestructive: confirmation.isDestructive, secondary: confirmation.secondary?.button,
-                              always: confirmation.asksAlways ? $alwaysDo : nil) {
+                              always: confirmation.asksAlways ? $alwaysDo : nil, cancel: confirmation.cancel) {
                 accept(confirmation, session, write: confirmation.write, remember: "always",
                        then: confirmation.afterSuccess)
             } onCancel: {

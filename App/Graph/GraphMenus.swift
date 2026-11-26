@@ -639,25 +639,21 @@ enum RepoMenus {
         return entries
     }
 
-    /// A local branch's Pull submenu: the checked-out branch gets each pull mode; another branch can only be fast-forwarded
-    /// to its upstream (fetched straight into the branch, no checkout). Greyed without an upstream.
+    /// A local branch's Pull submenu, each pull mode: the checked-out branch pulls as the toolbar does; another branch
+    /// is pulled without a checkout (`RepoSession.pullBranch`). Greyed without an upstream.
     private static func pull(_ name: String, isCurrent: Bool, upstream: RemoteBranch?,
                              _ session: RepoSession) -> [MenuEntry] {
         guard let upstream else {
             return [.action("Pull \(name)", enabled: false, toolTip: "\(name) has no upstream.") {}]
         }
-        if isCurrent {
-            return [.submenu("Pull \(name)", [
-                .action("Fast-forward if possible") { session.pull(.fastForward) },
-                .action("Fast-forward only") { session.pull(.fastForwardOnly) },
-                .action("Rebase") { session.pull(.rebase) },
-            ])]
+        let pull = { (mode: GitOperations.PullMode) in
+            isCurrent ? session.pull(mode) : session.pullBranch(name, upstream: upstream, mode: mode)
         }
-        let remoteBranch = String(upstream.name.dropFirst(upstream.remote.count + 1))
-        return [.submenu("Pull \(name)", [.action("Fast-forward to \(upstream.name)") {
-            session.run(.pullBranch(name, remote: upstream.remote, remoteBranch: remoteBranch),
-                        title: "Fast-forward \(name) to \(upstream.name)")
-        }])]
+        return [.submenu("Pull \(name)", [
+            .action("Fast-forward if possible") { pull(.fastForward) },
+            .action("Fast-forward only") { pull(.fastForwardOnly) },
+            .action("Rebase") { pull(.rebase) },
+        ])]
     }
 
     private static func remote(_ name: String, _ session: RepoSession) -> [MenuEntry] {

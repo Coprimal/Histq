@@ -128,6 +128,39 @@ extension RepoSession {
                 isDestructive: false, asksAlways: true)
     }
 
+    /// Pulls `name`, a local branch that is not checked out, from its `upstream` without a checkout, as `mode` says
+    /// (`GitOperations.pullBranch`). When that stops with nothing changed, `offerCheckoutPull` asks what to do.
+    func pullBranch(_ name: String, upstream: RemoteBranch, mode: GitOperations.PullMode) {
+        let remoteBranch = String(upstream.name.dropFirst(upstream.remote.count + 1))
+        run(.pullBranch(name, remote: upstream.remote, remoteBranch: remoteBranch, mode: mode), title: "Pull \(name)")
+    }
+
+    /// After a `pullBranch` that stopped on conflicts, or that cannot merge or rebase without a checkout, with nothing
+    /// changed: Checkout & Pull checks the branch out (changes stashed and brought back when `PrefKey.autoStash` is
+    /// "always", else carried along: git refuses when they conflict), then
+    /// pulls it there with the same mode, so conflicts stop in the WIP panel; Abort leaves everything as it was. True
+    /// when it asked.
+    func offerCheckoutPull(after failure: OperationFailure) -> Bool {
+        guard case .pullBranch(let branch, _, _, let mode) = failure.write,
+              let error = failure.error as? GitOperationError
+        else { return false }
+        switch error {
+        case .pullWouldConflict, .pullNeedsCheckout: break
+        default: return false
+        }
+        let title = if case .pullWouldConflict = error { "Pulling \(branch) would conflict" }
+            else { "\(branch) needs a checkout to pull" }
+        let stash = Preferences.defaults.string(forKey: PrefKey.autoStash.rawValue) == "always"
+            && status.value?.entries.contains(where: { !$0.isSubmodule }) == true
+        confirm(title,
+                message: Self.message(for: error) + " Checkout & Pull checks \(branch) out and pulls it there"
+                    + (mode == .rebase ? " (rebase)" : "") + ". Abort leaves everything as it is.",
+                button: "Checkout & Pull", write: .checkoutBranch(branch, autostash: stash),
+                operation: "Checkout \(branch)",
+                key: .checkout, isDestructive: false, cancel: "Abort") { [weak self] in self?.pull(mode) }
+        return true
+    }
+
     /// Rebases the checked-out branch onto `upstream` (a full ref). With local changes (untracked files and submodules
     /// aside, which a rebase leaves alone) and `PrefKey.autoStash` "ask", asks first: Stash & Rebase or Cancel.
     /// "always" stashes without asking, "never" leaves them to git, which refuses. A stashed rebase goes through only

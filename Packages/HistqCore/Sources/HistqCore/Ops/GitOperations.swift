@@ -49,6 +49,11 @@ public enum GitOperationError: Error, Equatable, Sendable {
     /// A rebase with stashed local changes was rolled back: a commit did not replay cleanly (`localChanges` false) or
     /// the changes did not apply cleanly to the rebased branch (true). `paths` are the conflicted files.
     case rebaseWouldConflict(paths: [String], localChanges: Bool)
+    /// `pullBranch` stopped on conflicts before changing `branch`: `paths` are the conflicted files (empty when git
+    /// does not name them, as for a rebase).
+    case pullWouldConflict(branch: String, paths: [String])
+    /// `pullBranch` cannot merge or rebase `branch` without checking it out, for `reason`; `branch` was not changed.
+    case pullNeedsCheckout(branch: String, reason: String)
 }
 
 /// A network command that failed to sign in after the token gate kept the GitHub token back for `reason`; `error` is
@@ -273,15 +278,8 @@ public struct GitOperations: Sendable {
             guard fields.count == 4 else { throw GitOperationError.invalidObjectID(commit) }
             let parents = fields[0].split(separator: " ").flatMap { ["-p", String($0)] }
             let author = ["GIT_AUTHOR_NAME": fields[1], "GIT_AUTHOR_EMAIL": fields[2], "GIT_AUTHOR_DATE": "@" + fields[3]]
-            var signFlags = Self.signingFlags(signing)
-            if case .profileDefault = signing {
-                let gpgSign = try await ops.exec(
-                    ["config", "--type=bool", "--get", "commit.gpgSign"], allowedExitCodes: [0, 1]
-                ).text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if gpgSign == "true" { signFlags = ["--gpg-sign"] }
-            }
             let new = try await ops.exec(
-                ["commit-tree"] + signFlags + parents + ["-F", "-", "\(commit)^{tree}"],
+                ["commit-tree"] + (try await ops.profileSigningFlags(signing)) + parents + ["-F", "-", "\(commit)^{tree}"],
                 stdin: Data(text.utf8), extraEnv: author
             ).text.trimmingCharacters(in: .whitespacesAndNewlines)
             try await ops.exec(["update-ref", "-m", "commit (amend): \(Self.subject(message))", "HEAD", new, commit])
@@ -546,6 +544,138 @@ public struct GitOperations: Sendable {
         }
     }
 
+    /// Pulls `remoteBranch` of `remote` into the local `branch` without checking it out (no worktree may have it
+    /// checked out). In the lane: `fetch <remote> refs/heads/<remoteBranch>` through the gate (the tracking ref moves
+    /// as a fetch moves it), then the fetched commit (FETCH_HEAD's: a refspec may not map the tracking ref) against
+    /// the branch. Up to date: nothing more. Only behind: the branch moves to it, whatever `mode`. Diverged:
+    /// `.fastForwardOnly` throws `GitError.nonFastForward`; `.fastForward` writes the merge in memory (`merge-tree
+    /// --write-tree`, git 2.38) and commits it with pull's message (`fmt-merge-msg` of FETCH_HEAD), the fetched commit
+    /// as second parent, signed as a commit is; `.rebase` replays the branch's own commits onto it in memory (`replay`,
+    /// git 2.44, which drops those already upstream). The branch moves last (`update-ref <new> <old>`), so whatever
+    /// stops before leaves it as it was. No hook runs. Throws `GitOperationError.pullWouldConflict` on conflicts and
+    /// `.pullNeedsCheckout` when it cannot be done in memory (an older git, merge commits to rebase, or a rebase where
+    /// commits are signed, which `replay` cannot do), both with nothing changed but the fetch; `GitError.other` when
+    /// a worktree has the branch checked out.
+    public func pullBranch(_ branch: String, remote: String, remoteBranch: String, mode: PullMode) async throws {
+        try await validateRemoteName(remote)
+        try await validateBranchName(branch)
+        try await validateBranchName(remoteBranch)
+        let ref = "refs/heads/\(branch)"
+        try await lane { ops in
+            let worktrees = try await ops.exec(["worktree", "list", "--porcelain", "-z"]).text
+            var path: String?
+            for line in worktrees.split(separator: "\0") {
+                if line.hasPrefix("worktree ") { path = String(line.dropFirst("worktree ".count)) }
+                if line == "branch \(ref)" {
+                    throw GitError.other(exit: 1, stderrTail: "\(branch) is checked out in \(path ?? "a worktree"). "
+                        + "Pull it there.")
+                }
+            }
+            // As `pull`, before the fetch moves the tracking ref.
+            let forkPoint = mode == .rebase ? await ops.forkPoint(of: branch) : nil
+            try await ops.networkExec(
+                ["fetch", "--end-of-options", remote, "refs/heads/\(remoteBranch)"], target: .fetch(remotes: [remote]))
+            let fetched = try await ops.commitID("FETCH_HEAD")
+            let local = try await ops.commitID(ref)
+            let isAncestor = { (a: String, b: String) in
+                try await ops.exec(["merge-base", "--is-ancestor", a, b], allowedExitCodes: [0, 1]).exitCode == 0
+            }
+            if try await isAncestor(fetched, local) { return }
+            let tracking = "\(remote)/\(remoteBranch)"
+            var new = fetched
+            var reflog = "pull: fast-forward"
+            if try await !isAncestor(local, fetched) {
+                let version = GitVersion(parsing: try await ops.exec(["version"]).text) ?? GitVersion(0, 0)
+                switch mode {
+                case .fastForwardOnly:
+                    throw GitError.nonFastForward(exit: 1, stderrTail: "\(branch) and \(tracking) have diverged, so "
+                        + "\(branch) cannot be fast-forwarded.")
+                case .fastForward:
+                    guard version >= GitVersion(2, 38) else {
+                        throw GitOperationError.pullNeedsCheckout(
+                            branch: branch, reason: "git \(version) cannot merge without a checkout (2.38 or later can)")
+                    }
+                    new = try await ops.mergeInMemory(branch, local: local, fetched: fetched, tracking: tracking)
+                    reflog = "pull: merge \(tracking)"
+                case .rebase:
+                    guard version >= GitVersion(2, 44) else {
+                        throw GitOperationError.pullNeedsCheckout(
+                            branch: branch, reason: "git \(version) cannot rebase without a checkout (2.44 or later can)")
+                    }
+                    new = try await ops.rebaseInMemory(branch, ref: ref, onto: fetched, from: forkPoint ?? fetched)
+                    reflog = "pull: rebase onto \(tracking)"
+                }
+            }
+            try await ops.exec(["update-ref", "-m", reflog, ref, new, local])
+        }
+    }
+
+    /// `revision`'s commit id (inside the lane).
+    private func commitID(_ revision: String) async throws -> String {
+        try await exec(["rev-parse", "--verify", "--end-of-options", "\(revision)^{commit}"]).text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// `pullBranch`'s merge of `fetched` into `branch` at `local`, written without a working tree: the merge commit's
+    /// id. Its message is `fmt-merge-msg`'s of FETCH_HEAD, as pull's ("Merge branch 'x' of <url> into y"), else one
+    /// naming `tracking`.
+    private func mergeInMemory(_ branch: String, local: String, fetched: String, tracking: String) async throws -> String {
+        let merged = try await exec(["merge-tree", "--write-tree", "--name-only", "-z", local, fetched],
+                                    allowedExitCodes: [0, 1])
+        // `<tree>\0<conflicted path>\0…\0\0<messages>`.
+        let fields = merged.text.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        guard merged.exitCode == 0 else {
+            let paths = fields.dropFirst().prefix { !$0.isEmpty }
+            throw GitOperationError.pullWouldConflict(
+                branch: branch, paths: paths.reduce(into: []) { if !$0.contains($1) { $0.append($1) } })
+        }
+        guard let tree = fields.first, Self.isObjectID(tree) else {
+            throw GitError.other(exit: 1, stderrTail: "git merge-tree did not write a tree.")
+        }
+        let fetchHead = try await exec(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"]).text
+            .trimmingCharacters(in: .newlines)
+        var message = ""
+        if let data = try? Data(contentsOf: URL(filePath: fetchHead)) {
+            message = (try? await exec(["fmt-merge-msg", "--into-name", branch], stdin: data).text) ?? ""
+        }
+        if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            message = "Merge remote-tracking branch '\(tracking)' into \(branch)\n"
+        }
+        return try await exec(
+            ["commit-tree"] + (try await profileSigningFlags(.profileDefault)) + ["-p", local, "-p", fetched, "-F", "-", tree],
+            stdin: Data(message.utf8)
+        ).text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// `pullBranch`'s rebase of `ref`'s commits after `base` (the fork point, as `pull --rebase`'s) onto `fetched`,
+    /// written without a working tree: the new tip.
+    private func rebaseInMemory(_ branch: String, ref: String, onto fetched: String, from base: String) async throws
+        -> String
+    {
+        guard try await profileSigningFlags(.profileDefault).isEmpty else {
+            throw GitOperationError.pullNeedsCheckout(
+                branch: branch, reason: "commits are signed here, and only a checked-out rebase signs them")
+        }
+        // `print`: the ref update comes on stdout (an older replay's only way) and `update-ref` makes it here.
+        let result = try await exec(
+            ["-c", "replay.refAction=print", "replay", "--onto", fetched, "\(base)..\(ref)"],
+            allowedExitCodes: Set(0...255))
+        switch result.exitCode {
+        case 0: break
+        case 1: throw GitOperationError.pullWouldConflict(branch: branch, paths: [])
+        default:
+            let reason = result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "fatal: ", with: "")
+            throw GitOperationError.pullNeedsCheckout(branch: branch, reason: reason.isEmpty ? "git replay failed" : reason)
+        }
+        // `update <ref> <new> <old>`.
+        for line in result.text.split(separator: "\n") {
+            let words = line.split(separator: " ").map(String.init)
+            if words.count == 4, words[0] == "update", words[1] == ref, Self.isObjectID(words[2]) { return words[2] }
+        }
+        throw GitOperationError.pullNeedsCheckout(branch: branch, reason: "git replay did not rebase \(branch)")
+    }
+
     /// The files of a pull request whose host has no diff API, diffed here: in the lane, `remote`'s branches
     /// `sourceBranch` and `targetBranch` are fetched through the gate with an empty refmap, no tags, no FETCH_HEAD and
     /// no submodule, so the objects arrive and no ref or FETCH_HEAD changes (a stale tracking ref stays stale; a
@@ -679,12 +809,14 @@ public struct GitOperations: Sendable {
                 + "was fetched.")
     }
 
-    /// `merge-base --fork-point @{upstream} HEAD`, as `pull --rebase` computes it; nil when the upstream is not a
-    /// tracking ref (git cannot resolve `@{upstream}`) or has no fork point, and `pull` then rebases from the fetched
-    /// commit too.
-    private func forkPoint() async -> String? {
+    /// `merge-base --fork-point @{upstream} HEAD` (with `branch`: its upstream and it), as `pull --rebase` computes
+    /// it; nil when the upstream is not a tracking ref (git cannot resolve `@{upstream}`) or has no fork point, and
+    /// `pull` then rebases from the fetched commit too.
+    private func forkPoint(of branch: String? = nil) async -> String? {
+        let upstream = branch.map { "\($0)@{upstream}" } ?? "@{upstream}"
         let result = try? await runner.run(
-            ["merge-base", "--fork-point", "@{upstream}", "HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1, 128])
+            ["merge-base", "--fork-point", upstream, branch.map { "refs/heads/\($0)" } ?? "HEAD"], cwd: cwd, env: env,
+            allowedExitCodes: [0, 1, 128])
         let text = result?.exitCode == 0 ? result?.text.trimmingCharacters(in: .newlines) : nil
         return text.flatMap { Self.isObjectID($0) ? $0 : nil }
     }
@@ -1589,6 +1721,15 @@ public struct GitOperations: Sendable {
         case .sign: ["--gpg-sign"]
         case .noSign: ["--no-gpg-sign"]
         }
+    }
+
+    /// `signingFlags` for `commit-tree`, which ignores `commit.gpgSign`: with `.profileDefault` it is read here (the
+    /// profile's config included), `--gpg-sign` when it is true. Inside the lane.
+    private func profileSigningFlags(_ signing: CommitSigning) async throws -> [String] {
+        guard case .profileDefault = signing else { return Self.signingFlags(signing) }
+        let gpgSign = try await exec(["config", "--type=bool", "--get", "commit.gpgSign"], allowedExitCodes: [0, 1])
+            .text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return gpgSign == "true" ? ["--gpg-sign"] : []
     }
 
     private static func mainlineFlags(_ mainline: Int?) throws -> [String] {
