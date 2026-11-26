@@ -1138,7 +1138,7 @@ private struct BranchRow<Trailing: View>: View {
                 if session.isPinned(ref) { Image(systemName: "pin.fill").imageScale(.small) }
                 if session.isSoloed(ref) { Image(systemName: "scope").imageScale(.small) }
                 trailing()
-                if session.isHidden(ref) { showButton(ref) }
+                if session.isHidden(ref) { showButton(ref) } else if hovered && !checkedOut { hideButton(ref) }
             }
         }
         // The checked-out branch's check and name in bright white, selected or not (user, 2026-11-19).
@@ -1169,9 +1169,21 @@ private struct BranchRow<Trailing: View>: View {
         let stale = session.view.hideStale && session.isStale(ref) && !session.isPinned(ref)
         return Button { session.show(ref) } label: { Image(systemName: "eye.slash") }
             .buttonStyle(RowIconButtonStyle())
+            // 5 pt into the row's trailing padding: its hover circle (5 pt around the glyph) meets the capsule's edge.
+            .padding(.trailing, -5)
             .disabled(stale)
             .help(stale ? "Hidden as a stale branch: turn off Hide Stale Branches" : "Show Again")
             .accessibilityLabel("Show \(name)")
+    }
+
+    /// A shown branch's or tag's eye, while the row is hovered: a click hides it (as the menu's Hide does).
+    private func hideButton(_ ref: String) -> some View {
+        Button { session.hide(ref) } label: { Image(systemName: "eye") }
+            .buttonStyle(RowIconButtonStyle())
+            // As the slashed eye's: its hover circle meets the capsule's edge.
+            .padding(.trailing, -5)
+            .help("Hide")
+            .accessibilityLabel("Hide \(name)")
     }
 }
 
