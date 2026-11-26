@@ -8,8 +8,10 @@
 #       NUL-terminated records, to [out] or ~/Downloads/HistqQA-data/big-<n>.log (big-1m.log for 1000000).
 #       Prints the record count. The VM parses the file with LogParser, so it needs no git.
 #   windows/scripts/qa-data.sh check <spike.json> [n]
-#       Compares the harness's spike.json with the phase 5 gate thresholds (parsedCommits == n, default 1000000).
-#       Prints PASS/FAIL per check; exits 1 on any FAIL.
+#       Compares the harness's spike.json with the phase 5 gate thresholds (parsedCommits == n, default 1000000) and
+#       the scroll probe's run conditions (drawCount >= 0.9 * frameCount, wheelStepsSent == 200, scrollSeconds >= 10).
+#       Prints PASS/FAIL per check, then the probe's diagnostic fields (INFO, not checked); exits 1 on any FAIL.
+#       With "probes": "skipped" (an interactive -HistqScrollProbe 0 run) only the load checks run.
 set -euo pipefail
 
 die() { echo "qa-data: $*" >&2; exit 1; }
@@ -98,6 +100,23 @@ parsed = number("parsedCommits")
 check(f"parsedCommits == {expected}", parsed == expected, probe.get("parsedCommits"))
 at_most("firstRowsMs", 1500)
 at_most("fullLoadMs", 15000)
+
+if probe.get("probes") == "skipped":
+    print('SKIP  all probe checks: "probes": "skipped" (an interactive -HistqScrollProbe 0 run)')
+    sys.exit(1 if failed else 0)
+
+# Run conditions: the probe ran the way the gate assumes.
+frames = number("frameCount")
+draws = number("drawCount")
+check(
+    "drawCount >= 0.9 * frameCount",
+    frames is not None and draws is not None and draws >= 0.9 * frames,
+    {"drawCount": probe.get("drawCount"), "frameCount": probe.get("frameCount")},
+)
+check("wheelStepsSent == 200", number("wheelStepsSent") == 200, probe.get("wheelStepsSent"))
+seconds = number("scrollSeconds")
+check("scrollSeconds >= 10", seconds is not None and seconds >= 10, probe.get("scrollSeconds"))
+
 at_most("frameIntervalMedianMs", 17.5)
 at_most("frameIntervalP95Ms", 33.4)
 at_most("frameIntervalMaxMs", 100)
@@ -125,6 +144,34 @@ check(
     backdrop in ("mica", "acrylic") or (backdrop == "none" and mica is False),
     {"backdrop": backdrop, "micaSupported": mica},
 )
+
+# Diagnostics, printed as they are (absent in an older spike.json).
+for key in (
+    "scrollPacing",
+    "pacingDrawSteps",
+    "pacingTimerSteps",
+    "firstTickAtMs",
+    "secondTickAtMs",
+    "firstIntervalMs",
+    "firstIntervalIncludesSetup",
+    "maxIntervalIndex",
+    "maxIntervalAtMs",
+    "topIntervalsMs",
+    "intervalsOver33",
+    "intervalsOver100",
+    "drawIntervalMedianMs",
+    "drawIntervalP95Ms",
+    "drawIntervalMaxMs",
+    "gcCount0Before",
+    "gcCount0After",
+    "gcCount1Before",
+    "gcCount1After",
+    "gcCount2Before",
+    "gcCount2After",
+    "gcPauseTotalMsBeforeProbe",
+    "gcPauseMs",
+):
+    print(f"INFO  {key}: {json.dumps(probe[key]) if key in probe else '(absent)'}")
 
 sys.exit(1 if failed else 0)
 PY
