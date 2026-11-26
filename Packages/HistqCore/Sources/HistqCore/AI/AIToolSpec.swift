@@ -18,7 +18,7 @@ public struct AIToolSpec: Sendable, Equatable {
 /// A tool call from the model. `inputJSON` is the validated arguments object re-serialized with sorted keys (never
 /// the raw model text); it is still untrusted model output. No provider echo field: Gemini uses the text-tool
 /// protocol (phase 5, 5.1 finding).
-public struct AIToolCall: Sendable, Equatable {
+public struct AIToolCall: Codable, Sendable, Equatable {
     public let id: String
     public let name: String
     public let inputJSON: String

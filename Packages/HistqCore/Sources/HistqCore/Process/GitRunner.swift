@@ -88,6 +88,8 @@ public actor GitRunner {
         public enum Source: Sendable { case stdout, stderr }
         public let source: Source
         public let text: String
+        /// The line was longer than the stream's `maxLineBytes`: `text` is its start, the rest was dropped.
+        public var truncated = false
     }
 
     /// Timing hook (the app's DEBUG and `HISTQ_PERF` builds set it once at launch, before any process runs): called
@@ -131,14 +133,16 @@ public actor GitRunner {
     /// when git exits 0 and throws `GitError` otherwise. Ending the iteration early (or cancelling the
     /// consuming task) stops git: SIGINT, then SIGTERM after 3 s. A cancelled consumer's loop ends without
     /// an error, so call `try Task.checkCancellation()` after the loop to tell it from a finished command.
+    /// With `maxLineBytes`, a stdout line longer than that is yielded as its first `maxLineBytes` bytes, marked
+    /// `truncated`, and the rest of it is dropped as it arrives (memory stays bounded).
     public func stream(
         _ args: [String], cwd: URL, env: [String: String], stdin: Data? = nil, timeout: Duration? = nil,
-        delimiter: UInt8 = UInt8(ascii: "\n")
+        delimiter: UInt8 = UInt8(ascii: "\n"), maxLineBytes: Int? = nil
     ) -> AsyncThrowingStream<Line, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Line.self)
         let child = ChildProcess(
             executable: executable, arguments: args, cwd: cwd, environment: env, stdin: stdin, timeout: timeout,
-            delimiter: delimiter, onLine: { continuation.yield($0) })
+            delimiter: delimiter, onLine: { continuation.yield($0) }, maxLineBytes: maxLineBytes)
         // Not inline: the stream calls this under its own lock while the pipe reader may hold the child's
         // lock and wait in `yield` for the stream's (lock-order deadlock on cancel).
         continuation.onTermination = { _ in DispatchQueue.global().async { child.stop() } }
@@ -226,10 +230,13 @@ final class ChildProcess: @unchecked Sendable {
     private let timeout: Duration?
     private let delimiter: UInt8?
     private let onLine: (@Sendable (GitRunner.Line) -> Void)?
+    private let maxLineBytes: Int?
 
     private let lock = NSLock()
     private var collected = Data()
     private var pendingStdout = Data()
+    /// A stdout line went over `maxLineBytes`: its start was emitted, the rest is dropped up to its delimiter.
+    private var droppingStdoutLine = false
     private var pendingStderr = Data()
     private var stdoutTail = Data()
     private var stderrTail = Data()
@@ -247,7 +254,8 @@ final class ChildProcess: @unchecked Sendable {
     /// `delimiter` and `onLine` go together: both nil collects stdout, both set streams lines.
     init(
         executable: URL, arguments: [String], cwd: URL?, environment: [String: String], stdin: Data?,
-        timeout: Duration?, delimiter: UInt8?, onLine: (@Sendable (GitRunner.Line) -> Void)?
+        timeout: Duration?, delimiter: UInt8?, onLine: (@Sendable (GitRunner.Line) -> Void)?,
+        maxLineBytes: Int? = nil
     ) {
         process.executableURL = executable
         process.arguments = arguments
@@ -259,6 +267,7 @@ final class ChildProcess: @unchecked Sendable {
         self.timeout = timeout
         self.delimiter = delimiter
         self.onLine = onLine
+        self.maxLineBytes = maxLineBytes
     }
 
     /// Launches the process. A `stop()` that arrived earlier takes effect right after the launch.
@@ -370,8 +379,19 @@ final class ChildProcess: @unchecked Sendable {
         case .stdout:
             Self.appendTail(data, to: &stdoutTail)
             if let delimiter {
-                pendingStdout.append(data)
+                if droppingStdoutLine {
+                    guard let end = data.firstIndex(of: delimiter) else { return }
+                    droppingStdoutLine = false
+                    pendingStdout.append(data[data.index(after: end)...])
+                } else {
+                    pendingStdout.append(data)
+                }
                 emitLines(from: &pendingStdout, source: .stdout) { $0 == delimiter }
+                if let maxLineBytes, pendingStdout.count > maxLineBytes {
+                    emit(pendingStdout, source: .stdout)  // Cut to `maxLineBytes` there.
+                    pendingStdout = Data()
+                    droppingStdoutLine = true
+                }
             } else {
                 collected.append(data)
             }
@@ -395,8 +415,14 @@ final class ChildProcess: @unchecked Sendable {
         if start != buffer.startIndex { buffer = Data(buffer[start...]) }
     }
 
+    /// A stdout line longer than `maxLineBytes` (complete or not) is emitted as its start, marked `truncated`.
     private func emit(_ line: Data, source: GitRunner.Line.Source) {
         if source == .stderr, line.isEmpty { return }
+        if source == .stdout, let maxLineBytes, line.count > maxLineBytes {
+            let start = String(decoding: line.prefix(maxLineBytes), as: UTF8.self)
+            onLine?(GitRunner.Line(source: source, text: start, truncated: true))
+            return
+        }
         onLine?(GitRunner.Line(source: source, text: String(decoding: line, as: UTF8.self)))
     }
 

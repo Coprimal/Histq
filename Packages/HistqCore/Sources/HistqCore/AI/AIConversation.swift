@@ -27,11 +27,20 @@ public struct AIChatEntry: Codable, Sendable, Equatable, Identifiable {
     public var ignoreDigest: String?
     /// What the user attached to this message (chips; the hidden context holds what they resolved to at send).
     public var references: [AIChatReference]?
+    /// A tool entry's call (model-chosen name and arguments: untrusted data) and its output as saved (cut to
+    /// `toolOutputLimit`). Replayed as data blocks while `ignoreDigest` matches (`AIChatHistory`), never re-run.
+    public var toolCall: AIToolCall?
+    public var toolOutput: String?
     public var isError: Bool
+
+    /// UTF-8 bytes of tool output a tool entry keeps.
+    public static let toolOutputLimit = 4 * 1024
+    static let toolOutputCutNote = "[Histq: the rest of this output was not saved]"
 
     public init(
         id: UUID = UUID(), role: Role, text: String, modelText: String? = nil, hiddenContext: String? = nil,
-        ignoreDigest: String? = nil, references: [AIChatReference]? = nil, isError: Bool = false
+        ignoreDigest: String? = nil, references: [AIChatReference]? = nil, toolCall: AIToolCall? = nil,
+        toolOutput: String? = nil, isError: Bool = false
     ) {
         self.id = id
         self.role = role
@@ -40,11 +49,30 @@ public struct AIChatEntry: Codable, Sendable, Equatable, Identifiable {
         self.hiddenContext = hiddenContext
         self.ignoreDigest = ignoreDigest
         self.references = references
+        self.toolCall = toolCall
+        self.toolOutput = toolOutput
         self.isError = isError
     }
 
+    /// The entry of one tool call: `text` is the chat's row (UI only), the model gets `AIChatHistory.toolRunSentence`
+    /// and the call and output as data blocks; `output` is cut to `toolOutputLimit` bytes with a note. `ignoreDigest`
+    /// is the digest of the `.aiignore` the call was filtered with. A failed call (`isError`) is shown, never replayed.
+    public static func tool(
+        _ call: AIToolCall, output: String, text: String, ignoreDigest: String?, isError: Bool
+    ) -> AIChatEntry {
+        var saved = output
+        if output.utf8.count > toolOutputLimit {
+            saved = AIChatHistory.prefix(output, bytes: toolOutputLimit - toolOutputCutNote.utf8.count - 1)
+            if saved.utf8.last != 0x0A { saved += "\n" }
+            saved += toolOutputCutNote
+        }
+        return AIChatEntry(
+            role: .tool, text: text, modelText: AIChatHistory.toolRunSentence, ignoreDigest: ignoreDigest,
+            toolCall: call, toolOutput: saved, isError: isError)
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, role, text, modelText, hiddenContext, ignoreDigest, references, isError
+        case id, role, text, modelText, hiddenContext, ignoreDigest, references, toolCall, toolOutput, isError
     }
 
     public init(from decoder: any Decoder) throws {
@@ -58,6 +86,9 @@ public struct AIChatEntry: Codable, Sendable, Equatable, Identifiable {
         // Lenient: a reference kind this build does not know drops that reference, never the entry or its text.
         references = (try? container.decodeIfPresent([Lenient<AIChatReference>].self, forKey: .references))?
             .compactMap(\.value)
+        // Lenient too: a call this build can't read drops the call, never the entry.
+        toolCall = try? container.decodeIfPresent(AIToolCall.self, forKey: .toolCall)
+        toolOutput = try? container.decodeIfPresent(String.self, forKey: .toolOutput)
         isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
     }
 }
@@ -226,17 +257,21 @@ actor AIConversationFiles {
 public enum AIChatHistory {
     public static let entryLimit = 20
     public static let omittedContext = "(earlier context omitted)"
+    /// What the model gets for a saved tool entry, before its call and output in data blocks.
+    public static let toolRunSentence = "Earlier in this chat a read-only git tool was run."
     static let restOmitted = "(rest of the context omitted)"
     static let blockCutNote = "[Histq: the rest of this data was left out to fit the size budget]\n"
 
     /// The model's view of `entries`: the last `entryLimit` that count (errors, empty entries and a leading
     /// assistant message are skipped). A user or tool entry becomes a user message of its hidden context, then
-    /// `modelText ?? text`; a hidden context whose `ignoreDigest` is not `ignoreDigest` (the worktree's current
-    /// `.aiignore`, nil when it could not be read) is replaced by `omittedContext`, so a context filtered with older
-    /// rules is never sent again. `budget` is in UTF-8 bytes (as `AIPrompts.diffBudget`): past it, the oldest hidden
-    /// contexts are replaced by `omittedContext`, and when the newest message is still over it, its own context is
-    /// cut (whole data blocks first, then one block's text, the block still closed). Adjacent messages with the same
-    /// role are then merged, so the list alternates and starts and ends with a user message.
+    /// `modelText ?? text`; a tool entry with a call becomes `toolRunSentence`, then its call (name and arguments)
+    /// and output as data blocks, which count as its hidden context. A hidden context whose `ignoreDigest` is not
+    /// `ignoreDigest` (the worktree's current `.aiignore`, nil when it could not be read) is replaced by
+    /// `omittedContext`, so a context filtered with older rules is never sent again. `budget` is in UTF-8 bytes (as
+    /// `AIPrompts.diffBudget`): past it, the oldest hidden contexts are replaced by `omittedContext`, and when the
+    /// newest message is still over it, its own context is cut (whole data blocks first, then one block's text, the
+    /// block still closed). Adjacent messages with the same role are then merged, so the list alternates and starts
+    /// and ends with a user message.
     public static func messages(from entries: [AIChatEntry], budget: Int, ignoreDigest: String?) -> [AIChatMessage] {
         var turns = Array(entries.compactMap { turn(for: $0, ignoreDigest: ignoreDigest) }.suffix(entryLimit))
         while turns.first?.role == .assistant { turns.removeFirst() }
@@ -258,9 +293,12 @@ public enum AIChatHistory {
         var role: AIChatMessage.Role
         var context: String?
         var body: String
+        /// The body comes first (a tool entry's sentence before its blocks).
+        var contextLast = false
 
         var text: String {
             guard let context, !context.isEmpty else { return body }
+            if contextLast { return body + "\n\n" + context }
             return context + (context.utf8.last == 0x0A ? "\n" : "\n\n") + body
         }
     }
@@ -272,15 +310,27 @@ public enum AIChatHistory {
         case .assistant:
             return isBlank(body) ? nil : Turn(role: .assistant, context: nil, body: body)
         case .user, .tool:
-            // Saved tool calls and outputs replay as user text (never as native tool blocks).
-            if isBlank(body), isBlank(entry.hiddenContext ?? "") { return nil }
-            var context = entry.hiddenContext
+            // Saved tool calls and outputs replay as user text (never as native tool blocks, never re-run).
+            let call = entry.role == .tool ? entry.toolCall : nil
+            var context = call.map { toolContext($0, output: entry.toolOutput ?? "") } ?? entry.hiddenContext
+            if call == nil, isBlank(body), isBlank(context ?? "") { return nil }
             // Two nils never match: an unknown digest or an unreadable `.aiignore` omits the context.
             if let hidden = context, !isBlank(hidden), ignoreDigest == nil || entry.ignoreDigest != ignoreDigest {
                 context = omittedContext
             }
-            return Turn(role: .user, context: context, body: body)
+            return Turn(
+                role: .user, context: context, body: call == nil ? body : toolRunSentence, contextLast: call != nil)
         }
+    }
+
+    /// A saved call's name and model-chosen arguments (one JSON object, as the text-tool protocol writes it) and its
+    /// output, as data blocks: nothing the model chose sits outside a block.
+    private static func toolContext(_ call: AIToolCall, output: String) -> String {
+        let arguments = (try? JSONSerialization.jsonObject(with: Data(call.inputJSON.utf8))) as? [String: Any]
+        let json = AISSEParser.canonicalJSON(["tool": call.name, "arguments": arguments ?? [:]]) ?? "{}"
+        return AIPrompts.dataBlocks([
+            AIDataBlock(label: .toolArguments, text: json), AIDataBlock(label: .toolOutput, text: output),
+        ])
     }
 
     private static func isBlank(_ text: String) -> Bool {
@@ -357,7 +407,7 @@ public enum AIChatHistory {
     }
 
     /// The start of `text` in at most `bytes` UTF-8 bytes, cut after its last line end when it has one.
-    private static func prefix(_ text: String, bytes: Int) -> String {
+    static func prefix(_ text: String, bytes: Int) -> String {
         var end = text.startIndex
         var used = 0
         for index in text.indices {

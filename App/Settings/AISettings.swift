@@ -236,6 +236,8 @@ struct AISettings: View {
     private var conflictInstructions = ""
     @AppStorage(PrefKey.aiPullRequestInstructions.rawValue, store: Preferences.defaults)
     private var pullRequestInstructions = ""
+    @AppStorage(PrefKey.aiChatReadsRepository.rawValue, store: Preferences.defaults)
+    private var chatReadsRepository = true
 
     private enum TestState: Equatable {
         case idle
@@ -264,6 +266,7 @@ struct AISettings: View {
             languageGroup
             commitMessageGroup
             explanationsGroup
+            chatGroup
             conflictResolutionGroup
             pullRequestGroup
             providerGroup
@@ -272,6 +275,7 @@ struct AISettings: View {
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 2)
+            SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
@@ -573,7 +577,7 @@ struct AISettings: View {
         }
     }
 
-    // MARK: Explanations, conflict resolution and pull requests
+    // MARK: Explanations, chat, conflict resolution and pull requests
 
     private var explanationsGroup: some View {
         SettingsGroup("Explanations") {
@@ -581,6 +585,15 @@ struct AISettings: View {
                                hint: "Added to Histq's prompt for Explain, for a commit and for your changes. "
                                    + "Sent to the provider with the diff.",
                                placeholder: "Point out changes to the public API first")
+        }
+    }
+
+    private var chatGroup: some View {
+        SettingsGroup("Chat") {
+            SettingsSwitchRow(title: "Let the chat read the repository",
+                              hint: "Read-only git commands: log, show, diff, blame, grep and files at a commit. "
+                                  + "Files in .aiignore are never read.",
+                              isOn: $chatReadsRepository)
         }
     }
 

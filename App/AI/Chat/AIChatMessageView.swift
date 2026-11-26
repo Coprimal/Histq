@@ -13,8 +13,9 @@ struct AIChatMessageView: View {
     private var isUser: Bool { entry.role == .user }
 
     var body: some View {
-        if entry.role == .tool {
-            // A compact row until phase 6 builds the tool rows.
+        if entry.role == .tool, let call = entry.toolCall {
+            AIChatToolRow(entry: entry, call: call)
+        } else if entry.role == .tool {
             Text(verbatim: entry.text)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -79,6 +80,112 @@ struct AIChatMessageView: View {
 private enum AIChatMetrics {
     /// The tone of `ErrorText`.
     static let errorTone = Color(nsColor: Palette.graphLanes[6])
+}
+
+/// A read-only git tool the model ran: one line, "Ran git log -S foo · 3 commits" (or "git_blame failed: …"), that
+/// expands on click to the saved output. The call's arguments are model output: shown verbatim, never as Markdown.
+private struct AIChatToolRow: View {
+    let entry: AIChatEntry
+    let call: AIToolCall
+    @State private var expanded = false
+
+    var body: some View {
+        let title = Self.title(entry, call)
+        let output = entry.toolOutput ?? ""
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 12)
+                        .opacity(output.isEmpty ? 0 : 1)
+                    Text(verbatim: title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.callout)
+                .foregroundStyle(entry.isError ? AnyShapeStyle(AIChatMetrics.errorTone) : AnyShapeStyle(.secondary))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(output.isEmpty)
+            .help(title)
+            .accessibilityLabel(title)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            if expanded, !output.isEmpty {
+                AIChatToolOutput(output: output)
+            }
+        }
+    }
+
+    /// "Ran git log -S foo · 3 commits"; a failed call: "git_blame failed: " and the first line of its error. One line.
+    private static func title(_ entry: AIChatEntry, _ call: AIToolCall) -> String {
+        let title: String
+        if entry.isError {
+            let reason = (entry.toolOutput ?? "").split(separator: "\n").first.map(String.init) ?? ""
+            title = reason.isEmpty ? entry.text : entry.text + ": " + reason
+        } else {
+            let summary = entry.text.range(of: " · ").map { String(entry.text[$0.lowerBound...]) } ?? ""
+            title = (["Ran", displayName(call.name)] + arguments(call)).joined(separator: " ") + summary
+        }
+        return title.components(separatedBy: .newlines).joined(separator: " ")
+    }
+
+    private static func displayName(_ name: String) -> String {
+        name == "read_file" ? "read file" : name.replacingOccurrences(of: "git_", with: "git ")
+    }
+
+    /// The call's key arguments, git-style: `-S foo`, a revision, `from..to`, a path, `-L 3,9`.
+    private static func arguments(_ call: AIToolCall) -> [String] {
+        guard let input = try? JSONDecoder().decode([String: JSONValue].self, from: Data(call.inputJSON.utf8)) else {
+            return []
+        }
+        func value(_ key: String) -> String? {
+            switch input[key] {
+            case .string(let text)?: text.contains(" ") ? "\"\(text)\"" : text
+            case .int(let number)?: String(number)
+            default: nil
+            }
+        }
+        func flag(_ name: String, _ key: String) -> String? { value(key).map { "\(name) \($0)" } }
+        let lines: String? = value("start_line") == nil && value("end_line") == nil
+            ? nil : "-L \(value("start_line") ?? ""),\(value("end_line") ?? "")"
+        let parts: [String?] = switch call.name {
+        case "git_log": [flag("-S", "search"), flag("-G", "regex"), flag("-n", "max_count"), value("revision"),
+                         value("path")]
+        case "git_diff": [value("from").map { from in value("to").map { "\(from)..\($0)" } ?? from }, value("path")]
+        case "git_blame", "read_file": [lines, value("revision"), value("path")]
+        case "git_grep": [input["fixed_strings"] == .bool(true) ? "-F" : nil, value("pattern"), value("revision"),
+                          value("path")]
+        default: [value("revision"), value("path")]
+        }
+        return parts.compactMap { $0 }
+    }
+}
+
+/// A tool's saved output: monospaced, selectable, scrolling sideways; past a few lines it also scrolls down.
+private struct AIChatToolOutput: View {
+    let output: String
+
+    var body: some View {
+        let long = output.utf8.lazy.filter { $0 == UInt8(ascii: "\n") }.count >= 10
+        ScrollView(long ? [.horizontal, .vertical] : .horizontal) {
+            Text(verbatim: output)
+                .font(.callout.monospaced())
+                .fixedSize()
+                .textSelection(.enabled)
+                .padding(8)
+        }
+        .defaultScrollAnchor(.topLeading)
+        .scrollIndicators(.hidden, axes: .horizontal)
+        .frame(height: long ? 200 : nil)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.modalInput))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.surfaceBorder))
+    }
 }
 
 /// A part of an assistant answer: Markdown text, or the body of a ``` fenced block.

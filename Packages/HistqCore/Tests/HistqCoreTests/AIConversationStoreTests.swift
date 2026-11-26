@@ -3,7 +3,8 @@
 // undecodable file is moved aside, never overwritten. The history cases check that a visible text is never replayed
 // when a model text is set, that roles alternate and start and end with a user message, and that an over-budget
 // hidden context is cut whole blocks first, never leaving a data block open, and that a context filtered with other
-// `.aiignore` rules (or unknown ones) is replaced by the omitted note.
+// `.aiignore` rules (or unknown ones) is replaced by the omitted note, and that a saved tool call replays as the fixed
+// sentence then its call and output in data blocks, joined to the next user message, its blocks omitted once stale.
 import Foundation
 import HistqCore
 import Testing
@@ -223,5 +224,45 @@ struct AIConversationStoreTests {
         let unreadable = AIChatHistory.messages(from: entries, budget: .max, ignoreDigest: nil).map(\.text)
         #expect(unreadable == [note, "a1", note, "a2", note], "an unreadable .aiignore omits every context")
         #expect(!unreadable.joined().contains("okapi"))
+    }
+
+    @Test("a saved tool call replays as the fixed sentence then data blocks, and its blocks are omitted once stale")
+    func toolEntryReplaysAsDataBlocks() throws {
+        let call = AIToolCall(id: "call-1", name: "git_log", inputJSON: #"{"path":"src/okapi.swift"}"#)
+        let tool = AIChatEntry.tool(
+            call, output: "abc123 Add okapi\n" + String(repeating: "x", count: 5_000), text: "Ran git_log",
+            ignoreDigest: Self.digest, isError: false)
+        let output = try #require(tool.toolOutput)
+        #expect(output.utf8.count <= AIChatEntry.toolOutputLimit, "the saved output is cut to 4 KB")
+        #expect(output.hasPrefix("abc123 Add okapi\n"))
+
+        let data = try JSONEncoder().encode(AIConversation(entries: [tool]))
+        #expect(try JSONDecoder().decode(AIConversation.self, from: data).entries == [tool], "the call is saved")
+
+        let entries = [
+            AIChatEntry(role: .user, text: "q1"), tool, AIChatEntry(role: .assistant, text: "a1"),
+            AIChatEntry(role: .user, text: "q2"),
+        ]
+        let messages = AIChatHistory.messages(from: entries, budget: .max, ignoreDigest: Self.digest)
+        #expect(messages.map(\.role) == [.user, .assistant, .user], "the replay joins q1's user message")
+        let replay = try #require(messages.first?.text)
+        let sentence = try #require(replay.range(of: AIChatHistory.toolRunSentence))
+        let firstBlock = try #require(replay.range(of: "BEGIN DATA "))
+        #expect(sentence.upperBound <= firstBlock.lowerBound, "the sentence comes before the blocks")
+        #expect(replay.components(separatedBy: "BEGIN DATA ").count == 1 + 2 * 2, "two blocks, each named twice")
+        // The name and the arguments only after the first BEGIN line, never in the app text around the blocks.
+        #expect(!replay[..<firstBlock.lowerBound].contains("git_log"))
+        #expect(!replay[..<firstBlock.lowerBound].contains("okapi"))
+        #expect(replay[firstBlock.lowerBound...].contains(#""tool":"git_log""#))
+        #expect(replay.contains("src/okapi.swift"))
+        #expect(!replay.contains("Ran git_log"), "the row's text is UI only")
+
+        let stale = AIIgnore.digest(AIIgnore(text: "src/\n"))
+        for current in [stale, nil] {
+            let omitted = AIChatHistory.messages(from: entries, budget: .max, ignoreDigest: current)
+            #expect(omitted.first?.text == "q1\n\n" + AIChatHistory.toolRunSentence + "\n\n"
+                + AIChatHistory.omittedContext)
+            #expect(!omitted.map(\.text).joined().contains("okapi"), "neither the arguments nor the output")
+        }
     }
 }

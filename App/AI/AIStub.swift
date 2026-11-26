@@ -7,6 +7,9 @@
 // request, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
 // prompt asks for one; a chat request (the chat system prompt, no boundary) gets a short Markdown answer without
 // markers (a heading, a list and a fenced code block); any other request without one (Test connection) gets "OK".
+// A chat request that offers tools (a `tools` array, or the text-tool section in its system prompt) and holds no tool
+// result yet gets one `git_log` call (`{"max_count":3}`) instead, on its wire (chat-completions `tool_calls`,
+// Anthropic `tool_use`, or a fenced ```tool block), and logs `stub tool-call git_log`; the next request gets the answer.
 // A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`. `error` answers
 // HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`) and its data blocks'
 // labels (`blocks [<label>, ...]`, never their content).
@@ -288,6 +291,75 @@ enum AIStub {
         return body
     }
 
+    // MARK: Tool call
+
+    /// The text-tool section's call rule, present only when the chat offers tools as text.
+    private static let textToolMarker = "reply with ONLY one ```\(AITextToolProtocol.fenceLanguage) block"
+
+    /// A chat request that offers tools and holds no tool result yet: true for native tools, false for the text
+    /// protocol. Nil for any other request.
+    static func toolOffer(body: Data) -> Bool? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let system = prompt(body: body)?.system, system.hasPrefix(chatOpening)
+        else { return nil }
+        let messages = object["messages"] as? [[String: Any]] ?? []
+        if let tools = object["tools"] as? [Any], !tools.isEmpty {
+            let answered = messages.contains { message in
+                message["role"] as? String == "tool"
+                    || (message["content"] as? [[String: Any]])?.contains { $0["type"] as? String == "tool_result" }
+                        == true
+            }
+            return answered ? nil : true
+        }
+        guard system.contains(textToolMarker) else { return nil }
+        let answered = messages.contains { message in
+            guard let content = message["content"] as? String else { return false }
+            return content.contains("Result of the tool ") || content.contains("Error from the tool ")
+                || content.contains("Result of a tool call:") || content.contains("Error from a tool call:")
+        }
+        return answered ? nil : false
+    }
+
+    /// One streamed `git_log` call as an SSE body of `wire`: native pieces, or the text protocol's fenced block.
+    static func toolCallSSE(native: Bool, wire: AIWire) -> String {
+        let arguments = #"{"max_count":3}"#
+        guard native else {
+            let call = AIToolCall(id: "stub", name: "git_log", inputJSON: arguments)
+            return sse(AITextToolProtocol.callText(call), wire: wire)
+        }
+        let pieces = [String(arguments.prefix(8)), String(arguments.dropFirst(8))]
+        var events: [(name: String?, data: String)] = []
+        switch wire {
+        case .chatCompletions:
+            let first: [String: Any] = ["index": 0, "id": "call_stub_1", "type": "function",
+                                        "function": ["name": "git_log", "arguments": ""]]
+            events.append((nil, json(["choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [first]]]]])))
+            for piece in pieces {
+                let fragment: [String: Any] = ["index": 0, "function": ["arguments": piece]]
+                events.append((nil, json(["choices": [["index": 0, "delta": ["tool_calls": [fragment]]]]])))
+            }
+            events.append((nil, json(["choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]])))
+            events.append((nil, "[DONE]"))
+        case .anthropicMessages:
+            let block: [String: Any] = ["type": "tool_use", "id": "toolu_stub_1", "name": "git_log", "input": [:]]
+            events.append(("content_block_start",
+                           json(["type": "content_block_start", "index": 0, "content_block": block])))
+            for piece in pieces {
+                events.append(("content_block_delta", json([
+                    "type": "content_block_delta", "index": 0,
+                    "delta": ["type": "input_json_delta", "partial_json": piece]
+                ])))
+            }
+            events.append(("content_block_stop", json(["type": "content_block_stop", "index": 0])))
+            events.append(("message_delta",
+                           json(["type": "message_delta", "delta": ["stop_reason": "tool_use"]])))
+            events.append(("message_stop", json(["type": "message_stop"])))
+        }
+        return events.map { event in
+            (event.name.map { "event: \($0)\n" } ?? "") + "data: \(event.data)\n\n"
+        }.joined()
+    }
+
     private static func json(_ object: [String: Any]) -> String {
         (try? JSONSerialization.data(withJSONObject: object)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
     }
@@ -335,7 +407,14 @@ final class AIStubProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let wire: AIWire = url.path().hasSuffix("/messages") ? .anthropicMessages : .chatCompletions
-        let stream = Data(AIStub.sse(AIStub.replyText(body: body), wire: wire).utf8)
+        let sse: String
+        if let native = AIStub.toolOffer(body: body) {
+            AIStub.log("stub tool-call git_log")
+            sse = AIStub.toolCallSSE(native: native, wire: wire)
+        } else {
+            sse = AIStub.sse(AIStub.replyText(body: body), wire: wire)
+        }
+        let stream = Data(sse.utf8)
         // Cut anywhere, events included: the client's parser must join them.
         let size = max(1, stream.count / 12 + 1)
         chunks = stride(from: 0, to: stream.count, by: size).map { stream.subdata(in: $0..<min($0 + size, stream.count)) }

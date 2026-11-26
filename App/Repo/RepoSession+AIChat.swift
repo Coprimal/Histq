@@ -1,8 +1,9 @@
 // A tab's AI chat (`AIChatModel`): its saved chats live in `StatePaths.directory("ai-chat")/<stateKey>.json`, so each
 // worktree has its own. Explain jobs open in the chat; their context is read off the main actor with the read
 // environment and the worktree's `.aiignore`, and each send reads the `.aiignore` digest that decides which saved
-// contexts may be sent again (one that can't be read fails the turn: nothing is sent). Only closing the tab or the
-// window stops a running chat.
+// contexts may be sent again (one that can't be read fails the turn: nothing is sent). The chat's git tools run with
+// the read environment (no profile) and the `.aiignore` read before each call. Only closing the tab or the window
+// stops a running chat.
 import Foundation
 import HistqCore
 
@@ -27,6 +28,12 @@ extension RepoSession {
             resolve: { [weak self] references in
                 guard let backend = try await self?.backend() else { throw CancellationError() }
                 return try await Self.aiChatContext(references, backend: backend, cwd: url)
+            },
+            runTool: { [weak self] call in
+                guard let backend = try? await self?.backend() else {
+                    return (AIToolResult(id: call.id, content: Self.aiToolUnreadable, isError: true), nil, nil)
+                }
+                return await Self.aiChatTool(call, backend: backend, cwd: url)
             })
     }
 
@@ -342,6 +349,30 @@ extension RepoSession {
         let ignore = try aiIgnore(worktree: worktree)
         guard let kept = AIPrompts.filteredUnlessAllIgnored(diff, ignore: ignore) else { throw AIJobError.allIgnored }
         return (kept, AIIgnore.digest(ignore))
+    }
+
+    /// The error result of a tool call when the repository can't be read (no backend, no read environment).
+    nonisolated static let aiToolUnreadable = "The repository can't be read; nothing was read."
+
+    /// One git tool call of the chat (`AIGitTools.run`), off the main actor, with the read environment (never a
+    /// profile) and the worktree's `.aiignore` loaded for this call, whose digest stamps the tool entry. An unreadable
+    /// `.aiignore` gives a fixed error result and git never runs.
+    @concurrent
+    nonisolated static func aiChatTool(
+        _ call: AIToolCall, backend: Backend, cwd: URL
+    ) async -> AIChatModel.ToolRun {
+        let ignore: AIIgnore?
+        do {
+            ignore = try aiIgnore(worktree: backend.directories.worktree)
+        } catch {
+            let message = "The .aiignore file can't be read; nothing was read."
+            return (AIToolResult(id: call.id, content: message, isError: true), nil, nil)
+        }
+        guard let env = try? await backend.readEnvironment(cwd: cwd) else {
+            return (AIToolResult(id: call.id, content: aiToolUnreadable, isError: true), nil, nil)
+        }
+        let output = await AIGitTools.run(call, runner: backend.runner, cwd: cwd, env: env, ignore: ignore)
+        return (output.result, output.summary, AIIgnore.digest(ignore))
     }
 
     /// The worktree's current `AIIgnore.digest`, read off the main actor; throws `aiIgnoreUnreadable` when

@@ -67,6 +67,7 @@ extension PaletteCommands {
             toggle(.diffWrapLines, "Wrap Long Lines", .appearance, "Diff"),
             toggle(.aiShowFeatures, "AI Features", show: true, .ai, nil),
             toggle(.aiCommitSummaryOnly, "Summary-Only Commit Messages", .ai, "Commit messages"),
+            toggle(.aiChatReadsRepository, "Repository Reading in Chat", .ai, "Chat"),
             choice(.terminalCursor, .terminal, "Display", "Terminal Cursor",
                    ["block", "underline", "bar"].map { ($0, $0.capitalized) }),
             // An Int, as the page stores it.

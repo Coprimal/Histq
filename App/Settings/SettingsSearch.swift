@@ -258,6 +258,8 @@ struct SettingsSearchItem: Identifiable {
               keywords: ["summary", "subject", "description", "generate message"]),
         .init(section: .ai, group: "Explanations", title: "Custom instructions",
               keywords: ["prompt", "explain", "instructions"]),
+        .init(section: .ai, group: "Chat", title: "Let the chat read the repository",
+              keywords: ["chat", "git tools", "tools", "aiignore", "log", "blame", "grep", "read files"]),
         .init(section: .ai, group: "Conflict resolution", title: "Custom instructions",
               keywords: ["prompt", "suggest resolution", "conflict", "merge", "instructions"]),
         .init(section: .ai, group: "Pull requests", title: "Custom instructions",

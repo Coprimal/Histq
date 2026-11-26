@@ -6,6 +6,11 @@
 // deleting a chat and a new Explain bump it, so an old stream's text never lands anywhere. Switching while a turn
 // runs stops it first and saves its partial answer in its own conversation. The store is only called from tasks,
 // one after another in call order, and its errors are logged, never shown in the chat.
+//
+// A turn runs through `AIToolLoop`: with Settings › AI's "Let the chat read the repository" on, the model may call
+// the read-only git tools (`AIGitTools`); each call becomes a tool entry before the answer, saved with its output cut
+// to 4 KB and replayed on later turns as data blocks (`AIChatHistory`), never re-run. Only the last step's text is the
+// answer: a tool call clears what its step wrote (in the text protocol, the ```tool block itself).
 import Foundation
 import HistqCore
 import os
@@ -22,6 +27,9 @@ final class AIChatModel {
 
     /// A turn's hidden context and the `AIIgnore.digest` of the `.aiignore` it was filtered with.
     typealias Context = (text: String, ignoreDigest: String)
+    /// A git tool call's answer, its tool row count (`AIGitToolOutput.summary`) and the `AIIgnore.digest` of the
+    /// `.aiignore` it was filtered with (nil when none was read).
+    typealias ToolRun = (result: AIToolResult, summary: String?, ignoreDigest: String?)
 
     private(set) var entries: [AIChatEntry] = []
     var draft = ""
@@ -49,6 +57,11 @@ final class AIChatModel {
     /// The hidden context of `references` (data blocks), with the digest of the `.aiignore` it was filtered with;
     /// throws when nothing may be sent. Called at send, off the main actor.
     private let resolve: @Sendable ([AIChatReference]) async throws -> Context
+    /// Runs one git tool call off the main actor (`AIGitTools.run` with the read environment and the `.aiignore` read
+    /// for that call).
+    private let runTool: @Sendable (AIToolCall) async -> ToolRun
+    /// The running turn's tool rows and digests by call id, from `runTool` until the loop reports the result.
+    @ObservationIgnored private var toolRuns: [String: ToolRun] = [:]
     /// The saved chats by id, so opening one needs no read.
     @ObservationIgnored private var saved: [UUID: AIConversation] = [:]
     /// Not observed, so `deinit` (nonisolated) can cancel it.
@@ -59,6 +72,8 @@ final class AIChatModel {
     /// the end of the stream writes into the entry.
     @ObservationIgnored private var reply = ""
     @ObservationIgnored private var replyID: UUID?
+    /// When the streamed text was last written into the entry (the throttle).
+    @ObservationIgnored private var shown = ContinuousClock.now
     /// The running turn's timing name (`ai <logName>`) and whether its content was logged.
     @ObservationIgnored private var turnDetail = ""
     @ObservationIgnored private var contentLogged = false
@@ -66,12 +81,14 @@ final class AIChatModel {
     init(
         storeURL: URL, system: @escaping @MainActor () -> String,
         ignoreDigest: @escaping @Sendable () async throws -> String?,
-        resolve: @escaping @Sendable ([AIChatReference]) async throws -> Context
+        resolve: @escaping @Sendable ([AIChatReference]) async throws -> Context,
+        runTool: @escaping @Sendable (AIToolCall) async -> ToolRun
     ) {
         store = AIConversationStore(url: storeURL)
         self.system = system
         self.ignoreDigest = ignoreDigest
         self.resolve = resolve
+        self.runTool = runTool
     }
 
     deinit {
@@ -235,11 +252,17 @@ final class AIChatModel {
         let model = setup.model(for: provider)
         let systemPrompt = system()
         let ignoreDigest = ignoreDigest
+        let runTool = runTool
+        // Switch off: no tools offered and one plain step (native, so no tools section is added to the prompt).
+        let loop = Preferences.defaults.bool(forKey: PrefKey.aiChatReadsRepository.rawValue)
+            ? AIToolLoop(tools: AIGitTools.specs, nativeTools: provider.supportsNativeTools)
+            : AIToolLoop(tools: [], nativeTools: true, maxSteps: 1)
         generation += 1
         let token = generation
         isGenerating = true
         reply = ""
         replyID = assistantID
+        toolRuns = [:]
         turnDetail = "ai \(logName)"
         contentLogged = false
         UITiming.select(turnDetail)
@@ -256,26 +279,21 @@ final class AIChatModel {
                 let client = try await AISetup.shared.makeClient(for: provider)
                 // The last point before anything leaves the Mac: a turn stopped meanwhile sends nothing.
                 guard self?.generation == token, !Task.isCancelled else { return }
-                var shown = ContinuousClock.now
-                for try await piece in client.stream(request) {
-                    guard let self, generation == token else { return }
-                    reply += piece
-                    // At once while nothing shows (the first words' timing), then at most ~20 times a second.
-                    guard text(of: assistantID).isEmpty || ContinuousClock.now - shown >= .milliseconds(50) else {
-                        continue
-                    }
-                    flushReply()
-                    shown = .now
-                    #if DEBUG
-                    if AIStub.takeChatOption("cancel") {
-                        AIStub.log("cancel \(logName) after reply chars \(reply.count)")
-                        stop()
-                        return
-                    }
-                    #endif
-                }
+                let outcome = try await loop.run(
+                    request: request,
+                    step: { [weak self] request in
+                        // Between steps: a turn stopped meanwhile sends nothing more.
+                        guard await self?.clearReply(token: token) == true else { throw CancellationError() }
+                        return client.events(request)
+                    },
+                    runTool: { [weak self] call in
+                        let run = await runTool(call)
+                        await self?.keepToolRun(run, for: call.id, token: token)
+                        return run.result
+                    },
+                    onEvent: { [weak self] event in await self?.handle(event, token: token, logName: logName) })
                 try Task.checkCancellation()
-                self?.finishTurn(token: token)
+                self?.finishTurn(token: token, answer: outcome.text)
             } catch {
                 guard !Task.isCancelled else { return }
                 // A context builder that gave up (its session gone) ends the turn without an error entry.
@@ -304,8 +322,60 @@ final class AIChatModel {
         return AIChatRequest(model: model, system: system, messages: messages)
     }
 
-    private func finishTurn(token: Int) {
+    // MARK: Loop events
+
+    private func handle(_ event: AIToolLoopEvent, token: Int, logName: String) {
+        guard generation == token, let replyID else { return }
+        switch event {
+        case .text(let piece):
+            reply += piece
+            // At once while nothing shows (the first words' timing), then at most ~20 times a second.
+            guard text(of: replyID).isEmpty || ContinuousClock.now - shown >= .milliseconds(50) else { return }
+            flushReply()
+            shown = .now
+            #if DEBUG
+            if AIStub.takeChatOption("cancel") {
+                AIStub.log("cancel \(logName) after reply chars \(reply.count)")
+                stop()
+            }
+            #endif
+        case .toolCall:
+            // The step's text is not the answer (in the text protocol it holds the ```tool block).
+            _ = clearReply(token: token)
+        case .toolResult(let call, let result):
+            let run = toolRuns.removeValue(forKey: call.id)
+            let summary = result.isError ? nil : run?.summary
+            let row = result.isError ? "\(call.name) failed" : "Ran \(call.name)" + (summary.map { " · \($0)" } ?? "")
+            let entry = AIChatEntry.tool(
+                call, output: result.content, text: row, ignoreDigest: run?.ignoreDigest, isError: result.isError)
+            entries.insert(entry, at: entries.firstIndex { $0.id == replyID } ?? entries.endIndex)
+        case .stepLimit, .finished:
+            break
+        }
+    }
+
+    /// A new step or a tool call: what the step wrote so far is dropped from the answer. False when the turn ended.
+    private func clearReply(token: Int) -> Bool {
+        guard generation == token else { return false }
+        reply = ""
+        if let replyID, let index = entries.firstIndex(where: { $0.id == replyID }) { entries[index].text = "" }
+        return true
+    }
+
+    private func keepToolRun(_ run: ToolRun, for id: String, token: Int) {
         guard generation == token else { return }
+        toolRuns[id] = run
+    }
+
+    // MARK: Turn end
+
+    /// The loop's answer (the last step's text, or the step-limit note) replaces what streamed.
+    private func finishTurn(token: Int, answer: String? = nil) {
+        guard generation == token else { return }
+        if let answer {
+            _ = clearReply(token: token)
+            reply = answer
+        }
         endTurn()
         logContent()
         save()

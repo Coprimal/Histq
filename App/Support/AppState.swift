@@ -270,6 +270,9 @@ enum PrefKey: String, CaseIterable {
     /// The AI chat card's width and height in points, shared by all tabs; 0 = the default size.
     case aiChatCardWidth
     case aiChatCardHeight
+    /// The AI chat may run read-only git commands on the repository (log, show, diff, blame, grep, a file at a
+    /// commit); off offers it no tools. Files `.aiignore` matches are never read.
+    case aiChatReadsRepository
     /// The operation toasts shown: a `ToastLevel` raw value, "all" or "errors" (a failure always shows).
     case toastLevel
     /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
@@ -341,6 +344,7 @@ enum PrefKey: String, CaseIterable {
         case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
         case .aiChatBubblePosition: 1.0
         case .aiChatCardWidth, .aiChatCardHeight: 0.0
+        case .aiChatReadsRepository: true
         case .toastLevel: "all"
         case .hiddenRefs: [String: [String]]()
         case .onboardingDone: false
