@@ -246,8 +246,8 @@ extension RepoSession {
 }
 
 /// The newest operation still running, whatever started it (a toolbar button, a menu, the palette, a panel's button,
-/// the automatic fetch): a spinner and its title, from the click's frame on. A checkout's spinner fades in only after
-/// 150 ms, so a fast checkout never flashes one.
+/// the automatic fetch): a spinner and its pulsing title, both in `Palette.runningStatusText`, from the click's frame
+/// on. A checkout's spinner fades in only after 150 ms, so a fast checkout never flashes one.
 struct RunningStatus: View {
     let session: RepoSession
     var font: Font = .settingsCaption
@@ -256,27 +256,36 @@ struct RunningStatus: View {
         if let operation = session.running.last {
             HStack(spacing: 6) {
                 if operation.key == .checkout {
-                    // The mini spinner's own place, filled after the delay (`DelayedSpinner` is a bigger one); not
-                    // once the checkout has ended, as this view can outlive it by a display.
-                    ProgressView().controlSize(.mini).hidden().overlay {
+                    // The spinner's own place, filled after the delay (`DelayedSpinner` is a bigger one); not once
+                    // the checkout has ended, as this view can outlive it by a display.
+                    spinner.hidden().overlay {
                         DelayedReveal(token: operation.id, detail: "status",
                                       isCurrent: { session.running.contains { $0.id == operation.id } }) {
-                            ProgressView().controlSize(.mini)
+                            spinner
                         }
                     }
                 } else {
-                    ProgressView().controlSize(.mini)
+                    spinner
                 }
                 Text(operation.title + "…")
                     .font(font)
-                    .foregroundStyle(Palette.runningStatusText)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .skeletonPulse()
             }
+            .foregroundStyle(Palette.runningStatusText)
             .padding(.trailing, 6)
             .layoutPriority(-1)
             .onChange(of: operation.id, initial: true) { UITiming.opFeedback("status \(operation.title)") }
         }
+    }
+
+    /// A spinner in the text's colour: `ProgressView` ignores `tint` and `foregroundStyle` on macOS.
+    private var spinner: some View {
+        Image(systemName: "progress.indicator")
+            .font(font)
+            .imageScale(.small)
+            .symbolEffect(.variableColor.iterative.dimInactiveLayers.nonReversing, options: .repeating)
     }
 }
 
