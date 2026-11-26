@@ -192,11 +192,20 @@ final class RefBadgeCellView: NSView {
                       .paragraphStyle: paragraph])
             })
         /// The checked-out branch's name: 12.5 pt at Regular, a point above the others, in pure white, so it stands
-        /// out from them without a border (user, 2026-11-18; 2026-11-19: a bit smaller).
+        /// out from them without a border (user, 2026-11-18; 2026-11-19: a bit smaller), with the selected tab's faint
+        /// dark text shadow (`PrimaryLabelShadow`, user 2026-11-26).
         static let headText: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
             uniqueKeysWithValues: TextSize.allCases.map {
-                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12.5)), .foregroundColor: Palette.graphBadgeText, .paragraphStyle: paragraph])
+                ($0, [.font: NSFont.systemFont(ofSize: $0.scaled(12.5)), .foregroundColor: Palette.graphBadgeText,
+                      .paragraphStyle: paragraph, .shadow: headTextShadow])
             })
+        private static let headTextShadow: NSShadow = {
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor(Palette.onPrimaryShadow)
+            shadow.shadowBlurRadius = 1
+            shadow.shadowOffset = NSSize(width: 0, height: -0.75)
+            return shadow
+        }()
         /// ↑↓, "#N" and "+N" by text size: the counts' font (11 pt at Regular).
         static let count: [TextSize: [NSAttributedString.Key: Any]] = Dictionary(
             uniqueKeysWithValues: TextSize.allCases.map {
