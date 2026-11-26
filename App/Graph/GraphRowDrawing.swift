@@ -394,9 +394,10 @@ final class GraphCellView: NSView {
     var hasGhostRef = false
     /// The row shows the checked-out branch's badge (or a detached HEAD's): its line to the node stays full width.
     var hasHeadRef = false
-    /// Another worktree's faded row: its band, refs line and node are faded (`Palette.graphOtherWorktreeAlpha`).
+    /// Another worktree's faded row, or a row of a branch the graph search did not match: its band, refs line and node
+    /// are faded (`Palette.graphOtherWorktreeAlpha`).
     var isFaded = false
-    /// The lines of another worktree's faded branch, by `GraphSegment.owner`.
+    /// The lines of another worktree's faded branch, or of a branch the search did not match, by `GraphSegment.owner`.
     var isSegmentFaded: (Int32) -> Bool = { _ in false }
     /// 5.2's avatar for the node; initials while nil.
     var avatar: NSImage?

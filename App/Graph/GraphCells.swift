@@ -133,7 +133,8 @@ final class RefBadgeCellView: NSView {
     var badges: [RefBadge] = []
     /// The row's lane color (`GraphRow.color`).
     var color = 0
-    /// Another worktree's faded row: its badges and line are faded (`Palette.graphOtherWorktreeAlpha`).
+    /// Another worktree's faded row, or a row of a branch the graph search did not match: its badges and line are
+    /// faded (`Palette.graphOtherWorktreeAlpha`).
     var isFaded = false
     /// The logos of the remotes' owners by remote name (`AvatarStore.ownerAvatar`): drawn in place of the cloud.
     var remoteAvatars: [String: NSImage] = [:]

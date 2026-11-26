@@ -1,7 +1,7 @@
 // The graph's commit search (⌘F, Edit › Find…): a repo tab's `GraphSearch` (the query, its matches off the main actor,
 // the current match) and the bar that slides up over the bottom of the graph card. Going to a match selects its row as
-// a click does and centres it when it is off screen; while a query has matches the other rows' text dims. No
-// filtering: the lanes stay whole.
+// a click does and centres it when it is off screen; while a query has matches the other rows' text dims, and the lines,
+// nodes and badges of the branches without a match fade (`BranchMap`). No filtering: the lanes stay whole.
 import AppKit
 import HistqCore
 import SwiftUI

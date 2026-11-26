@@ -560,6 +560,9 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var isPlaced = false
     /// The search's dimmed rows, and its last reveal request.
     private var dimming = GraphDimming()
+    /// The branches (`BranchMap.names`) a commit the search matches is on: the lines and badges of the others fade.
+    /// nil while nothing fades (no match, or no branch map of the search's log).
+    private var searchLitBranches: [Bool]?
     private var revealToken = 0
 
     private static let rowViewID = NSUserInterfaceItemIdentifier("graphRow")
@@ -730,6 +733,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     func update(_ view: GraphView) {
         self.view = view
         isUpdating = true
+        let branchMapGeneration = branchMap.generation
         updateRows(view)
         if let table = table as? GraphTableView, table.setHiddenColumns(view.hiddenColumns) {
             // The graph column may have stopped filling (or started): it fits its lanes again.
@@ -744,9 +748,16 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             hideStack()
             table?.reloadData()
         }
-        if view.dimming.token != dimming.token {
+        let dimmingChanged = view.dimming.token != dimming.token
+        if dimmingChanged {
             dimming = view.dimming
             refreshDimming()
+        }
+        // The branches without a match fade: again for a new search result, or a branch map landing after it.
+        if dimmingChanged || (branchMap.generation != branchMapGeneration && dimming.matched != nil) {
+            let wasFading = searchLitBranches != nil
+            searchLitBranches = Self.litBranches(dimming, branchMap)
+            if wasFading || searchLitBranches != nil { redrawFades() }
         }
         // Before `syncSelection`, which then finds the row on screen.
         if view.revealToken != revealToken {
@@ -1181,7 +1192,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             // After the row's own badges (a detached HEAD, tags): when the column is short, the hint gives way first.
             if let ghostBadge { cell.badges.append(ghostBadge) }
             cell.color = graphRow.color
-            cell.isFaded = isWorktreeFaded(row: row)
+            cell.isFaded = isFaded(row: row)
             cell.remoteAvatars = remoteAvatars
             cell.metrics = metrics
             // A reloaded row keeps its hover stack, made again from its new badges (a click on the stack selects
@@ -1203,9 +1214,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             cell.hasRefs = commit.map { badges[$0.hash] != nil } ?? (worktree(synthetic) != nil)
             cell.hasGhostRef = ghost(at: row, commit: commit) != nil
             cell.hasHeadRef = commit.flatMap { badges[$0.hash] }?.contains { $0.isHead } ?? false
-            cell.isFaded = isWorktreeFaded(row: row)
+            cell.isFaded = isFaded(row: row)
             cell.isSegmentFaded = { [weak self] owner in
-                owner >= 0 && self?.isWorktreeFaded(commit: Int(owner)) == true
+                guard owner >= 0, let self else { return false }
+                return isWorktreeFaded(commit: Int(owner)) || isSearchFaded(commit: Int(owner))
             }
             if let commit {
                 cell.node = commit.isMerge
@@ -1388,10 +1400,18 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             else { bits & (0 &- bits) }
         guard lit != litWorktree else { return }
         litWorktree = lit
+        redrawFades()
+        refreshDimming()
+    }
+
+    /// Redraws the graph cells and the badge cells whose fade changed, of the rows the table has made (on screen and
+    /// just around it).
+    private func redrawFades() {
+        guard let table else { return }
         let graph = table.column(withIdentifier: GraphColumn.graph.identifier)
         let refs = table.column(withIdentifier: GraphColumn.refs.identifier)
         table.enumerateAvailableRowViews { rowView, row in
-            let faded = self.isWorktreeFaded(row: row)
+            let faded = self.isFaded(row: row)
             if graph >= 0, let cell = rowView.view(atColumn: graph) as? GraphCellView {
                 // Lines passing by may be another row's: every graph cell redraws.
                 cell.isFaded = faded
@@ -1402,7 +1422,41 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.needsDisplay = true
             }
         }
-        refreshDimming()
+    }
+
+    /// A row's node, own line and badges fade: another worktree's row, or a row of a branch the search did not match.
+    private func isFaded(row: Int) -> Bool {
+        isWorktreeFaded(row: row) || isSearchFaded(row: row)
+    }
+
+    /// A row the search fades with its branch: a commit (`isSearchFaded(commit:)`), or a WIP or stash row it dims.
+    private func isSearchFaded(row: Int) -> Bool {
+        switch log.entry(at: row) {
+        case .commit(let index): isSearchFaded(commit: index)
+        case .synthetic: searchLitBranches != nil && dimming.isDimmed(row: row, in: log)
+        case nil: false
+        }
+    }
+
+    /// `log.commits[index]` does not match the search and its branch (`BranchMap`) has no commit that does, or it is on
+    /// no branch; its lines to its parents fade with it. Commits the search or the map has not seen yet do not fade.
+    private func isSearchFaded(commit index: Int) -> Bool {
+        guard let searchLitBranches, let matched = dimming.matched, dimming.logGeneration == log.generation,
+              branchMap.logGeneration == log.generation, index < matched.count, index < branchMap.claims.count
+        else { return false }
+        let claim = branchMap.claims[index]
+        return !matched[index] && (claim < 0 || !searchLitBranches[Int(claim)])
+    }
+
+    /// The branches of `branchMap` with a commit `dimming` matches; nil while nothing dims or the map is of another log.
+    private static func litBranches(_ dimming: GraphDimming, _ branchMap: BranchMap) -> [Bool]? {
+        guard let matched = dimming.matched, dimming.logGeneration == branchMap.logGeneration else { return nil }
+        var lit = [Bool](repeating: false, count: branchMap.names.count)
+        for index in 0..<min(matched.count, branchMap.claims.count) where matched[index] {
+            let claim = branchMap.claims[index]
+            if claim >= 0 { lit[Int(claim)] = true }
+        }
+        return lit
     }
 
     /// The other worktree of a worktree WIP row.
