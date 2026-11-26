@@ -617,12 +617,15 @@ private struct CommitListPanel: View {
             // ⌘F (Edit › Find…): the search bar slides up from the card's bottom edge over the graph, which neither
             // moves nor resizes (it keeps its identity).
             graph
-                .overlay(alignment: .topTrailing) { GraphVisibilityChip(session: session) }
                 .overlay(alignment: .bottom) {
-                    if session.graphSearch.isOpen {
-                        GraphSearchBar(search: session.graphSearch)
-                            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                    VStack(alignment: .trailing, spacing: 0) {
+                        GraphVisibilityChip(session: session)
+                        if session.graphSearch.isOpen {
+                            GraphSearchBar(search: session.graphSearch)
+                                .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius, style: .continuous))
                 .animation(reduceMotion ? nil : Motion.sheet, value: session.graphSearch.isOpen)
