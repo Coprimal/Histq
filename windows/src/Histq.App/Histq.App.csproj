@@ -20,6 +20,8 @@
     <!-- QA flags compile only in Debug or with -p:HistqQa=true. Appended here, never passed as -p:DefineConstants,
          which would replace DISABLE_XAML_GENERATED_MAIN. -->
     <DefineConstants Condition="'$(Configuration)' == 'Debug' Or '$(HistqQa)' == 'true'">$(DefineConstants);HISTQ_QA</DefineConstants>
+    <!-- Background gen-2 GCs; Program.Main asks for SustainedLowLatency, which needs it. -->
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <!-- Never PublishTrimmed or NativeAOT: CsWin32 classic COM interop (Histq.Platform, phase 7) breaks under trimming and AOT. -->
   </PropertyGroup>
 

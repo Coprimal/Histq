@@ -148,6 +148,9 @@ check(
 # Diagnostics, printed as they are (absent in an older spike.json).
 for key in (
     "scrollPacing",
+    "gcLatencyMode",
+    "gcConcurrent",
+    "gcServer",
     "pacingDrawSteps",
     "pacingTimerSteps",
     "firstTickAtMs",

@@ -1,5 +1,6 @@
 #if HISTQ_QA
 using System.Diagnostics;
+using System.Runtime;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -23,7 +24,7 @@ public partial class App
 /// The phase 5 spike harness (QA builds only). Launch flags: <c>-HistqStateDir &lt;dir&gt;</c>,
 /// <c>-HistqWindowSize W,H</c> (the client size in physical pixels), <c>-HistqSpikeLog &lt;dump&gt;</c> (a
 /// NUL-terminated log in <see cref="LogReader.Arguments"/>' format, made by windows/scripts/qa-data.sh dump) and
-/// <c>-HistqScrollProbe &lt;seconds&gt;</c> (default 10) and <c>-HistqScrollPacing rendering|draw</c> (default rendering,
+/// <c>-HistqScrollProbe &lt;seconds&gt;</c> (default 10) and <c>-HistqScrollPacing draw|rendering</c> (default draw,
 /// see <see cref="ScrollProbeAsync"/>).
 /// <para>
 /// Without <c>-HistqSpikeLog</c> it only sizes the window, which stays open for the interactive title-bar checks. With
@@ -135,8 +136,8 @@ internal sealed class SpikeHarness
                 return;
             bool drawPacing = _flags.String(ScrollPacingFlag) switch
             {
-                null or "rendering" => false,
-                "draw" => true,
+                null or "draw" => true,
+                "rendering" => false,
                 var other => throw new ArgumentException($"{ScrollPacingFlag} must be rendering or draw, not '{other}'"),
             };
 
@@ -150,6 +151,9 @@ internal sealed class SpikeHarness
             _result.ClientSize = $"{client.Width},{client.Height}";
             _result.RowHeight = _canvas.RowHeight;
             _result.ViewportHeight = _canvas.ViewportHeight;
+            _result.GcLatencyMode = GCSettings.LatencyMode.ToString();
+            _result.GcConcurrent = AppContext.TryGetSwitch("System.GC.Concurrent", out bool concurrent) ? concurrent : null;
+            _result.GcServer = GCSettings.IsServerGC;
 
             if (interactive)
             {
@@ -762,6 +766,9 @@ internal sealed class SpikeHarness
         public int? GcCount2After { get; set; }
         public double? GcPauseTotalMsBeforeProbe { get; set; }
         public double? GcPauseMs { get; set; }
+        public string? GcLatencyMode { get; set; }
+        public bool? GcConcurrent { get; set; }
+        public bool? GcServer { get; set; }
         public string? Error { get; set; }
     }
 }
