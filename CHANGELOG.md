@@ -4,14 +4,25 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-25
+
 ### Added
 - AI chat in every repository tab: the app logo sits on the bottom edge of the graph column (drag it along the edge) and opens a resizable chat card; the AI button in the toolbar opens it too. Ask follow-up questions, start a New Chat, and reopen earlier chats from the history list: chats are saved per repository.
 - AI submenus with Explain and Add to AI Chat on commits (one or several selected), branches, files, working changes and pull requests, and in the command palette. Add to AI Chat puts a reference chip in the chat without sending; quick actions (Review my changes, Write release notes, Summarize this branch, What could break?) ask about the chips.
 - Explain Conflict in the conflict editor, Ask AI on a failed operation's toast (sends git's output with credentials and secrets removed, without lines naming files your `.aiignore` keeps out) and Continue in Chat on the AI cards you apply from (commit messages, conflict suggestions, Suggest All, pull request descriptions), to ask more about the answer.
+- Upload an image (PNG, JPEG or SVG) as a tab's icon.
+- Full file mode of the diff marks added and removed lines over the scroller, so you can see where the changes are in a long file.
+- The Histq logo sits at the leading edge of the toolbar's header row.
 - The chat can read the repository by itself to answer: git log, show, diff, blame and grep, and a file at a commit. It reads committed revisions only, never changes anything and skips files your `.aiignore` keeps out; each read shows as a row you can expand. Settings › AI › Let the chat read the repository (on by default) turns it off.
 
 ### Changed
+- The diff action panel hugs its buttons and Checkout is a round icon button.
 - Explain commit and Explain working changes answer in the chat instead of a card, so you can ask follow-up questions.
+
+### Fixed
+- Shift-click on the graph selects a range within the checked-out branch's commits only.
+- Copy Relative Path sits next to Copy Full Path in the file menus.
+- A worktree box stays clear of the tab group line, and the selected tab's outline lines up with it.
 
 ## [0.4.0] - 2026-11-25
 
