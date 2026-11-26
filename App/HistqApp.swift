@@ -277,7 +277,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? await Task.sleep(for: .milliseconds(50))
         }
         guard let model = target()?.model else { return }
+        if let typed = AppState.launchFlag("-HistqPaletteType") {
+            // Lets the launch's last frames go by, so the opening is not timed against them.
+            try? await Task.sleep(for: .seconds(1))
+            await paletteProbe("open") { model.openPalette(query: query) }
+            guard let palette = model.palette else { return }
+            for count in 1...max(typed.count, 1) {
+                await paletteProbe("key \(count)") { palette.query = String(typed.prefix(count)) }
+            }
+            // Closed and opened again: the later openings, as a user's every ⌘P after the first.
+            for round in 2...4 {
+                model.closePalette()
+                try? await Task.sleep(for: .milliseconds(500))
+                await paletteProbe("open \(round)") { model.openPalette(query: query) }
+            }
+            RepoMenus.debugLog("palette typed \(typed)")
+            return
+        }
         model.openPalette(query: query)
+        // `-HistqPaletteDown "<n>[ <text>]"`: Down pressed n times in the field, then `text` typed (one key event every
+        // 80 ms), for a shot of where the highlighted row scrolled.
+        if let spec = AppState.launchFlag("-HistqPaletteDown"), let window = target()?.window {
+            let parts = spec.split(separator: " ", maxSplits: 1)
+            let downs = parts.first.flatMap { Int($0) } ?? 0
+            let keys = Array(repeating: ("\u{F701}", UInt16(125)), count: downs)
+                + (parts.count > 1 ? parts[1].map { (String($0), UInt16(0)) } : [])
+            try? await Task.sleep(for: .milliseconds(500))
+            for (characters, keyCode) in keys {
+                for type in [NSEvent.EventType.keyDown, .keyUp] {
+                    guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil,
+                                                       characters: characters, charactersIgnoringModifiers: characters,
+                                                       isARepeat: false, keyCode: keyCode) else { continue }
+                    window.sendEvent(event)
+                }
+                try? await Task.sleep(for: .milliseconds(80))
+            }
+            RepoMenus.debugLog("palette down \(spec)")
+        }
         guard ProcessInfo.processInfo.arguments.contains("-HistqPaletteRun"), let palette = model.palette else { return }
         for _ in 0..<250 {
             if palette.isRankFresh { break }
@@ -294,6 +331,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         while session?.running.isEmpty == false { try? await Task.sleep(for: .milliseconds(50)) }
         RepoMenus.debugLog(session?.failure.map { "fail palette \(item.title): \($0.message)" }
             ?? "ok palette \(item.title)")
+    }
+
+    /// DEBUG `-HistqPaletteType "<text>"`: runs `action`, then ticks every 5 ms on the main actor for 200 ms and logs
+    /// `palette-frame <label> max=<ms> over16=<ms>`: the largest gap between two ticks and the sum of the gaps over
+    /// 16 ms (the main thread's holds), as `tabWalkSelect` does for a tab switch.
+    private func paletteProbe(_ label: String, _ action: () -> Void) async {
+        let start = ContinuousClock.now
+        var last = start
+        var longest = Duration.zero
+        var over16 = Duration.zero
+        action()
+        while last - start < .milliseconds(200) {
+            try? await Task.sleep(for: .milliseconds(5))
+            let now = ContinuousClock.now
+            let gap = now - last
+            longest = max(longest, gap)
+            if gap > .milliseconds(16) { over16 += gap }
+            last = now
+        }
+        let ms: (Duration) -> String = { String(format: "%.1f", Double($0 / .microseconds(1)) / 1000) }
+        UITiming.palette("frame \(label) max=\(ms(longest)) over16=\(ms(over16))")
     }
     #endif
 

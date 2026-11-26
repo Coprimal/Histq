@@ -35,12 +35,18 @@ final class CommandPaletteModel {
     @ObservationIgnored private let actions: [Int: @MainActor () -> Void]
     @ObservationIgnored private var rankTask: Task<Void, Never>?
 
-    /// Ranks `snapshot` for `query` at once (off the main actor).
+    /// Ranks `snapshot` for `query` at once (off the main actor). An empty query takes the first rows here, so they
+    /// show in the palette's first frame.
     init(snapshot: PaletteSnapshot, query: String = "") {
         items = snapshot.items
         actions = snapshot.actions
         self.query = query
-        schedule()
+        if FuzzyRank.keywords(in: query).isEmpty {
+            ranked = Array(items.prefix(Self.limit))
+            rankedGeneration = generation
+        } else {
+            schedule()
+        }
     }
 
     /// The row's action, when Return or a click may run it: an enabled row of the current query's results (never one
@@ -58,18 +64,27 @@ final class CommandPaletteModel {
         let query = query
         let limit = Self.limit
         rankTask?.cancel()
+        let start = DispatchTime.now().uptimeNanoseconds
         rankTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let indices = FuzzyRank.rank(items.map(\.searchKeys), query: query, limit: limit)
+            var steps = UITiming.Steps()
+            let keys = items.map(\.searchKeys)
+            steps.lap("keys")
+            let indices = FuzzyRank.rank(keys, query: query, limit: limit)
+            steps.lap("rank")
             guard !Task.isCancelled else { return }
             let ranked = indices.map { items[$0] }
-            await self?.adopt(ranked, generation: generation)
+            await self?.adopt(ranked, generation: generation, query: query, start: start, steps: steps)
         }
     }
 
-    private func adopt(_ ranked: [PaletteItem], generation: Int) {
+    private func adopt(_ ranked: [PaletteItem], generation: Int, query: String, start: UInt64,
+                       steps: UITiming.Steps)
+    {
         guard generation == self.generation else { return }
         self.ranked = ranked
         rankedGeneration = generation
+        UITiming.palette("rank \"\(query)\" rows=\(items.count) \(steps.description) adopt="
+            + String(format: "%.1f", Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000))
     }
 
     deinit {

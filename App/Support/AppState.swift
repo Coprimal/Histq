@@ -541,6 +541,13 @@ enum UITiming {
         record("file-load", detail())
         #endif
     }
+    /// The command palette's costs: `palette snapshot rows=<n> lag=<ms> <step>=<ms> …` as it opens (lag: from the
+    /// key event to `openPalette`), `palette rank <query> rows=<n> keys=<ms> rank=<ms> adopt=<ms>` per query.
+    static func palette(_ detail: @autoclosure () -> String) {
+        #if DEBUG || HISTQ_PERF
+        record("palette", detail())
+        #endif
+    }
     /// A new id for an operation's `op-*` lines, unique across tabs (the first is 1).
     @MainActor static func nextOpID() -> Int {
         lastOpID &+= 1

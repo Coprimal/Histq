@@ -1,7 +1,8 @@
 // The command palette over the window (ported from Dblore's `CommandPaletteView`): a scrim, and a bg_card container
 // near the top with its two parts, the search capsule and the results card. It starts fading in (`ModalFade`) in the
-// frame of ⌘K or the click that opens it; the rows follow once ranked. Up and Down move the highlight, Return or a
-// click runs the row; Escape or a click on the scrim closes it and gives the focus back to the view that had it.
+// frame of ⌘K or the click that opens it, with its first rows; a query's rows follow once ranked. Up and Down move the
+// highlight, Return or a click runs the row; Escape or a click on the scrim closes it and gives the focus back to the
+// view that had it.
 import AppKit
 import SwiftUI
 
@@ -75,6 +76,10 @@ struct CommandPaletteView: View {
         .onExitCommand { model.closePalette() }
         .onAppear {
             UITiming.placeholder("palette")
+            if palette.isRankFresh {
+                loggedContent = true
+                UITiming.content("palette \(palette.ranked.count)")
+            }
             openedTab = model.selectedTabID
             if let responder = NSApp.keyWindow?.firstResponder as? NSView,
                !((responder as? NSTextView)?.isFieldEditor ?? false)
@@ -148,8 +153,10 @@ struct CommandPaletteView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, minHeight: 120)
                 } else {
-                    // Not lazy: at most 50 rows, and `scrollTo` lands short on rows a lazy stack has not laid out.
-                    VStack(alignment: .leading, spacing: 2) {
+                    // Lazy: only the ~12 rows in view are built (all 50 held the main thread 40-80 ms per opening and
+                    // up to 50 ms per keystroke). Up and Down move one row, so `scrollTo` always aims at a row next
+                    // to the ones laid out.
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(sections) { section in
                             Text(section.title)
                                 .font(.settingsCaption)

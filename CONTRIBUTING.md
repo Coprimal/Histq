@@ -317,6 +317,8 @@ state. Outcomes go to `timing.log` or `operations.txt` in the state dir. Exact b
 | `-HistqDoubleClick toolbar\|toolbargap\|tabrow` | Double-clicks that window row; logs `click`, `dblclick` and `zoom`. |
 | `-HistqToolbarFrames YES` | Logs the repo and branch dropdowns' frames (`toolbar`). |
 | `-HistqOpenPalette "<query>"` / `-HistqPaletteRun` | Opens the command palette with that query; runs its first row. |
+| `-HistqPaletteType "<text>"` (with `-HistqOpenPalette`) | Opens the palette, types `<text>` one letter at a time, then closes and opens it 3 more times; logs `palette snapshot`, `palette rank` and `palette frame <step> max=<ms> over16=<ms>` (the main thread's holds) to `timing.log`. Not with `-HistqPaletteDown` or `-HistqPaletteRun`. |
+| `-HistqPaletteDown "<n>[ <text>]"` (with `-HistqOpenPalette`) | Presses Down `n` times in the palette, then types `text`, for a shot of the scrolled highlight. |
 | `-HistqFileSearch "<query>"` | Types that query in the File History…, Blame… or Edit File… modal when it opens (`-HistqOpenPalette "File History" -HistqPaletteRun`). |
 | `-HistqFileSearchPick YES` | With `-HistqFileSearch`, picks the first ranked row once the files are read, as Return does; logs `filesearch pick <path>` to `operations.txt`, or `filesearch pick: no row for <query>`. |
 | `-HistqOpenTerminal YES` | Opens the terminal drawer with each repository tab and starts its shell. |

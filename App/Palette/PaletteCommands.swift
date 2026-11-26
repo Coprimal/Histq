@@ -86,12 +86,14 @@ struct PaletteSnapshot {
 
 @MainActor
 enum PaletteCommands {
-    /// The window's rows now. Repo rows only while a repo tab shows (`actionSession`, as the toolbar's buttons).
-    static func snapshot(for model: WindowModel) -> PaletteSnapshot {
+    /// The window's rows now. Repo rows only while a repo tab shows (`actionSession`, as the toolbar's buttons). Each
+    /// part's time goes to `steps` (DEBUG and `HISTQ_PERF` timing lines).
+    static func snapshot(for model: WindowModel, steps: inout UITiming.Steps) -> PaletteSnapshot {
         var snapshot = PaletteSnapshot()
         let session = model.actionSession
         if let session {
             repository(session, into: &snapshot)
+            steps.lap("repo")
             // A search of the tab's files; the pick opens its history or blame as File History and Blame do, or the
             // file editor.
             if let tabID = model.selectedTabID {
@@ -104,11 +106,14 @@ enum PaletteCommands {
                 }
             }
             checkouts(session, into: &snapshot)
+            steps.lap("checkout")
         }
         tabs(model, into: &snapshot)
         app(model, into: &snapshot)
         settings(into: &snapshot)
+        steps.lap("app")
         if let session { operations(session, into: &snapshot) }
+        steps.lap("ops")
         return snapshot
     }
 

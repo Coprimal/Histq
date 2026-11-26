@@ -2026,7 +2026,13 @@ final class WindowModel {
         // onboarding, its tour included (where `isShowingModal` is false).
         guard modal == nil, !isSettingsOpen, actionSession?.hasModal != true, !isOnboarding else { return }
         UITiming.select("palette")
-        palette = CommandPaletteModel(snapshot: PaletteCommands.snapshot(for: self), query: query)
+        let event = NSApp.currentEvent
+        var steps = UITiming.Steps()
+        let snapshot = PaletteCommands.snapshot(for: self, steps: &steps)
+        UITiming.palette("snapshot rows=\(snapshot.items.count) lag="
+            + String(format: "%.1f", event.map { (ProcessInfo.processInfo.systemUptime - $0.timestamp) * 1000 } ?? -1)
+            + " " + steps.description)
+        palette = CommandPaletteModel(snapshot: snapshot, query: query)
     }
 
     /// The palette, Settings, a modal or an onboarding card shows: `MainView` blurs and disables the content behind it.
