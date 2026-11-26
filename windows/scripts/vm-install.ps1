@@ -1,0 +1,172 @@
+<#
+.SYNOPSIS
+    Installs a CI build of Histq in the Windows QA VM (Windows PowerShell 5.1).
+
+.DESCRIPTION
+    Picks the app folder for this machine's architecture from a downloaded CI
+    artifact, stops any running Histq, copies the app to a local folder
+    (Z: is a network zone and elevated shells may not see it), unblocks the
+    files and optionally starts Histq.exe.
+
+.PARAMETER Folder
+    The downloaded artifact folder. Either a per-arch artifact that contains
+    app\Histq.exe, or a folder that contains win-arm64\app and/or win-x64\app.
+
+.PARAMETER Launch
+    Start Histq.exe after installing. Without -Wait the app is started through
+    explorer.exe, which hands the launch to the shell, and the new process id is
+    printed. Why: the VM tool runs each command in a job and kills the whole
+    process tree when the command returns, which ends a Start-Process child at
+    once. A process created through WMI (Win32_Process.Create) lands on a
+    non-interactive desktop, so its window never shows, and a scheduled-task
+    launch shows the window but renders no XAML text. With -Wait the caller
+    waits, so the app is a normal child process.
+
+.PARAMETER AppArgs
+    Alias -Args. Arguments passed to Histq.exe. A non-empty list implies -Launch
+    and needs -Wait (explorer.exe cannot pass arguments): run vm-install with
+    -Wait inside a long-timeout VM command. The values are never printed (they
+    may hold paths of QA files), only their count.
+
+.PARAMETER Wait
+    Wait for Histq to exit, print its exit code and exit with that code. The app
+    runs as a child of this script (see -Launch).
+
+.PARAMETER Dest
+    Where the app is copied. Default: C:\HistqQA\builds\<leaf name of -Folder>.
+    An existing copy there is replaced. It must not be -Folder, lie inside it or
+    contain it.
+
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File Z:\Downloads\Histq-win\<RUN>\vm-install.ps1 -Folder Z:\Downloads\Histq-win\<RUN> -Launch
+
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "& 'Z:\Downloads\Histq-win\<RUN>\vm-install.ps1' -Folder 'Z:\Downloads\Histq-win\<RUN>' -Args '-HistqStateDir','C:\HistqQA\state\probe' -Wait"
+
+    Use -Command (not -File) to pass app arguments: under -File, a value such as
+    -HistqStateDir is read as a parameter name and a,b stays one string.
+#>
+param(
+    [string]$Folder,
+    [switch]$Launch,
+    [Alias('Args')][string[]]$AppArgs = @(),
+    [switch]$Wait,
+    [string]$Dest
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+function Get-Arch {
+    # An emulated shell reports its own arch; PROCESSOR_ARCHITEW6432 then holds the machine's.
+    $machine = $env:PROCESSOR_ARCHITEW6432
+    if (-not $machine) { $machine = $env:PROCESSOR_ARCHITECTURE }
+    switch ($machine) {
+        'ARM64' { return 'arm64' }
+        'AMD64' { return 'x64' }
+        default { throw "Unsupported processor architecture '$machine' (expected ARM64 or AMD64)." }
+    }
+}
+
+function Find-AppFolder {
+    $flat = Join-Path $Folder 'app'
+    if (Test-Path -LiteralPath (Join-Path $flat 'Histq.exe') -PathType Leaf) {
+        return $flat
+    }
+    $arch = Get-Arch
+    $perArch = Join-Path $Folder "win-$arch\app"
+    if (Test-Path -LiteralPath (Join-Path $perArch 'Histq.exe') -PathType Leaf) {
+        return $perArch
+    }
+    throw "Histq.exe not found for $arch under '$Folder' (looked in '$flat' and '$perArch')."
+}
+
+try {
+    if (-not $Folder) {
+        throw 'Pass -Folder (a CI app folder).'
+    }
+    if ($AppArgs.Count -gt 0 -and -not $Wait) {
+        throw 'App arguments need -Wait: the VM tool kills child processes when the command returns. Run vm-install with -Wait inside a long-timeout vmpal_exec call.'
+    }
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) {
+        throw "Folder '$Folder' is not reachable from this session (an elevated session may not see the Z: drive). Copy the folder to C:\HistqQA\incoming\<run> first and pass that path."
+    }
+    if (-not $Dest) {
+        $Dest = Join-Path 'C:\HistqQA\builds' (Get-Item -LiteralPath $Folder).Name
+    }
+
+    # $Dest is deleted and replaced below: it must not be $Folder, inside it, or contain it.
+    $folderFull = [IO.Path]::GetFullPath((Get-Item -LiteralPath $Folder).FullName).TrimEnd('\', '/')
+    $destFull = [IO.Path]::GetFullPath(
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dest)).TrimEnd('\', '/')
+    $ignoreCase = [StringComparison]::OrdinalIgnoreCase
+    if ($destFull.Equals($folderFull, $ignoreCase) -or
+        $destFull.StartsWith($folderFull + '\', $ignoreCase) -or
+        $folderFull.StartsWith($destFull + '\', $ignoreCase)) {
+        throw "Dest '$destFull' overlaps Folder '$folderFull' and would delete the build before copying it. Pass -Dest elsewhere."
+    }
+
+    $appDir = Find-AppFolder
+
+    Get-Process Histq -ErrorAction SilentlyContinue | Stop-Process -Force
+
+    $parent = Split-Path -Parent $Dest
+    if ($parent) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $Dest) {
+        Remove-Item -LiteralPath $Dest -Recurse -Force
+    }
+    Copy-Item -LiteralPath $appDir -Destination $Dest -Recurse
+    Get-ChildItem -LiteralPath $Dest -Recurse -File | Unblock-File
+    Write-Host "Installed $appDir to $Dest."
+
+    if (-not ($Launch -or $AppArgs.Count -gt 0)) {
+        exit 0
+    }
+
+    $exe = Join-Path $Dest 'Histq.exe'
+
+    if (-not $Wait) {
+        # Through the shell, outside this job (see -Launch). Any earlier Histq was stopped above;
+        # the margin covers clock granularity.
+        $since = (Get-Date).AddSeconds(-1)
+        # explorer.exe exits with 1 even when the launch works: its exit code is ignored.
+        & "$env:WINDIR\explorer.exe" $exe
+        $started = $null
+        $deadline = (Get-Date).AddSeconds(10)
+        while (-not $started -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+            $started = Get-Process Histq -ErrorAction SilentlyContinue |
+                Where-Object { $_.StartTime -ge $since } |
+                Select-Object -First 1
+        }
+        if (-not $started) {
+            throw "Histq did not start within 10 s (launched through explorer.exe)."
+        }
+        Write-Host "Launched $exe, process id $($started.Id)."
+        exit 0
+    }
+
+    $startArgs = @{
+        FilePath         = $exe
+        WorkingDirectory = $Dest
+        PassThru         = $true
+    }
+    if ($AppArgs.Count -gt 0) {
+        $startArgs['ArgumentList'] = $AppArgs
+    }
+    $proc = Start-Process @startArgs
+    # Cache the handle now; without it ExitCode can be empty after the process exits.
+    $null = $proc.Handle
+    Write-Host "Launched $exe with $($AppArgs.Count) argument(s)."
+
+    $proc.WaitForExit()
+    $code = $proc.ExitCode
+    Write-Host "Histq exited with code $code"
+    exit $code
+}
+catch {
+    [Console]::Error.WriteLine("vm-install: $($_.Exception.Message)")
+    exit 1
+}
