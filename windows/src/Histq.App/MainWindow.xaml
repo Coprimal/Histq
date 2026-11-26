@@ -2,13 +2,86 @@
 <Window
     x:Class="Histq.App.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:graph="using:Histq.App.Graph"
+    xmlns:shell="using:Histq.App.Shell">
     <!-- No Background: the system backdrop shows through, except in the solid fallback (MainWindow.xaml.cs). -->
     <Grid x:Name="RootGrid">
-        <TextBlock
-            x:Name="VersionText"
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
-            Style="{StaticResource BodyTextBlockStyle}" />
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Page sheet joined to the selected tab (design §1.2, §3.2): one figure from Shell/SheetTabShape, white at
+             0.09, behind the title bar and the sheet content. Geometry in RootGrid coordinates, rebuilt in code. -->
+        <Path
+            x:Name="SheetPath"
+            Grid.RowSpan="2"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top"
+            Fill="#17FFFFFF"
+            IsHitTestVisible="False"
+            Stretch="None" />
+
+        <!-- Title bar = tab row (layout B, design header-and-tab-row.md §1), 48 epx = TitleBarHeightOption.Tall.
+             Only the elements Shell/TitleBarRegions lists take input; the rest is caption (drag, double-click). -->
+        <Grid x:Name="AppTitleBar" Height="48">
+            <Grid.ColumnDefinitions>
+                <!-- Inset columns sit under the caption buttons; TitleBarRegions sizes them from LeftInset/RightInset. -->
+                <ColumnDefinition x:Name="LeftInsetColumn" Width="0" />
+                <ColumnDefinition Width="Auto" />
+                <!-- Star column: it absorbs a narrow window, so the drag column always stays on screen. -->
+                <ColumnDefinition Width="*" />
+                <!-- Free drag area, never narrower than 48 epx. -->
+                <ColumnDefinition x:Name="DragColumn" Width="Auto" MinWidth="48" />
+                <ColumnDefinition x:Name="RightInsetColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Placeholder logo (app menu in phase 8): 32x32 in the tabs' 36 epx band, so the top 12 epx still drag. -->
+            <Button
+                x:Name="LogoButton"
+                Grid.Column="1"
+                Width="32"
+                Height="32"
+                MinWidth="0"
+                MinHeight="0"
+                Margin="8,0,8,2"
+                Padding="0"
+                VerticalAlignment="Bottom"
+                AutomationProperties.Name="Histq menu">
+                <FontIcon FontSize="16" Glyph="&#xE700;" />
+            </Button>
+
+            <!-- Tab strip host: placeholder tabs (phase 9 makes the real row). Tabs are 36 epx tall on the row's
+                 bottom edge; the 12 epx above them always drag the window. -->
+            <Border
+                x:Name="TabStripHost"
+                Grid.Column="2"
+                Height="36"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Bottom">
+                <shell:SpikeTabStrip x:Name="TabStrip" />
+            </Border>
+        </Grid>
+
+        <!-- Sheet area (SheetPath draws the sheet): the graph inside the sheet's 8 epx inset, 8 more from its edges so
+             it clears the 22 epx corners, and the version in a small footer under it. -->
+        <Grid x:Name="SheetArea" Grid.Row="1" Margin="8,0,8,8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <graph:GraphCanvas
+                x:Name="CommitGraph"
+                Margin="8,8,8,0"
+                AutomationProperties.Name="Commit graph" />
+            <TextBlock
+                x:Name="VersionText"
+                Grid.Row="1"
+                Margin="16,4,16,6"
+                HorizontalAlignment="Right"
+                FontSize="11"
+                Opacity="0.5" />
+        </Grid>
     </Grid>
 </Window>
