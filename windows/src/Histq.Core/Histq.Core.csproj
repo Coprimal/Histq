@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Portable: no Windows API, so it builds and tests on the Mac. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Histq.Core</RootNamespace>
+    <AssemblyName>Histq.Core</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Histq.Core.Tests" />
+  </ItemGroup>
+</Project>

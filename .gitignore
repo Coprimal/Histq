@@ -35,3 +35,6 @@ sparkle_private_key*
 website/.hallmark/
 
 Config/Secrets.xcconfig
+
+windows/**/bin/
+windows/**/obj/

@@ -1,0 +1,94 @@
+name: Windows
+
+# Tests the Windows port (windows/) on x64 and ARM64: the Histq.Core tests, which build their fixture repos with
+# scripts/make-fixtures.sh through the runner's Git for Windows (Git Bash).
+# No signing, no certificate and no secrets.
+
+on:
+  push:
+    branches: [main, windows-port]
+    paths:
+      - 'windows/**'
+      - 'scripts/make-fixtures.sh'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - 'scripts/make-fixtures.sh'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'App build configuration (used by the package job from phase 2)'
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: Debug
+
+permissions:
+  contents: read
+
+# The event name keeps a workflow_dispatch run and a push run on the same ref from cancelling each other.
+concurrency:
+  group: windows-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      # Before checkout: the repo has no .gitattributes, so without this the scripts get CRLF and Git Bash fails on them.
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          # Pinned, not global-json-file: on SDK release days the resolver picks a version whose files are not on
+          # the download feed yet (10.0.403 on 2026-10-25), which fails every job. global.json still rolls forward.
+          dotnet-version: 10.0.402
+
+      - name: Git diagnostics
+        run: |
+          git --version
+          where.exe git
+
+      # Run from windows/ so global.json applies.
+      - name: Test
+        working-directory: windows
+        run: dotnet test tests/Histq.Core.Tests/Histq.Core.Tests.csproj
+
+  # Same as test, on a native ARM64 runner (the QA VM is ARM64).
+  test-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          # Pinned, not global-json-file: on SDK release days the resolver picks a version whose files are not on
+          # the download feed yet (10.0.403 on 2026-10-25), which fails every job. global.json still rolls forward.
+          dotnet-version: 10.0.402
+
+      - name: Git diagnostics
+        run: |
+          "Runner: $env:RUNNER_ARCH, OS arch: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          git --version
+          where.exe git
+
+      - name: Test
+        working-directory: windows
+        run: dotnet test tests/Histq.Core.Tests/Histq.Core.Tests.csproj
