@@ -180,6 +180,11 @@ struct RepoLayoutView: View {
     @State private var columnsDrag: ColumnsWidths?
     /// Columns: the widths when that drag began.
     @State private var columnsDragStart: ColumnsWidths?
+    /// Settings › AI "Show AI features": the AI chat bubble is mounted only while it is on.
+    @AppStorage(PrefKey.aiShowFeatures.rawValue, store: Preferences.defaults)
+    private var showAIFeatures = true
+    /// Opens Settings › AI from the chat card.
+    @Environment(WindowModel.self) private var window
 
     private enum DividerSide { case sidebar, detail, diff }
 
@@ -218,6 +223,14 @@ struct RepoLayoutView: View {
         return preset == .focus || (isPullRequest && preset != .stacked)
     }
 
+    /// Classic and Focus: something in `panel2Overlays` is drawn over the whole graph, which is hidden under it.
+    /// Columns: the plain diff and a file history show in column 4, beside the graph.
+    private var graphCovered: Bool {
+        isColumns
+            ? session.openFile?.isConflict == true || session.openHosted != nil || columnsTool != nil
+            : session.openFile != nil || session.openHosted != nil || session.openTool != nil
+    }
+
     /// Stacked shows a file, pull request, issue or tool in its bottom pane.
     private var isStackedPaneOpen: Bool {
         isStacked && (session.openFile != nil || session.openHosted != nil || session.openTool != nil)
@@ -232,12 +245,41 @@ struct RepoLayoutView: View {
             VStack(spacing: SectionCardMetrics.spacing) {
                 panels(widths: widths, columns: columns, available: available, height: proxy.size.height)
             }
+            // Over all the panels, so the logo moves across the whole row and the card is clamped to its width.
+            .overlay(alignment: .bottom) {
+                if showAIFeatures {
+                    AIChatBubble(model: session.aiChat) { window.selectSettings(.ai) }
+                }
+            }
             .padding(RepoLayoutMetrics.inset)
         }
         .environment(\.textSize, textSize)
         // The tab's GitHub lists, for the PRs tab and the graph's PR badges.
         .background(GitHubDriver(session: session))
+        #if DEBUG
+        .onChange(of: session.aiChat.isGenerating) { _, generating in
+            if generating { debugCloseAfterExplain() }
+        }
+        #endif
     }
+
+    #if DEBUG
+    /// DEBUG `-HistqAI explain|explain-wip,close-tab|close-window`: closes the tab (another tab must stay open) or the
+    /// window right after the Explain click, before the chat sends its context, as Cmd-W would; ai.log must then show
+    /// no stub request. Stopping the chat is left to the close itself.
+    private func debugCloseAfterExplain() {
+        let closesTab = AIStub.takeChatOption("close-tab")
+        guard closesTab || AIStub.takeChatOption("close-window") else { return }
+        AIStub.log("close-\(closesTab ? "tab" : "window") chat \(AIStub.seamHook ?? "") generating "
+            + "\(session.aiChat.isGenerating)")
+        if closesTab {
+            guard let id = window.sessions.first(where: { $0.value === session })?.key else { return }
+            _ = window.closeTab(id: id)
+        } else {
+            window.closeWindow()
+        }
+    }
+    #endif
 
     /// Panel 1's width range: the sidebar's, or the file history's (wider).
     private var panel1Range: ClosedRange<CGFloat> {
@@ -351,10 +393,7 @@ struct RepoLayoutView: View {
         ZStack {
             // The graph stays mounted under an open file, so Esc brings it back as it was (scroll, selection)
             // and opening a file costs no teardown in the click's frame.
-            // Columns: the plain diff and a file history show in column 4, beside the graph.
-            let fileOpen = isColumns
-                ? session.openFile?.isConflict == true || session.openHosted != nil || columnsTool != nil
-                : session.openFile != nil || session.openHosted != nil || session.openTool != nil
+            let fileOpen = graphCovered
             CommitListPanel(session: session)
                 .opacity(fileOpen ? 0 : 1)
                 .allowsHitTesting(!fileOpen)
@@ -640,9 +679,16 @@ private struct CommitListPanel: View {
                           bottomInset: session.graphSearch.isOpen ? GraphSearchBar.overlayHeight : 0,
                           onTable: { [search = session.graphSearch] table in search.table = table },
                           hiddenColumns: hiddenColumns,
-                          onEscape: { [search = session.graphSearch] in
-                              guard search.isOpen else { return false }
-                              search.close()
+                          // The search bar first; else the expanded AI chat card (only while the bubble is mounted and
+                          // not hidden).
+                          onEscape: { [session] in
+                              if session.graphSearch.isOpen {
+                                  session.graphSearch.close()
+                                  return true
+                              }
+                              guard Preferences.defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue),
+                                    !AISetup.shared.chatBubbleHidden, session.aiChat.isExpanded else { return false }
+                              session.aiChat.isExpanded = false
                               return true
                           },
                           scrollPosition: session.graphScroll,

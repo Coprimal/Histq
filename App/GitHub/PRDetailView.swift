@@ -2233,6 +2233,7 @@ private struct PRHeaderCard: View {
                         if layout.reviewButtonsInHeader, value.isOpen {
                             PRHeaderReviewButtons(session: session, detail: value)
                         }
+                        aiMenu(value.pull)
                         PRReloadButton(reloading: session.pullDetail.reloading,
                                        noun: kind.pullRequestNoun.lowercased()) { [session] in
                             session.pullDetail.reload(github: session.github)
@@ -2289,6 +2290,29 @@ private struct PRHeaderCard: View {
             // The card's width, never its rows': a row wider than the card neither widens it nor hides the switch.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: Bool.self) { $0.size.width < Self.narrowWidth } action: { narrow = $0 }
+        }
+    }
+
+    /// The pull request's "AI" menu (`RepoMenus.aiPullRequest`): Explain and Add to AI Chat; nothing while AI features
+    /// are hidden.
+    @ViewBuilder private func aiMenu(_ pull: HostedPullRequest) -> some View {
+        if let ai = RepoMenus.aiPullRequest(pull, session: session).last {
+            Menu {
+                MenuEntriesView(entries: ai.children)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "sparkles")
+                        .accessibilityHidden(true)
+                    Text("AI")
+                    MenuChevron()
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(RowTextButtonStyle(formRow: true))
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Explain the \(session.github.kind.pullRequestNoun.lowercased()) or add it to the AI chat")
+            .accessibilityLabel("AI")
         }
     }
 

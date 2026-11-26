@@ -1,5 +1,5 @@
-// Text-only streaming chat with one cloud provider, and its model list (ported from Dblore's `AIChatClient`,
-// `AIClientFactory` and `AIRedirectGuard`, without tools, OAuth or local models). The `URLSession` is injected, so
+// Streaming chat with one cloud provider (text, or events with native tool calls), and its model list (ported from
+// Dblore's `AIChatClient`, `AIClientFactory` and `AIRedirectGuard`, without OAuth or local models). The `URLSession` is injected, so
 // tests serve inline SSE and JSON through a stub `URLProtocol` and never reach the network.
 //
 // The API key is a secret: it only ever goes in a request header to the provider's own host. A built-in provider
@@ -8,14 +8,33 @@
 // `print`, `dump` and `String(reflecting:)` of a client show only its provider and host.
 import Foundation
 
+public enum AIContentBlock: Sendable, Equatable {
+    case text(String)
+    /// The model asks the app to run a tool.
+    case toolUse(AIToolCall)
+    /// The app's answer to the tool call with the same id.
+    case toolResult(AIToolResult)
+}
+
 public struct AIChatMessage: Sendable, Equatable {
     public enum Role: String, Sendable { case user, assistant }
     public let role: Role
-    public let text: String
+    public let blocks: [AIContentBlock]
+
+    public init(role: Role, blocks: [AIContentBlock]) {
+        self.role = role
+        self.blocks = blocks
+    }
 
     public init(role: Role, text: String) {
-        self.role = role
-        self.text = text
+        self.init(role: role, blocks: [.text(text)])
+    }
+
+    /// The text blocks joined, for wires and callers that only send text.
+    public var text: String {
+        blocks.reduce(into: "") { result, block in
+            if case .text(let text) = block { result += text }
+        }
     }
 }
 
@@ -26,13 +45,35 @@ public struct AIChatRequest: Sendable, Equatable {
     /// The answer's token cap. Anthropic requires one; the chat-completions wire only sends it to custom endpoints
     /// (see `AIProviderRequests.chatCompletions`).
     public var maxTokens: Int
+    /// Tools the model may call; empty sends no tools.
+    public var tools: [AIToolSpec]
 
-    public init(model: String, system: String, messages: [AIChatMessage], maxTokens: Int = 4096) {
+    public init(
+        model: String, system: String, messages: [AIChatMessage], maxTokens: Int = 4096, tools: [AIToolSpec] = []
+    ) {
         self.model = model
         self.system = system
         self.messages = messages
         self.maxTokens = maxTokens
+        self.tools = tools
     }
+}
+
+public enum AIStreamEvent: Sendable, Equatable {
+    case text(String)
+    /// A complete tool call (arguments fully assembled).
+    case toolCall(AIToolCall)
+    /// The model ended its turn.
+    case stop(AIStopReason)
+}
+
+/// Why the model ended its turn, normalized across wires.
+public enum AIStopReason: Sendable, Equatable {
+    case endTurn
+    case toolUse
+    case maxTokens
+    /// Any other provider value, kept as sent.
+    case other(String)
 }
 
 public enum AIClientError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -121,7 +162,32 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
             return AsyncThrowingStream { $0.finish(throwing: AIClientError.missingModel) }
         }
         let urlRequest = AIProviderRequests.make(request, provider: provider, baseURL: baseURL, apiKey: apiKey)
-        return Self.streamLines(urlRequest, session: session, parser: AISSEParser(wire: provider.wire), secret: apiKey)
+        return Self.streamLines(urlRequest, session: session, parser: AISSEParser(wire: provider.wire), secret: apiKey) {
+            if case .text(let text) = $0 { text } else { nil }
+        }
+    }
+
+    /// The answer as events: text pieces, complete tool calls (only to the names in `request.tools`; a refused call
+    /// fails the stream with `AIClientError.invalidResponse`) and one `.stop`: the provider's reason, or `.endTurn` at
+    /// `[DONE]` / `message_stop` when none arrived. A body that ends without `[DONE]` / `message_stop` and without a
+    /// provider reason (which `stream(_:)` accepts too) ends with no stop; the caller decides what that means. Errors
+    /// and cancellation behave as in `stream(_:)`; dropping the events stream cancels the request.
+    public func events(_ request: AIChatRequest) -> AsyncThrowingStream<AIStreamEvent, Error> {
+        var request = request
+        request.model = request.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.model.isEmpty else {
+            return AsyncThrowingStream { $0.finish(throwing: AIClientError.missingModel) }
+        }
+        let urlRequest = AIProviderRequests.make(request, provider: provider, baseURL: baseURL, apiKey: apiKey)
+        let parser = AISSEParser(wire: provider.wire, toolNames: Set(request.tools.map(\.name)))
+        return Self.streamLines(urlRequest, session: session, parser: parser, secret: apiKey) { delta in
+            switch delta {
+            case .text(let text): .text(text)
+            case .toolCall(let call): .toolCall(call)
+            case .stop(let reason): .stop(reason)
+            case .done: nil
+            }
+        }
     }
 
     /// The provider's model ids (`AIModelList.parse`), through the same redirect guard as `stream`. Errors are
@@ -156,10 +222,12 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
     }
 
     /// Streams an SSE response through `parser`, with the redirect guard. Iterates raw bytes and hands them to the
-    /// parser in line-sized chunks, because `AsyncBytes.lines` drops the blank lines that dispatch events.
-    static func streamLines(
-        _ request: URLRequest, session: URLSession, parser: AISSEParser, secret: String
-    ) -> AsyncThrowingStream<String, Error> {
+    /// parser in line-sized chunks, because `AsyncBytes.lines` drops the blank lines that dispatch events. `element`
+    /// maps each delta to what is yielded (nil skips it); `.done` finishes the stream.
+    static func streamLines<Element: Sendable>(
+        _ request: URLRequest, session: URLSession, parser: AISSEParser, secret: String,
+        element: @escaping @Sendable (AIStreamDelta) -> Element?
+    ) -> AsyncThrowingStream<Element, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -180,10 +248,10 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
                         chunk.append(byte)
                         // Hand over at each line end so text reaches the preview as soon as its event is whole.
                         guard byte == 0x0A || byte == 0x0D || chunk.count >= 16_384 else { continue }
-                        if yield(try parser.consume(chunk), to: continuation) { return }
+                        if yield(try parser.consume(chunk), as: element, to: continuation) { return }
                         chunk.removeAll(keepingCapacity: true)
                     }
-                    if yield(try parser.consume(chunk) + parser.finish(), to: continuation) { return }
+                    if yield(try parser.consume(chunk) + parser.finish(), as: element, to: continuation) { return }
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -195,7 +263,7 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
                     switch error {
                     case .provider(let message):
                         continuation.finish(throwing: AIClientError.provider(scrubbed(message, secret: secret)))
-                    case .lineTooLong:
+                    case .lineTooLong, .invalidToolCall:
                         continuation.finish(throwing: AIClientError.invalidResponse(error.description))
                     }
                 } catch let error as URLError {
@@ -210,18 +278,17 @@ public struct AIChatClient: Sendable, CustomStringConvertible, CustomDebugString
         }
     }
 
-    /// Yields the text deltas; returns true when a `.done` delta ended the stream (it is then finished).
-    private static func yield(
-        _ deltas: [AIStreamDelta], to continuation: AsyncThrowingStream<String, Error>.Continuation
+    /// Yields the mapped deltas; returns true when a `.done` delta ended the stream (it is then finished).
+    private static func yield<Element>(
+        _ deltas: [AIStreamDelta], as element: (AIStreamDelta) -> Element?,
+        to continuation: AsyncThrowingStream<Element, Error>.Continuation
     ) -> Bool {
         for delta in deltas {
-            switch delta {
-            case .text(let text):
-                continuation.yield(text)
-            case .done:
+            if delta == .done {
                 continuation.finish()
                 return true
             }
+            if let value = element(delta) { continuation.yield(value) }
         }
         return false
     }

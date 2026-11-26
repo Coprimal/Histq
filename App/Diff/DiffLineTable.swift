@@ -393,7 +393,7 @@ struct DiffLineTable: NSViewRepresentable {
         column.resizingMask = []
         table.addTableColumn(column)
 
-        let scroll = NSScrollView()
+        let scroll = DiffScrollView()
         scroll.documentView = table
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
@@ -402,6 +402,7 @@ struct DiffLineTable: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.isHidden = !tabIsShown
+        scroll.addRuler()
 
         context.coordinator.attach(table)
         onTable(table)
@@ -784,6 +785,117 @@ struct DiffLayout {
     }
 }
 
+/// The diff table's scroll view: it keeps the change ruler over its vertical scroller.
+final class DiffScrollView: NSScrollView {
+    let ruler = DiffChangeRuler()
+
+    /// Added once the scrollers are set, so the ruler sits above them.
+    func addRuler() {
+        addSubview(ruler)
+    }
+
+    override func tile() {
+        super.tile()
+        let width = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
+        ruler.frame = NSRect(x: bounds.maxX - width, y: 0, width: width, height: bounds.height)
+        ruler.refresh()
+    }
+}
+
+/// Full file mode's overview of the changes, as marks over the vertical scroller: green for added lines, red for
+/// removed ones, each where its lines sit in the whole file. A click (or a drag) off the scroller's knob brings that
+/// place to the middle; on the knob the scroller drags as usual.
+final class DiffChangeRuler: NSView {
+    struct Mark: Equatable {
+        let rows: ClosedRange<Int>
+        let added: Bool
+    }
+
+    /// Each run of added or removed rows; empty outside Full file mode.
+    var marks: [Mark] = [] {
+        didSet { if marks != oldValue { refresh() } }
+    }
+
+    private weak var observedTable: NSView?
+
+    override var isFlipped: Bool { true }
+
+    /// The runs of added and removed rows in `rows`.
+    static func marks(_ rows: [DiffTableRow]) -> [Mark] {
+        var marks: [Mark] = []
+        for (index, row) in rows.enumerated() {
+            guard case .single(let line) = row, line.kind == .added || line.kind == .removed else { continue }
+            let added = line.kind == .added
+            if let last = marks.last, last.added == added, last.rows.upperBound == index - 1 {
+                marks[marks.count - 1] = Mark(rows: last.rows.lowerBound...index, added: added)
+            } else {
+                marks.append(Mark(rows: index...index, added: added))
+            }
+        }
+        return marks
+    }
+
+    private var scrollView: NSScrollView? { superview as? NSScrollView }
+    private var table: NSTableView? { scrollView?.documentView as? NSTableView }
+
+    /// Shown only with marks and a file taller than the card; redrawn, and the table's height followed (wrapping and
+    /// threads change it).
+    func refresh() {
+        if let table, table !== observedTable {
+            if let observedTable {
+                NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification,
+                                                          object: observedTable)
+            }
+            NotificationCenter.default.addObserver(self, selector: #selector(tableResized),
+                                                   name: NSView.frameDidChangeNotification, object: table)
+            observedTable = table
+        }
+        let overflows = (table?.frame.height ?? 0) > (scrollView?.contentView.bounds.height ?? 0) + 1
+        isHidden = marks.isEmpty || !overflows
+        needsDisplay = true
+    }
+
+    @objc private func tableResized() { refresh() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let table else { return }
+        let total = table.frame.height
+        guard total > 0 else { return }
+        let scale = bounds.height / total
+        let lane = bounds.insetBy(dx: 3, dy: 0)
+        for mark in marks where mark.rows.upperBound < table.numberOfRows {
+            let top = table.rect(ofRow: mark.rows.lowerBound).minY * scale
+            let bottom = table.rect(ofRow: mark.rows.upperBound).maxY * scale
+            let rect = NSRect(x: lane.minX, y: top, width: lane.width, height: max(3, bottom - top))
+            guard rect.intersects(dirtyRect) else { continue }
+            (mark.added ? Palette.diffAddedSign : Palette.diffRemovedSign).withAlphaComponent(0.85).setFill()
+            rect.fill()
+        }
+    }
+
+    /// The scroller takes the clicks on its knob.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let scroller = scrollView?.verticalScroller, !scroller.isHidden else {
+            return super.hitTest(point)
+        }
+        let knob = scroller.convert(scroller.rect(for: .knob), to: superview)
+        return knob.contains(point) ? nil : super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) { center(at: event) }
+    override func mouseDragged(with event: NSEvent) { center(at: event) }
+
+    /// Scrolls the place under the pointer to the middle of the card.
+    private func center(at event: NSEvent) {
+        guard let scrollView, let table else { return }
+        let clip = scrollView.contentView
+        let y = convert(event.locationInWindow, from: nil).y / max(1, bounds.height) * table.frame.height
+        let origin = NSPoint(x: clip.bounds.minX, y: y - clip.bounds.height / 2)
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+        scrollView.reflectScrolledClipView(clip)
+    }
+}
+
 /// The diff table: its one column is as wide as the longest line or the card, whichever is wider (as wide as the card
 /// when the lines wrap or split). Esc asks to go back, ⌘C copies the selected lines, a right-click opens the
 /// selection's menu.
@@ -1118,6 +1230,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             let wasTyping = composerHasFocus()
             let typingInThread = focusedThreadBox()
             placeRows(view)
+            (table.enclosingScrollView as? DiffScrollView)?.ruler.marks =
+                view.mode == .full ? DiffChangeRuler.marks(rows) : []
             layout = DiffLayout(rows: view.section.rows(view.mode),
                                 oneGutter: [.untracked, .file].contains(view.section.side))
             heightsWidth = -1

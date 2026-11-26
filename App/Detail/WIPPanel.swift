@@ -781,7 +781,7 @@ private struct CommitBox: View {
             }
             .padding(.top, SectionCardMetrics.accessoryGap)
         } accessory: {
-            // AI (task 12.3): each opens the result card; nothing is sent before the click.
+            // AI: Explain opens the tab's AI chat, Generate Message the result card; nothing is sent before the click.
             HStack(spacing: 6) {
                 AIHookButton(title: "Explain", help: "Explain the uncommitted changes with AI",
                              unavailable: changeCount == 0 ? "No changes to explain" : nil, seam: "explain-wip",
@@ -934,6 +934,14 @@ private struct CommitBox: View {
                     // Set after: `failure` drops the action of a conflict ("unmerged files").
                     toast.action = OperationToast.Action(title: "Put Back Message") { [weak session] in
                         session?.commitDraft = draft
+                    }
+                    // As `report` (not on conflicts): git's error and the message as separate parts, each cut on
+                    // its own (`chatErrorContext`).
+                    let conflict = if case .conflict = error as? GitError { true } else { false }
+                    if !conflict {
+                        toast.askAI = { [weak session] in
+                            session?.askAIAboutFailure(title: title, message: text, commitMessage: sent)
+                        }
                     }
                     session.postToast(toast)
                 }

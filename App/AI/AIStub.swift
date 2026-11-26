@@ -3,12 +3,16 @@
 // a `URLSession` whose only protocol is `AIStubProtocol`, which answers every request itself and never passes one on
 // to the network: a canned SSE stream in the request's wire format (Anthropic Messages for `/messages`, chat
 // completions otherwise), sent in small chunks over about a second so the preview streams and Cancel can stop it. The
-// answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, an
-// explanation, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
-// prompt asks for one; a request without one (Test connection) gets "OK". A `GET …/models` (Load models) gets two
-// model ids, `stub-model-a` and `models/stub-model-b`. `error` answers HTTP 401 instead. Each chat request logs its
-// prompt's language rule (`language <name|default>`) and its data blocks' labels (`blocks [<label>, ...]`, never
-// their content).
+// answer carries the prompt's own boundary token (read from the request's system prompt): a commit message, a pull
+// request, or for a resolution side A's text then side B's with LF line breaks, after a reason block when the
+// prompt asks for one; a chat request (the chat system prompt, no boundary) gets a short Markdown answer without
+// markers (a heading, a list and a fenced code block); any other request without one (Test connection) gets "OK".
+// A chat request that offers tools (a `tools` array, or the text-tool section in its system prompt) and holds no tool
+// result yet gets one `git_log` call (`{"max_count":3}`) instead, on its wire (chat-completions `tool_calls`,
+// Anthropic `tool_use`, or a fenced ```tool block), and logs `stub tool-call git_log`; the next request gets the answer.
+// A `GET …/models` (Load models) gets two model ids, `stub-model-a` and `models/stub-model-b`. `error` answers
+// HTTP 401 instead. Each chat request logs its prompt's language rule (`language <name|default>`) and its data blocks'
+// labels (`blocks [<label>, ...]`, never their content).
 // With `-HistqKeychain memory`, every built-in provider gets a fake key in the in-memory Keychain, so the AI buttons
 // are enabled.
 //
@@ -29,6 +33,11 @@
 // soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
 // reads its content (Suggest All: while the batch runs);
 // `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
+// `hide-badge` clicks nothing: the AI chat bubble shows its x badge without a hover (a background shot can't hover).
+// `explain` and `explain-wip` open in the tab's chat: there `cancel` stops the turn as soon as the first words show
+// (`AIChatModel.stop()`), and `close-tab` / `close-window` close the tab or window right after the click, before the
+// context is sent. `-HistqAIChatSend <text>` then sends `text` as a follow-up once the first chat answer finishes
+// (`chat-send` in ai.log, `ai chat-send` in timing.log); each chat turn logs `chat finished` or `chat failed`.
 // `generate` waits until the refs are read (the branch name). A hook whose button is disabled for a reason of its own
 // (AI set up) logs `unavailable <hook>: <reason>` once per reason. Evidence goes to `<stateDir>/ai.log` (never a key).
 import Foundation
@@ -98,6 +107,31 @@ enum AIStub {
         log("unavailable \(hook): \(reason)")
     }
 
+    /// `explain`, `explain-wip` and `explain-conflict` open in the tab's chat (`RepoSession.explainInChat`,
+    /// `explainConflictInChat`), not in the result card.
+    private static var hookOpensChat: Bool {
+        seamHook == "explain" || seamHook == "explain-wip" || seamHook == "explain-conflict"
+    }
+
+    @MainActor private static var chatOptionsTaken: Set<String> = []
+
+    /// `cancel`, `close-tab` or `close-window` of a chat hook: true once per launch, after its click.
+    @MainActor
+    static func takeChatOption(_ option: String) -> Bool {
+        guard seamTaken, hookOpensChat, seamOptions.contains(option) else { return false }
+        return chatOptionsTaken.insert(option).inserted
+    }
+
+    /// `-HistqAIChatSend <text>` (stub runs only): the follow-up the chat sends once its first answer finishes.
+    @MainActor private static var chatSendText: String? = isEnabled ? AppState.launchFlag("-HistqAIChatSend") : nil
+
+    /// The `-HistqAIChatSend` text, once per launch.
+    @MainActor
+    static func takeChatSend() -> String? {
+        defer { chatSendText = nil }
+        return chatSendText
+    }
+
     @MainActor private static var regenerateTaken = false
 
     /// `-HistqAI <hook>,regenerate`: true once per launch, on the first finish (the card is re-created per run).
@@ -157,7 +191,12 @@ enum AIStub {
     static func replyText(body: Data) -> String {
         guard let parts = prompt(body: body) else { return "OK" }
         let (system, user) = (parts.system, parts.user)
-        guard let token = boundary(system: system) else { return "OK" }
+        guard let token = boundary(system: system) else {
+            guard system.hasPrefix(chatOpening) else { return "OK" }
+            return customAnswer?.answer ?? "# DEBUG AI stub\n\nThis chat answer was written by the **DEBUG AI stub** "
+                + "(-HistqAIStub).\n\n- No provider was called.\n- The last message held \(user.utf8.count) bytes.\n\n"
+                + "```sh\ngit log --oneline -3\n```\n"
+        }
         var answer: String
         if system.contains("Write a git commit message") {
             answer = "Add a canned change from the AI stub\n\nWritten by the DEBUG AI stub (-HistqAIStub); no "
@@ -165,14 +204,12 @@ enum AIStub {
         } else if system.contains("Write a pull request title") {
             answer = "Add a canned pull request from the AI stub\n\n## Summary\n\nWritten by the **DEBUG AI stub** "
                 + "(-HistqAIStub); no provider was called.\n\n- The prompt held \(user.utf8.count) bytes.\n"
-        } else if system.contains("Resolve one git merge conflict") {
-            // LF only, as models usually answer: Apply must convert it to a CRLF file's line breaks.
+        } else {
+            // A resolution, the only other marker prompt ("Resolve one git merge conflict"). LF only, as models
+            // usually answer: Apply must convert it to a CRLF file's line breaks.
             answer = (terminated(block(in: user, token: token, label: "A: ours"))
                 + terminated(block(in: user, token: token, label: "B: theirs")))
                 .replacingOccurrences(of: "\r\n", with: "\n")
-        } else {
-            answer = "This change was explained by the **DEBUG AI stub**.\n\n- No provider was called.\n- The "
-                + "prompt held \(user.utf8.count) bytes.\n"
         }
         var reasonText = "The stub keeps side A, then side B."
         if let custom = customAnswer {
@@ -183,6 +220,9 @@ enum AIStub {
             ? "BEGIN REASON \(token)\n\(reasonText)\nEND REASON \(token)\n" : ""
         return "Here is the answer.\n\(reason)BEGIN ANSWER \(token)\n\(terminated(answer))END ANSWER \(token)\n"
     }
+
+    /// The chat system prompt's fixed first line: it never depends on the language or the instructions.
+    private static let chatOpening = String(AIPrompts.chatSystem().prefix { $0 != "\n" })
 
     /// `-HistqAIStubAnswer <file.json>` (`{"answer": "…", "reason": "…"}`, reason optional): the text every chat request
     /// gets instead of the canned one, for screenshots without stub wording.
@@ -252,6 +292,75 @@ enum AIStub {
         return body
     }
 
+    // MARK: Tool call
+
+    /// The text-tool section's call rule, present only when the chat offers tools as text.
+    private static let textToolMarker = "reply with ONLY one ```\(AITextToolProtocol.fenceLanguage) block"
+
+    /// A chat request that offers tools and holds no tool result yet: true for native tools, false for the text
+    /// protocol. Nil for any other request.
+    static func toolOffer(body: Data) -> Bool? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let system = prompt(body: body)?.system, system.hasPrefix(chatOpening)
+        else { return nil }
+        let messages = object["messages"] as? [[String: Any]] ?? []
+        if let tools = object["tools"] as? [Any], !tools.isEmpty {
+            let answered = messages.contains { message in
+                message["role"] as? String == "tool"
+                    || (message["content"] as? [[String: Any]])?.contains { $0["type"] as? String == "tool_result" }
+                        == true
+            }
+            return answered ? nil : true
+        }
+        guard system.contains(textToolMarker) else { return nil }
+        let answered = messages.contains { message in
+            guard let content = message["content"] as? String else { return false }
+            return content.contains("Result of the tool ") || content.contains("Error from the tool ")
+                || content.contains("Result of a tool call:") || content.contains("Error from a tool call:")
+        }
+        return answered ? nil : false
+    }
+
+    /// One streamed `git_log` call as an SSE body of `wire`: native pieces, or the text protocol's fenced block.
+    static func toolCallSSE(native: Bool, wire: AIWire) -> String {
+        let arguments = #"{"max_count":3}"#
+        guard native else {
+            let call = AIToolCall(id: "stub", name: "git_log", inputJSON: arguments)
+            return sse(AITextToolProtocol.callText(call), wire: wire)
+        }
+        let pieces = [String(arguments.prefix(8)), String(arguments.dropFirst(8))]
+        var events: [(name: String?, data: String)] = []
+        switch wire {
+        case .chatCompletions:
+            let first: [String: Any] = ["index": 0, "id": "call_stub_1", "type": "function",
+                                        "function": ["name": "git_log", "arguments": ""]]
+            events.append((nil, json(["choices": [["index": 0, "delta": ["role": "assistant", "tool_calls": [first]]]]])))
+            for piece in pieces {
+                let fragment: [String: Any] = ["index": 0, "function": ["arguments": piece]]
+                events.append((nil, json(["choices": [["index": 0, "delta": ["tool_calls": [fragment]]]]])))
+            }
+            events.append((nil, json(["choices": [["index": 0, "delta": [:], "finish_reason": "tool_calls"]]])))
+            events.append((nil, "[DONE]"))
+        case .anthropicMessages:
+            let block: [String: Any] = ["type": "tool_use", "id": "toolu_stub_1", "name": "git_log", "input": [:]]
+            events.append(("content_block_start",
+                           json(["type": "content_block_start", "index": 0, "content_block": block])))
+            for piece in pieces {
+                events.append(("content_block_delta", json([
+                    "type": "content_block_delta", "index": 0,
+                    "delta": ["type": "input_json_delta", "partial_json": piece]
+                ])))
+            }
+            events.append(("content_block_stop", json(["type": "content_block_stop", "index": 0])))
+            events.append(("message_delta",
+                           json(["type": "message_delta", "delta": ["stop_reason": "tool_use"]])))
+            events.append(("message_stop", json(["type": "message_stop"])))
+        }
+        return events.map { event in
+            (event.name.map { "event: \($0)\n" } ?? "") + "data: \(event.data)\n\n"
+        }.joined()
+    }
+
     private static func json(_ object: [String: Any]) -> String {
         (try? JSONSerialization.data(withJSONObject: object)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
     }
@@ -299,7 +408,14 @@ final class AIStubProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let wire: AIWire = url.path().hasSuffix("/messages") ? .anthropicMessages : .chatCompletions
-        let stream = Data(AIStub.sse(AIStub.replyText(body: body), wire: wire).utf8)
+        let sse: String
+        if let native = AIStub.toolOffer(body: body) {
+            AIStub.log("stub tool-call git_log")
+            sse = AIStub.toolCallSSE(native: native, wire: wire)
+        } else {
+            sse = AIStub.sse(AIStub.replyText(body: body), wire: wire)
+        }
+        let stream = Data(sse.utf8)
         // Cut anywhere, events included: the client's parser must join them.
         let size = max(1, stream.count / 12 + 1)
         chunks = stride(from: 0, to: stream.count, by: size).map { stream.subdata(in: $0..<min($0 + size, stream.count)) }

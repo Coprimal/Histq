@@ -265,6 +265,17 @@ enum PrefKey: String, CaseIterable {
     case aiConflictInstructions
     /// The user's own instructions added to the pull request Generate prompt (empty: none).
     case aiPullRequestInstructions
+    /// The AI chat logo's place along the graph column's bottom edge, 0 (left) ... 1 (right); shared by all tabs.
+    case aiChatBubblePosition
+    /// The AI chat card's width and height in points, shared by all tabs; 0 = the default size.
+    case aiChatCardWidth
+    case aiChatCardHeight
+    /// The AI chat's bubble (logo and card) is hidden by its x badge or the header's AI button, in every tab; the
+    /// header's AI button or anything that opens the chat shows it again.
+    case aiChatBubbleHidden
+    /// The AI chat may run read-only git commands on the repository (log, show, diff, blame, grep, a file at a
+    /// commit); off offers it no tools. Files `.aiignore` matches are never read.
+    case aiChatReadsRepository
     /// The operation toasts shown: a `ToastLevel` raw value, "all" or "errors" (a failure always shows).
     case toastLevel
     /// The refs an earlier build hid, full ref names by repo folder path: only read once per folder, to move them into
@@ -334,6 +345,10 @@ enum PrefKey: String, CaseIterable {
         case .aiCommitLanguage: "english"
         case .aiCommitSummaryOnly: false
         case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
+        case .aiChatBubblePosition: 1.0
+        case .aiChatCardWidth, .aiChatCardHeight: 0.0
+        case .aiChatBubbleHidden: false
+        case .aiChatReadsRepository: true
         case .toastLevel: "all"
         case .hiddenRefs: [String: [String]]()
         case .onboardingDone: false

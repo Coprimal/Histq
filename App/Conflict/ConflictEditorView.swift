@@ -1,9 +1,9 @@
 // A conflicted file in panel2, in place of the graph, each part in its own card: the header (the
 // file, its conflict count, the encoding, "Open in external merge tool", Save, close), then panes A and B side by
 // side in one card (the two sides' whole files, conflict lines tinted with checkboxes) above Output (the merge,
-// editable, with "conflict k of N", the AI buttons Suggest Resolution and Suggest All, and Undo AI). A binary file or
-// a file deleted on one side gets a chooser card instead. The stages load off the main actor; until then the cards are
-// skeletons.
+// editable, with "conflict k of N", the AI buttons Explain Conflict, Suggest Resolution and Suggest All, and Undo
+// AI). A binary file or a file deleted on one side gets a chooser card instead. The stages load off the main actor;
+// until then the cards are skeletons.
 import HistqCore
 import SwiftUI
 
@@ -366,6 +366,14 @@ private struct ConflictOutputCard: View {
             }
             Spacer(minLength: 0)
             if count > 0 {
+                // AI: opens the tab's chat on this conflict; nothing is written. An `.aiignore` match shows its
+                // error in the chat (checked off the main actor), so only a file that is not UTF-8 disables it.
+                AIHookButton(title: "Explain Conflict", systemImage: iconOnly ? "questionmark.bubble" : nil,
+                             help: "Explain conflict \(current + 1) with AI",
+                             unavailable: document.isUTF8 ? nil : "The file is not UTF-8",
+                             seam: "explain-conflict", small: true, iconOnly: iconOnly) {
+                    if let target = session.aiResolutionTarget() { session.explainConflictInChat(target) }
+                }
                 // AI (task 12.3): replaces only this conflict's Output, as a manual edit, once applied.
                 AIHookButton(title: "Suggest Resolution", systemImage: "sparkles",
                              help: "Suggest a resolution of conflict \(current + 1) with AI",

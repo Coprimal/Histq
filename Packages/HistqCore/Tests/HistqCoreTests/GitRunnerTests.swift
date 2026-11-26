@@ -1,6 +1,7 @@
 // Key feature tests for the process layer (task 2.5): a failing git command surfaces its exit code and
-// stderr tail, cancelling a stream really stops the child process, and GitExecutable rejects a git older
-// than 2.36 while accepting 2.36 itself.
+// stderr tail, cancelling a stream really stops the child process, a stream cuts an over-long line (yielded
+// before EOF) and resumes at the next one, and GitExecutable rejects a git older than 2.36 while accepting
+// 2.36 itself.
 import Foundation
 import HistqCore
 import Testing
@@ -52,6 +53,47 @@ struct GitRunnerTests {
         #expect(throws: CancellationError.self) { try outcome.get() }
         let gone = try await Self.poll(upTo: .seconds(5)) { try await !Self.isRunning(marker, cwd: folder) }
         #expect(gone, "the child process is still running 5 s after the cancel")
+    }
+
+    @Test("a stream cuts a stdout line at maxLineBytes, drops its rest and resumes at the next line")
+    func streamCutsLongLineAndResumes() async throws {
+        let folder = try Fixtures.makeTempDirectory()
+        defer { Fixtures.removeTempDirectory(folder) }
+        let fakeGit = folder.appending(path: "bin/git")
+        try Fixtures.writeScript("head -c 1000000 /dev/zero | tr '\\0' q\nprintf '\\nshort\\n'", to: fakeGit)
+        let env = Fixtures.hermeticEnvironment(home: folder)
+
+        var lines: [GitRunner.Line] = []
+        for try await line in await GitRunner(executable: fakeGit).stream(
+            ["cat-file"], cwd: folder, env: env, timeout: .seconds(30), maxLineBytes: 4_096)
+        where line.source == .stdout {
+            lines.append(line)
+        }
+        try #require(lines.count == 2, "lines: \(lines.map(\.text.utf8.count))")
+        #expect(lines[0].truncated)
+        #expect(lines[0].text == String(repeating: "q", count: 4_096))
+        #expect(lines[1].text == "short")
+        #expect(!lines[1].truncated)
+    }
+
+    @Test("a cut line is yielded while git is still writing it, before any delimiter or EOF")
+    func streamYieldsCutLineBeforeEOF() async throws {
+        let folder = try Fixtures.makeTempDirectory()
+        defer { Fixtures.removeTempDirectory(folder) }
+        // Shell builtins only, so the stop's SIGINT ends it: one endless line.
+        let fakeGit = folder.appending(path: "bin/git")
+        try Fixtures.writeScript("while :; do printf 'qqqqqqqqqqqqqqqq'; done", to: fakeGit)
+        let env = Fixtures.hermeticEnvironment(home: folder)
+
+        var first: GitRunner.Line?
+        for try await line in await GitRunner(executable: fakeGit).stream(
+            ["cat-file"], cwd: folder, env: env, timeout: .seconds(30), maxLineBytes: 4_096) {
+            first = line
+            break
+        }
+        #expect(first?.source == .stdout)
+        #expect(first?.truncated == true)
+        #expect(first?.text.utf8.count == 4_096)
     }
 
     @Test("GitExecutable rejects git 2.35.1 as too old and accepts git 2.36.0")

@@ -136,6 +136,11 @@ final class AIRun: Identifiable {
     /// applied.
     private(set) var reason: String?
     private(set) var reply = ""
+    /// The prompt once built: its data blocks seed the chat at Continue in Chat (`AIPrompt.data`).
+    private(set) var prompt: AIPrompt?
+    /// The `AIIgnore.digest` of the `.aiignore` `prompt` was filtered with (nil when unknown): the seeded context's
+    /// stamp, so a later `.aiignore` change omits it from the chat's requests.
+    private(set) var ignoreDigest: String?
     /// Not observed, so `deinit` (nonisolated) can cancel it.
     @ObservationIgnored private var task: Task<Void, Never>?
 
@@ -162,15 +167,20 @@ final class AIRun: Identifiable {
     /// Reads the job's content and streams the answer. `prompt` runs off the main actor (git reads, the diff budget).
     /// `onFinish` runs once when the job ends, however it ends (answer, failure, cancel, the run dropped): what Suggest
     /// All awaits before it asks the next region. It is held by the task, never by the run.
-    func start(prompt: @escaping @Sendable () async throws -> AIPrompt, onFinish: (@MainActor () -> Void)? = nil) {
+    func start(
+        prompt: @escaping @Sendable () async throws -> (prompt: AIPrompt, ignoreDigest: String?),
+        onFinish: (@MainActor () -> Void)? = nil
+    ) {
         task?.cancel()
         let provider = provider
         let model = model
         task = Task { [weak self] in
             defer { onFinish?() }
             do {
-                let prompt = try await prompt()
+                let (prompt, ignoreDigest) = try await prompt()
                 try Task.checkCancellation()
+                self?.prompt = prompt
+                self?.ignoreDigest = ignoreDigest
                 let client = try await AISetup.shared.makeClient(for: provider)
                 // The last point before anything leaves the Mac: a run cancelled or dropped meanwhile sends nothing.
                 guard self != nil, !Task.isCancelled else { return }
@@ -250,6 +260,12 @@ struct AIResultSheet: View {
                 Button("Regenerate", action: regenerate)
                     .buttonStyle(RowTextButtonStyle(formRow: true))
                     .help("Ask again for a new answer")
+            }
+            if run.job.canApply, run.answer != nil, run.prompt != nil {
+                Button("Continue in Chat") { session.continueInChat(run: run) }
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .help(session.hasFormModal
+                        ? "Opens in the chat once this form closes" : "Close this card and go on in the chat")
             }
             if run.job.canApply {
                 Button("Apply", action: apply)
@@ -366,7 +382,7 @@ struct AIResultSheet: View {
     }
 
     /// Inline markdown (bold, italic, code) with the line breaks kept; links are shown as plain text, never opened.
-    private static func markdown(_ text: String) -> AttributedString {
+    static func markdown(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var styled = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
         // The answer is steered by untrusted repo content (a commit message or diff can ask for a link), so no run

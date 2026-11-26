@@ -5,6 +5,7 @@
 // read (fail closed). `AIPrompts.filtered` applies both before `budgeted`. `AIIgnore.load` reads a worktree's
 // `.aiignore` (throwing on anything but a small regular file), and `filteredUnlessAllIgnored` reports a diff that
 // `.aiignore` emptied, so neither case sends unfiltered or empty content.
+import CryptoKit
 import Foundation
 
 /// The patterns of a `.aiignore` file: `#` comments, blank lines, `*` and `?` (never across `/`), `**` (any number of
@@ -40,12 +41,13 @@ public struct AIIgnore: Sendable, Equatable {
         self.rules = rules
     }
 
-    /// True when `path` (relative to the repo root, `/`-separated) or a folder above it is matched.
-    public func matches(_ path: String) -> Bool {
+    /// True when `path` (relative to the repo root, `/`-separated) or a folder above it is matched. With `orFolder`,
+    /// `path` itself is also read as a folder (folders-only rules apply to it), for a path that may name either.
+    public func matches(_ path: String, orFolder: Bool = false) -> Bool {
         let components = path.split(separator: "/").map(String.init)
         for end in components.indices {
             let prefix = Array(components[...end])
-            let isFolder = end < components.count - 1
+            let isFolder = orFolder || end < components.count - 1
             for rule in rules where isFolder || !rule.foldersOnly {
                 let matched = rule.anchored
                     ? Self.matchSegments(rule.segments, prefix)
@@ -207,6 +209,19 @@ public struct AIIgnore: Sendable, Equatable {
         else { throw LoadError.unreadable }
         return AIIgnore(text: String(decoding: data, as: UTF8.self))
     }
+
+    /// A fingerprint of the rules `ignore` applies (nil: no `.aiignore`), so a saved AI chat context can tell whether
+    /// it was filtered with the rules in force now. Comments and blank lines do not change it.
+    public static func digest(_ ignore: AIIgnore?) -> String {
+        guard let ignore else { return "none" }
+        // Every part length-prefixed, so two rule lists never write the same text.
+        var text = ""
+        for rule in ignore.rules {
+            text += "\(rule.anchored ? 1 : 0)\(rule.foldersOnly ? 1 : 0)\(rule.segments.count);"
+            for segment in rule.segments { text += "\(segment.utf8.count):\(segment)" }
+        }
+        return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 extension AIPrompts {
@@ -218,6 +233,39 @@ extension AIPrompts {
             $0.hasPrefix("diff --git ") || $0.hasPrefix("diff --cc ") || $0.hasPrefix("diff --combined ")
         }
         return kept == diff || hasFile ? kept : nil
+    }
+
+    /// `text` (git's or a hook's output) without the lines that name a file `ignore` excludes, and a closing line
+    /// "(N lines naming files excluded by .aiignore left out)" when any went (the lines then end in `\n`); nil
+    /// `ignore`, or no such line, returns `text` as it is. Fails closed: a line is split into words at every character
+    /// a path rarely holds (spaces, quotes, `:`, brackets, commas), and each word, as written and without its closing
+    /// dots, is checked whole and from each of its folders on (so `/abs/repo/secrets/key`, `a/secrets/key` and
+    /// `./secrets/key` all match `secrets/**`). Only the naming line goes: output printed under it without the path
+    /// (a code frame) stays.
+    public static func droppingIgnoredLines(_ text: String, ignore: AIIgnore?) -> String {
+        guard let ignore else { return text }
+        var dropped = 0
+        let kept = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).filter { line in
+            let named = line.split { !isPathCharacter($0) }.contains { word in
+                // As written and without a sentence's closing dots ("see certs/server.pem.").
+                let trimmed = word.prefix(through: word.lastIndex { $0 != "." } ?? word.startIndex)
+                return [word, trimmed].contains { word in
+                    let parts = word.split(separator: "/").filter { !$0.allSatisfy { $0 == "." } }
+                    return parts.indices.contains { ignore.matches(parts[$0...].joined(separator: "/")) }
+                }
+            }
+            if named { dropped += 1 }
+            return !named
+        }
+        guard dropped > 0 else { return text }
+        var out = kept.joined(separator: "\n")
+        if !out.isEmpty, !out.hasSuffix("\n") { out += "\n" }
+        return out + "(\(dropped) line\(dropped == 1 ? "" : "s") naming files excluded by .aiignore left out)"
+    }
+
+    /// A character a word of `droppingIgnoredLines` keeps: letters, digits and `/ . _ - ~ @ + \` (C-quoted bytes).
+    private static func isPathCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || "/._-~@+\\".contains(character)
     }
 
     /// Lock and generated files, by name: their contents are left out of AI requests (the header stays).

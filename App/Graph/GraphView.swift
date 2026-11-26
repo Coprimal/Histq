@@ -174,7 +174,7 @@ struct GraphView: NSViewRepresentable {
     /// The text columns hidden (`PrefKey.graphShowMessage`, `graphShowAuthor`, `graphShowDate`); a change applies at
     /// once, without a reload.
     var hiddenColumns: Set<GraphColumn> = []
-    /// Esc while the table has the focus; true when it was used (the open search bar closed).
+    /// Esc while the table has the focus; true when it was used (the open search bar closed, else the AI chat card).
     var onEscape: @MainActor () -> Bool = { false }
     /// Where the tab's graph was when its last view went away (`GraphScrollPosition`): a new view starts there, else on
     /// the top with the selection revealed. `onScroll` gets the position when the view goes away.
@@ -339,7 +339,7 @@ final class GraphTableView: NSTableView {
     }
 
     override func keyDown(with event: NSEvent) {
-        // Escape: closes the graph search bar when it is open.
+        // Escape: closes the graph search bar when it is open, else the expanded AI chat card.
         if event.keyCode == 53, event.modifierFlags.isDisjoint(with: [.command, .control, .option, .shift]),
            (delegate as? GraphTableController)?.escape() == true
         {
@@ -576,6 +576,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// While a press on a stacked badge is tracked: the row under it, the stack's row, which it is for, and the
     /// table's selection and the event's modifier keys when it began.
     private var pressRow: (row: Int, stack: Int, selection: IndexSet, modifiers: NSEvent.ModifierFlags)?
+    /// While a Shift press (without Command) is tracked: the row under it and the table's selection when it began.
+    private var shiftPress: (row: Int, selection: IndexSet)?
 
     func attach(_ table: NSTableView) {
         self.table = table
@@ -932,7 +934,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     // MARK: Search
 
-    /// Esc in the table: the view's `onEscape` (closes the open search bar). False when it did nothing.
+    /// Esc in the table: the view's `onEscape` (closes the open search bar, else the AI chat card). False when it did
+    /// nothing.
     func escape() -> Bool {
         view?.onEscape() ?? false
     }
@@ -1764,6 +1767,8 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     func beginPress(at point: NSPoint, modifiers: NSEvent.ModifierFlags) {
         dragged = nil
         pressRow = nil
+        shiftPress = modifiers.contains(.shift) && !modifiers.contains(.command)
+            ? (row: table?.row(at: point) ?? -1, selection: table?.selectedRowIndexes ?? IndexSet()) : nil
         if stackIndex(at: point) != nil {
             pressRow = (row: table?.row(at: point) ?? -1, stack: stackRow,
                         selection: table?.selectedRowIndexes ?? IndexSet(), modifiers: modifiers)
@@ -1772,7 +1777,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
-    func endPress() { pressRow = nil }
+    func endPress() {
+        pressRow = nil
+        shiftPress = nil
+    }
 
     /// The clicked row, the stack's own for a click on a stacked badge.
     private var clickedRow: Int { pressRow?.stack ?? table?.clickedRow ?? -1 }
@@ -1781,7 +1789,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     /// the selection the press began with, with Shift it adds it, else it selects it alone. The table may ask again
     /// as the pointer drags, so the answer comes from the press's start, never from the current selection.
     func tableView(_ tableView: NSTableView, selectionIndexesForProposedSelection proposed: IndexSet) -> IndexSet {
-        guard let pressRow, pressRow.row != pressRow.stack else { return proposed }
+        guard let pressRow, pressRow.row != pressRow.stack else { return headRange(proposed) }
         guard pressRow.row >= 0 else { return IndexSet(integer: pressRow.stack) }
         var selection = pressRow.selection
         if pressRow.modifiers.contains(.command) {
@@ -1790,6 +1798,38 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         if pressRow.modifiers.contains(.shift) { return selection.union(IndexSet(integer: pressRow.stack)) }
         return IndexSet(integer: pressRow.stack)
+    }
+
+    /// A Shift click on the checked-out branch (a commit HEAD reaches, or the WIP row) selects only that branch's
+    /// commits of the range: the commits of other branches between, by date, and the other synthetic rows are left
+    /// out. Only when the rows selected before the click are that branch's too; else, for a Shift click elsewhere, or
+    /// with the keys, the table's range stays.
+    private func headRange(_ proposed: IndexSet) -> IndexSet {
+        guard let shiftPress, let head = refs?.head.commit, let headIndex = log.commitIndex[head] else { return proposed }
+        // The lowest commit of the range bounds the walk: commits are in log order, children first.
+        var lowest = headIndex
+        for row in proposed.union(shiftPress.selection).reversed() {
+            if case .commit(let index) = log.entry(at: row) {
+                lowest = max(index, headIndex)
+                break
+            }
+        }
+        var reached = [Bool](repeating: false, count: lowest - headIndex + 1)
+        reached[0] = true
+        for index in headIndex...lowest where reached[index - headIndex] {
+            for parent in log.commits[index].parents {
+                if let at = log.commitIndex[parent], at > index, at <= lowest { reached[at - headIndex] = true }
+            }
+        }
+        func isOnHead(_ row: Int) -> Bool {
+            switch log.entry(at: row) {
+            case .commit(let index): index >= headIndex && index <= lowest && reached[index - headIndex]
+            case .synthetic(let synthetic, _): synthetic.kind == .wip
+            case nil: false
+            }
+        }
+        guard isOnHead(shiftPress.row), shiftPress.selection.allSatisfy(isOnHead) else { return proposed }
+        return proposed.filteredIndexSet(includeInteger: isOnHead)
     }
 
     @objc private func scrolled(_ notification: Notification) {

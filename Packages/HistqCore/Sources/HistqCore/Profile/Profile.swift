@@ -192,7 +192,7 @@ public struct HostingAccount: Codable, Sendable, Hashable {
 }
 
 /// Any JSON value, read and written back as it is (integers stay integers).
-enum JSONValue: Codable, Sendable, Hashable {
+public enum JSONValue: Codable, Sendable, Hashable {
     case null
     case bool(Bool)
     case int(Int)
@@ -201,7 +201,7 @@ enum JSONValue: Codable, Sendable, Hashable {
     case array([JSONValue])
     case object([String: JSONValue])
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
@@ -220,7 +220,7 @@ enum JSONValue: Codable, Sendable, Hashable {
         }
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .null: try container.encodeNil()

@@ -33,6 +33,11 @@ public enum AIProvider: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// True when the chat calls tools natively on the provider's wire; false uses the text-tool protocol. A custom
+    /// endpoint may not support tools, and Gemini's streamed tool calls need a thought signature echoed back whose
+    /// streamed shape is undocumented (phase 5, 5.1 finding).
+    public var supportsNativeTools: Bool { self != .custom && self != .gemini }
+
     /// A custom endpoint is often a local server that takes no key; every built-in provider needs one.
     public var requiresAPIKey: Bool { self != .custom }
 

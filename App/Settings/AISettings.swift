@@ -72,6 +72,12 @@ final class AISetup {
     private(set) var keyStored: [AIProvider: Bool] = [:]
     /// The first Keychain read has finished.
     private(set) var keysLoaded = false
+    /// Settings › AI "Show AI features" (`PrefKey.aiShowFeatures`), observed: AppKit code (the toolbar's AI button)
+    /// reads it here, as a `UserDefaults` read is not tracked.
+    private(set) var showFeatures: Bool
+    /// The AI chat's bubble is hidden in every tab (`PrefKey.aiChatBubbleHidden`): read once, then kept here, so a
+    /// launch argument only sets the first value.
+    private(set) var chatBubbleHidden: Bool
     private var loadTask: Task<Void, Never>?
 
     private init() {
@@ -79,6 +85,23 @@ final class AISetup {
         provider = defaults.string(forKey: PrefKey.aiProvider.rawValue).flatMap(AIProvider.init(rawValue:)) ?? .openAI
         models = defaults.dictionary(forKey: PrefKey.aiModels.rawValue) as? [String: String] ?? [:]
         customBaseURL = defaults.string(forKey: PrefKey.aiCustomBaseURL.rawValue) ?? ""
+        showFeatures = defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue)
+        chatBubbleHidden = defaults.bool(forKey: PrefKey.aiChatBubbleHidden.rawValue)
+        // Posted for every key, possibly off the main thread; only a change of the switch is written.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let shown = Preferences.defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue)
+                if AISetup.shared.showFeatures != shown { AISetup.shared.showFeatures = shown }
+            }
+        }
+    }
+
+    func setChatBubbleHidden(_ hidden: Bool) {
+        guard chatBubbleHidden != hidden else { return }
+        chatBubbleHidden = hidden
+        Preferences.defaults.set(hidden, forKey: PrefKey.aiChatBubbleHidden.rawValue)
     }
 
     func setProvider(_ provider: AIProvider) {
@@ -223,6 +246,8 @@ struct AISettings: View {
     private var conflictInstructions = ""
     @AppStorage(PrefKey.aiPullRequestInstructions.rawValue, store: Preferences.defaults)
     private var pullRequestInstructions = ""
+    @AppStorage(PrefKey.aiChatReadsRepository.rawValue, store: Preferences.defaults)
+    private var chatReadsRepository = true
 
     private enum TestState: Equatable {
         case idle
@@ -251,6 +276,7 @@ struct AISettings: View {
             languageGroup
             commitMessageGroup
             explanationsGroup
+            chatGroup
             conflictResolutionGroup
             pullRequestGroup
             providerGroup
@@ -259,6 +285,7 @@ struct AISettings: View {
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 2)
+            SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
             SettingsSkeletonGroup(rows: 1)
@@ -560,7 +587,7 @@ struct AISettings: View {
         }
     }
 
-    // MARK: Explanations, conflict resolution and pull requests
+    // MARK: Explanations, chat, conflict resolution and pull requests
 
     private var explanationsGroup: some View {
         SettingsGroup("Explanations") {
@@ -568,6 +595,15 @@ struct AISettings: View {
                                hint: "Added to Histq's prompt for Explain, for a commit and for your changes. "
                                    + "Sent to the provider with the diff.",
                                placeholder: "Point out changes to the public API first")
+        }
+    }
+
+    private var chatGroup: some View {
+        SettingsGroup("Chat") {
+            SettingsSwitchRow(title: "Let the chat read the repository",
+                              hint: "Read-only git commands: log, show, diff, blame, grep and files at a commit. "
+                                  + "Files in .aiignore are never read.",
+                              isOn: $chatReadsRepository)
         }
     }
 

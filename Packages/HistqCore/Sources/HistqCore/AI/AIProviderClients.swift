@@ -1,7 +1,7 @@
 // The streaming chat requests of the two wires (ported from Dblore's `OpenAICompatibleClient` and `AnthropicClient`,
-// text only), and their model list requests. OpenAI, Gemini (through its OpenAI-compatible endpoint), xAI and custom
-// servers speak chat-completions; Anthropic speaks Messages. The key goes in a header only, never in the URL or the
-// body.
+// with native tools), and their model list requests. OpenAI, Gemini (through its OpenAI-compatible endpoint), xAI
+// and custom servers speak chat-completions; Anthropic speaks Messages. The key goes in a header only, never in the
+// URL or the body.
 import Foundation
 
 enum AIProviderRequests {
@@ -24,13 +24,23 @@ enum AIProviderRequests {
         if !apiKey.isEmpty { urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         var messages: [[String: Any]] = []
         if !request.system.isEmpty { messages.append(["role": "system", "content": request.system]) }
-        messages += request.messages.map { ["role": $0.role.rawValue, "content": $0.text] }
+        messages += request.messages.flatMap(chatMessages)
         var body: [String: Any] = ["model": request.model, "messages": messages, "stream": true]
         // The hosted providers get no cap: api.openai.com rejects `max_tokens` on o-series and GPT-5+ models, and
         // its replacement, like Gemini's and xAI's output caps, also counts hidden reasoning tokens, so a small cap
         // could be spent on reasoning and return no answer (the model's own limit applies instead). A custom server
         // still gets `max_tokens`, since some local servers default to a very short answer without it.
         if provider == .custom { body["max_tokens"] = request.maxTokens }
+        if !request.tools.isEmpty {
+            body["tools"] = request.tools.map { tool -> [String: Any] in
+                [
+                    "type": "function",
+                    "function": [
+                        "name": tool.name, "description": tool.description, "parameters": jsonObject(tool.schema),
+                    ] as [String: Any],
+                ]
+            }
+        }
         urlRequest.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return urlRequest
     }
@@ -42,13 +52,90 @@ enum AIProviderRequests {
         urlRequest.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
         var body: [String: Any] = [
             "model": request.model,
-            "messages": request.messages.map { ["role": $0.role.rawValue, "content": $0.text] },
+            "messages": request.messages.map(anthropicMessage),
             "max_tokens": request.maxTokens,
             "stream": true,
         ]
         if !request.system.isEmpty { body["system"] = request.system }
+        if !request.tools.isEmpty {
+            body["tools"] = request.tools.map {
+                ["name": $0.name, "description": $0.description, "input_schema": jsonObject($0.schema)] as [String: Any]
+            }
+        }
         urlRequest.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return urlRequest
+    }
+
+    /// A text-only message stays one `{role, content}` message. Each tool result becomes its own `role: "tool"`
+    /// message (by `tool_call_id`), followed by any user text; an assistant turn with tool uses carries `tool_calls`
+    /// with the arguments as a JSON string, and its text or `null` as `content`.
+    private static func chatMessages(_ message: AIChatMessage) -> [[String: Any]] {
+        guard hasToolBlocks(message) else { return [["role": message.role.rawValue, "content": message.text]] }
+        var messages: [[String: Any]] = []
+        var calls: [[String: Any]] = []
+        for block in message.blocks {
+            switch block {
+            case .text: break
+            case .toolUse(let call):
+                calls.append([
+                    "id": call.id, "type": "function",
+                    "function": ["name": call.name, "arguments": call.inputJSON],
+                ])
+            case .toolResult(let result):
+                messages.append(["role": "tool", "tool_call_id": result.id, "content": result.content])
+            }
+        }
+        let text = message.text
+        if !calls.isEmpty {
+            messages.append([
+                "role": message.role.rawValue, "content": text.isEmpty ? NSNull() : text, "tool_calls": calls,
+            ])
+        } else if !text.isEmpty {
+            messages.append(["role": message.role.rawValue, "content": text])
+        }
+        return messages
+    }
+
+    /// A text-only message keeps a string `content`; one with tool blocks sends a block array, `tool_result` blocks
+    /// first as the Messages API requires, and no empty text block (the API refuses one).
+    private static func anthropicMessage(_ message: AIChatMessage) -> [String: Any] {
+        guard hasToolBlocks(message) else { return ["role": message.role.rawValue, "content": message.text] }
+        let results = message.blocks.filter { if case .toolResult = $0 { true } else { false } }
+        let others = message.blocks.filter { if case .toolResult = $0 { false } else { true } }
+        let content = (results + others).compactMap { block -> [String: Any]? in
+            switch block {
+            case .text(let text):
+                return text.isEmpty ? nil : ["type": "text", "text": text]
+            case .toolUse(let call):
+                // `inputJSON` is the canonical object the parser validated; one that does not parse back is dropped
+                // rather than sent as a different call.
+                guard let input = try? JSONSerialization.jsonObject(with: Data(call.inputJSON.utf8)) as? [String: Any]
+                else { return nil }
+                return ["type": "tool_use", "id": call.id, "name": call.name, "input": input]
+            case .toolResult(let result):
+                var object: [String: Any] = ["type": "tool_result", "tool_use_id": result.id, "content": result.content]
+                if result.isError { object["is_error"] = true }
+                return object
+            }
+        }
+        return ["role": message.role.rawValue, "content": content]
+    }
+
+    private static func hasToolBlocks(_ message: AIChatMessage) -> Bool {
+        message.blocks.contains { if case .text = $0 { false } else { true } }
+    }
+
+    /// `value` as the Foundation object `JSONSerialization` writes.
+    private static func jsonObject(_ value: JSONValue) -> Any {
+        switch value {
+        case .null: NSNull()
+        case .bool(let value): value
+        case .int(let value): value
+        case .double(let value): value
+        case .string(let value): value
+        case .array(let values): values.map(jsonObject)
+        case .object(let values): values.mapValues(jsonObject)
+        }
     }
 
     /// The longest a model list request waits.
