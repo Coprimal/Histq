@@ -4,6 +4,23 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
+### Added
+- The sidebar shows branches and tags with slashes in their names (like `feature/login`) as a folder tree.
+- Hover a branch, tag or remote in the sidebar to hide it from the graph with an eye button.
+- Pull a branch that is not checked out, with every pull mode.
+- Searching the graph fades the lines and badges of branches that have no match.
+
+### Changed
+- The graph fades branch badges a little, except the checked-out branch, and the hidden-branches chip moved to the bottom-right corner.
+- Inline code in modals is colored instead of filled, with smaller mono text and rebalanced header gaps.
+- The running status in the footer uses the lifted brand blue.
+
+### Fixed
+- Push asks for the remote branch when the upstream is gone, instead of failing.
+- The gap above Stashes is even when a repository has no submodules.
+
 ## [0.5.0] - 2026-11-25
 
 ### Added
