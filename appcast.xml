@@ -3,6 +3,16 @@
     <channel>
         <title>Histq</title>
         <item>
+            <title>0.5.0</title>
+            <pubDate>Wed, 25 Nov 2026 21:52:04 -0600</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/Coprimal/Histq/releases</sparkle:fullReleaseNotesLink>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Coprimal/Histq/releases/download/v0.5.0/Histq-0.5.0.zip" length="9678157" type="application/octet-stream" sparkle:edSignature="xmBysMM7S8J4OfqtIskbxIRfKJEnJiPs0h0CkWhbkYmACiiUZ+0LyrQiJO5vBg0+3oMOdST2NPnyXWrUugyeDw=="/>
+        </item>
+        <item>
             <title>0.4.0</title>
             <pubDate>Wed, 25 Nov 2026 06:18:09 -0600</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/Coprimal/Histq/releases</sparkle:fullReleaseNotesLink>
