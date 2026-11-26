@@ -1254,7 +1254,7 @@ enum RepoMenus {
     }
 
     /// The push the local branch `name` needs before it can head a pull request: to the GitHub remote when GitHub has
-    /// no branch for it (setting the upstream when it has none), or to its upstream there when it is ahead of it. Nil
+    /// no branch for it (setting the upstream when it has none or it is gone), or to its upstream there when it is ahead of it. Nil
     /// when GitHub has all its commits, when its branch there has commits it lacks (that push would be refused), when
     /// its branch there is only a same-name branch that is not its upstream (ahead/behind count against the upstream
     /// only), or without GitHub.
@@ -1262,8 +1262,8 @@ enum RepoMenus {
         guard let remote = session.github.api?.remote,
               let branch = session.refs.value?.localBranches.first(where: { $0.name == name }) else { return nil }
         guard let gitHubName = gitHubBranch(of: .local(name), session) else {
-            return .push(branch: name, remote: remote, remoteBranch: nil, setUpstream: branch.upstream == nil,
-                         forceWithLease: nil)
+            return .push(branch: name, remote: remote, remoteBranch: nil,
+                         setUpstream: branch.upstream == nil || branch.upstreamGone, forceWithLease: nil)
         }
         guard branch.upstream == "\(remote)/\(gitHubName)", branch.ahead > 0, branch.behind == 0 else { return nil }
         return .push(branch: name, remote: remote, remoteBranch: gitHubName, setUpstream: false, forceWithLease: nil)

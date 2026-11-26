@@ -43,17 +43,13 @@ extension RepoSession {
     }
 
     /// Where `branch` pushes: its upstream's remote and branch (and the upstream's commit, the lease of a force push),
-    /// else the default remote with `-u`. Nil without a remote.
+    /// else the default remote with `-u`. An upstream whose remote-tracking ref is gone (deleted on the remote) counts
+    /// as none, so the push asks for the remote branch again instead of recreating the old one. Nil without a remote.
     func pushTarget(of branch: String) -> (remote: String, remoteBranch: String?, setUpstream: Bool, lease: String?)? {
         let refs = refs.value
-        if let upstream = refs?.localBranches.first(where: { $0.name == branch })?.upstream {
-            if let tracking = refs?.remoteBranches.first(where: { $0.name == upstream }) {
-                return (tracking.remote, String(upstream.dropFirst(tracking.remote.count + 1)), false, tracking.commit)
-            }
-            // The upstream is not fetched (or gone): its remote is the longest remote name it starts with.
-            if let remote = remotes.map(\.name).filter({ upstream.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) {
-                return (remote, String(upstream.dropFirst(remote.count + 1)), false, nil)
-            }
+        if let upstream = refs?.localBranches.first(where: { $0.name == branch })?.upstream,
+           let tracking = refs?.remoteBranches.first(where: { $0.name == upstream }) {
+            return (tracking.remote, String(upstream.dropFirst(tracking.remote.count + 1)), false, tracking.commit)
         }
         return defaultRemote.map { ($0, nil, true, nil) }
     }
