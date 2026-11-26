@@ -269,7 +269,7 @@ struct RunningStatus: View {
                 }
                 Text(operation.title + "…")
                     .font(font)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Palette.runningStatusText)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }

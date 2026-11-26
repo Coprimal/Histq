@@ -104,6 +104,9 @@ enum Palette {
     static let modalInput = color(srgb(0x1A1A1C))
     /// Inline code (a branch name) in a modal's title and message: the links' lifted blue, with no fill behind it.
     static let inlineCodeText = color(linkText)
+    /// The running operation's title in the footer and the vertical tabs (`RunningStatus`): the links' lifted blue, so
+    /// it stands out from the footer's grey text (user, 2026-11-26).
+    static let runningStatusText = color(linkText)
     /// The 1 pt edge of cards and panels.
     static let surfaceBorder = color(.white.withAlphaComponent(0.08))
     /// The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom.
