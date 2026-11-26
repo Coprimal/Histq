@@ -4,6 +4,15 @@ All notable changes to Histq are listed here. `scripts/publish-release.sh` uses 
 
 ## [Unreleased]
 
+### Added
+- AI chat in every repository tab: the app logo sits on the bottom edge of the graph column (drag it along the edge) and opens a resizable chat card; the AI button in the toolbar opens it too. Ask follow-up questions, start a New Chat, and reopen earlier chats from the history list: chats are saved per repository.
+- AI submenus with Explain and Add to AI Chat on commits (one or several selected), branches, files, working changes and pull requests, and in the command palette. Add to AI Chat puts a reference chip in the chat without sending; quick actions (Review my changes, Write release notes, Summarize this branch, What could break?) ask about the chips.
+- Explain Conflict in the conflict editor, Ask AI on a failed operation's toast (sends git's output with credentials and secrets removed, without lines naming files your `.aiignore` keeps out) and Continue in Chat on the AI cards you apply from (commit messages, conflict suggestions, Suggest All, pull request descriptions), to ask more about the answer.
+- The chat can read the repository by itself to answer: git log, show, diff, blame and grep, and a file at a commit. It reads committed revisions only, never changes anything and skips files your `.aiignore` keeps out; each read shows as a row you can expand. Settings › AI › Let the chat read the repository (on by default) turns it off.
+
+### Changed
+- Explain commit and Explain working changes answer in the chat instead of a card, so you can ask follow-up questions.
+
 ## [0.4.0] - 2026-11-25
 
 ### Added

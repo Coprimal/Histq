@@ -3,13 +3,14 @@
 // argv: arguments are typed and strictly decoded (unknown keys, values starting with `-`, control characters and
 // over-long values refused), a revision is resolved to a commit id with `rev-parse --verify --end-of-options
 // <rev>^{commit}` and only that id reaches git (no `rev:path`, blob or tree ids), and a path must be a plain
-// root-relative path. `.aiignore` is privacy-grade here too: a path argument it matches is refused, diffs go through
-// `AIPrompts.filtered`, every path git prints is read from NUL-separated output and parsed verbatim (fail closed),
-// and a `-S`/`-G` search drops the commits whose matching files are all ignored, silently (no probing). Each call
-// has a 15 s deadline and a 32 KB output cap, reading through `GitRunner.stream` and stopping git early. A line
-// (or `-z` record) longer than `rawLimit` arrives as its start (the rest is dropped as git writes it), so one huge
-// line is never held whole: `read_file` and `git_grep` show it shortened ("[Histq: line cut]") and read on, the
-// other tools stop there with the cut note. The cut note means only that output was cut at the cap.
+// root-relative path. `.aiignore` is privacy-grade here too: a path argument it matches (as a file or a folder) is
+// refused, diffs go through `AIPrompts.filtered`, every path git prints is read from NUL-separated output and parsed
+// verbatim (fail closed), and a `-S`/`-G` search or a path-limited log drops the commits whose listed files are all
+// ignored, silently (no probing). Each call has a 15 s deadline and a 32 KB output cap, reading through
+// `GitRunner.stream` and stopping git early. A line (or `-z` record) longer than `rawLimit` arrives as its start (the
+// rest is dropped as git writes it), so one huge line is never held whole: `read_file` and `git_grep` show it
+// shortened ("[Histq: line cut]") and read on, the other tools stop there with the cut note. The cut note means only
+// that output was cut at the cap.
 //
 // `run` returns the raw (already filtered) output: `AIToolLoop` wraps every tool result in a data block with the
 // data notice on both protocols (`AIPrompts.toolOutputContent`, `AITextToolProtocol.resultText`), so it is not
@@ -229,8 +230,9 @@ public enum AIGitTools {
 
     /// `git log` from `commit`, each commit with its changed files (`-z --name-only`, ignored paths dropped). A
     /// header carries a per-call random token, so a path can never pass for one. With `pickaxe` (`-S…`/`-G…`), git
-    /// lists only the matching files, and a commit whose matching files are all ignored (or unparseable) is dropped
-    /// silently; the count and the cap apply to the commits kept, so neither tells whether one was dropped.
+    /// lists only the matching files (with `path`, only the files under it), and a commit whose listed files are all
+    /// ignored (or unparseable) is dropped silently; the count and the cap apply to the commits kept, so neither
+    /// tells whether one was dropped.
     private static func log(
         _ commit: String, path: String?, pickaxe: String?, count: Int, git: Git, ignore: AIIgnore?
     ) async throws -> (String, String) {
@@ -240,7 +242,7 @@ public enum AIGitTools {
                     "--name-only", "--date=short", "--format=\(token)%H%n%ad%n%an%n%s"]
             + (pickaxe.map { [$0] } ?? []) + ["--end-of-options", commit, "--"] + (path.map { [$0] } ?? [])
 
-        var list = LogList(limit: count, pickaxe: pickaxe != nil)
+        var list = LogList(limit: count, needsVisibleFile: pickaxe != nil || path != nil)
         // A record cut at `rawLimit` is dropped with the commit it belongs to.
         if try await git.read(args, delimiter: 0, { record in
             if record.hasPrefix(token) {
@@ -266,15 +268,15 @@ public enum AIGitTools {
         }
 
         let limit: Int
-        let pickaxe: Bool
+        let needsVisibleFile: Bool
         var out = ""
         var kept = 0
         var cut = false
         var current: Entry?
 
-        init(limit: Int, pickaxe: Bool) {
+        init(limit: Int, needsVisibleFile: Bool) {
             self.limit = limit
-            self.pickaxe = pickaxe
+            self.needsVisibleFile = needsVisibleFile
         }
 
         /// A new commit from its header (`%H`, `%ad`, `%an`, `%s` on lines, the token removed).
@@ -302,12 +304,12 @@ public enum AIGitTools {
             current = entry
         }
 
-        /// Adds the finished current commit (a pickaxe commit only when a matching file is shown); false once the
-        /// count or the cap is reached.
+        /// Adds the finished current commit (with a pickaxe or a path, only when one of its files is shown); false
+        /// once the count or the cap is reached.
         mutating func finish() -> Bool {
             guard let entry = current else { return true }
             current = nil
-            guard !entry.broken, !(pickaxe && entry.paths.isEmpty) else { return true }
+            guard !entry.broken, !(needsVisibleFile && entry.paths.isEmpty) else { return true }
             let subject = entry.header.count > 3 ? entry.header[3] : ""
             let more = entry.paths.count - maxLogFiles
             let text = "\(entry.header[0]) \(entry.header[1]) \(entry.header[2])\n    \(subject)\n"
@@ -547,14 +549,16 @@ public enum AIGitTools {
             return text
         }
 
-        /// A root-relative path: no leading `/`, no empty, `.` or `..` part; refused when `.aiignore` excludes it.
+        /// A root-relative path: no leading `/`, no empty, `.` or `..` part; refused when `.aiignore` excludes it as a
+        /// file or a folder.
         func path(_ key: String, ignore: AIIgnore?) throws -> String? {
             guard let text = try string(key, max: AIGitTools.maxPathLength) else { return nil }
             let parts = text.split(separator: "/", omittingEmptySubsequences: false)
             guard !text.hasPrefix("/"), !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
                 throw ToolError.invalidPath
             }
-            if ignore?.matches(text) == true { throw ToolError.ignoredPath }
+            // As a file or a folder: a folder a folders-only rule excludes would otherwise pass.
+            if ignore?.matches(text, orFolder: true) == true { throw ToolError.ignoredPath }
             return text
         }
 

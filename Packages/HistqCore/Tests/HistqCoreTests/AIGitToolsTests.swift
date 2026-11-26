@@ -2,7 +2,8 @@
 // arguments (option-like, unknown, `rev:path`, an ignored or escaping path) answer a fixed sentence and run no git
 // process; an `.aiignore`d file (`secret.env`, `bí-mật/key.txt`, `deploy.key`) never shows in `git_grep`,
 // `git_show`, `git_diff` or `git_log -S`/`-G` output, also by blob id, with a non-ASCII path quoted by
-// `core.quotePath`, and with `color.ui=always` and diff prefixes in the repo's config; output stops at 32 KB; and
+// `core.quotePath`, and with `color.ui=always` and diff prefixes in the repo's config; an ignored folder is refused as
+// a path, and a path-limited `git_log` drops commits that only touched ignored files; output stops at 32 KB; and
 // `read_file`/`git_grep` show a line over the raw limit shortened and read on past it.
 // The `.aiignore` is in memory (`AIIgnore(text:)`), so no committed file names the ignored paths.
 import Foundation
@@ -268,6 +269,51 @@ struct AIGitToolsTests {
         #expect(open.result.content.contains("key.txt"))
         let openRegex = try await repo.call("git_log", #"{"regex":"QUOKKA-SECRET"}"#, ignore: nil)
         #expect(openRegex.summary == "2 commits")
+    }
+
+    @Test("a folder excluded only by a folders-only rule is refused as a path on every tool and runs no git")
+    func ignoredFolderPathRefused() async throws {
+        let repo = try await Repo()
+        defer { repo.remove() }
+        try await Self.makeSecrets(repo)
+
+        let ignored = "That path is excluded by .aiignore; it can't be read."
+        let calls: [(String, String)] = [
+            ("git_log", #"{"path":"bí-mật"}"#),
+            ("git_show", #"{"revision":"HEAD","path":"bí-mật"}"#),
+            ("git_diff", #"{"from":"HEAD~1","path":"bí-mật"}"#),
+            ("git_grep", #"{"pattern":"QUOKKA","path":"bí-mật"}"#),
+            ("git_blame", #"{"path":"bí-mật"}"#),
+            ("read_file", #"{"path":"bí-mật"}"#),
+        ]
+        for (name, json) in calls {
+            let output = try await repo.call(name, json)
+            #expect(output.result.isError, "\(name) \(json)")
+            #expect(output.result.content == ignored, "\(name) \(json)")
+            #expect(try repo.processes() == 0, "\(name) \(json) ran git")
+        }
+    }
+
+    @Test("git_log with a visible folder path never lists a commit that only touched ignored files in it")
+    func pathLogSkipsIgnoredOnlyCommits() async throws {
+        let repo = try await Repo()
+        defer { repo.remove() }
+        let shown = try await repo.commit("add docs", ["docs/ok.md": "open\n", "docs/secret.env": "TOKEN=1\n"])
+        let hidden = try await repo.commit("tweak hidden", ["docs/secret.env": "TOKEN=2\n"])
+
+        let output = try await repo.call("git_log", #"{"path":"docs"}"#)
+        #expect(!output.result.isError)
+        #expect(output.summary == "1 commit")
+        #expect(output.result.content.hasPrefix(shown))
+        #expect(output.result.content.contains("    file: docs/ok.md\n"))
+        #expect(!output.result.content.contains(hidden))
+        #expect(!output.result.content.contains("tweak hidden"))
+        Self.expectNoSecret(output.result.content, "git_log docs")
+
+        // The fixture holds the commit: without .aiignore the same log lists it.
+        let open = try await repo.call("git_log", #"{"path":"docs"}"#, ignore: nil)
+        #expect(open.summary == "2 commits")
+        #expect(open.result.content.hasPrefix(hidden))
     }
 
     @Test("color.ui=always and diff prefixes in the repo's config can't let an ignored diff through")

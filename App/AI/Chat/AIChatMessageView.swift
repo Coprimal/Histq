@@ -9,6 +9,8 @@ import SwiftUI
 
 struct AIChatMessageView: View {
     let entry: AIChatEntry
+    /// Called when the "Thinking…" placeholder appears (the turn's timing log).
+    var onThinking: () -> Void = {}
 
     private var isUser: Bool { entry.role == .user }
 
@@ -64,6 +66,7 @@ struct AIChatMessageView: View {
             // The model's turn drops an answer that is still blank when it ends, so this shows only while it streams.
             Text("Thinking…")
                 .foregroundStyle(.secondary)
+                .onAppear(perform: onThinking)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(AIChatSegment.split(entry.text).enumerated()), id: \.offset) { _, segment in

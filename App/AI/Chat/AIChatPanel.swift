@@ -256,7 +256,7 @@ private struct AIChatMessageList: View {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(model.entries) { entry in
-                        AIChatMessageView(entry: entry)
+                        AIChatMessageView(entry: entry, onThinking: model.logPlaceholder)
                     }
                     Color.clear
                         .frame(height: 1)

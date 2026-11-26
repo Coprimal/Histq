@@ -41,12 +41,13 @@ public struct AIIgnore: Sendable, Equatable {
         self.rules = rules
     }
 
-    /// True when `path` (relative to the repo root, `/`-separated) or a folder above it is matched.
-    public func matches(_ path: String) -> Bool {
+    /// True when `path` (relative to the repo root, `/`-separated) or a folder above it is matched. With `orFolder`,
+    /// `path` itself is also read as a folder (folders-only rules apply to it), for a path that may name either.
+    public func matches(_ path: String, orFolder: Bool = false) -> Bool {
         let components = path.split(separator: "/").map(String.init)
         for end in components.indices {
             let prefix = Array(components[...end])
-            let isFolder = end < components.count - 1
+            let isFolder = orFolder || end < components.count - 1
             for rule in rules where isFolder || !rule.foldersOnly {
                 let matched = rule.anchored
                     ? Self.matchSegments(rule.segments, prefix)

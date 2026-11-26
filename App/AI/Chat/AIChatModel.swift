@@ -74,8 +74,9 @@ final class AIChatModel {
     @ObservationIgnored private var replyID: UUID?
     /// When the streamed text was last written into the entry (the throttle).
     @ObservationIgnored private var shown = ContinuousClock.now
-    /// The running turn's timing name (`ai <logName>`) and whether its content was logged.
+    /// The running turn's timing name (`ai <logName>`) and whether its placeholder and content were logged.
     @ObservationIgnored private var turnDetail = ""
+    @ObservationIgnored private var placeholderLogged = false
     @ObservationIgnored private var contentLogged = false
 
     init(
@@ -264,6 +265,7 @@ final class AIChatModel {
         replyID = assistantID
         toolRuns = [:]
         turnDetail = "ai \(logName)"
+        placeholderLogged = false
         contentLogged = false
         UITiming.select(turnDetail)
         task = Task { [weak self] in
@@ -425,6 +427,13 @@ final class AIChatModel {
 
     private func text(of id: UUID) -> String {
         entries.first { $0.id == id }?.text ?? ""
+    }
+
+    /// The turn's "Thinking…" row showed: logged once per turn, and not once its content showed.
+    func logPlaceholder() {
+        guard !placeholderLogged, !contentLogged, !turnDetail.isEmpty else { return }
+        placeholderLogged = true
+        UITiming.placeholder(turnDetail)
     }
 
     /// The first words (or the turn's answer or error) showed: logged once per turn, never for a stop.
