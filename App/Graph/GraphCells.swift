@@ -488,23 +488,30 @@ final class RefBadgeCellView: NSView {
         }
         for (index, rect, level) in layout.badges {
             let badge = badges[index]
-            // A ghost is faded as a whole (one transparency layer), so its fill and text do not show through each other.
-            if badge.isGhost {
+            // A ghost is faded as a whole (one transparency layer), so its fill and text do not show through each other;
+            // outside the stack, every badge but the checked-out branch's is a little fainter, so that one stands out.
+            let alpha: CGFloat? = badge.isGhost ? Palette.graphGhostAlpha
+                : stack == nil && !badge.isHead ? Palette.graphNotHeadBadgeAlpha : nil
+            if let alpha {
                 context.saveGState()
-                context.setAlpha(Palette.graphGhostAlpha)
+                context.setAlpha(alpha)
                 context.beginTransparencyLayer(auxiliaryInfo: nil)
             }
             // In the stack: the row's own badge as it is, those under it fainter, the hovered one lit.
             let fill: Fill = stack == nil ? .normal
                 : index == hovered && !badge.isGhost ? .lit : index == 0 ? .normal : .faint
             drawBadge(badge, in: rect, level: level, fill: fill, context: context)
-            if badge.isGhost {
+            if alpha != nil {
                 context.endTransparencyLayer()
                 context.restoreGState()
             }
         }
         if let chip = layout.chip {
+            // The "+N" stands for badges that are not the checked-out branch's: as faint as they are.
+            context.saveGState()
+            context.setAlpha(Palette.graphNotHeadBadgeAlpha)
             drawChip(chip.text, in: chip.rect, context: context)
+            context.restoreGState()
         }
 
         // The line to the node: faded too when only a ghost is shown.

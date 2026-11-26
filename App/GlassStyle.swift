@@ -176,6 +176,8 @@ enum Palette {
     /// The faded ("ghost") badge of the branch a selected commit is on, and its line to the node: drawn whole at this
     /// opacity.
     static let graphGhostAlpha: CGFloat = 0.4
+    /// Every graph badge but the checked-out branch's: a little fainter (far less than a ghost), so HEAD's stands out.
+    static let graphNotHeadBadgeAlpha: CGFloat = 0.75
     /// Another worktree's WIP row (badge, node, band, text): faded so it does not read as this worktree's changes.
     static let graphOtherWorktreeAlpha: CGFloat = 0.45
     /// Initials on a node, dark on the bright lanes. #1C1C1E
