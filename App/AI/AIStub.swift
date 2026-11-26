@@ -33,6 +33,7 @@
 // soon as the first words show, `close-tab` and `close-window` close the card's tab or window while the job still
 // reads its content (Suggest All: while the batch runs);
 // `generate,amend` turns the commit box's Amend on first and clicks once its message is loaded.
+// `hide-badge` clicks nothing: the AI chat bubble shows its x badge without a hover (a background shot can't hover).
 // `explain` and `explain-wip` open in the tab's chat: there `cancel` stops the turn as soon as the first words show
 // (`AIChatModel.stop()`), and `close-tab` / `close-window` close the tab or window right after the click, before the
 // context is sent. `-HistqAIChatSend <text>` then sends `text` as a follow-up once the first chat answer finishes

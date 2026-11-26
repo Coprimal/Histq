@@ -75,6 +75,9 @@ final class AISetup {
     /// Settings › AI "Show AI features" (`PrefKey.aiShowFeatures`), observed: AppKit code (the toolbar's AI button)
     /// reads it here, as a `UserDefaults` read is not tracked.
     private(set) var showFeatures: Bool
+    /// The AI chat's bubble is hidden in every tab (`PrefKey.aiChatBubbleHidden`): read once, then kept here, so a
+    /// launch argument only sets the first value.
+    private(set) var chatBubbleHidden: Bool
     private var loadTask: Task<Void, Never>?
 
     private init() {
@@ -83,6 +86,7 @@ final class AISetup {
         models = defaults.dictionary(forKey: PrefKey.aiModels.rawValue) as? [String: String] ?? [:]
         customBaseURL = defaults.string(forKey: PrefKey.aiCustomBaseURL.rawValue) ?? ""
         showFeatures = defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue)
+        chatBubbleHidden = defaults.bool(forKey: PrefKey.aiChatBubbleHidden.rawValue)
         // Posted for every key, possibly off the main thread; only a change of the switch is written.
         NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: defaults, queue: .main
@@ -92,6 +96,12 @@ final class AISetup {
                 if AISetup.shared.showFeatures != shown { AISetup.shared.showFeatures = shown }
             }
         }
+    }
+
+    func setChatBubbleHidden(_ hidden: Bool) {
+        guard chatBubbleHidden != hidden else { return }
+        chatBubbleHidden = hidden
+        Preferences.defaults.set(hidden, forKey: PrefKey.aiChatBubbleHidden.rawValue)
     }
 
     func setProvider(_ provider: AIProvider) {

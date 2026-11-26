@@ -270,6 +270,9 @@ enum PrefKey: String, CaseIterable {
     /// The AI chat card's width and height in points, shared by all tabs; 0 = the default size.
     case aiChatCardWidth
     case aiChatCardHeight
+    /// The AI chat's bubble (logo and card) is hidden by its x badge or the header's AI button, in every tab; the
+    /// header's AI button or anything that opens the chat shows it again.
+    case aiChatBubbleHidden
     /// The AI chat may run read-only git commands on the repository (log, show, diff, blame, grep, a file at a
     /// commit); off offers it no tools. Files `.aiignore` matches are never read.
     case aiChatReadsRepository
@@ -344,6 +347,7 @@ enum PrefKey: String, CaseIterable {
         case .aiCommitInstructions, .aiExplainInstructions, .aiConflictInstructions, .aiPullRequestInstructions: ""
         case .aiChatBubblePosition: 1.0
         case .aiChatCardWidth, .aiChatCardHeight: 0.0
+        case .aiChatBubbleHidden: false
         case .aiChatReadsRepository: true
         case .toastLevel: "all"
         case .hiddenRefs: [String: [String]]()

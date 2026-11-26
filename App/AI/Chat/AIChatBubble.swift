@@ -1,15 +1,14 @@
 // The AI chat's floating bubble (ported from Dblore's `AIBubbleOverlay` and `AIBubbleLayout`): the app logo on the
-// bottom edge of the graph column, dragged sideways to move it (a move under 4 pt is a click, which opens or closes the
-// card), and the chat card above it, centered on the logo, kept between the margins and resized from its leading,
-// trailing and top edges. The logo's place and the card's size are shared by all tabs and saved only when a drag ends.
-// Only the logo and the card take clicks: the empty space passes them to the graph underneath.
+// bottom edge of the tab's panels (sidebar, graph and detail), dragged sideways to move it (a move under 4 pt is a
+// click, which opens or closes the card), and the chat card above it, centered on the logo, kept between the margins
+// and resized from its leading, trailing and top edges. The logo's place and the card's size are shared by all tabs
+// and saved only when a drag ends. Only the logo and the card take clicks: the empty space passes them to the panels
+// underneath. Hovering the logo shows an x badge that hides the bubble (logo and card) in every tab until the header's
+// AI button or anything that opens the chat shows it again.
 import SwiftUI
 
 struct AIChatBubble: View {
     @Bindable var model: AIChatModel
-    /// The logo shows (false while something covers the graph column's bottom edge); the card still opens from the
-    /// header button and Explain.
-    var showsLogo = true
     /// Opens Settings › AI (`WindowModel.selectSettings(.ai)`).
     let onOpenSettings: () -> Void
 
@@ -20,6 +19,7 @@ struct AIChatBubble: View {
     @State private var dragOffset: CGFloat = 0
     @State private var isDragging = false
     @State private var isPressed = false
+    @State private var isHovering = false
     /// The live resize (points added to the saved width / height), saved when the drag ends.
     @State private var widthDrag: CGFloat = 0
     @State private var heightDrag: CGFloat = 0
@@ -39,11 +39,12 @@ struct AIChatBubble: View {
             let cardMinX = AIChatBubbleLayout.cardMinX(logoCenterX: centerX, cardWidth: cardWidth,
                                                        containerWidth: size.width)
             let cardTop = centerY - Self.radius - AIChatBubbleLayout.gap - cardHeight
+            let hidden = AISetup.shared.chatBubbleHidden
 
             ZStack(alignment: .topLeading) {
                 // Always there, sized as the card, so the transition scales in the card's space.
                 ZStack {
-                    if model.isExpanded {
+                    if model.isExpanded && !hidden {
                         card(width: cardWidth, height: cardHeight, containerSize: size)
                             .transition(.scale(scale: 0.9, anchor: AIChatBubbleLayout.scaleAnchor(
                                 logoCenterX: centerX, cardMinX: cardMinX, cardWidth: cardWidth,
@@ -56,11 +57,13 @@ struct AIChatBubble: View {
                 // Every toggle animates, whoever flips `isExpanded` (the logo, the header button, Explain).
                 .animation(.snappy(duration: 0.2), value: model.isExpanded)
 
-                if showsLogo {
+                if !hidden {
                     logo(containerWidth: size.width)
                         .offset(x: centerX - Self.radius, y: centerY - Self.radius)
+                        .transition(.opacity)
                 }
             }
+            .animation(.snappy(duration: 0.2), value: hidden)
         }
         // Mounted with the tab while AI features show: the menus' Explain reads `isReady` from this first key read.
         .onAppear { AISetup.shared.loadKeysIfNeeded() }
@@ -69,11 +72,15 @@ struct AIChatBubble: View {
             widthDrag = 0
             heightDrag = 0
         }
-        // A logo hidden mid-drag never ends its drag either.
-        .onChange(of: showsLogo) {
+        // Hidden (here, in another tab or from the header): this tab's card closes too, and a logo removed under the
+        // pointer or mid-drag never gets its hover exit or drag end.
+        .onChange(of: AISetup.shared.chatBubbleHidden) { _, hidden in
+            guard hidden else { return }
+            model.isExpanded = false
             dragOffset = 0
             isDragging = false
             isPressed = false
+            isHovering = false
         }
     }
 
@@ -174,6 +181,40 @@ struct AIChatBubble: View {
             .accessibilityLabel("AI Chat")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { toggle() }
+            // After the gesture, so the badge takes its own clicks; the hover covers the badge too.
+            .overlay(alignment: .topTrailing) { hideBadge }
+            .onHover { isHovering = $0 }
+    }
+
+    private var showsHideBadge: Bool {
+        #if DEBUG
+        // `-HistqAI hide-badge` (stub runs only): shown without a hover, for a background shot.
+        if AIStub.seamHook == "hide-badge" { return !isDragging }
+        #endif
+        return isHovering && !isDragging
+    }
+
+    /// The x on the logo's corner while the pointer is over it (not while dragging): hides the bubble in every tab.
+    private var hideBadge: some View {
+        let visible = showsHideBadge
+        return Button {
+            model.isExpanded = false
+            AISetup.shared.setChatBubbleHidden(true)
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+                .background(Circle().fill(Palette.surface))
+                .overlay(Circle().strokeBorder(Palette.sheetCardBorder, lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("Hide AI bubble")
+        .accessibilityLabel("Hide AI bubble")
+        .opacity(visible ? 1 : 0)
+        .allowsHitTesting(visible)
+        .animation(.easeOut(duration: 0.15), value: visible)
     }
 
     private func dragGesture(containerWidth: CGFloat) -> some Gesture {

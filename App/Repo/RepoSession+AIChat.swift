@@ -255,9 +255,15 @@ extension RepoSession {
             head: pull.isFromSameRepository ? local(pull.head.ref) : "")
     }
 
-    /// The header's AI button: shows or hides the chat card (a running turn goes on).
+    /// The header's AI button: a hidden bubble shows with its card open, a closed card opens, an open one closes and
+    /// hides the bubble in every tab (a running turn goes on).
     func toggleAIChat() {
-        aiChat.isExpanded.toggle()
+        if aiChat.isExpanded && !AISetup.shared.chatBubbleHidden {
+            aiChat.isExpanded = false
+            AISetup.shared.setChatBubbleHidden(true)
+        } else {
+            aiChat.isExpanded = true
+        }
     }
 
     /// The tab or its window closed: stops the running turn (its partial answer is saved).

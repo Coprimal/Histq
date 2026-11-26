@@ -36,7 +36,10 @@ final class AIChatModel {
     /// The references attached to the next message (chips above the composer); nothing is read until it is sent.
     private(set) var attachments: [AIChatReference] = []
     private(set) var isGenerating = false
-    var isExpanded = false
+    /// The card is open. Opening it (the logo, the header button, Explain, the AI menus) shows a hidden bubble.
+    var isExpanded = false {
+        didSet { if isExpanded { AISetup.shared.setChatBubbleHidden(false) } }
+    }
     /// The saved chats, newest first (loaded by `loadConversations()`, refreshed by each save or delete).
     private(set) var conversations: [Summary] = []
     /// The first load of `conversations` finished (the history list shows a placeholder until then).

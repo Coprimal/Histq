@@ -231,13 +231,6 @@ struct RepoLayoutView: View {
             : session.openFile != nil || session.openHosted != nil || session.openTool != nil
     }
 
-    /// The AI chat's logo shows only while the graph itself is visible and nothing covers the graph column's bottom
-    /// edge: no overlay over the graph, no Stacked bottom pane, no terminal drawer. The card still opens from the
-    /// header button and Explain.
-    private var showsAIChatLogo: Bool {
-        !graphCovered && !isStackedPaneOpen && !session.isTerminalOpen
-    }
-
     /// Stacked shows a file, pull request, issue or tool in its bottom pane.
     private var isStackedPaneOpen: Bool {
         isStacked && (session.openFile != nil || session.openHosted != nil || session.openTool != nil)
@@ -251,6 +244,12 @@ struct RepoLayoutView: View {
             let widths = columns?.panels ?? (dragWidths ?? savedWidths).fitted(in: available, sidebarRange: panel1Range)
             VStack(spacing: SectionCardMetrics.spacing) {
                 panels(widths: widths, columns: columns, available: available, height: proxy.size.height)
+            }
+            // Over all the panels, so the logo moves across the whole row and the card is clamped to its width.
+            .overlay(alignment: .bottom) {
+                if showAIFeatures {
+                    AIChatBubble(model: session.aiChat) { window.selectSettings(.ai) }
+                }
             }
             .padding(RepoLayoutMetrics.inset)
         }
@@ -349,14 +348,6 @@ struct RepoLayoutView: View {
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { graphAndDrawerHeight = $0 }
-                // On the graph column only, so the card never covers the detail and is clamped to this width.
-                .overlay(alignment: .bottom) {
-                    if showAIFeatures {
-                        AIChatBubble(model: session.aiChat, showsLogo: showsAIChatLogo) {
-                            window.selectSettings(.ai)
-                        }
-                    }
-                }
             }
             .frame(maxWidth: .infinity)
             if showsDetail {
@@ -688,14 +679,15 @@ private struct CommitListPanel: View {
                           bottomInset: session.graphSearch.isOpen ? GraphSearchBar.overlayHeight : 0,
                           onTable: { [search = session.graphSearch] table in search.table = table },
                           hiddenColumns: hiddenColumns,
-                          // The search bar first; else the expanded AI chat card (only while the bubble is mounted).
+                          // The search bar first; else the expanded AI chat card (only while the bubble is mounted and
+                          // not hidden).
                           onEscape: { [session] in
                               if session.graphSearch.isOpen {
                                   session.graphSearch.close()
                                   return true
                               }
                               guard Preferences.defaults.bool(forKey: PrefKey.aiShowFeatures.rawValue),
-                                    session.aiChat.isExpanded else { return false }
+                                    !AISetup.shared.chatBubbleHidden, session.aiChat.isExpanded else { return false }
                               session.aiChat.isExpanded = false
                               return true
                           },

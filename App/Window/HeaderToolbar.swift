@@ -162,9 +162,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         configureButton(redoItem, label: "Redo", systemImage: Self.redoSymbol)
         undoItem.action = #selector(undo(_:))
         redoItem.action = #selector(redo(_:))
-        // The app's logo (full color, not a template), as the chat's bubble; `sparkles` if the asset is missing.
         configureButton(aiChatItem, label: "AI Chat", systemImage: "sparkles")
-        if let logo = Self.aiChatLogo() { aiChatItem.image = logo }
         aiChatItem.action = #selector(toggleAIChat(_:))
         configureButton(terminalItem, label: "Terminal", systemImage: "terminal")
         terminalItem.action = #selector(toggleTerminal(_:))
@@ -685,14 +683,6 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         guard let button = hoverButtons[ObjectIdentifier(aiChatItem)] else { return }
         if button.isHidden != hidden { button.isHidden = hidden }
         if button.menuForm.isHidden != hidden { button.menuForm.isHidden = hidden }
-    }
-
-    /// The logo at a toolbar icon's size: a copy, so the catalog's shared instance keeps its size.
-    private static func aiChatLogo() -> NSImage? {
-        guard let image = NSImage(named: "histq-logo")?.copy() as? NSImage else { return nil }
-        image.size = NSSize(width: 18, height: 18)
-        image.accessibilityDescription = "AI Chat"
-        return image
     }
 
     private var symbols: [ObjectIdentifier: String] = [:]
