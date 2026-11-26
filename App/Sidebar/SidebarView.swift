@@ -2,7 +2,8 @@
 // Pull requests & Issues (`PullRequestSections`: the GitHub lists, or the Connect card). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
 // for it); a right-click opens the same menu as its badge in the graph. A branch the graph hides is dimmed, with an eye
-// that shows it again; a pinned or soloed one has a pin or a scope. The Local and Remote cards' header menus hide stale
+// that shows it again; a pinned or soloed one has a pin or a scope. Branch and tag names with "/" show as a tree: a
+// collapsible `backup` folder row with `backup/one` nested under it. The Local and Remote cards' header menus hide stale
 // branches or show all. The Remote card's header menu also adds a remote and renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
 // when one has uncommitted changes); a double-click opens another one in a tab, its header menu adds or prunes. The
 // Submodules card, only in a repo that has some, lists them with their state; its header menu updates or syncs them.
@@ -269,7 +270,8 @@ private struct BranchSections: View {
             case .local: localCard.spotlightTarget(.sidebarRefs)
             case .remote: remoteCard.spotlightTarget(.sidebarRefs)
             case .worktrees: WorktreeSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
-            case .submodules: SubmoduleSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
+            // Reports its part itself: a modifier on its EmptyView (no submodules) would add a gap to the stack.
+            case .submodules: SubmoduleSection(session: session)
             default: EmptyView()
             }
         }
@@ -291,10 +293,12 @@ private struct BranchSections: View {
             } else if branches.isEmpty {
                 EmptyRow(text: "No matching branches")
             }
-            ForEach(branches, id: \.refName) { branch in
+            RefTreeRows(session: session, refs: branches, name: \.name, folderPrefix: "refs/heads/", query: query) {
+                branch, name, indent in
                 // The checked-out branch shows a check in place of the branch icon.
-                BranchRow(session: session, item: .local(branch.name), name: branch.name,
-                          systemImage: branch.isHead ? SidebarMetrics.currentImage : SidebarMetrics.branchImage) {
+                BranchRow(session: session, item: .local(branch.name), name: name,
+                          systemImage: branch.isHead ? SidebarMetrics.currentImage : SidebarMetrics.branchImage,
+                          indent: indent, fullName: branch.name) {
                     AheadBehind(branch: branch)
                 }
             }
@@ -331,10 +335,12 @@ private struct BranchSections: View {
             ForEach(shown, id: \.name) { remote in
                 RemoteRow(name: remote.name, url: session.remotes.first { $0.name == remote.name }?.url)
                     .contextMenu { MenuEntriesView(entries: RepoMenus.remote(named: remote.name, session)) }
-                ForEach(remote.branches, id: \.refName) { branch in
-                    BranchRow(session: session, item: .remote(branch.name),
-                              name: String(branch.name.dropFirst(remote.name.count + 1)),
-                              systemImage: SidebarMetrics.branchImage, indent: SidebarMetrics.nestedIndent) {
+                RefTreeRows(session: session, refs: remote.branches,
+                            name: { String($0.name.dropFirst(remote.name.count + 1)) },
+                            folderPrefix: "refs/remotes/\(remote.name)/", query: query,
+                            indent: SidebarMetrics.nestedIndent) { branch, name, indent in
+                    BranchRow(session: session, item: .remote(branch.name), name: name,
+                              systemImage: SidebarMetrics.branchImage, indent: indent, fullName: branch.name) {
                         EmptyView()
                     }
                 }
@@ -562,12 +568,14 @@ private struct SubmoduleSection: View {
                 .help("Submodules")
                 .accessibilityLabel("Submodule actions")
             }
+            .spotlightTarget(.sidebarStashesWorktrees)
         case .failed(let message):
             // The repo has a `.gitmodules` the read could not list.
             SidebarSection(title: "Submodules", systemImage: SidebarMetrics.submoduleImage, count: 0,
                            isExpanded: $session.submodulesExpanded) { _ in
                 EmptyRow(text: message)
             }
+            .spotlightTarget(.sidebarStashesWorktrees)
         default:
             EmptyView()
         }
@@ -786,12 +794,102 @@ private struct TagRows: View {
         } else if shown.isEmpty {
             EmptyRow(text: "No matching tags")
         }
-        ForEach(shown, id: \.refName) { tag in
-            BranchRow(session: session, item: .tag(tag.name), name: tag.name,
-                      systemImage: tag.isAnnotated ? "tag.fill" : "tag",
+        RefTreeRows(session: session, refs: shown, name: \.name, folderPrefix: "refs/tags/", query: query) {
+            tag, name, indent in
+            BranchRow(session: session, item: .tag(tag.name), name: name,
+                      systemImage: tag.isAnnotated ? "tag.fill" : "tag", indent: indent, fullName: tag.name,
                       iconHelp: tag.isAnnotated
                         ? "Annotated tag: its own object, with a message, author and date"
                         : "Lightweight tag: only a name pointing at a commit, no message") { EmptyView() }
+        }
+    }
+}
+
+/// A card's refs as a tree (`RefTree`): `backup/one` and `backup/two` under a `backup` folder row, each level one
+/// `nestedIndent` further in. A click on a folder collapses or expands it (`RepoSession.collapsedRefFolders`, keyed
+/// by `folderPrefix` and its path); while the card searches, every folder holding a match is open.
+private struct RefTreeRows<Ref, Row: View>: View {
+    let session: RepoSession
+    let refs: [Ref]
+    /// The name the tree splits: the short name, a remote's branch without its remote.
+    let name: (Ref) -> String
+    /// The full ref prefix of `name` (`refs/heads/`, `refs/remotes/origin/`).
+    let folderPrefix: String
+    let query: String
+    /// The indent of the top level past `SidebarMetrics.rowLeading`.
+    var indent: CGFloat = 0
+    /// A ref's row, given its last name component and its indent.
+    @ViewBuilder let row: (_ ref: Ref, _ name: String, _ indent: CGFloat) -> Row
+
+    var body: some View {
+        let rows = RefTree.rows(refs, name: name) {
+            query.isEmpty && session.collapsedRefFolders.contains(folderPrefix + $0)
+        }
+        ForEach(rows) { treeRow in
+            let rowIndent = indent + CGFloat(treeRow.depth) * SidebarMetrics.nestedIndent
+            switch treeRow.kind {
+            case .folder(let path):
+                RefFolderRow(session: session, key: folderPrefix + path, name: treeRow.name,
+                             isSearching: !query.isEmpty, indent: rowIndent)
+            case .ref(let ref):
+                row(ref, treeRow.name, rowIndent)
+            }
+        }
+    }
+}
+
+/// A folder of refs (`backup` of `backup/one`): a folder icon, its name, then a chevron; a click collapses or expands
+/// it at once. Not while the card searches, which shows every match.
+private struct RefFolderRow: View {
+    let session: RepoSession
+    /// Its key in `RepoSession.collapsedRefFolders`: the full ref prefix (`refs/tags/backup`).
+    let key: String
+    let name: String
+    let isSearching: Bool
+    let indent: CGFloat
+    @State private var hovered = false
+    @Environment(\.textSize) private var textSize
+
+    var body: some View {
+        let collapsed = !isSearching && session.collapsedRefFolders.contains(key)
+        HStack(spacing: SidebarMetrics.iconGap) {
+            Image(systemName: "folder")
+                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+            Text(name)
+                .font(textSize.body)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.right")
+                .imageScale(.small)
+                .rotationEffect(.degrees(collapsed ? 0 : 90))
+                .opacity(isSearching ? 0 : 1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.leading, SidebarMetrics.capsuleLeading)
+        .padding(.trailing, 10)
+        .frame(minHeight: SidebarMetrics.rowHeight(textSize))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Capsule().fill(hovered && !isSearching ? Palette.hoverFill : .clear))
+        .contentShape(Capsule())
+        .padding(.leading, SidebarMetrics.rowLeading - SidebarMetrics.capsuleLeading + indent)
+        .animation(Motion.hover, value: hovered)
+        .animation(Motion.standard, value: collapsed)
+        .onHover { hovered = $0 }
+        .onTapGesture(perform: toggle)
+        .help(key.split(separator: "/").dropFirst(2).joined(separator: "/"))
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Folder \(name), \(collapsed ? "collapsed" : "expanded")")
+        .accessibilityAction { toggle() }
+    }
+
+    private func toggle() {
+        guard !isSearching else { return }
+        if session.collapsedRefFolders.contains(key) {
+            session.collapsedRefFolders.remove(key)
+        } else {
+            session.collapsedRefFolders.insert(key)
         }
     }
 }
@@ -1003,8 +1101,11 @@ private struct BranchRow<Trailing: View>: View {
     let item: SidebarItem
     let name: String
     let systemImage: String
-    /// Past `SidebarMetrics.rowLeading`: a remote's branches sit one step in from the remote's row.
+    /// Past `SidebarMetrics.rowLeading`: a remote's branches sit one step in from the remote's row, a folder's refs one
+    /// step in from the folder's.
     var indent: CGFloat = 0
+    /// The full name (`backup/one`) for the tooltip and VoiceOver when `name` is only its last part; `name` otherwise.
+    var fullName: String? = nil
     /// The icon's own tooltip (a tag's kind); the row's name otherwise.
     var iconHelp: String? = nil
     @ViewBuilder let trailing: () -> Trailing
@@ -1025,13 +1126,14 @@ private struct BranchRow<Trailing: View>: View {
                 .imageScale(checkedOut ? .large : .medium)
                 .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
                 .opacity(dimmed)
-                .help(iconHelp ?? name)
+                .help(iconHelp ?? fullName ?? name)
             HStack(spacing: 4) {
                 Text(name)
                     .font(textSize.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .opacity(dimmed)
+                    .accessibilityLabel(fullName ?? name)
                 Spacer(minLength: 4)
                 if session.isPinned(ref) { Image(systemName: "pin.fill").imageScale(.small) }
                 if session.isSoloed(ref) { Image(systemName: "scope").imageScale(.small) }
@@ -1055,7 +1157,7 @@ private struct BranchRow<Trailing: View>: View {
         .onTapGesture { session.selectRef(item) }
         .simultaneousGesture(TapGesture(count: 2).onEnded { RepoMenus.checkout(item, session) })
         .contextMenu { MenuEntriesView(entries: RepoMenus.ref(item, session)) }
-        .help(name)
+        .help(fullName ?? name)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { session.selectRef(item) }

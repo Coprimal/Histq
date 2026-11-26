@@ -955,6 +955,9 @@ final class RepoSession: Identifiable {
     var localShowsHidden = false
     var remoteShowsHidden = false
     var tagsShowHidden = false
+    /// The Local, Remote and Tags cards' collapsed folders (`backup` of `backup/one`), by their full ref prefix
+    /// (`refs/tags/backup`). Folders start expanded.
+    var collapsedRefFolders: Set<String> = []
 
     /// The repo's worktrees (the main one first) with the other worktrees' change counts: read after the first log
     /// page, so they never delay the tab's first content, then with every refs read and when the tab is shown again.
