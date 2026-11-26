@@ -269,7 +269,8 @@ private struct BranchSections: View {
             case .local: localCard.spotlightTarget(.sidebarRefs)
             case .remote: remoteCard.spotlightTarget(.sidebarRefs)
             case .worktrees: WorktreeSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
-            case .submodules: SubmoduleSection(session: session).spotlightTarget(.sidebarStashesWorktrees)
+            // Reports its part itself: a modifier on its EmptyView (no submodules) would add a gap to the stack.
+            case .submodules: SubmoduleSection(session: session)
             default: EmptyView()
             }
         }
@@ -562,12 +563,14 @@ private struct SubmoduleSection: View {
                 .help("Submodules")
                 .accessibilityLabel("Submodule actions")
             }
+            .spotlightTarget(.sidebarStashesWorktrees)
         case .failed(let message):
             // The repo has a `.gitmodules` the read could not list.
             SidebarSection(title: "Submodules", systemImage: SidebarMetrics.submoduleImage, count: 0,
                            isExpanded: $session.submodulesExpanded) { _ in
                 EmptyRow(text: message)
             }
+            .spotlightTarget(.sidebarStashesWorktrees)
         default:
             EmptyView()
         }
