@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Histq.App.Graph;
 using Histq.App.Shell.Tabs;
 using Histq.Core;
 using Histq.Platform.IO;
@@ -73,6 +74,9 @@ internal sealed partial class WindowManager
     /// <summary>The repo layouts' side panel widths (<see cref="PanelWidths"/>), shared by every window.</summary>
     private PanelWidths _panelWidths;
 
+    /// <summary>The graphs' column widths and shown columns (<see cref="GraphColumns"/>), shared by every window.</summary>
+    private GraphColumnSettings _graphColumns;
+
     /// <param name="store">Saves the session; <see cref="Restore"/> turns its capture on.</param>
     /// <param name="workspaces">The workspace layouts read at launch: those still <c>open</c> reopen, the others are
     /// saved back while their file is in Recent Workspaces.</param>
@@ -88,8 +92,20 @@ internal sealed partial class WindowManager
         RecentWorkspaces = new RecentRepos(preferences, PrefKey.RecentWorkspaces);
         // Read here, before any preference write is queued, so it never waits on one.
         _panelWidths = PanelWidths.Decode(preferences.Get<string>(PrefKey.PanelWidths));
+        _graphColumns = GraphColumnSettings.Read(preferences);
+        GraphLook = GraphLook.Read(preferences);
         _store.WriteResult = OnWorkspaceWritten;
     }
+
+    /// <summary>A column's width or shown state changed in a graph: every graph takes the new settings.</summary>
+    public event EventHandler? GraphColumnsChanged;
+
+    /// <summary>The graphs' column widths and shown columns (graphColumnWidths, graphShowMessage, graphShowAuthor,
+    /// graphShowDate), one value for every tab and window, as on the Mac.</summary>
+    internal GraphColumnSettings GraphColumns => _graphColumns;
+
+    /// <summary>The graphs' row density, lane colors, date format and worktree fading, as read at launch.</summary>
+    internal GraphLook GraphLook { get; }
 
     /// <summary>A divider drag ended and changed <see cref="PanelWidths"/>: every repo layout takes the new widths.</summary>
     public event EventHandler? PanelWidthsChanged;
@@ -221,6 +237,25 @@ internal sealed partial class WindowManager
         _panelWidths = widths;
         _ = SetPreference(PrefKey.PanelWidths, widths.Encoded);
         PanelWidthsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>A graph's column drag ended, or a column was shown or hidden: kept for every graph at once (they are
+    /// told through <see cref="GraphColumnsChanged"/>) and the preferences that changed saved on the write worker.</summary>
+    internal void SetGraphColumns(GraphColumnSettings settings)
+    {
+        GraphColumnSettings old = _graphColumns;
+        if (settings == old)
+            return;
+        _graphColumns = settings;
+        if (!string.Equals(settings.EncodedWidths, old.EncodedWidths, StringComparison.Ordinal))
+            _ = SetPreference(PrefKey.GraphColumnWidths, settings.EncodedWidths);
+        if (settings.ShowMessage != old.ShowMessage)
+            _ = SetPreference(PrefKey.GraphShowMessage, settings.ShowMessage);
+        if (settings.ShowAuthor != old.ShowAuthor)
+            _ = SetPreference(PrefKey.GraphShowAuthor, settings.ShowAuthor);
+        if (settings.ShowDate != old.ShowDate)
+            _ = SetPreference(PrefKey.GraphShowDate, settings.ShowDate);
+        GraphColumnsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>

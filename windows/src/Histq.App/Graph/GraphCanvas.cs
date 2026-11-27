@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Numerics;
 using Histq.Core;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.UI;
@@ -10,6 +11,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.System;
+using Windows.UI;
 
 namespace Histq.App.Graph;
 
@@ -23,14 +25,70 @@ public readonly record struct GraphDrawInfo(
     double DrawMs, long FirstRow, long LastRow, bool LastRowFullyDrawn, long SelectedRow);
 
 /// <summary>
+/// What a <see cref="GraphCanvas"/> draws: its rows, read at draw time on the UI thread. A source never changes once
+/// set; new rows come as a new source (<see cref="GraphCanvas.SetSource"/>).
+/// </summary>
+internal abstract class GraphRowSource
+{
+    public abstract long Count { get; }
+
+    /// <summary>The laid-out row <paramref name="row"/> (0 to <see cref="Count"/> - 1).</summary>
+    public abstract GraphRow RowAt(long row);
+
+    /// <summary>The row's name in UI Automation (its message, safe to show).</summary>
+    public abstract string NameOf(long row);
+
+    /// <summary>The row's text columns and badges, when the canvas draws columns.</summary>
+    public virtual GraphRowText TextOf(long row) => new(NameOf(row));
+
+    /// <summary>The row's commit (its node's avatar); null for a synthetic row, or a source without commits.</summary>
+    public virtual Commit? CommitOf(long row) => null;
+
+    /// <summary>Another worktree's row: its band, node and text are faded.</summary>
+    public virtual bool IsFaded(long row) => false;
+
+    /// <summary>A row the graph search does not match while it has matches: its text is dimmed.</summary>
+    public virtual bool IsDimmed(long row) => false;
+
+    /// <summary>The lines leaving the commit of index <paramref name="owner"/> (<see cref="GraphSegment.Owner"/>) are
+    /// another worktree's: drawn faded.</summary>
+    public virtual bool IsSegmentFaded(int owner) => false;
+}
+
+/// <summary>A row's text columns. <paramref name="Changes"/> follow a WIP row's message as glyphs and counts;
+/// <paramref name="Badges"/> are the Branch / Tag column's (none when null).</summary>
+internal readonly record struct GraphRowText(
+    string Message, bool IsSecondary = false, bool IsItalic = false, WorktreeChanges? Changes = null,
+    string Author = "", string Date = "", IReadOnlyList<RefBadge>? Badges = null);
+
+/// <summary>Rows given as lists (<see cref="GraphCanvas.SetRows"/>): <c>commits[i]</c> is row i's commit, named after
+/// its subject; a synthetic row or a row past the commits has no name.</summary>
+internal sealed class GraphListSource(IReadOnlyList<GraphRow> rows, IReadOnlyList<Commit> commits) : GraphRowSource
+{
+    public IReadOnlyList<GraphRow> Rows => rows;
+
+    public override long Count => rows.Count;
+
+    public override GraphRow RowAt(long row) => rows[(int)row];
+
+    public override string NameOf(long row) =>
+        row < commits.Count && !rows[(int)row].Node.IsSynthetic ? commits[(int)row].Subject : "";
+}
+
+/// <summary>
 /// The commit graph, virtualized: a viewport-sized Win2D canvas (never one as tall as the data) that draws only the
 /// visible rows, and its own vertical scroll bar over their right edge (<see cref="GraphScrollBar"/>). The scroll
 /// offset is a row index and a pixel offset inside that row, so a million rows times the row height never goes through
 /// a float; every drawing coordinate is relative to the viewport.
 /// <para>
-/// Wheel and keys (Up, Down, Page Up, Page Down, Home, End) scroll; a press selects the row under the pointer and the
-/// highlight is drawn in the same frame. Each visible row's subject is drawn with one shared text format, so no
-/// per-row text object is made while scrolling.
+/// Without <see cref="Columns"/> (the spike harness) it draws the graph in a column fitted to the visible rows' lanes
+/// and the subject after it; with them (<see cref="GraphView"/>) each column where the layout puts it: the graph, the
+/// message, the author and the date, the selected row's fill from its node to the right edge under them.
+/// </para>
+/// <para>
+/// Wheel and Page Up, Page Down, Home, End scroll; Up and Down move the selection by one row and scroll it into view; a
+/// press selects the row under the pointer and the highlight is drawn in the same frame. Each visible row's texts are
+/// drawn with shared text formats, so no per-row text object is made while scrolling.
 /// </para>
 /// <para>
 /// The scroll bar is drawn in the same Draw pass, so a scroll step changes no XAML element (updating a XAML ScrollBar
@@ -56,14 +114,18 @@ public sealed partial class GraphCanvas : UserControl
     private static readonly TimeSpan ThumbFadeFrame = TimeSpan.FromMilliseconds(16);
 
     private readonly GraphRowRenderer _renderer = new(GraphMetrics.Regular);
+    private readonly RefBadgeRenderer _badges = new();
+
+    private static readonly GraphListSource Empty = new([], []);
     private readonly CanvasControl _canvas;
 
     /// <summary>Redraws the thumb's fade; one-shot, armed again from its own tick, never per scroll step.</summary>
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _fadeTimer;
 
-    private IReadOnlyList<GraphRow> _rows = [];
-    private IReadOnlyList<Commit> _commits = [];
+    private GraphRowSource _source = Empty;
     private long _count;
+    private GraphColumnLayout? _columns;
+    private int _logLanes;
 
     // The scroll offset: the top row and how far it is scrolled off (0 <= _pixelInRow < RowHeight).
     private long _firstRow;
@@ -119,7 +181,55 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>Raised at the end of every Draw, with its time and what it drew.</summary>
     public event EventHandler<GraphDrawInfo>? DrawCompleted;
 
+    /// <summary>The user selected a row (a press, Up or Down, UI Automation), already drawn selected; -1 for none.</summary>
+    internal event Action<long>? RowSelected;
+
     public double RowHeight => _renderer.Metrics.RowHeight;
+
+    /// <summary>The row height, band and lane sizes and lane colors; a change keeps the top row and redraws.</summary>
+    internal GraphMetrics Metrics
+    {
+        get => _renderer.Metrics;
+        set
+        {
+            if (value == _renderer.Metrics)
+                return;
+            double fraction = _pixelInRow / RowHeight;
+            _renderer.SetMetrics(value);
+            _pixelInRow = 0;
+            SetOffset(_firstRow, fraction * RowHeight);
+            _canvas.Invalidate();
+        }
+    }
+
+    /// <summary>Where the columns are (<see cref="GraphView"/>); null draws the graph and the subject only.</summary>
+    internal GraphColumnLayout? Columns
+    {
+        get => _columns;
+        set
+        {
+            if (Equals(value, _columns))
+                return;
+            _columns = value;
+            _canvas.Invalidate();
+        }
+    }
+
+    /// <summary>The commit nodes' avatars (<see cref="GraphView"/>); none while null.</summary>
+    internal AvatarRenderer? Avatars { get; set; }
+
+    /// <summary>The most lanes a row of the log draws in: a graph column too narrow for them folds them.</summary>
+    internal int LogLanes
+    {
+        get => _logLanes;
+        set
+        {
+            if (value == _logLanes)
+                return;
+            _logLanes = value;
+            _canvas.Invalidate();
+        }
+    }
 
     public long RowCount => _count;
 
@@ -204,12 +314,19 @@ public sealed partial class GraphCanvas : UserControl
     {
         ArgumentNullException.ThrowIfNull(rows);
         ArgumentNullException.ThrowIfNull(commits);
-        if (!ReferenceEquals(rows, _rows))
+        if (_source is not GraphListSource list || !ReferenceEquals(rows, list.Rows))
             _columnLanes = 1;
+        SetSource(new GraphListSource(rows, commits));
+    }
 
-        _rows = rows;
-        _commits = commits;
-        _count = rows.Count;
+    /// <summary>
+    /// Shows <paramref name="source"/>'s rows. O(1): the source is read at draw time. The offset and selection stay
+    /// where they are, clamped (the caller moves them to follow the rows). UI thread.
+    /// </summary>
+    internal void SetSource(GraphRowSource source)
+    {
+        _source = source;
+        _count = source.Count;
         if (SelectedRow >= _count)
             SelectedRow = -1;
         SetOffset(_firstRow, _pixelInRow);
@@ -225,9 +342,9 @@ public sealed partial class GraphCanvas : UserControl
     {
         _fadeTimer.Stop();
         _fadeTimerArmed = false;
-        _rows = [];
-        _commits = [];
+        _source = Empty;
         _count = 0;
+        _badges.Dispose();
         SelectedRow = -1;
         _canvas.RemoveFromVisualTree();
     }
@@ -240,6 +357,22 @@ public sealed partial class GraphCanvas : UserControl
     {
         (long first, double pixel) = MaxOffset();
         SetOffset(first, pixel);
+    }
+
+    /// <summary>Scrolls to <paramref name="first"/> at the top, <paramref name="pixel"/> epx of it scrolled off,
+    /// clamped to the rows.</summary>
+    internal void ScrollTo(long first, double pixel) => SetOffset(first, pixel);
+
+    /// <summary>Scrolls just enough for <paramref name="row"/> to be wholly on screen.</summary>
+    internal void ScrollIntoView(long row)
+    {
+        if (row < 0 || row >= _count)
+            return;
+        double top = TopOfRow(row);
+        if (top < 0)
+            SetOffset(row, 0);
+        else if (top + RowHeight > ViewportHeight)
+            ScrollByPixels(top + RowHeight - ViewportHeight);
     }
 
     /// <summary>Scrolls by <paramref name="dy"/> epx, down when positive, clamped to the rows.</summary>
@@ -305,13 +438,48 @@ public sealed partial class GraphCanvas : UserControl
         _canvas.Invalidate();
     }
 
-    /// <summary>The subject of <paramref name="row"/>'s commit; empty for a synthetic row or a row without one.</summary>
-    public string SubjectOf(long row)
+    /// <summary>A left press on the rows (not the scroll bar) at <paramref name="row"/> (-1: none under the pointer):
+    /// the graph takes the focus and the row is selected, drawn in the same frame.</summary>
+    internal void PressRow(long row)
     {
-        if (row < 0 || row >= _count || row >= _commits.Count || _rows[(int)row].Node.IsSynthetic)
-            return "";
-        return _commits[(int)row].Subject;
+        Focus(FocusState.Pointer);
+        if (row >= 0)
+            SelectByUser(row);
     }
+
+    /// <summary>Draws again (what the source tells changed, e.g. the search's dimming).</summary>
+    internal void Redraw() => _canvas.Invalidate();
+
+    /// <summary>
+    /// Scrolls <paramref name="row"/> to the middle of the rows' area when it is not wholly in it; the bottom
+    /// <paramref name="bottomInset"/> epx (the open search bar) count as hidden.
+    /// </summary>
+    internal void CenterIfHidden(long row, double bottomInset)
+    {
+        if (row < 0 || row >= _count)
+            return;
+        double top = TopOfRow(row);
+        double visible = Math.Max(RowHeight, ViewportHeight - bottomInset);
+        if (top >= 0 && top + RowHeight <= visible)
+            return;
+        ScrollByPixels(top + RowHeight / 2 - visible / 2);
+    }
+
+    /// <summary>Selects <paramref name="row"/> as the user did (<see cref="RowSelected"/>).</summary>
+    internal void SelectByUser(long row)
+    {
+        // The selected row again (a click on it): nothing changes, as on the Mac.
+        if (row < -1 || row >= _count || row == SelectedRow)
+            return;
+        Select(row);
+        RowSelected?.Invoke(row);
+    }
+
+    /// <summary>The name of <paramref name="row"/> (its message); empty outside the rows.</summary>
+    public string SubjectOf(long row) => row < 0 || row >= _count ? "" : _source.NameOf(row);
+
+    /// <summary>The lane of <paramref name="row"/>'s node; -1 outside the rows.</summary>
+    internal int LaneOf(long row) => row < 0 || row >= _count ? -1 : _source.RowAt(row).Lane;
 
     protected override AutomationPeer OnCreateAutomationPeer() => new GraphAutomationPeer(this);
 
@@ -333,10 +501,7 @@ public sealed partial class GraphCanvas : UserControl
             return;
         }
 
-        Focus(FocusState.Pointer);
-        long row = HitTest(position.Y);
-        if (row >= 0)
-            Select(row);
+        PressRow(HitTest(position.Y));
         e.Handled = true;
     }
 
@@ -403,10 +568,10 @@ public sealed partial class GraphCanvas : UserControl
         switch (e.Key)
         {
             case VirtualKey.Up:
-                ScrollByPixels(-RowHeight);
+                MoveSelection(-1);
                 break;
             case VirtualKey.Down:
-                ScrollByPixels(RowHeight);
+                MoveSelection(1);
                 break;
             case VirtualKey.PageUp:
                 ScrollByPixels(-page);
@@ -426,6 +591,22 @@ public sealed partial class GraphCanvas : UserControl
         }
 
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// Up or Down: selects the row above or below the selected one (with none, the top row on screen) and scrolls it
+    /// into view.
+    /// </summary>
+    private void MoveSelection(int direction)
+    {
+        if (_count == 0)
+            return;
+        long row = SelectedRow < 0
+            ? Math.Max(0, TopOfRow(_firstRow) < 0 && _firstRow + 1 < _count ? _firstRow + 1 : _firstRow)
+            : Math.Clamp(SelectedRow + direction, 0, _count - 1);
+        if (row != SelectedRow)
+            SelectByUser(row);
+        ScrollIntoView(row);
     }
 
     /// <summary>The bottom row on screen in a viewport <paramref name="height"/> tall, -1 when there is none.</summary>
@@ -611,7 +792,11 @@ public sealed partial class GraphCanvas : UserControl
     private void OnCreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args) =>
         ReleaseDeviceResources();
 
-    private void ReleaseDeviceResources() => _renderer.ResetDeviceResources();
+    private void ReleaseDeviceResources()
+    {
+        _renderer.ResetDeviceResources();
+        Avatars?.Reset();
+    }
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
@@ -626,26 +811,10 @@ public sealed partial class GraphCanvas : UserControl
 
         if (last >= 0)
         {
-            for (long r = first; r <= last; r++)
-                _columnLanes = Math.Max(_columnLanes, _rows[(int)r].Width);
-
-            GraphMetrics m = _renderer.Metrics;
-            float column = (float)Math.Min(m.Width(_columnLanes), Math.Max(m.MinColumnWidth, width * 0.5));
-            float textX = column + TextGap;
-            float textWidth = width - textX - TextGap;
-            bool drawText = DrawSubjects && textWidth > 0;
-
-            for (long r = first; r <= last; r++)
-            {
-                // Viewport coordinates: the integer row difference first, so the float stays small.
-                float top = (float)((r - first) * rh - _pixelInRow);
-                bool selected = r == SelectedRow;
-                GraphRow row = _rows[(int)r];
-                _renderer.DrawRow(ds, row, top, column, selected);
-                if (drawText && SubjectOf(r) is { Length: > 0 } subject)
-                    _renderer.DrawSubject(ds, subject, textX, top, textWidth, selected);
-            }
-
+            if (_columns is { } columns)
+                DrawColumns(ds, columns, first, last, width);
+            else
+                DrawGraphAndSubjects(ds, first, last, width);
             lastFull = (last - first + 1) * rh - _pixelInRow <= height + 0.001;
         }
 
@@ -654,5 +823,111 @@ public sealed partial class GraphCanvas : UserControl
         DrawCompleted?.Invoke(
             this,
             new GraphDrawInfo(Stopwatch.GetElapsedTime(started).TotalMilliseconds, first, last, lastFull, SelectedRow));
+    }
+
+    /// <summary>Without columns: the graph in a column fitted to the lanes seen so far, the subject after it.</summary>
+    private void DrawGraphAndSubjects(CanvasDrawingSession ds, long first, long last, float width)
+    {
+        double rh = RowHeight;
+        for (long r = first; r <= last; r++)
+            _columnLanes = Math.Max(_columnLanes, _source.RowAt(r).Width);
+
+        GraphMetrics m = _renderer.Metrics;
+        float column = (float)Math.Min(m.Width(_columnLanes), Math.Max(m.MinColumnWidth, width * 0.5));
+        float textX = column + TextGap;
+        float textWidth = width - textX - TextGap;
+        bool drawText = DrawSubjects && textWidth > 0;
+
+        for (long r = first; r <= last; r++)
+        {
+            // Viewport coordinates: the integer row difference first, so the float stays small.
+            float top = (float)((r - first) * rh - _pixelInRow);
+            bool selected = r == SelectedRow;
+            GraphRow row = _source.RowAt(r);
+            _renderer.DrawRow(ds, row, top, column, selected, _columnLanes);
+            if (drawText && _source.NameOf(r) is { Length: > 0 } subject)
+                _renderer.DrawSubject(ds, subject, textX, top, textWidth, selected);
+        }
+    }
+
+    /// <summary>
+    /// With columns: each row's selection fill (from its node to the right edge), its graph part in the graph column,
+    /// then its message, author and date in theirs. A faded row (another worktree's) draws its node, band and texts
+    /// faded. The badges go in the refs column, their line on to the node; a commit's node shows its author's avatar.
+    /// </summary>
+    private void DrawColumns(CanvasDrawingSession ds, GraphColumnLayout columns, long first, long last, float width)
+    {
+        double rh = RowHeight;
+        GraphMetrics m = _renderer.Metrics;
+        GraphColumnSpan graph = columns[GraphColumn.Graph];
+        float graphX = (float)graph.X;
+        float graphWidth = (float)graph.Width;
+        int lanes = Math.Max(1, _logLanes);
+        Matrix3x2 identity = ds.Transform;
+
+        for (long r = first; r <= last; r++)
+        {
+            float top = (float)((r - first) * rh - _pixelInRow);
+            bool selected = r == SelectedRow;
+            GraphRow row = _source.RowAt(r);
+            bool faded = _source.IsFaded(r);
+            GraphRowText text = _source.TextOf(r);
+            IReadOnlyList<RefBadge> badges = text.Badges ?? [];
+            GraphColumnSpan refs = columns[GraphColumn.Refs];
+
+            if (selected)
+            {
+                float start = Math.Clamp(graphX + (float)m.DrawnX(row.Lane, graphWidth), 0, width);
+                ds.FillRectangle(
+                    start, top + (float)m.BandInset, width - start, (float)m.BandHeight, GraphPalette.Selection);
+            }
+
+            float nodeAlpha = faded ? GraphPalette.OtherWorktreeAlpha : 1;
+            bool hasRefs = badges.Count > 0 && refs.IsShown;
+            if (hasRefs)
+                _badges.Draw(ds, badges, (float)refs.X, top, (float)refs.Width, row.Color, m, nodeAlpha);
+
+            if (graph.IsShown)
+            {
+                ICanvasImage? avatar = Avatars is { } avatars && _source.CommitOf(r) is { IsMerge: false } commit
+                    ? avatars.Avatar(ds, commit.AuthorEmail, commit.AuthorName, _renderer.AvatarDiameter)
+                    : null;
+                ds.Transform = Matrix3x2.CreateTranslation(graphX, 0) * identity;
+                _renderer.DrawRow(
+                    ds, row, top, graphWidth, selected, lanes, _source, nodeAlpha,
+                    new GraphNodeDecor(avatar, hasRefs, hasRefs && RefBadgeRenderer.HasHead(badges)));
+                ds.Transform = identity;
+            }
+
+            if (!DrawSubjects)
+                continue;
+            float alpha = faded || _source.IsDimmed(r) ? GraphPalette.DimmedTextAlpha : 1;
+            Color primary = GraphPalette.Faded(
+                selected ? GraphPalette.SelectedSubjectText : GraphPalette.SubjectText, alpha);
+            Color secondary = GraphPalette.Faded(
+                selected ? GraphPalette.SelectedSubjectText : GraphPalette.SecondaryText, alpha);
+
+            if (TextRect(columns[GraphColumn.Message], out float x, out float w) && text.Message.Length > 0)
+            {
+                Color color = text.IsSecondary ? secondary : primary;
+                if (text.Changes is { IsEmpty: false } changes)
+                    _renderer.DrawChanges(ds, text.Message, changes, x, top, w, color, text.IsItalic);
+                else
+                    _renderer.DrawText(ds, text.Message, x, top, w, color, text.IsItalic);
+            }
+
+            if (TextRect(columns[GraphColumn.Author], out x, out w) && text.Author.Length > 0)
+                _renderer.DrawText(ds, text.Author, x, top, w, secondary, false);
+            if (TextRect(columns[GraphColumn.Date], out x, out w) && text.Date.Length > 0)
+                _renderer.DrawText(ds, text.Date, x, top, w, secondary, false);
+        }
+    }
+
+    /// <summary>A text column's text area: its span less the padding on both sides; false when hidden or too narrow.</summary>
+    private static bool TextRect(GraphColumnSpan span, out float x, out float width)
+    {
+        x = (float)(span.X + GraphRowRenderer.TextPadding);
+        width = (float)(span.Width - 2 * GraphRowRenderer.TextPadding);
+        return span.IsShown && width >= 1;
     }
 }

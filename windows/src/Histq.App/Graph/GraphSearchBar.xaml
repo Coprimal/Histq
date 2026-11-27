@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The graph's search bar (ported from GraphSearchBar.swift at 6fa6d40): a raised card floating over the bottom of the
+    graph card, with the query field, the match count ("3 of 12", "No results"), the previous and next buttons and a
+    close button. Ctrl+F opens it, Enter goes to the next match, Shift+Enter to the previous one, Esc closes it.
+-->
+<UserControl
+    x:Class="Histq.App.Graph.GraphSearchBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    VerticalAlignment="Bottom">
+    <Border
+        Margin="8"
+        Padding="8,6"
+        Background="{StaticResource SurfaceBrush}"
+        BorderBrush="{StaticResource SurfaceBorderBrush}"
+        BorderThickness="1"
+        CornerRadius="{StaticResource CardCornerRadius}">
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox
+                x:Name="QueryBox"
+                MinHeight="28"
+                VerticalAlignment="Center"
+                AutomationProperties.Name="Find commits"
+                IsSpellCheckEnabled="False"
+                PlaceholderText="Find commit or stash message, or hash"
+                PreviewKeyDown="OnQueryKeyDown"
+                TextChanged="OnQueryChanged" />
+            <TextBlock
+                x:Name="SummaryText"
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                FontSize="12"
+                Foreground="{StaticResource GraphSecondaryTextBrush}" />
+            <Button
+                x:Name="PreviousButton"
+                Grid.Column="2"
+                AutomationProperties.Name="Previous match"
+                Click="OnPreviousClick"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Previous match (Shift+Enter)">
+                <FontIcon FontSize="11" Glyph="&#xE70E;" />
+            </Button>
+            <Button
+                x:Name="NextButton"
+                Grid.Column="3"
+                AutomationProperties.Name="Next match"
+                Click="OnNextClick"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Next match (Enter)">
+                <FontIcon FontSize="11" Glyph="&#xE70D;" />
+            </Button>
+            <Button
+                x:Name="CloseButton"
+                Grid.Column="4"
+                AutomationProperties.Name="Close search"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="OnCloseClick"
+                ToolTipService.ToolTip="Close (Esc)">
+                <FontIcon FontSize="11" Glyph="&#xE711;" />
+            </Button>
+        </Grid>
+    </Border>
+</UserControl>

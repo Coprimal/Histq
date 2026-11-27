@@ -7,8 +7,9 @@ using Windows.Foundation;
 namespace Histq.App.Graph;
 
 /// <summary>
-/// <see cref="GraphCanvas"/> in UI Automation: a List whose items are the rows on screen (name = the subject, position
-/// in set = the row index + 1), so vmpal_tree can read the graph. Rows off screen have no peer.
+/// <see cref="GraphCanvas"/> in UI Automation: a List whose items are the rows on screen (name = the row's message,
+/// item status = "lane n" for its node's lane, position in set = the row index + 1), so vmpal_tree can read the graph.
+/// Rows off screen have no peer.
 /// <para>
 /// The list has the Scroll pattern (vertical only), mapped to the canvas's drawn scroll bar, so assistive tech and
 /// vmpal can read and set the position. It is read on request only: no property change event is raised per scroll step.
@@ -124,8 +125,9 @@ public sealed partial class GraphAutomationPeer : FrameworkElementAutomationPeer
 }
 
 /// <summary>
-/// One visible graph row in UI Automation: a ListItem named after its subject, with the SelectionItem pattern (the
-/// selected row) and its bounds on screen.
+/// One visible graph row in UI Automation: a ListItem named after its message (a commit's subject, "// WIP", a stash's
+/// message), its node's lane as its item status ("lane 0"), with the SelectionItem pattern (the selected row) and its
+/// bounds on screen.
 /// </summary>
 internal sealed partial class GraphRowAutomationPeer : AutomationPeer, ISelectionItemProvider
 {
@@ -152,19 +154,22 @@ internal sealed partial class GraphRowAutomationPeer : AutomationPeer, ISelectio
     public void RemoveFromSelection()
     {
         if (IsSelected)
-            _canvas.Select(-1);
+            _canvas.SelectByUser(-1);
     }
 
     public void Select()
     {
         if (Row < _canvas.RowCount)
-            _canvas.Select(Row);
+            _canvas.SelectByUser(Row);
     }
 
     protected override object GetPatternCore(PatternInterface patternInterface) =>
         patternInterface == PatternInterface.SelectionItem ? this : base.GetPatternCore(patternInterface);
 
     protected override string GetNameCore() => _canvas.SubjectOf(Row);
+
+    protected override string GetItemStatusCore() =>
+        _canvas.LaneOf(Row) is >= 0 and var lane ? "lane " + lane.ToString(CultureInfo.InvariantCulture) : "";
 
     protected override string GetAutomationIdCore() => "GraphRow" + Row.ToString(CultureInfo.InvariantCulture);
 

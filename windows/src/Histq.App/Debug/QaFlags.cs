@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Histq.App.Detail;
+using Histq.App.Graph;
 using Histq.App.Repo;
 using Histq.App.Shell;
 using Histq.App.Shell.Tabs;
@@ -33,6 +35,8 @@ namespace Histq.App
     /// at 6fa6d40). Read once, when the first window asks (<see cref="TabPositionFlag"/>).</item>
     /// <item>The tab flags <c>-HistqMoveTab</c>, <c>-HistqSelect</c>, <c>-HistqTabWalk</c> and
     /// <c>-HistqTabClickProbe</c>: see <see cref="QaTabProbes"/>.</item>
+    /// <item><c>-HistqRowClickProbe auto|row,row,...</c>: graph row clicks in the front window's selected repo tab, see
+    /// <see cref="QaRowClickProbe"/>.</item>
     /// </list>
     /// workspace.json reads the saved file back as the app opens one and lists each tab of each window with its stored
     /// <c>path</c> / <c>home</c> strings, the native path they resolved to and whether that folder exists (a UNC or
@@ -68,11 +72,15 @@ namespace Histq.App
         /// <summary>The tab flags (<see cref="QaTabProbes"/>); null without any.</summary>
         private readonly QaTabProbes? _tabProbes;
 
-        private QaFlags(string? openWorkspace, string? saveWorkspace, QaTabProbes? tabProbes)
+        /// <summary>The row click probe (<see cref="QaRowClickProbe"/>); null without the flag.</summary>
+        private readonly QaRowClickProbe? _rowProbe;
+
+        private QaFlags(string? openWorkspace, string? saveWorkspace, QaTabProbes? tabProbes, QaRowClickProbe? rowProbe)
         {
             OpenWorkspace = openWorkspace;
             SaveWorkspace = saveWorkspace;
             _tabProbes = tabProbes;
+            _rowProbe = rowProbe;
         }
 
         /// <summary>The workspace file to open at launch; null without the flag.</summary>
@@ -97,7 +105,7 @@ namespace Histq.App
             var flags = new LaunchFlags(arguments);
             return new QaFlags(
                 NonEmpty(flags.String(OpenWorkspaceFlag)), NonEmpty(flags.String(SaveWorkspaceFlag)),
-                QaTabProbes.Read(arguments));
+                QaTabProbes.Read(arguments), QaRowClickProbe.Read(arguments));
         }
 
         /// <summary>
@@ -110,6 +118,7 @@ namespace Histq.App
         {
             Task workspaceRun = StartWorkspace(windows, restored, paths);
             _tabProbes?.Start(windows, Task.WhenAll(restored, launched, workspaceRun), paths);
+            _rowProbe?.Start(windows, Task.WhenAll(restored, launched, workspaceRun), paths);
         }
 
         /// <summary>The workspace flags' run (none: a completed task); it never faults.</summary>
@@ -768,7 +777,7 @@ namespace Histq.App
         }
 
         /// <summary>Waits for <paramref name="count"/> drawn frames (at most <see cref="FramesLimit"/>).</summary>
-        private static async Task FramesAsync(int count)
+        internal static async Task FramesAsync(int count)
         {
             var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             TimeSpan? previous = null;
@@ -1134,6 +1143,356 @@ namespace Histq.App
         }
     }
 
+    /// <summary>
+    /// <c>-HistqRowClickProbe auto|row,row,...</c> (QA builds only; give it a value, or put it last or before another
+    /// flag: launch flags are <c>-Name value</c> pairs, so a bare flag before a positional folder would take the folder
+    /// as its value): once the launch's windows, folders and workspace flags
+    /// are open and the tabs' checks applied, waits (at most 60 s) until the front window's selected tab is a repo
+    /// layout whose log is complete, then clicks graph rows one after another through the pointer press's own path
+    /// (<see cref="GraphCanvas.PressRow"/>: the focus, then the selection drawn in the same frame): the listed row indices
+    /// (0 = the top row; a row off screen is scrolled into view first, not clicked there), or with <c>auto</c> (or no
+    /// value) the first 8 commit rows wholly on screen. Each click is measured in CompositionTarget.Rendering frames (the first after the click is
+    /// frame 1): <c>clickToHighlightFrames</c> (the frame whose graph draw shows the row selected),
+    /// <c>placeholderFrames</c> (frames the detail's placeholder was up), <c>summaryFrames</c> and <c>summaryMs</c> (until
+    /// the summary shows), with <c>meetsCriteria</c> (highlight &lt;= 1 frame, placeholder &lt;= 1 frame, summary &lt;=
+    /// 300 ms). Written to <c>&lt;stateDir&gt;\Probes\rowclick.json</c> (<c>ok</c>, <c>error</c>, <c>clicks</c>,
+    /// <c>allMeetCriteria</c>); then the process quits as File › Exit saves (<see cref="WindowManager.QaQuit"/>) and exits
+    /// 0, or 1 when the run failed, or 3 when it is not done in 3 minutes. Use it alone (not with the tab probes, which
+    /// exit on their own).
+    /// </summary>
+    internal sealed class QaRowClickProbe
+    {
+        private const string Flag = "-HistqRowClickProbe";
+
+        /// <summary>The rows clicked without a list: the first commit rows on screen.</summary>
+        private const int DefaultClicks = 8;
+
+        /// <summary>Frames waited before the first click and after each one.</summary>
+        private const int QuietFrames = 10;
+
+        private static readonly TimeSpan SettleLimit = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan LoadLimit = TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan ClickLimit = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan Watchdog = TimeSpan.FromMinutes(3);
+
+        private readonly Lock _gate = new();
+        private readonly string _rows;
+        private readonly RowClickResult _result = new();
+        private string _path = string.Empty;
+        private int _finished;
+
+        private QaRowClickProbe(string rows) => _rows = rows;
+
+        /// <summary>The probe when <paramref name="arguments"/> hold the flag (its value optional); else null.</summary>
+        public static QaRowClickProbe? Read(IReadOnlyList<string> arguments)
+        {
+            int at = arguments.ToList().IndexOf(Flag);
+            if (at < 0)
+                return null;
+            string value = at + 1 < arguments.Count && !arguments[at + 1].StartsWith('-') ? arguments[at + 1].Trim() : "";
+            return new QaRowClickProbe(string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase) ? "" : value);
+        }
+
+        /// <summary>Runs the probe once <paramref name="ready"/> (never faulting) ends. Call it on the UI thread.</summary>
+        public void Start(WindowManager windows, Task ready, StatePaths paths)
+        {
+            _path = Path.Combine(paths.Root, "Probes", "rowclick.json");
+            _ = Task.Delay(Watchdog).ContinueWith(
+                _ => Finish($"watchdog: the run did not finish in {Watchdog.TotalMinutes} minutes", 3),
+                TaskScheduler.Default);
+            Application.Current.UnhandledException += (_, e) => Finish(e.Exception.ToString(), 1);
+            _ = RunAsync(windows, ready);
+        }
+
+        private async Task RunAsync(WindowManager windows, Task ready)
+        {
+            string? failure;
+            try
+            {
+                // Resumes on the UI thread (its SynchronizationContext), as every await below.
+                await ready;
+                await windows.QaSettleAsync(SettleLimit);
+                failure = await ClickAsync(windows);
+            }
+            catch (Exception error)
+            {
+                failure = error.ToString();
+            }
+
+            windows.QaQuit();
+            if (await Task.Run(() => Record(failure)))
+                Environment.Exit(failure is null ? 0 : 1);
+        }
+
+        /// <summary>Clicks the rows and measures each click; the error, else null.</summary>
+        private async Task<string?> ClickAsync(WindowManager windows)
+        {
+            var clock = Stopwatch.StartNew();
+            RepoLayoutView? layout = null;
+            while (clock.Elapsed < LoadLimit)
+            {
+                if (windows.Windows.Count > 0 && windows.Windows[0] is { } window
+                    && window.QaContentHost.QaShownLayout(window.Tabs) is { } shown
+                    && (shown.QaLoadFailed || shown.QaGraph.Data?.Snapshot.IsComplete == true))
+                {
+                    layout = shown;
+                    lock (_gate)
+                        _result.Tab = window.Tabs.SelectedIndex is { } index ? window.Tabs.Tabs[index].Title : null;
+                    break;
+                }
+
+                await Task.Delay(100);
+            }
+
+            if (layout is null)
+                return $"no repo tab with a complete log was shown within {LoadLimit.TotalSeconds} s";
+            if (layout.QaLoadFailed)
+                return "the repo tab's graph load failed";
+
+            GraphView graph = layout.QaGraph;
+            GraphCanvas canvas = graph.Canvas;
+            await QaTabProbes.FramesAsync(QuietFrames);
+            List<long> rows;
+            if (_rows.Length > 0)
+            {
+                rows = [];
+                foreach (string part in _rows.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (!long.TryParse(part, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out long row)
+                        || row >= canvas.RowCount)
+                    {
+                        return $"{Flag}: \"{part}\" is not a row of the graph (0 to {canvas.RowCount - 1})";
+                    }
+
+                    rows.Add(row);
+                }
+            }
+            else
+            {
+                rows = [];
+                for (long row = canvas.FirstVisibleRow; row >= 0 && row <= canvas.LastVisibleRow && rows.Count < DefaultClicks; row++)
+                {
+                    if (graph.ItemAt(row) is { Kind: GraphItemKind.Commit } && canvas.TopOfRow(row) >= 0
+                        && canvas.TopOfRow(row) + canvas.RowHeight <= canvas.ViewportHeight)
+                    {
+                        rows.Add(row);
+                    }
+                }
+            }
+
+            if (rows.Count == 0)
+                return "no commit row on screen to click";
+            lock (_gate)
+                _result.Rows = [.. rows];
+
+            for (int step = 0; step < rows.Count; step++)
+            {
+                long row = rows[step];
+                if (canvas.TopOfRow(row) < 0 || canvas.TopOfRow(row) + canvas.RowHeight > canvas.ViewportHeight)
+                {
+                    canvas.ScrollIntoView(row);
+                    await QaTabProbes.FramesAsync(QuietFrames);
+                }
+
+                RowClick click = await MeasureAsync(layout, graph, row, step + 1);
+                lock (_gate)
+                    _result.Clicks.Add(click);
+                if (click.TimedOut)
+                    return $"row {row} (step {step + 1}): the selection or the summary did not show within {ClickLimit.TotalSeconds} s";
+                await QaTabProbes.FramesAsync(QuietFrames);
+            }
+
+            lock (_gate)
+            {
+                _result.AllMeetCriteria = _result.Clicks.All(click => click.MeetsCriteria);
+                _result.Ok = true;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Presses <paramref name="row"/> as a pointer press does and counts the frames until the graph has drawn it
+        /// selected and until the detail shows its summary, and the frames its placeholder was up. The handlers only read.
+        /// </summary>
+        private static async Task<RowClick> MeasureAsync(RepoLayoutView layout, GraphView graph, long row, int step)
+        {
+            GraphCanvas canvas = graph.Canvas;
+            CommitSummaryView summary = layout.QaSummary;
+            var result = new RowClick
+            {
+                Step = step,
+                Row = row,
+                Item = graph.ItemAt(row) is { } item ? $"{item.Kind}:{item.Id}" : null,
+                WasSelected = canvas.SelectedRow == row,
+            };
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            TimeSpan? previous = null;
+            int frames = 0;
+            int placeholder = 0;
+            int? highlight = null;
+            int? shown = null;
+            var clock = new Stopwatch();
+
+            void OnDrawn(object? sender, GraphDrawInfo info)
+            {
+                if (highlight is null && info.SelectedRow == row)
+                    highlight = Math.Max(1, frames);
+                if (highlight is not null && shown is not null)
+                    done.TrySetResult();
+            }
+
+            void OnRendering(object? sender, object e)
+            {
+                try
+                {
+                    // Rendering can be raised more than once per frame, with the same time.
+                    if (e is not RenderingEventArgs args || args.RenderingTime == previous)
+                        return;
+                    previous = args.RenderingTime;
+                    frames++;
+                    // An already selected row is not drawn again: its highlight is the state. Its detail is not
+                    // reloaded either: the summary already shows, so its placeholder frames are measured as 0.
+                    if (highlight is null && result.WasSelected && canvas.SelectedRow == row)
+                        highlight = frames;
+                    if (shown is null)
+                    {
+                        if (summary.QaShowsSummary)
+                        {
+                            shown = frames;
+                            result.SummaryMs = Math.Round(clock.Elapsed.TotalMilliseconds, 1);
+                        }
+                        else if (summary.QaShowsPlaceholder)
+                        {
+                            placeholder++;
+                        }
+                    }
+
+                    if (highlight is not null && shown is not null)
+                        done.TrySetResult();
+                }
+                catch (Exception error)
+                {
+                    done.TrySetException(error);
+                }
+            }
+
+            CompositionTarget.Rendering += OnRendering;
+            canvas.DrawCompleted += OnDrawn;
+            try
+            {
+                clock.Start();
+                canvas.PressRow(row);
+                result.PlaceholderAtClick = summary.QaShowsPlaceholder;
+                await Task.WhenAny(done.Task, Task.Delay(ClickLimit));
+            }
+            finally
+            {
+                CompositionTarget.Rendering -= OnRendering;
+                canvas.DrawCompleted -= OnDrawn;
+            }
+
+            if (done.Task.IsFaulted)
+                throw done.Task.Exception!.InnerException ?? done.Task.Exception;
+
+            result.ClickToHighlightFrames = highlight;
+            result.PlaceholderFrames = placeholder;
+            result.SummaryFrames = shown;
+            result.Frames = frames;
+            result.Selected = canvas.SelectedRow == row;
+            result.TimedOut = highlight is null || shown is null;
+            result.MeetsCriteria = !result.TimedOut && highlight <= 1 && placeholder <= 1 && result.SummaryMs <= 300;
+            return result;
+        }
+
+        private void Finish(string error, int code)
+        {
+            if (Record(error))
+                Environment.Exit(code);
+        }
+
+        /// <summary>Writes rowclick.json once (the first call, which then exits). Any thread.</summary>
+        private bool Record(string? error)
+        {
+            if (Interlocked.Exchange(ref _finished, 1) == 1)
+                return false;
+            lock (_gate)
+            {
+                if (error is not null)
+                {
+                    _result.Ok = false;
+                    _result.Error ??= error;
+                }
+
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+                    File.WriteAllText(_path, JsonSerializer.Serialize(_result, QaFlags.JsonOptions));
+                }
+                catch (Exception failure)
+                {
+                    Trace.WriteLine($"Histq: rowclick.json not written: {failure.Message}");
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>rowclick.json.</summary>
+        private sealed class RowClickResult
+        {
+            public bool Ok { get; set; }
+            public string? Error { get; set; }
+
+            /// <summary>The selected tab's title.</summary>
+            public string? Tab { get; set; }
+
+            /// <summary>The rows clicked, in order.</summary>
+            public List<long>? Rows { get; set; }
+
+            public List<RowClick> Clicks { get; set; } = [];
+
+            /// <summary>Every click met the plan's criteria; null when the run did not end.</summary>
+            public bool? AllMeetCriteria { get; set; }
+        }
+
+        private sealed class RowClick
+        {
+            /// <summary>1 for the first click.</summary>
+            public int Step { get; set; }
+
+            public long Row { get; set; }
+
+            /// <summary>The row's item: "Commit:&lt;sha&gt;", "Stash:&lt;sha&gt;", "Wip:wip", "Worktree:&lt;path&gt;".</summary>
+            public string? Item { get; set; }
+
+            /// <summary>The row was already selected before the click.</summary>
+            public bool WasSelected { get; set; }
+
+            /// <summary>The frame whose graph draw first showed the row selected (1: the first after the click).</summary>
+            public int? ClickToHighlightFrames { get; set; }
+
+            /// <summary>The detail's placeholder was up right after the click's own update (before any frame).</summary>
+            public bool PlaceholderAtClick { get; set; }
+
+            /// <summary>Frames drawn with the detail's placeholder up.</summary>
+            public int PlaceholderFrames { get; set; }
+
+            /// <summary>The frame the summary first showed in.</summary>
+            public int? SummaryFrames { get; set; }
+
+            /// <summary>From the click to the frame the summary showed in.</summary>
+            public double? SummaryMs { get; set; }
+
+            public int Frames { get; set; }
+            public bool Selected { get; set; }
+            public bool TimedOut { get; set; }
+
+            /// <summary>clickToHighlightFrames &lt;= 1, placeholderFrames &lt;= 1, summaryMs &lt;= 300.</summary>
+            public bool MeetsCriteria { get; set; }
+        }
+    }
+
     /// <summary>A tab's content as the click probe reads it (<see cref="TabContentHost.QaState"/>).</summary>
     /// <param name="Kind">"repo", "missing", "welcome", or "none" when nothing is mounted for the tab.</param>
     /// <param name="Visible">The content is Visible (the selected tab's).</param>
@@ -1296,6 +1655,12 @@ namespace Histq.App.Shell
                 .Where(tab => _mounted.TryGetValue(tab.Id, out Mounted? mounted) && mounted.Kind == ContentKind.Repo)
                 .Select(tab => tab.Title)];
 
+        /// <summary>The selected tab's repo layout when it is mounted (<see cref="QaRowClickProbe"/>); null otherwise.</summary>
+        internal RepoLayoutView? QaShownLayout(WindowTabs tabs) =>
+            tabs.SelectedTabId is { } id && _mounted.TryGetValue(id, out Mounted? mounted)
+                ? mounted.Element as RepoLayoutView
+                : null;
+
         /// <summary>The tab <paramref name="id"/>'s mounted content as it stands now; reads only (a Rendering handler
         /// calls it).</summary>
         internal QaContentState QaState(Guid id)
@@ -1345,6 +1710,12 @@ namespace Histq.App.Repo
 
         /// <summary>The graph area shows the load's error.</summary>
         internal bool QaLoadFailed => GraphFailure.Visibility == Visibility.Visible;
+
+        /// <summary>The graph (<see cref="QaRowClickProbe"/>).</summary>
+        internal GraphView QaGraph => _graph;
+
+        /// <summary>The detail's summary (<see cref="QaRowClickProbe"/>).</summary>
+        internal CommitSummaryView QaSummary => _summary;
     }
 }
 #endif

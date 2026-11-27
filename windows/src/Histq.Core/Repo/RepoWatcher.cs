@@ -137,6 +137,9 @@ public sealed class RepoWatcher(string? ownStateDir = null) : IDisposable
             }
         }
 
+        Exception error;
+        List<FileSystemWatcher> failed;
+        Timer? debounce;
         lock (_lock)
         {
             if (_stopped || _directories is not null)
@@ -147,36 +150,68 @@ public sealed class RepoWatcher(string? ownStateDir = null) : IDisposable
             _directories = directories;
             _onChange = onChange;
             _debounce = new Timer(_ => Fire());
-            foreach (var root in roots)
+            try
             {
-                var watcher = new FileSystemWatcher(root)
-                {
-                    IncludeSubdirectories = true,
-                    InternalBufferSize = BufferSize,
-                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite
-                        | NotifyFilters.Size | NotifyFilters.Attributes,
-                };
-                // A folder's own "changed" (Windows reports one for the folder a file was added to or removed from) is
-                // no change of its own: the file's event counts, so a lock file made in refs/heads stays ignored.
-                watcher.Changed += (_, e) =>
-                {
-                    if (!Directory.Exists(e.FullPath))
-                    {
-                        Received(e.FullPath);
-                    }
-                };
-                watcher.Created += (_, e) => Received(e.FullPath);
-                watcher.Deleted += (_, e) => Received(e.FullPath);
-                watcher.Renamed += (_, e) =>
-                {
-                    Received(e.OldFullPath);
-                    Received(e.FullPath);
-                };
-                // Changes were dropped (the buffer overflowed) or the folder went away: reload everything.
-                watcher.Error += (_, _) => Received(null);
-                _watchers.Add(watcher);
-                watcher.EnableRaisingEvents = true;
+                StartWatchers(roots);
+                return;
             }
+            catch (Exception caught)
+            {
+                // A root that cannot be watched: none stays live, and a later Start may try again.
+                error = caught;
+                failed = [.. _watchers];
+                _watchers.Clear();
+                debounce = _debounce;
+                _debounce = null;
+                _directories = null;
+                _onChange = null;
+                _pending = RefreshScope.None;
+            }
+        }
+
+        // Outside the lock: a handler in flight waits for it.
+        foreach (var watcher in failed)
+        {
+            watcher.Dispose();
+        }
+
+        debounce?.Dispose();
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(error);
+    }
+
+    /// <summary>Creates and starts one watcher per root, each kept in <see cref="_watchers"/> as soon as it is made.
+    /// Under <see cref="_lock"/>.</summary>
+    private void StartWatchers(List<string> roots)
+    {
+        foreach (var root in roots)
+        {
+            var watcher = new FileSystemWatcher(root)
+            {
+                IncludeSubdirectories = true,
+                InternalBufferSize = BufferSize,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite
+                    | NotifyFilters.Size | NotifyFilters.Attributes,
+            };
+            // A folder's own "changed" (Windows reports one for the folder a file was added to or removed from) is
+            // no change of its own: the file's event counts, so a lock file made in refs/heads stays ignored.
+            watcher.Changed += (_, e) =>
+            {
+                if (!Directory.Exists(e.FullPath))
+                {
+                    Received(e.FullPath);
+                }
+            };
+            watcher.Created += (_, e) => Received(e.FullPath);
+            watcher.Deleted += (_, e) => Received(e.FullPath);
+            watcher.Renamed += (_, e) =>
+            {
+                Received(e.OldFullPath);
+                Received(e.FullPath);
+            };
+            // Changes were dropped (the buffer overflowed) or the folder went away: reload everything.
+            watcher.Error += (_, _) => Received(null);
+            _watchers.Add(watcher);
+            watcher.EnableRaisingEvents = true;
         }
     }
 

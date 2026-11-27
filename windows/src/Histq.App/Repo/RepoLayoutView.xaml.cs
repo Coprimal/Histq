@@ -1,3 +1,5 @@
+using Histq.App.Detail;
+using Histq.App.Graph;
 using Histq.App.Shell;
 using Histq.App.Theme;
 using Histq.Core;
@@ -5,10 +7,13 @@ using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using VirtualKey = Windows.System.VirtualKey;
+using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 
 namespace Histq.App.Repo;
 
@@ -16,8 +21,10 @@ namespace Histq.App.Repo;
 /// A repo tab (ported from RepoLayoutView, App/Repo/RepoLayoutView.swift at 6fa6d40, its Classic layout): sidebar |
 /// commit graph | detail. Made by <see cref="TabContentHost"/> in the same call as the tab's selection, so its cards and
 /// the graph's placeholder show in that frame; its <see cref="RepoTabSession"/> reads the log off the UI thread and the
-/// graph shows the rows as they come. It stays mounted while another tab shows, among the last tabs shown; when it is
-/// unmounted (the tab closed or no longer kept, its window closed) <see cref="Close"/> stops the load.
+/// graph (<see cref="GraphView"/>, which takes the XAML's plain canvas's place in code) shows the rows as they come. It
+/// stays mounted while another tab shows, among the last tabs shown; shown again, it has its session read the worktrees
+/// (and the status) again. When it is unmounted (the tab closed or no longer kept, its window closed)
+/// <see cref="Close"/> stops the load.
 /// <para>
 /// The side panels' widths are the app's (<see cref="WindowManager.PanelWidths"/>, the panelWidths preference), fitted in
 /// this layout's width (<see cref="PanelWidths.Fitted"/>) whenever it changes size or the widths change. The two gaps are
@@ -30,6 +37,14 @@ public sealed partial class RepoLayoutView : UserControl
 {
     private readonly MainWindow _window;
     private readonly RepoTabSession _session;
+    private readonly GraphView _graph;
+    private readonly GraphSearchBar _search;
+    private readonly CommitSummaryView _summary = new();
+    private readonly GraphDateFormatter _dates;
+
+    /// <summary>The detail card, and the skeleton it shows while no row is selected.</summary>
+    private readonly Border _detailCard;
+    private readonly UIElement _detailSkeleton;
     private readonly DispatcherQueueTimer _spinnerTimer;
 
     /// <summary>The widths the columns have now (fitted); the start of a drag.</summary>
@@ -43,10 +58,29 @@ public sealed partial class RepoLayoutView : UserControl
 
     private bool _closed;
 
+    /// <summary>Whether the layout was shown when its visibility last changed.</summary>
+    private bool _isShown = true;
+
     internal RepoLayoutView(MainWindow window, string path)
     {
         _window = window;
         InitializeComponent();
+        Grid graphHost;
+        (_graph, graphHost) = SwapInGraphView();
+        _search = new GraphSearchBar(_graph);
+        graphHost.Children.Add(_search);
+        _dates = new GraphDateFormatter(_window.Manager.GraphLook.DateFormat);
+        _detailCard = DetailPanel.Children.OfType<Border>().First();
+        _detailSkeleton = _detailCard.Child;
+        _graph.SelectionChanged += OnSelectionChanged;
+        _summary.ParentClicked += OnParentClicked;
+
+        // Ctrl+F: the graph search of the shown tab (a kept tab's layout is Collapsed and leaves it to the others).
+        var find = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
+        find.Invoked += OnFindInvoked;
+        KeyboardAccelerators.Add(find);
+        KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
+        KeyDown += OnLayoutKeyDown;
 
         GraphSpinner.OpacityTransition = new ScalarTransition
         {
@@ -68,11 +102,13 @@ public sealed partial class RepoLayoutView : UserControl
             divider.PointerCaptureLost += OnDividerCaptureLost;
         }
 
-        _session = new RepoTabSession(path, _window.Manager.Preferences, DispatcherQueue.GetForCurrentThread());
-        _session.RowsChanged += OnRowsChanged;
-        _session.Completed += OnCompleted;
+        _session = new RepoTabSession(
+            path, _window.Manager.Preferences, _window.Manager.GraphLook.FadeOtherWorktrees,
+            ((App)Application.Current).StatePaths.Root, DispatcherQueue.GetForCurrentThread());
+        _session.Loaded += OnLoaded;
         _session.Failed += OnFailed;
         _session.Start();
+        RegisterPropertyChangedCallback(VisibilityProperty, OnVisibilityChanged);
     }
 
     /// <summary>Unmounted: stops the load, the spinner's timer and the widths' updates, and releases the graph's canvas.
@@ -85,32 +121,112 @@ public sealed partial class RepoLayoutView : UserControl
         _session.Dispose();
         _spinnerTimer.Stop();
         _window.Manager.PanelWidthsChanged -= OnPanelWidthsChanged;
-        CommitGraph.Release();
+        _search.Release();
+        _summary.Release();
+        _graph.Release();
     }
 
     // Graph
 
-    private void OnRowsChanged(IReadOnlyList<GraphRow> rows, IReadOnlyList<Commit> commits)
+    /// <summary>
+    /// Puts a <see cref="GraphView"/> where the XAML has its plain canvas (<c>CommitGraph</c>), its rows named as that
+    /// canvas was in UI Automation, and releases that canvas. The graph card's grid is found from <c>PanelsGrid</c> down
+    /// (its child in the third column, the graph's card), never through a Parent. Constructor only.
+    /// </summary>
+    private (GraphView Graph, Grid Host) SwapInGraphView()
     {
-        CommitGraph.SetRows(rows, commits);
-        ShowGraph();
+        var graph = new GraphView(_window.Manager, AutomationProperties.GetName(CommitGraph));
+        var card = PanelsGrid.Children.OfType<Border>().First(border => Grid.GetColumn(border) == 2);
+        var host = (Grid)card.Child;
+        host.Children[host.Children.IndexOf(CommitGraph)] = graph;
+        CommitGraph.Release();
+        return (graph, host);
     }
 
-    /// <summary>The whole log is in: an empty one leaves the graph empty, as on the Mac.</summary>
-    private void OnCompleted() => ShowGraph();
+    // Search and detail
+
+    private void OnFindInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (_closed || !_isShown || GraphFailure.Visibility == Visibility.Visible)
+            return;
+        _search.Open();
+        args.Handled = true;
+    }
+
+    /// <summary>Esc in the layout (the graph has the focus): closes the open search bar.</summary>
+    private void OnLayoutKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Escape && _search.IsOpen)
+        {
+            _search.Close();
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// A row was selected (a click, the arrow keys, a search match, a parent link) or the selected one went away: the
+    /// detail shows its summary's placeholder in this frame, the summary once made; nothing selected shows the skeleton.
+    /// </summary>
+    private void OnSelectionChanged(GraphItem? item)
+    {
+        if (_closed)
+            return;
+        if (item is not { } selected || _graph.Data is not { } data)
+        {
+            if (!ReferenceEquals(_detailCard.Child, _detailSkeleton))
+                _detailCard.Child = _detailSkeleton;
+            return;
+        }
+
+        if (!ReferenceEquals(_detailCard.Child, _summary))
+            _detailCard.Child = _summary;
+        _summary.Show(selected, data, _dates);
+    }
+
+    /// <summary>A parent's link: its commit's row is selected and revealed, as a click on it does.</summary>
+    private void OnParentClicked(string hash) =>
+        _graph.Select(new GraphItem(GraphItemKind.Commit, hash), _search.IsOpen ? _search.ActualHeight : 0);
+
+    /// <summary>A first page, the complete log or a reload: the graph shows it (an empty log leaves the graph empty,
+    /// as on the Mac).</summary>
+    private void OnLoaded(GraphData data)
+    {
+        _graph.Show(data);
+        // A WIP or worktree row's summary holds its counts: it follows the new data (other rows' do not change).
+        if (_graph.SelectedItem is { Kind: GraphItemKind.Wip or GraphItemKind.Worktree } selected
+            && ReferenceEquals(_detailCard.Child, _summary))
+        {
+            _summary.Refresh(selected, data, _dates);
+        }
+        if (GraphPlaceholder.Visibility == Visibility.Visible)
+            HidePlaceholder();
+        if (GraphFailure.Visibility == Visibility.Visible)
+        {
+            GraphFailure.Visibility = Visibility.Collapsed;
+            _graph.Visibility = Visibility.Visible;
+        }
+    }
 
     private void OnFailed(string message)
     {
         HidePlaceholder();
-        CommitGraph.Visibility = Visibility.Collapsed;
+        _graph.Visibility = Visibility.Collapsed;
         GraphFailureText.Text = message;
         GraphFailure.Visibility = Visibility.Visible;
     }
 
-    private void ShowGraph()
+    /// <summary>Shown again (another tab was shown meanwhile): the session reads the worktrees and the status again.</summary>
+    private void OnVisibilityChanged(DependencyObject sender, DependencyProperty property)
     {
-        if (GraphPlaceholder.Visibility == Visibility.Visible)
-            HidePlaceholder();
+        bool shown = Visibility == Visibility.Visible;
+        if (shown == _isShown)
+            return;
+        _isShown = shown;
+        if (_closed)
+            return;
+        _session.SetShown(shown);
+        if (shown)
+            _session.RefreshOnShow();
     }
 
     private void HidePlaceholder()

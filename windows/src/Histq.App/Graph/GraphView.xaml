@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The commit graph with its columns (ported from GraphView.swift at 6fa6d40): the column titles (Branch / Tag, Graph,
+    Commit message, Author, Time) on a 26 epx header with a hairline below, then the rows, drawn by one viewport-sized
+    Win2D canvas. The titles are made in GraphView.xaml.cs (one per column, with its resize grip); a right-click on the
+    header shows or hides the message, author and date columns.
+-->
+<UserControl
+    x:Class="Histq.App.Graph.GraphView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:graph="using:Histq.App.Graph">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="26" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid x:Name="HeaderGrid" Background="Transparent">
+            <Grid.ContextFlyout>
+                <MenuFlyout x:Name="HeaderMenu" Opening="OnHeaderMenuOpening">
+                    <ToggleMenuFlyoutItem
+                        x:Name="ShowMessageItem"
+                        Click="OnShowColumnClick"
+                        Text="Commit Message Column" />
+                    <ToggleMenuFlyoutItem
+                        x:Name="ShowAuthorItem"
+                        Click="OnShowColumnClick"
+                        Text="Author Column" />
+                    <ToggleMenuFlyoutItem
+                        x:Name="ShowDateItem"
+                        Click="OnShowColumnClick"
+                        Text="Time Column" />
+                </MenuFlyout>
+            </Grid.ContextFlyout>
+        </Grid>
+        <Border
+            Height="1"
+            VerticalAlignment="Bottom"
+            Background="{StaticResource GraphSeparatorBrush}"
+            IsHitTestVisible="False" />
+
+        <graph:GraphCanvas x:Name="Rows" Grid.Row="1" />
+    </Grid>
+</UserControl>

@@ -10,13 +10,15 @@ using Windows.UI;
 namespace Histq.App.Graph;
 
 /// <summary>
-/// Sizes of the graph from the row height (ported from GraphMetrics in App/Graph/GraphRowDrawing.swift at 6fa6d40, the
-/// Regular density with the Vivid lane colors). The band, the selection and the node share one height, centered in the
-/// row with a 3 epx gap above and below where the lane lines run between two rows.
+/// Sizes of the graph from the row height (the rowDensity preference) and its lane colors (ported from GraphMetrics in
+/// App/Graph/GraphRowDrawing.swift at 6fa6d40, at the Regular text size). The band, the selection and the node share
+/// one height, centered in the row with a 3 epx gap above and below where the lane lines run between two rows. A graph
+/// column too narrow for its lanes folds them continuously (<see cref="DrawnX"/>).
 /// </summary>
-internal sealed record GraphMetrics(double RowHeight)
+/// <param name="Gradient">The Gradient lane colors (laneColors), one per column, with 2 epx lines; else Vivid.</param>
+internal sealed record GraphMetrics(double RowHeight, bool Gradient = false)
 {
-    /// <summary>The default density: 30 epx rows.</summary>
+    /// <summary>The default density: 30 epx rows, Vivid.</summary>
     public static GraphMetrics Regular { get; } = new(30);
 
     /// <summary>Before lane 0.</summary>
@@ -28,10 +30,26 @@ internal sealed record GraphMetrics(double RowHeight)
     /// <summary>The least gap between a node's right edge and the column's right edge.</summary>
     public const double MinTrailing = 6;
 
-    /// <summary>Vivid lines: 1.5 epx.</summary>
-    public const float LineWidth = 1.5f;
+    /// <summary>A WIP or stash node's dashed outline.</summary>
+    public const float NodeLineWidth = 1.5f;
+
+    /// <summary>"compact" 26, "comfortable" 34, anything else regular (30).</summary>
+    public static GraphMetrics For(string? density, bool gradient) => new(
+        density switch
+        {
+            "compact" => 26,
+            "comfortable" => 34,
+            _ => 30,
+        },
+        gradient);
+
+    /// <summary>Vivid lines 1.5 epx, Gradient 2.</summary>
+    public float LineWidth => Gradient ? 2f : 1.5f;
 
     public double BandHeight => RowHeight - 6;
+
+    /// <summary>The band's and the selection's inset from the row's top and bottom.</summary>
+    public double BandInset => (RowHeight - BandHeight) / 2;
 
     /// <summary>A commit's node: as tall as the band.</summary>
     public double NodeDiameter => BandHeight;
@@ -54,21 +72,40 @@ internal sealed record GraphMetrics(double RowHeight)
     /// <summary>The graph column's width that shows <paramref name="lanes"/> lanes.</summary>
     public double Width(int lanes) => Leading + lanes * LaneWidth + Trailing;
 
-    /// <summary>
-    /// <paramref name="lane"/>'s node has room in a column <paramref name="columnWidth"/> wide. Lane 0 always has; a lane
-    /// that does not is left out (the macOS fold, which slides such nodes left, comes with the real graph view).
-    /// </summary>
-    public bool Fits(int lane, double columnWidth) =>
-        lane == 0 || X(lane) <= columnWidth - MinTrailing - NodeDiameter / 2 + 0.001;
+    /// <summary>The right-most node center a column <paramref name="width"/> wide has room for, never left of lane
+    /// 0's.</summary>
+    public double FoldLimit(double width) => Math.Max(X(0), width - MinTrailing - NodeDiameter / 2);
+
+    /// <summary>Where <paramref name="lane"/>'s node is drawn in a column <paramref name="width"/> wide: its own center,
+    /// or the fold limit when the column has no room for it (the right-most nodes slide left, onto their neighbours'
+    /// lines, down to lane 0).</summary>
+    public double DrawnX(int lane, double width) => Math.Min(X(lane), FoldLimit(width));
+
+    /// <summary><paramref name="lane"/> has no room in a column <paramref name="width"/> wide: its node is pushed left
+    /// and its lines are not drawn. Lane 0 never is.</summary>
+    public bool IsPinned(int lane, double width) => X(lane) > FoldLimit(width) + 0.001;
+
+    /// <summary>The lane lines' opacity in a column <paramref name="width"/> wide for a log of
+    /// <paramref name="logLanes"/> lanes: 1 until lane 1 is pinned, then fading to 0 as lane 1's nodes slide onto lane
+    /// 0, so the narrowest column draws no lane line. A one-lane log keeps its line.</summary>
+    public double LineAlpha(double width, int logLanes) =>
+        logLanes <= 1 ? 1 : Math.Clamp((FoldLimit(width) - X(0)) / LaneWidth, 0, 1);
 }
 
 /// <summary>
-/// The graph's Vivid colors by palette index (App/GlassStyle.swift at 6fa6d40): lines and nodes, the faint row band
-/// and the selected row's band; the grey of stash rows and other worktrees' WIP rows. Read once from Theme/Palette.xaml
-/// on the first draw (the UI thread), so no draw call looks a resource up.
+/// The graph's colors by palette index (App/GlassStyle.swift and GraphRowDrawing.swift at 6fa6d40): the Vivid or
+/// Gradient lines and nodes, the faint row band and the selected row's band; the grey of stash rows and other worktrees'
+/// WIP rows; the texts and the selection. Read once from Theme/Palette.xaml on the first draw (the UI thread), so no
+/// draw call looks a resource up.
 /// </summary>
 internal static class GraphPalette
 {
+    /// <summary>Another worktree's faded row, node and lines (Palette.graphOtherWorktreeAlpha).</summary>
+    public const float OtherWorktreeAlpha = 0.45f;
+
+    /// <summary>A faded row's text.</summary>
+    public const float DimmedTextAlpha = 0.35f;
+
     private static ColorSet? _colors;
 
     private static ColorSet Current => _colors ??= new ColorSet();
@@ -81,29 +118,65 @@ internal static class GraphPalette
 
     public static Color SelectedSubjectText => Current.SelectedSubjectText;
 
-    /// <summary>The scroll thumb at rest, and hovered or dragged.</summary>
+    /// <summary>The author, the date, a stash's and another worktree's label.</summary>
+    public static Color SecondaryText => Current.SecondaryText;
+
+    /// <summary>The selected row's fill, from its node to the right edge.</summary>
+    public static Color Selection => Current.Selection;
+
+    /// <summary>The scroll bar's thumb at rest, and hovered or dragged.</summary>
     public static Color ScrollThumbRest => Current.ScrollThumbRest;
 
     public static Color ScrollThumbActive => Current.ScrollThumbActive;
 
+    /// <summary>A badge's text and icons, and a tag's (and the "+N" chip's) neutral fill.</summary>
+    public static Color BadgeText => Current.BadgeText;
+
+    public static Color TagFill => Current.TagFill;
+
+    /// <summary>A WIP row's edited, added and deleted counts' glyphs: orange, green, red.</summary>
+    public static Color Edited => Current.Vivid.Lines[1];
+
+    public static Color Added => Current.Vivid.Lines[2];
+
+    public static Color Deleted => Current.Vivid.Lines[7];
+
     /// <summary>A <see cref="GraphRow"/> or <see cref="GraphSegment"/> color: its lane color, or the stash grey.</summary>
-    public static Color Lane(int color)
+    public static Color Lane(int color, bool gradient)
     {
         ColorSet colors = Current;
-        return color == GraphLayout.StashColor
-            ? colors.Stash
-            : colors.Lines[(int)((uint)color % (uint)colors.Lines.Length)];
+        if (color == GraphLayout.StashColor)
+            return colors.Stash;
+        Color[] lines = (gradient ? colors.Gradient : colors.Vivid).Lines;
+        return lines[(int)((uint)color % (uint)lines.Length)];
     }
 
     /// <summary>The band of a row of <paramref name="color"/>, brighter on the selected row.</summary>
-    public static Color Band(int color, bool selected)
+    public static Color Band(int color, bool gradient, bool selected)
     {
         ColorSet colors = Current;
         if (color == GraphLayout.StashColor)
             return selected ? colors.StashSelectedBand : colors.StashBand;
-        Color[] bands = selected ? colors.SelectedBands : colors.Bands;
+        LaneSet set = gradient ? colors.Gradient : colors.Vivid;
+        Color[] bands = selected ? set.SelectedBands : set.Bands;
         return bands[(int)((uint)color % (uint)bands.Length)];
     }
+
+    /// <summary>A branch or HEAD badge's fill on a row of <paramref name="color"/>: its lane color at 0.38, the
+    /// checked-out branch's at 0.6; the stash grey's on a stash or other worktree's row.</summary>
+    public static Color BadgeFill(int color, bool gradient, bool head)
+    {
+        ColorSet colors = Current;
+        if (color == GraphLayout.StashColor)
+            return colors.StashBadgeFill;
+        LaneSet set = gradient ? colors.Gradient : colors.Vivid;
+        Color[] fills = head ? set.HeadBadgeFills : set.BadgeFills;
+        return fills[(int)((uint)color % (uint)fills.Length)];
+    }
+
+    /// <summary><paramref name="color"/> at <paramref name="alpha"/> of its own alpha.</summary>
+    public static Color Faded(Color color, float alpha) =>
+        alpha >= 1 ? color : ColorHelper.FromArgb((byte)Math.Round(color.A * Math.Clamp(alpha, 0, 1)), color.R, color.G, color.B);
 
     private static Color WithAlpha(Color color, double alpha) =>
         ColorHelper.FromArgb((byte)Math.Round(alpha * 255), color.R, color.G, color.B);
@@ -111,57 +184,96 @@ internal static class GraphPalette
     private static Color[] WithAlpha(Color[] colors, double alpha) =>
         Array.ConvertAll(colors, color => WithAlpha(color, alpha));
 
+    /// <summary>One lane color set: lines and nodes, row bands, selected row bands, badge fills.</summary>
+    private sealed class LaneSet(Color[] lines, double band, double selectedBand, double badge, double headBadge)
+    {
+        public readonly Color[] Lines = lines;
+        public readonly Color[] Bands = WithAlpha(lines, band);
+        public readonly Color[] SelectedBands = WithAlpha(lines, selectedBand);
+        public readonly Color[] BadgeFills = WithAlpha(lines, badge);
+        public readonly Color[] HeadBadgeFills = WithAlpha(lines, headBadge);
+    }
+
     private sealed class ColorSet
     {
-        // Blue, orange, green, pink, cyan, yellow, purple, red.
-        public readonly Color[] Lines =
-            Enumerable.Range(0, 8).Select(i => PaletteResources.Color($"Lane{i}Color")).ToArray();
-
         public readonly Color Stash = PaletteResources.Color("GraphStashColor");
         public readonly Color Surface = PaletteResources.Color("SheetCardOpaqueColor");
         public readonly Color SubjectText = PaletteResources.Color("GraphSubjectTextColor");
         public readonly Color SelectedSubjectText = PaletteResources.Color("GraphSelectedSubjectTextColor");
+        public readonly Color SecondaryText = PaletteResources.Color("GraphSecondaryTextColor");
+        public readonly Color Selection = PaletteResources.Color("GraphSelectionColor");
         public readonly Color ScrollThumbRest = PaletteResources.Color("ScrollThumbRestColor");
         public readonly Color ScrollThumbActive = PaletteResources.Color("ScrollThumbActiveColor");
-        public readonly Color[] Bands;
-        public readonly Color[] SelectedBands;
+        public readonly Color BadgeText = PaletteResources.Color("GraphBadgeTextColor");
+        public readonly Color TagFill = PaletteResources.Color("GraphTagFillColor");
+        public readonly LaneSet Vivid;
+        public readonly LaneSet Gradient;
         public readonly Color StashBand;
         public readonly Color StashSelectedBand;
+        public readonly Color StashBadgeFill;
 
         public ColorSet()
         {
             double band = PaletteResources.Double("GraphBandOpacity");
             double selectedBand = PaletteResources.Double("GraphSelectedBandOpacity");
-            Bands = WithAlpha(Lines, band);
-            SelectedBands = WithAlpha(Lines, selectedBand);
+            double badge = PaletteResources.Double("BadgeFillOpacity");
+            double headBadge = PaletteResources.Double("HeadBadgeFillOpacity");
+            // Vivid: blue, orange, green, pink, cyan, yellow, purple, red. Gradient: 10 hues in order.
+            Vivid = new LaneSet(
+                Enumerable.Range(0, 8).Select(i => PaletteResources.Color($"Lane{i}Color")).ToArray(), band, selectedBand,
+                badge, headBadge);
+            Gradient = new LaneSet(
+                Enumerable.Range(0, 10).Select(i => PaletteResources.Color($"GradientLane{i}Color")).ToArray(), band,
+                selectedBand, badge, headBadge);
             StashBand = WithAlpha(Stash, band);
             StashSelectedBand = WithAlpha(Stash, selectedBand);
+            StashBadgeFill = WithAlpha(Stash, badge);
         }
     }
 }
 
+/// <summary>What a row's graph part draws besides its lanes (GraphCellView in GraphRowDrawing.swift at 6fa6d40).</summary>
+/// <param name="Avatar">A commit node's avatar (<see cref="AvatarRenderer"/>), drawn inside a ring of the lane color;
+/// null for a plain node.</param>
+/// <param name="HasRefs">The row has badges: the line from the column's left edge (where the badges' line ends) runs to
+/// the node.</param>
+/// <param name="HeadRef">One of them is the checked-out branch (or a detached HEAD): that line is full.</param>
+internal readonly record struct GraphNodeDecor(ICanvasImage? Avatar = null, bool HasRefs = false, bool HeadRef = false);
+
 /// <summary>
 /// Draws one graph row with Win2D (ported from App/Graph/GraphRowDrawing.swift at 6fa6d40): the faint band from the
 /// node to the column's edge, ending in a 2 epx bar in the lane color; the lane lines, rounded where they bend into or
-/// out of the node; the node; and the subject. Coordinates are relative to the row's top, so the caller's scroll offset
-/// never reaches a float beyond the viewport.
+/// out of the node; the node; and the row's texts. Coordinates are relative to the graph column's left edge and the
+/// row's top, so the caller's scroll offset never reaches a float beyond the viewport. A column too narrow for the
+/// log's lanes folds them (<see cref="GraphMetrics.DrawnX"/>): the right-most nodes slide left, a pinned lane's lines are
+/// not drawn, and as lane 1 folds onto lane 0 the lines fade out (<see cref="GraphMetrics.LineAlpha"/>; each line is
+/// faded on its own, where the Mac fades them through one layer).
 /// <para>
-/// Nothing here allocates per frame (but the cut copy of a subject over 512 chars): lines are drawn as such, the four
-/// quarter arcs of a bend are built once per device and drawn at an offset, and the stroke styles and text format are
-/// shared. It needs only a drawing session and a
-/// resource creator, so it draws the same on any Win2D host.
+/// Nothing here allocates per frame (but the cut copy of a text over 512 chars, and a WIP row's text with its change
+/// counts): lines are drawn as such, the four quarter arcs of a bend are built once per device and drawn at an offset,
+/// and the stroke styles and text formats are shared. It needs only a drawing session and a resource creator, so it
+/// draws the same on any Win2D host.
 /// </para>
 /// </summary>
 internal sealed class GraphRowRenderer : IDisposable
 {
-    /// <summary>The subject is cut here before it is drawn: a hostile repository's huge subject stays cheap.</summary>
-    private const int MaxSubjectLength = 512;
+    /// <summary>A text is cut here before it is drawn: a hostile repository's huge subject stays cheap.</summary>
+    private const int MaxTextLength = 512;
+
+    /// <summary>A text cell's padding, left and right.</summary>
+    public const float TextPadding = 8;
 
     // The quarter arcs of a bend, by direction (see Bend).
     private const int BendInRight = 0;
     private const int BendInLeft = 1;
     private const int BendOutRight = 2;
     private const int BendOutLeft = 3;
+
+    // A WIP row's change count glyphs (Segoe Fluent Icons): edit, add, remove.
+    private const string IconFont = "Segoe Fluent Icons";
+    private const char EditedGlyph = '\uE70F';
+    private const char AddedGlyph = '\uE710';
+    private const char DeletedGlyph = '\uE738';
 
     private readonly CanvasStrokeStyle _solid = new()
     {
@@ -170,36 +282,44 @@ internal sealed class GraphRowRenderer : IDisposable
         LineJoin = CanvasLineJoin.Round,
     };
 
-    // A synthetic row's line to its base: 3 on, 3 off at 1.5 epx (dash lengths are in stroke widths).
-    private readonly CanvasStrokeStyle _dashed = new()
-    {
-        StartCap = CanvasCapStyle.Round,
-        EndCap = CanvasCapStyle.Round,
-        DashCap = CanvasCapStyle.Round,
-        LineJoin = CanvasLineJoin.Round,
-        CustomDashStyle = [2f, 2f],
-    };
-
     // A WIP or stash node's outline: 2.5 on, 2.5 off at 1.5 epx.
     private readonly CanvasStrokeStyle _nodeDashed = new() { CustomDashStyle = [2.5f / 1.5f, 2.5f / 1.5f] };
 
-    private readonly CanvasTextFormat _subjectFormat = new()
-    {
-        FontFamily = "Segoe UI Variable Text",
-        FontSize = 13,
-        WordWrapping = CanvasWordWrapping.NoWrap,
-        VerticalAlignment = CanvasVerticalAlignment.Center,
-        TrimmingGranularity = CanvasTextTrimmingGranularity.Character,
-        TrimmingSign = CanvasTrimmingSign.Ellipsis,
-    };
+    private readonly CanvasTextFormat _textFormat = NewTextFormat(italic: false);
+
+    private readonly CanvasTextFormat _italicFormat = NewTextFormat(italic: true);
 
     private readonly CanvasGeometry?[] _bends = new CanvasGeometry?[4];
 
-    public GraphRowRenderer(GraphMetrics metrics) => Metrics = metrics;
+    // A synthetic row's line to its base: 3 on, 3 off (dash lengths are in stroke widths, so it follows the metrics).
+    private CanvasStrokeStyle _dashed;
 
-    public GraphMetrics Metrics { get; }
+    public GraphRowRenderer(GraphMetrics metrics)
+    {
+        Metrics = metrics;
+        _dashed = NewDashed(metrics.LineWidth);
+    }
 
-    /// <summary>Drops the geometries built on the current device (device lost, unload); they are rebuilt on use.</summary>
+    public GraphMetrics Metrics { get; private set; }
+
+    /// <summary>Draws with <paramref name="metrics"/> from now on (a row density or lane color change). UI thread,
+    /// between two draws.</summary>
+    public void SetMetrics(GraphMetrics metrics)
+    {
+        if (metrics == Metrics)
+            return;
+        bool lineChanged = metrics.LineWidth != Metrics.LineWidth;
+        Metrics = metrics;
+        ResetDeviceResources();
+        if (lineChanged)
+        {
+            _dashed.Dispose();
+            _dashed = NewDashed(metrics.LineWidth);
+        }
+    }
+
+    /// <summary>Drops the geometries built on the current device (device lost, unload, new metrics); they are rebuilt
+    /// on use.</summary>
     public void ResetDeviceResources()
     {
         for (int i = 0; i < _bends.Length; i++)
@@ -215,87 +335,184 @@ internal sealed class GraphRowRenderer : IDisposable
         _solid.Dispose();
         _dashed.Dispose();
         _nodeDashed.Dispose();
-        _subjectFormat.Dispose();
+        _textFormat.Dispose();
+        _italicFormat.Dispose();
     }
 
     /// <summary>
     /// Draws <paramref name="row"/>'s graph part in the column from x 0 to <paramref name="columnWidth"/>, the row's
-    /// top at <paramref name="top"/>. <paramref name="selected"/> draws the band brighter.
+    /// top at <paramref name="top"/>, for a log of <paramref name="logLanes"/> lanes. <paramref name="selected"/> draws
+    /// the band brighter; <paramref name="nodeAlpha"/> fades the row's own band and node (another worktree's row), and
+    /// <paramref name="fade"/> tells, by <see cref="GraphSegment.Owner"/>, the lines drawn faded.
     /// </summary>
-    public void DrawRow(CanvasDrawingSession ds, in GraphRow row, float top, float columnWidth, bool selected)
+    public void DrawRow(
+        CanvasDrawingSession ds, in GraphRow row, float top, float columnWidth, bool selected, int logLanes,
+        GraphRowSource? fade = null, float nodeAlpha = 1, GraphNodeDecor decor = default)
     {
         GraphMetrics m = Metrics;
         float mid = top + (float)(m.RowHeight / 2);
-        bool nodeFits = m.Fits(row.Lane, columnWidth);
-        float nodeX = (float)m.X(row.Lane);
-        Color laneColor = GraphPalette.Lane(row.Color);
+        float nodeX = (float)m.DrawnX(row.Lane, columnWidth);
+        Color laneColor = GraphPalette.Lane(row.Color, m.Gradient);
 
         // The band, from the node to the column's edge, ending in a 2 epx bar in the lane color.
-        if (nodeFits && columnWidth > nodeX)
+        if (columnWidth > nodeX)
         {
             float bandHeight = (float)m.BandHeight;
             float bandTop = mid - bandHeight / 2;
-            ds.FillRectangle(nodeX, bandTop, columnWidth - nodeX, bandHeight, GraphPalette.Band(row.Color, selected));
-            ds.FillRectangle(columnWidth - 2, bandTop, 2, bandHeight, laneColor);
+            ds.FillRectangle(
+                nodeX, bandTop, columnWidth - nodeX, bandHeight,
+                GraphPalette.Faded(GraphPalette.Band(row.Color, m.Gradient, selected), nodeAlpha));
+            ds.FillRectangle(columnWidth - 2, bandTop, 2, bandHeight, GraphPalette.Faded(laneColor, nodeAlpha));
         }
 
-        if (!row.Top.IsDefault)
+        // The badges' line, on from the column's left edge to the node.
+        if (decor.HasRefs && nodeX > 0)
         {
-            foreach (GraphSegment segment in row.Top)
+            ds.DrawLine(
+                0, mid, nodeX, mid,
+                GraphPalette.Faded(laneColor, nodeAlpha * RefBadgeRenderer.RefsLineAlpha(decor.HeadRef)),
+                RefBadgeRenderer.RefsLineWidth(decor.HeadRef));
+        }
+
+        // The same for every row of the column, so the lines never break between rows.
+        float lineAlpha = (float)m.LineAlpha(columnWidth, logLanes);
+        if (lineAlpha > 0.01f)
+        {
+            // A segment's edge end (top or bottom) must be on an unpinned lane; its center end may also be the node.
+            if (!row.Top.IsDefault)
             {
-                if (m.Fits(segment.From, columnWidth) && m.Fits(segment.To, columnWidth))
-                    DrawSegment(ds, segment, topHalf: true, top, mid);
+                foreach (GraphSegment segment in row.Top)
+                {
+                    if (!m.IsPinned(segment.From, columnWidth) && Shows(segment.To, row.Lane, columnWidth))
+                        DrawSegment(ds, segment, topHalf: true, top, mid, columnWidth, lineAlpha * SegmentAlpha(segment, fade));
+                }
+            }
+
+            if (!row.Bottom.IsDefault)
+            {
+                foreach (GraphSegment segment in row.Bottom)
+                {
+                    if (Shows(segment.From, row.Lane, columnWidth) && !m.IsPinned(segment.To, columnWidth))
+                        DrawSegment(ds, segment, topHalf: false, top, mid, columnWidth, lineAlpha * SegmentAlpha(segment, fade));
+                }
             }
         }
 
-        if (!row.Bottom.IsDefault)
-        {
-            foreach (GraphSegment segment in row.Bottom)
-            {
-                if (m.Fits(segment.From, columnWidth) && m.Fits(segment.To, columnWidth))
-                    DrawSegment(ds, segment, topHalf: false, top, mid);
-            }
-        }
+        DrawNode(ds, row, new Vector2(nodeX, mid), laneColor, nodeAlpha, decor.Avatar);
+    }
 
-        if (nodeFits)
-            DrawNode(ds, row, new Vector2(nodeX, mid), laneColor);
+    /// <summary>The diameter of a commit node's avatar: inside a ring of the lane color as thick as the lines.</summary>
+    public float AvatarDiameter => (float)Metrics.NodeDiameter - 2 * Metrics.LineWidth;
+
+    /// <summary>
+    /// Draws <paramref name="subject"/> from <paramref name="x"/>, <paramref name="width"/> wide, in the subject's
+    /// color (full white on the selected row).
+    /// </summary>
+    public void DrawSubject(CanvasDrawingSession ds, string subject, float x, float top, float width, bool selected) =>
+        DrawText(ds, subject, x, top, width, selected ? GraphPalette.SelectedSubjectText : GraphPalette.SubjectText, false);
+
+    /// <summary>
+    /// Draws <paramref name="text"/> from <paramref name="x"/>, <paramref name="width"/> wide (more than 0), on one line
+    /// vertically centered in the row, ending in an ellipsis when cut. No text layout object is kept: each call draws
+    /// with a shared format, so scrolling makes no managed wrapper per row.
+    /// </summary>
+    public void DrawText(
+        CanvasDrawingSession ds, string text, float x, float top, float width, Color color, bool italic)
+    {
+        ds.DrawText(
+            Cut(text), new Windows.Foundation.Rect(x, top, width, Metrics.RowHeight), color,
+            italic ? _italicFormat : _textFormat);
     }
 
     /// <summary>
-    /// Draws <paramref name="subject"/> from <paramref name="x"/>, <paramref name="width"/> wide (more than 0), on one
-    /// line vertically centered in the row, ending in an ellipsis when cut. No text layout object is kept: each call
-    /// draws with the shared format, so scrolling makes no managed wrapper per row.
+    /// A WIP row's text: <paramref name="label"/>, then each kind of change of <paramref name="changes"/> as its glyph
+    /// in its color (edited orange, added green, deleted red) and its count, as <see cref="DrawText"/>. Builds a text
+    /// layout: only the few WIP rows on screen draw it.
     /// </summary>
-    public void DrawSubject(CanvasDrawingSession ds, string subject, float x, float top, float width, bool selected)
+    public void DrawChanges(
+        CanvasDrawingSession ds, string label, WorktreeChanges changes, float x, float top, float width, Color color,
+        bool italic)
     {
-        string text = subject;
-        if (text.Length > MaxSubjectLength)
+        var text = new System.Text.StringBuilder(Cut(label));
+        var glyphs = new List<(int Index, Color Color)>(3);
+        foreach ((int count, char glyph, Color glyphColor) in new[]
+                 {
+                     (changes.Edited, EditedGlyph, GraphPalette.Edited),
+                     (changes.Added, AddedGlyph, GraphPalette.Added),
+                     (changes.Deleted, DeletedGlyph, GraphPalette.Deleted),
+                 })
         {
-            // Cut on a surrogate boundary: never half a pair.
-            int length = char.IsHighSurrogate(text[MaxSubjectLength - 1]) ? MaxSubjectLength - 1 : MaxSubjectLength;
-            text = text[..length];
+            if (count <= 0)
+                continue;
+            text.Append("   ");
+            glyphs.Add((text.Length, glyphColor));
+            text.Append(glyph).Append(' ').Append(count.ToString(System.Globalization.CultureInfo.CurrentCulture));
         }
 
-        ds.DrawText(
-            text,
-            new Windows.Foundation.Rect(x, top, width, Metrics.RowHeight),
-            selected ? GraphPalette.SelectedSubjectText : GraphPalette.SubjectText,
-            _subjectFormat);
+        using var layout = new CanvasTextLayout(
+            ds, text.ToString(), italic ? _italicFormat : _textFormat, width, (float)Metrics.RowHeight);
+        foreach ((int index, Color glyphColor) in glyphs)
+        {
+            layout.SetFontFamily(index, 1, IconFont);
+            layout.SetFontStyle(index, 1, Windows.UI.Text.FontStyle.Normal);
+            layout.SetFontSize(index, 1, 11);
+            layout.SetColor(index, 1, glyphColor);
+        }
+
+        ds.DrawTextLayout(layout, x, top, color);
     }
+
+    private static CanvasTextFormat NewTextFormat(bool italic) => new()
+    {
+        FontFamily = "Segoe UI Variable Text",
+        FontSize = 13,
+        FontStyle = italic ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal,
+        WordWrapping = CanvasWordWrapping.NoWrap,
+        VerticalAlignment = CanvasVerticalAlignment.Center,
+        TrimmingGranularity = CanvasTextTrimmingGranularity.Character,
+        TrimmingSign = CanvasTrimmingSign.Ellipsis,
+    };
+
+    private static CanvasStrokeStyle NewDashed(float lineWidth) => new()
+    {
+        StartCap = CanvasCapStyle.Round,
+        EndCap = CanvasCapStyle.Round,
+        DashCap = CanvasCapStyle.Round,
+        LineJoin = CanvasLineJoin.Round,
+        CustomDashStyle = [3 / lineWidth, 3 / lineWidth],
+    };
+
+    /// <summary>The text cut at <see cref="MaxTextLength"/> on a surrogate boundary (never half a pair).</summary>
+    private static string Cut(string text)
+    {
+        if (text.Length <= MaxTextLength)
+            return text;
+        int length = char.IsHighSurrogate(text[MaxTextLength - 1]) ? MaxTextLength - 1 : MaxTextLength;
+        return text[..length];
+    }
+
+    /// <summary>A segment's center end at <paramref name="lane"/> shows: an unpinned lane, or the row's own node.</summary>
+    private bool Shows(int lane, int nodeLane, float columnWidth) =>
+        lane == nodeLane || !Metrics.IsPinned(lane, columnWidth);
+
+    private static float SegmentAlpha(in GraphSegment segment, GraphRowSource? fade) =>
+        fade is not null && segment.Owner >= 0 && fade.IsSegmentFaded(segment.Owner) ? GraphPalette.OtherWorktreeAlpha : 1;
 
     /// <summary>
     /// One line piece. Top half: from the row's top edge at lane <c>From</c> to the center at lane <c>To</c>. Bottom
-    /// half: from the center at <c>From</c> to the bottom edge at <c>To</c>. Bends turn with <see cref="GraphMetrics.BendRadius"/>.
+    /// half: from the center at <c>From</c> to the bottom edge at <c>To</c>. Lanes are at their drawn x; bends turn with
+    /// <see cref="GraphMetrics.BendRadius"/> (a straight corner when the lanes are closer than that).
     /// </summary>
-    private void DrawSegment(CanvasDrawingSession ds, GraphSegment segment, bool topHalf, float top, float mid)
+    private void DrawSegment(
+        CanvasDrawingSession ds, GraphSegment segment, bool topHalf, float top, float mid, float columnWidth, float alpha)
     {
         GraphMetrics m = Metrics;
-        float fromX = (float)m.X(segment.From);
-        float toX = (float)m.X(segment.To);
+        float fromX = (float)m.DrawnX(segment.From, columnWidth);
+        float toX = (float)m.DrawnX(segment.To, columnWidth);
         float bottom = top + (float)m.RowHeight;
         float radius = (float)m.BendRadius;
-        float width = GraphMetrics.LineWidth;
-        Color color = GraphPalette.Lane(segment.Color);
+        float width = m.LineWidth;
+        Color color = GraphPalette.Faded(GraphPalette.Lane(segment.Color, m.Gradient), alpha);
         CanvasStrokeStyle style = segment.IsDashed ? _dashed : _solid;
         bool bends = Math.Abs(toX - fromX) >= radius && radius > 0;
         float sign = toX > fromX ? 1 : -1;
@@ -361,40 +578,70 @@ internal sealed class GraphRowRenderer : IDisposable
     }
 
     /// <summary>
-    /// The node: a commit's filled circle (its avatar and initials come with the real graph view), a merge's small
-    /// dot, a WIP row's dashed circle, a stash's dashed rounded square.
+    /// The node: a commit's filled circle with its avatar inside a ring of the lane color, a merge's small dot, a WIP
+    /// row's dashed circle, a stash's dashed rounded square. A faded node (<paramref name="alpha"/> under 1) first
+    /// covers the lines under it with the card's surface, so they do not show through.
     /// </summary>
-    private void DrawNode(CanvasDrawingSession ds, in GraphRow row, Vector2 center, Color color)
+    private void DrawNode(
+        CanvasDrawingSession ds, in GraphRow row, Vector2 center, Color color, float alpha, ICanvasImage? avatar)
     {
         GraphMetrics m = Metrics;
         float diameter = (float)m.NodeDiameter;
+        float hollow = diameter - 2;
+        Color full = color;
+        if (alpha < 0.99f)
+        {
+            ds.FillCircle(center, hollow / 2, GraphPalette.Surface);
+            color = GraphPalette.Faded(color, alpha);
+        }
+
         if (row.Node.SyntheticRow is { } synthetic)
         {
-            float hollow = diameter - 2;
-            Color band = GraphPalette.Band(row.Color, selected: false);
+            Color band = GraphPalette.Faded(GraphPalette.Band(row.Color, m.Gradient, selected: false), alpha);
             if (synthetic.Kind == GraphSyntheticRowKind.Stash)
             {
                 var rect = new Windows.Foundation.Rect(
                     center.X - hollow / 2, center.Y - hollow / 2, hollow, hollow);
                 ds.FillRoundedRectangle(rect, 2, 2, GraphPalette.Surface);
                 ds.FillRoundedRectangle(rect, 2, 2, band);
-                ds.DrawRoundedRectangle(rect, 2, 2, color, GraphMetrics.LineWidth, _nodeDashed);
+                ds.DrawRoundedRectangle(rect, 2, 2, color, GraphMetrics.NodeLineWidth, _nodeDashed);
             }
             else
             {
                 ds.FillCircle(center, hollow / 2, GraphPalette.Surface);
                 ds.FillCircle(center, hollow / 2, band);
-                ds.DrawCircle(center, hollow / 2, color, GraphMetrics.LineWidth, _nodeDashed);
+                ds.DrawCircle(center, hollow / 2, color, GraphMetrics.NodeLineWidth, _nodeDashed);
             }
         }
         else if (row.Node.IsMerge)
         {
             ds.FillCircle(center, (float)(m.MergeDotDiameter / 2), color);
         }
+        else if (avatar is not null && alpha < 0.99f)
+        {
+            // A faded node with its avatar: faded as a whole (one layer), so the ring does not show through the avatar.
+            // Bounded to the node: no full-target layer per faded node.
+            using (ds.CreateLayer(alpha, new Windows.Foundation.Rect(
+                       center.X - diameter / 2 - 1, center.Y - diameter / 2 - 1, diameter + 2, diameter + 2)))
+                DrawAvatarNode(ds, center, full, avatar);
+        }
         else
         {
-            ds.FillCircle(center, diameter / 2, color);
+            if (avatar is not null)
+                DrawAvatarNode(ds, center, color, avatar);
+            else
+                ds.FillCircle(center, diameter / 2, color);
         }
+    }
+
+    /// <summary>A commit's node: a disc of the lane color, the avatar inside it, a ring as thick as the lines left.</summary>
+    private void DrawAvatarNode(CanvasDrawingSession ds, Vector2 center, Color color, ICanvasImage avatar)
+    {
+        ds.FillCircle(center, (float)Metrics.NodeDiameter / 2, color);
+        float inner = AvatarDiameter;
+        ds.DrawImage(
+            avatar, new Windows.Foundation.Rect(center.X - inner / 2, center.Y - inner / 2, inner, inner),
+            new Windows.Foundation.Rect(0, 0, inner, inner));
     }
 }
 

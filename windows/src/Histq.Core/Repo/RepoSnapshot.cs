@@ -1,7 +1,7 @@
 // What one load of a repo's log produced: the commits with their graph rows, the WIP, other-worktree and stash rows
 // laid out around them, and what the next reload needs to read only the new commits (the tips, the filter, the order).
-// Ported from LogSnapshot in App/Repo/RepoSession.swift at 6fa6d40 (its data only; the table-row mapping comes with
-// the graph view).
+// Ported from LogSnapshot in App/Repo/RepoSession.swift at 6fa6d40, with its table-row mapping (entry(at:),
+// row(ofCommit:), row(where:)).
 using System.Collections.Frozen;
 
 namespace Histq.Core;
@@ -78,4 +78,105 @@ public sealed record RepoSnapshot
 
     /// <summary>How the rows took their lane colors (the laneColors preference).</summary>
     public GraphLayout.Coloring Coloring { get; init; } = GraphLayout.Coloring.Branch;
+
+    /// <summary>The working tree's status the WIP row was laid out from; null before it was read.</summary>
+    public WorkingStatus? Status { get; init; }
+
+    /// <summary>The graph's rows: the top rows (<see cref="SyntheticRows"/>), then the commits with the hung rows
+    /// between them.</summary>
+    public long RowCount => (long)SyntheticRows.Count + Hung.Count + Commits.Count;
+
+    /// <summary>What graph row <paramref name="row"/> shows; null outside the rows. O(log hung rows).</summary>
+    public RepoRowEntry? EntryAt(long row)
+    {
+        if (row < 0 || row >= RowCount)
+        {
+            return null;
+        }
+
+        if (row < SyntheticRows.Count)
+        {
+            var top = SyntheticRows[(int)row];
+            return top.Node.SyntheticRow is { } synthetic ? new RepoRowEntry(synthetic, top, -1) : null;
+        }
+
+        // The hung row k sits at position Hung[k].Above + k among the rows below the top ones (strictly increasing):
+        // the hung rows at or above `position` are found by binary search.
+        var position = row - SyntheticRows.Count;
+        int low = 0, high = Hung.Count;
+        while (low < high)
+        {
+            var middle = (low + high) / 2;
+            if ((long)Hung[middle].Above + middle <= position)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        if (low > 0 && (long)Hung[low - 1].Above + low - 1 == position)
+        {
+            var hung = Hung[low - 1];
+            return new RepoRowEntry(hung.Synthetic, hung.Row, -1);
+        }
+
+        var index = position - low;
+        return index < Commits.Count ? new RepoRowEntry(null, Rows[(int)index], (int)index) : null;
+    }
+
+    /// <summary>The graph row of <c>Commits[index]</c>.</summary>
+    public long RowOfCommit(int index)
+    {
+        // The hung rows above it: those whose base comes at or before it.
+        int low = 0, high = Hung.Count;
+        while (low < high)
+        {
+            var middle = (low + high) / 2;
+            if (Hung[middle].Above <= index)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return (long)SyntheticRows.Count + index + low;
+    }
+
+    /// <summary>The graph row of the first synthetic row of <paramref name="kind"/> with <paramref name="id"/>; -1 for
+    /// none.</summary>
+    public long RowOfSynthetic(GraphSyntheticRowKind kind, string id)
+    {
+        for (var top = 0; top < SyntheticRows.Count; top++)
+        {
+            if (SyntheticRows[top].Node.SyntheticRow is { } synthetic && Matches(synthetic))
+            {
+                return top;
+            }
+        }
+
+        for (var k = 0; k < Hung.Count; k++)
+        {
+            if (Matches(Hung[k].Synthetic))
+            {
+                return (long)SyntheticRows.Count + Hung[k].Above + k;
+            }
+        }
+
+        return -1;
+
+        bool Matches(GraphSyntheticRow synthetic) =>
+            synthetic.Kind == kind && string.Equals(synthetic.Id, id, StringComparison.Ordinal);
+    }
 }
+
+/// <summary>What one graph row of a <see cref="RepoSnapshot"/> shows (<see cref="RepoSnapshot.EntryAt"/>).</summary>
+/// <param name="Synthetic">The WIP, other worktree's or stash row; null for a commit.</param>
+/// <param name="Row">The row as laid out.</param>
+/// <param name="CommitIndex">The commit's index in <see cref="RepoSnapshot.Commits"/>; -1 for a synthetic row.</param>
+public readonly record struct RepoRowEntry(GraphSyntheticRow? Synthetic, GraphRow Row, int CommitIndex);

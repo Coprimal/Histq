@@ -18,8 +18,8 @@ namespace Histq.Core;
 public sealed class RepoLoader(
     GitRunner runner, string cwd, IReadOnlyDictionary<string, string> @base, ReadEnvironmentCache? cache = null)
 {
-    /// <summary>The repo's common dir, resolved on first use; a race resolves it twice to the same value.</summary>
-    private string? _commonDir;
+    /// <summary>The repo's common dir and bareness, resolved on first use; a race resolves them twice the same.</summary>
+    private RepoInfo? _info;
 
     /// <summary>The order the commitOrder preference stores: <c>"branch"</c> is by branch, anything else by date.</summary>
     public static LogReader.Order OrderFrom(string? stored) =>
@@ -71,10 +71,11 @@ public sealed class RepoLoader(
         var env = await ReadEnvironmentAsync(ct).ConfigureAwait(false);
         // The status runs beside the stashes and the history: it is awaited only when the first rows are laid out.
         using var statusCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var status = StartStatus(env, statusCancel.Token);
+        var info = InfoAsync(env, ct);
+        var status = StartStatus(env, info, statusCancel.Token);
         try
         {
-            var (stashes, commonDir) = await StashesAndCommonDirAsync(env, ct).ConfigureAwait(false);
+            var (stashes, commonDir) = await StashesAndCommonDirAsync(env, info, ct).ConfigureAwait(false);
             var isShallow = IsShallow(commonDir);
             // The stashes' bases are read too, which no branch may hold any more (not in solo mode).
             var pages = LogReader.PagesAsync(
@@ -82,6 +83,7 @@ public sealed class RepoLoader(
                 hidden: Sorted(filter.Hidden), solo: filter.Solo, order: order, ct: ct);
             var index = new Dictionary<string, int>(StringComparer.Ordinal);
             IReadOnlyList<GraphSyntheticRow> synthetic = [];
+            WorkingStatus? read = null;
             GraphLayout? layout = null;
             GraphLayout? top = null;
             List<GraphRow> syntheticRows = [];
@@ -92,7 +94,8 @@ public sealed class RepoLoader(
             // Once git has started on the history (or ended without a commit): the status, then the top rows.
             async Task<GraphLayout> BeginAsync()
             {
-                synthetic = SyntheticRows(await status.ConfigureAwait(false), stashes, worktrees);
+                read = await status.ConfigureAwait(false);
+                synthetic = SyntheticRows(read, stashes, worktrees);
                 (layout, top, syntheticRows) = BeginLayout(synthetic, filter, coloring, isComplete: false, index);
                 lanes = LanesOf(syntheticRows);
                 return layout;
@@ -120,7 +123,7 @@ public sealed class RepoLoader(
                         Hung = pageLayout.Hung.ToArray(), Synthetic = synthetic, Stashes = stashes,
                         CommitIndex = new Dictionary<string, int>(index, StringComparer.Ordinal), Lanes = lanes,
                         Worktrees = worktrees, IsShallow = isShallow, Generation = generation, Filter = filter,
-                        Order = order, Coloring = coloring,
+                        Order = order, Coloring = coloring, Status = read,
                     }).ConfigureAwait(false);
                 }
             }
@@ -135,7 +138,7 @@ public sealed class RepoLoader(
                 Lanes = Math.Max(lanes, LanesOf(syntheticRows)), Worktrees = worktrees, IsComplete = true,
                 // Made shallow while git read the history: the next reload must not trust it.
                 IsShallow = isShallow || IsShallow(commonDir), Generation = generation, Filter = filter,
-                Order = order, Coloring = coloring,
+                Order = order, Coloring = coloring, Status = read,
             };
         }
         finally
@@ -205,10 +208,11 @@ public sealed class RepoLoader(
         var env = await ReadEnvironmentAsync(ct).ConfigureAwait(false);
         // The status runs beside the stashes and the new commits; it is awaited only for the top rows.
         using var statusCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var status = StartStatus(env, statusCancel.Token);
+        var info = InfoAsync(env, ct);
+        var status = StartStatus(env, info, statusCancel.Token);
         try
         {
-            return await ReloadIncrementallyAsync(previous, generation, filter, worktrees, env, status, ct)
+            return await ReloadIncrementallyAsync(previous, generation, filter, worktrees, env, info, status, ct)
                 .ConfigureAwait(false);
         }
         finally
@@ -222,10 +226,10 @@ public sealed class RepoLoader(
     /// with the read environment and the status read in flight.</summary>
     private async Task<RepoSnapshot?> ReloadIncrementallyAsync(
         RepoSnapshot previous, int generation, LogFilter filter, IReadOnlyList<Worktree> worktrees,
-        IReadOnlyDictionary<string, string> env, Task<WorkingStatus> status, CancellationToken ct)
+        IReadOnlyDictionary<string, string> env, Task<RepoInfo> info, Task<WorkingStatus> status, CancellationToken ct)
     {
-        var (stashes, commonDir) = await StashesAndCommonDirAsync(env, ct).ConfigureAwait(false);
-        if (IsShallow(commonDir) || File.Exists(Path.Combine(commonDir, "info", "grafts")))
+        var (stashes, commonDir) = await StashesAndCommonDirAsync(env, info, ct).ConfigureAwait(false);
+        if (commonDir is null || IsShallow(commonDir) || File.Exists(Path.Combine(commonDir, "info", "grafts")))
         {
             return null;
         }
@@ -263,7 +267,8 @@ public sealed class RepoLoader(
 
         ct.ThrowIfCancellationRequested();
         // Laid out as complete: a WIP base or a hung row's base missing from the log goes on top without a line.
-        var synthetic = SyntheticRows(await status.ConfigureAwait(false), stashes, worktrees);
+        var read = await status.ConfigureAwait(false);
+        var synthetic = SyntheticRows(read, stashes, worktrees);
         var (layout, top, syntheticRows) = BeginLayout(synthetic, filter, previous.Coloring, isComplete: true, index);
         var rows = layout.Append(commits, ct);
         syntheticRows.AddRange(top.Append(Unbased(layout.Waiting)));
@@ -275,8 +280,23 @@ public sealed class RepoLoader(
             Stashes = stashes, CommitIndex = index, Tips = LogReader.TipsAdding(delta, previous.Tips),
             Lanes = Math.Max(LanesOf(syntheticRows), Math.Max(LanesOf(rows), LanesOf(hung.Select(row => row.Row)))),
             Worktrees = worktrees, IsComplete = true, Generation = generation, Filter = filter, Order = order,
-            Coloring = previous.Coloring,
+            Coloring = previous.Coloring, Status = read,
         };
+    }
+
+    /// <summary>
+    /// The status and the stashes now, read as a load reads them (the cached common dir and bareness): a bare repo has
+    /// no changes (an empty status) and no stash. For the checks between loads, which compare them with a snapshot's.
+    /// Throws <see cref="GitError"/> and <see cref="OperationCanceledException"/>.
+    /// </summary>
+    public async Task<(WorkingStatus Status, IReadOnlyList<Stash> Stashes)> StatusAndStashesAsync(
+        CancellationToken ct = default)
+    {
+        var env = await ReadEnvironmentAsync(ct).ConfigureAwait(false);
+        var info = InfoAsync(env, ct);
+        var status = StartStatus(env, info, ct);
+        var (stashes, _) = await StashesAndCommonDirAsync(env, info, ct).ConfigureAwait(false);
+        return (await status.ConfigureAwait(false), stashes);
     }
 
     /// <summary>The read environment for this folder, built once per load (its driver listing cached in <c>cache</c>).</summary>
@@ -285,42 +305,120 @@ public sealed class RepoLoader(
 
     /// <summary>
     /// Starts reading the status. A failure is marked observed at once, so a load that ends before awaiting it (in doubt,
-    /// failed, cancelled) leaves no unobserved task exception; a load that awaits it still gets the failure.
+    /// failed, cancelled) leaves no unobserved task exception; a load that awaits it still gets the failure. A bare repo
+    /// (no working tree, so git refuses the status) has no changes: no WIP row.
     /// </summary>
-    private Task<WorkingStatus> StartStatus(IReadOnlyDictionary<string, string> env, CancellationToken ct)
+    private Task<WorkingStatus> StartStatus(
+        IReadOnlyDictionary<string, string> env, Task<RepoInfo> info, CancellationToken ct)
     {
-        var status = StatusReader.ReadAsync(runner, cwd, env, ct);
+        var status = StatusOrNoneAsync(env, info, ct);
         _ = status.ContinueWith(
             static task => _ = task.Exception, CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         return status;
     }
 
-    /// <summary>The stashes and the common dir, read side by side.</summary>
-    private async Task<(IReadOnlyList<Stash> Stashes, string CommonDir)> StashesAndCommonDirAsync(
-        IReadOnlyDictionary<string, string> env, CancellationToken ct)
+    private async Task<WorkingStatus> StatusOrNoneAsync(
+        IReadOnlyDictionary<string, string> env, Task<RepoInfo> info, CancellationToken ct)
     {
-        var stashes = StashWorktreeReader.StashesAsync(runner, cwd, env, ct);
-        var commonDir = CommonDirAsync(env, ct);
-        await Task.WhenAll(stashes, commonDir).ConfigureAwait(false);
-        return (await stashes.ConfigureAwait(false), await commonDir.ConfigureAwait(false));
+        try
+        {
+            return await StatusReader.ReadAsync(runner, cwd, env, ct).ConfigureAwait(false);
+        }
+        catch (GitError)
+        {
+            if ((await info.ConfigureAwait(false)).IsBare)
+            {
+                return new WorkingStatus(new WorkingStatusBranch(null, null, null, null, null), []);
+            }
+
+            throw;
+        }
     }
 
-    /// <summary>The git dir every worktree of the repo shares (where <c>shallow</c> and <c>info/grafts</c> live).</summary>
-    private async Task<string> CommonDirAsync(IReadOnlyDictionary<string, string> env, CancellationToken ct)
+    /// <summary>The stashes and the common dir, read side by side. A bare repo has no stash list (git refuses it
+    /// without a working tree): no stash row.</summary>
+    private async Task<(IReadOnlyList<Stash> Stashes, string? CommonDir)> StashesAndCommonDirAsync(
+        IReadOnlyDictionary<string, string> env, Task<RepoInfo> info, CancellationToken ct)
     {
-        if (Volatile.Read(ref _commonDir) is { } known)
+        IReadOnlyList<Stash> stashes;
+        try
+        {
+            stashes = await StashWorktreeReader.StashesAsync(runner, cwd, env, ct).ConfigureAwait(false);
+        }
+        catch (GitError)
+        {
+            if (!(await info.ConfigureAwait(false)).IsBare)
+            {
+                throw;
+            }
+
+            stashes = [];
+        }
+
+        return (stashes, (await info.ConfigureAwait(false)).CommonDir);
+    }
+
+    /// <summary>
+    /// The git dir every worktree of the repo shares (where <c>shallow</c> and <c>info/grafts</c> live) as its real
+    /// path, and whether the repo is bare; read with <c>rev-parse</c> alone, which needs no working tree. The common dir
+    /// is null when it cannot be had or is a network (UNC) or device path, which Histq never probes itself: the log is
+    /// then read as if shallow (a reload reads it whole). Throws only a cancellation.
+    /// </summary>
+    private async Task<RepoInfo> InfoAsync(IReadOnlyDictionary<string, string> env, CancellationToken ct)
+    {
+        if (Volatile.Read(ref _info) is { } known)
         {
             return known;
         }
 
-        var resolved = (await RepoDirectories.ResolveAsync(runner, cwd, env, ct).ConfigureAwait(false)).CommonDir;
-        Volatile.Write(ref _commonDir, resolved);
+        RepoInfo resolved;
+        try
+        {
+            var result = await runner.RunAsync(
+                ["rev-parse", "--path-format=absolute", "--git-common-dir", "--is-bare-repository"], cwd, env,
+                timeout: TimeSpan.FromSeconds(10), ct: ct).ConfigureAwait(false);
+            var lines = result.Text.Split('\n');
+            resolved = new RepoInfo(
+                lines.Length > 0 ? LocalFolder(lines[0].TrimEnd('\r')) : null,
+                lines.Length > 1 && string.Equals(lines[1].Trim(), "true", StringComparison.Ordinal));
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return new RepoInfo(null, false);
+        }
+
+        Volatile.Write(ref _info, resolved);
         return resolved;
     }
 
-    /// <summary>Whether the repo is a shallow clone now (<c>&lt;common dir&gt;/shallow</c> exists).</summary>
-    private static bool IsShallow(string commonDir) => File.Exists(Path.Combine(commonDir, "shallow"));
+    /// <summary><paramref name="output"/> (a folder git printed) as a local real path; null for a network or device
+    /// path (checked before any file system call and again on the real path) or one that cannot be had.</summary>
+    private static string? LocalFolder(string output)
+    {
+        var flavor = PathFlavor.Host;
+        if (output.Length == 0 || flavor.IsUncOrDevice(output))
+        {
+            return null;
+        }
+
+        var native = StashWorktreeReader.NativePath(output);
+        if (flavor.IsUncOrDevice(native) || !flavor.IsAbsolute(native))
+        {
+            return null;
+        }
+
+        var real = WorkspaceDisk.Host.RealPath(native);
+        return real is null || flavor.IsUncOrDevice(real) ? null : real;
+    }
+
+    /// <summary>Whether the repo is a shallow clone now (<c>&lt;common dir&gt;/shallow</c> exists); an unknown common
+    /// dir counts as shallow, so a reload never trusts the history it read.</summary>
+    private static bool IsShallow(string? commonDir) =>
+        commonDir is null || File.Exists(Path.Combine(commonDir, "shallow"));
+
+    /// <summary>The repo's common dir (null when unknown or remote) and whether it is bare (<see cref="InfoAsync"/>).</summary>
+    private sealed record RepoInfo(string? CommonDir, bool IsBare);
 
     /// <summary>
     /// Lays out the WIP row at the top and hangs the other worktrees' rows and the stashes above their bases (another

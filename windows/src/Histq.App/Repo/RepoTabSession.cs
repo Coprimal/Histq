@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Histq.App.Graph;
 using Histq.App.Shell;
 using Histq.Core;
 using Histq.Platform.SystemServices;
@@ -8,22 +9,39 @@ using Microsoft.UI.Dispatching;
 namespace Histq.App.Repo;
 
 /// <summary>
-/// A repo tab's log load (ported from the entry of RepoSession's load pipeline, readLog in App/Repo/RepoSession.swift at
-/// 6fa6d40, its log part only): off the UI thread it resolves git (<see cref="GitExecutable.ResolveAsync"/> with the
-/// gitPath preference), builds the read environment (<see cref="GitInvocation.ReadEnvironmentAsync"/>, its driver
-/// listing shared through one <see cref="ReadEnvironmentCache"/>), then streams <see cref="LogReader.PagesAsync"/> in the
-/// commitOrder preference's order and lays each page out (<see cref="GraphLayout"/>) as it comes. Every git process
-/// joins <see cref="ChildProcessJob.Shared"/>, so none outlives the app.
+/// A repo tab's log and graph rows (ported from RepoSession's load pipeline in App/Repo/RepoSession.swift at 6fa6d40:
+/// loadLog, loadWorktrees, readWorktrees, refreshWorktrees). Off the UI thread it resolves git
+/// (<see cref="GitExecutable.ResolveAsync"/> with the gitPath preference) and loads the log with
+/// <see cref="RepoLoader"/> (the read base environment, its driver listing shared through one
+/// <see cref="ReadEnvironmentCache"/>): the status and the stashes beside the history, the WIP, other worktrees' and stash
+/// rows laid out around the commits, in the commitOrder preference's order and the laneColors preference's coloring.
+/// Every git process joins <see cref="ChildProcessJob.Shared"/>, so none outlives the app.
 /// <para>
-/// The rows reach the UI thread through <see cref="RowsChanged"/>: the first page as soon as it is laid out, then
-/// whatever arrived meanwhile in one dispatcher callback at a time, so a large log never floods the UI thread. The lists
-/// it hands out only grow, and only on the UI thread (<see cref="Graph.GraphCanvas.SetRows"/>' contract). Then
-/// <see cref="Completed"/>, or <see cref="Failed"/> with a message to show in the graph area.
+/// The graph gets <see cref="GraphData"/> on the UI thread through <see cref="Loaded"/>: the first page's snapshot as
+/// soon as it is laid out, then the complete one, then one per reload; only the latest one waiting is handed out. A
+/// failure of the first load is <see cref="Failed"/> (a message for the graph area); a later failure keeps the graph.
 /// </para>
 /// <para>
-/// Not ported yet (M2+): the status and the WIP row, the stashes and their bases, the refs (hidden and soloed branches,
-/// pinned tips), the other worktrees' rows, reloads. The subjects are sanitized for display here, off the UI thread
-/// (<see cref="DisplayText.Sanitize"/>), so the canvas draws them as they are.
+/// The refs are read beside each load (<see cref="RefReader"/>, the same read environment) and become the commits'
+/// badges (<see cref="RefBadge.For"/>), handed out with the rows: with the first page when they are read by then, with
+/// the complete log always.
+/// </para>
+/// <para>
+/// After the first log, the worktree list is read with each other worktree's change count, in its own folder with its
+/// own read environment (never a bare, missing, network or device one); the other worktrees with changes get a WIP row
+/// (a reload lays them out). After the first log the repo is watched (<see cref="RepoWatcher"/>, Histq's own state
+/// folder ignored): a refs or log change is <see cref="RefreshRefs"/> (the log reloaded, the worktrees read again), a
+/// status change <see cref="RefreshStatus"/>; while the tab is hidden (<see cref="SetShown"/>) they are held until it
+/// shows, as on the Mac. <see cref="RefreshOnShow"/> (the tab shown again) runs them and reads the worktrees
+/// again, as on the Mac (and, when the repo could not be watched, checks the status, the stashes and the refs). Requests
+/// queue: one read runs at a time, and requests made meanwhile run once after it.
+/// </para>
+/// <para>
+/// Not ported yet: hidden, soloed and pinned branches (<see cref="LogFilter.None"/>: the saved view is not kept per
+/// repo outside a workspace yet). The subjects are sanitized for display here, off the UI thread
+/// (<see cref="DisplayText.Sanitize"/>), only for commits a previous snapshot did not have (an incremental reload reuses
+/// its Commit objects); the badges' names when they are made; author names, stash messages and worktree names stay raw
+/// in the data and are sanitized where the graph shows them.
 /// </para>
 /// </summary>
 internal sealed class RepoTabSession : IDisposable
@@ -36,50 +54,75 @@ internal sealed class RepoTabSession : IDisposable
 
     private readonly string _path;
     private readonly Preferences _preferences;
+    private readonly bool _fadeWorktrees;
+    private readonly string? _ownStateDir;
     private readonly DispatcherQueue _dispatcher;
     private readonly CancellationTokenSource _cancel = new();
 
-    /// <summary>Guards the pending rows and outcome, which the load fills and <see cref="Drain"/> takes.</summary>
+    /// <summary>Guards the requests and the data waiting for the UI thread.</summary>
     private readonly Lock _gate = new();
 
-    // The rows and commits laid out since the last drain, the load's outcome, and whether a drain is queued.
-    private List<GraphRow> _pendingRows = [];
-    private List<Commit> _pendingCommits = [];
-    private Outcome _outcome;
+    // Requests (under _gate): what the next pass of the pump does, and whether it runs.
+    private bool _loadWanted;
+    private bool _worktreesWanted;
+    private bool _checkWanted;
+    private bool _statusWanted;
+
+    // While the tab is hidden (under _gate): it is, and the watcher's refreshes held until it shows.
+    private bool _hidden;
+    private bool _heldLoad;
+    private bool _heldStatus;
+
+    /// <summary>The repo's watcher (under _gate): set once it watches; null before, or when it could not.</summary>
+    private RepoWatcher? _watcher;
+    private bool _pumping;
+
+    // Waiting for the UI thread (under _gate): the latest data, or the first load's failure; a drain is queued.
+    private GraphData? _pending;
     private string? _failure;
     private bool _drainQueued;
 
-    // UI thread only: the lists the canvas holds, and whether the session was disposed.
-    private readonly List<GraphRow> _rows = [];
-    private readonly List<Commit> _commits = [];
+    // The pump's own (one pass at a time): git, the loader, the folders, the last complete snapshot and worktrees.
+    private RepoLoader? _loader;
+    private GitRunner? _runner;
+    private IReadOnlyDictionary<string, string>? _base;
+    private RepoDirectories? _directories;
+
+    /// <summary>The repo's folders cannot be resolved (a bare or network repo): not tried again.</summary>
+    private bool _noDirectories;
+    private RepoSnapshot? _complete;
+    private IReadOnlyList<WorktreeInfo> _worktrees = [];
+    private WorktreeFade? _fade;
+    private Refs? _refs;
+    private IReadOnlyDictionary<string, RefBadge[]>? _badges;
+    private int _generation;
+    private bool _shownAny;
+    private bool _watchTried;
+
+    // UI thread only.
     private bool _disposed;
     private bool _started;
-
-    private enum Outcome
-    {
-        Loading,
-        Completed,
-        Failed,
-    }
 
     /// <param name="path">The tab's folder: a repo tab that is not missing (and never a received UNC or device path,
     /// which <see cref="TabContentHost"/> shows as "Repo not found").</param>
     /// <param name="preferences">The app's preferences, read off the UI thread only.</param>
+    /// <param name="fadeWorktrees">Other worktrees' commits fade (graphFadeOtherWorktrees): their reach is computed.</param>
+    /// <param name="ownStateDir">Histq's own state folder: the watcher ignores its changes (a repo holding it).</param>
     /// <param name="dispatcher">The UI thread's queue, where every event is raised.</param>
-    public RepoTabSession(string path, Preferences preferences, DispatcherQueue dispatcher)
+    public RepoTabSession(
+        string path, Preferences preferences, bool fadeWorktrees, string? ownStateDir, DispatcherQueue dispatcher)
     {
         _path = path;
         _preferences = preferences;
+        _fadeWorktrees = fadeWorktrees;
+        _ownStateDir = ownStateDir;
         _dispatcher = dispatcher;
     }
 
-    /// <summary>New rows were appended: the lists (always the same two, grown) to show. UI thread.</summary>
-    public event Action<IReadOnlyList<GraphRow>, IReadOnlyList<Commit>>? RowsChanged;
+    /// <summary>The graph's rows, worktrees and fading: a first page, a complete log or a reload. UI thread.</summary>
+    public event Action<GraphData>? Loaded;
 
-    /// <summary>The whole log is in (maybe empty). UI thread.</summary>
-    public event Action? Completed;
-
-    /// <summary>The load failed: the message to show (sanitized). UI thread.</summary>
+    /// <summary>The first load failed: the message to show (sanitized). UI thread.</summary>
     public event Action<string>? Failed;
 
     /// <summary>Starts the load on a worker; at most once. Call on the UI thread after hooking the events.</summary>
@@ -88,75 +131,494 @@ internal sealed class RepoTabSession : IDisposable
         if (_started || _disposed)
             return;
         _started = true;
-        CancellationToken ct = _cancel.Token;
-        _ = Task.Run(() => LoadAsync(ct), CancellationToken.None);
+        Request(load: true, worktrees: true);
     }
 
-    /// <summary>Stops the load (its git process is killed) and raises nothing more. UI thread; the tab closed, or its
-    /// layout was unmounted (keep-alive) or its window closed.</summary>
+    /// <summary>The refs changed (a commit, a checkout, a branch or worktree added or removed): reloads the log and
+    /// reads the worktrees again. Any thread.</summary>
+    public void RefreshRefs() => Request(load: true, worktrees: true);
+
+    /// <summary>The working tree or the index changed: reads the status and the stashes again; a WIP or stash row that
+    /// comes or goes reloads the log, other changes only update the WIP row's counts. Any thread.</summary>
+    public void RefreshStatus() => Request(status: true);
+
+    /// <summary>The tab is shown again: reads the worktrees again (another worktree's files may have changed in its
+    /// own tab; the watcher follows only this worktree's), as on the Mac. Without a watcher (it could not start), it also
+    /// checks the status, the stashes and the refs. Any thread.</summary>
+    public void RefreshOnShow()
+    {
+        bool watching, load, status;
+        lock (_gate)
+        {
+            watching = _watcher is not null;
+            (load, status) = (_heldLoad, _heldStatus);
+            _heldLoad = _heldStatus = false;
+        }
+
+        Request(load: load, worktrees: true, check: !watching, status: status);
+    }
+
+    /// <summary>The tab is shown (true) or hidden: while hidden, the watcher's refreshes are held, as on the Mac, and
+    /// run once <see cref="RefreshOnShow"/> comes. UI thread.</summary>
+    public void SetShown(bool shown)
+    {
+        lock (_gate)
+            _hidden = !shown;
+    }
+
+    /// <summary>Stops the reads (their git processes are killed) and raises nothing more. UI thread; the tab closed, or
+    /// its layout was unmounted (keep-alive) or its window closed.</summary>
     public void Dispose()
     {
         if (_disposed)
             return;
         _disposed = true;
-        // Not disposed itself: the load may still read its token.
-        _cancel.Cancel();
+        RepoWatcher? watcher;
+        lock (_gate)
+        {
+            // Not disposed itself: the pump may still read its token.
+            _cancel.Cancel();
+            watcher = _watcher;
+            _watcher = null;
+        }
+
+        watcher?.Dispose();
     }
 
-    /// <summary>Never throws: a cancellation ends quietly, any other failure is handed out as a message.</summary>
-    private async Task LoadAsync(CancellationToken ct)
-    {
-        try
-        {
-            string gitPath = _preferences.Get<string>(PrefKey.GitPath);
-            LogReader.Order order = string.Equals(_preferences.Get<string>(PrefKey.CommitOrder), "branch", StringComparison.Ordinal)
-                ? LogReader.Order.Branch
-                : LogReader.Order.Date;
-            GitExecutable git = await GitExecutable.ResolveAsync(gitPath, ct: ct).ConfigureAwait(false);
-            var runner = new GitRunner(git.ExecutablePath, OnStarted.Value);
-            Dictionary<string, string> @base = GitInvocation.BaseEnvironment(gitExecutable: git.ExecutablePath);
-            Dictionary<string, string> env = await GitInvocation
-                .ReadEnvironmentAsync(null, @base, runner, _path, ReadCache, ct).ConfigureAwait(false);
-
-            var layout = new GraphLayout();
-            await foreach (IReadOnlyList<Commit> page in LogReader.PagesAsync(runner, _path, env, order: order, ct: ct)
-                               .ConfigureAwait(false))
-            {
-                GraphRow[] rows = layout.Append(page, ct);
-                Post(rows, Sanitized(page), Outcome.Loading, null);
-            }
-
-            Post([], [], Outcome.Completed, null);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-        }
-        catch (Exception error)
-        {
-            if (!ct.IsCancellationRequested)
-                Post([], [], Outcome.Failed, Message(error));
-        }
-    }
-
-    /// <summary>Adds rows (and the outcome, once known) for the UI thread and queues one drain unless one is queued.
-    /// Any thread.</summary>
-    private void Post(GraphRow[] rows, Commit[] commits, Outcome outcome, string? failure)
+    private void Request(bool load = false, bool worktrees = false, bool check = false, bool status = false)
     {
         lock (_gate)
         {
-            _pendingRows.AddRange(rows);
-            _pendingCommits.AddRange(commits);
-            if (outcome != Outcome.Loading)
+            if (!_started || _cancel.IsCancellationRequested)
+                return;
+            _loadWanted |= load;
+            _worktreesWanted |= worktrees;
+            _checkWanted |= check;
+            _statusWanted |= status;
+            if (_pumping)
+                return;
+            _pumping = true;
+        }
+
+        CancellationToken ct = _cancel.Token;
+        _ = Task.Run(() => PumpAsync(ct), CancellationToken.None);
+    }
+
+    /// <summary>Runs the requests one pass at a time until none is left. Never throws.</summary>
+    private async Task PumpAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            bool load, worktrees, check, status;
+            lock (_gate)
             {
-                _outcome = outcome;
-                _failure = failure;
+                (load, worktrees, check, status) = (_loadWanted, _worktreesWanted, _checkWanted, _statusWanted);
+                _loadWanted = _worktreesWanted = _checkWanted = _statusWanted = false;
+                if (ct.IsCancellationRequested || !(load || worktrees || check || status))
+                {
+                    _pumping = false;
+                    return;
+                }
             }
 
+            try
+            {
+                await PassAsync(load, worktrees, check, status, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+            }
+            catch (Exception error)
+            {
+                if (ct.IsCancellationRequested)
+                    continue;
+                if (_complete is null && !_shownAny)
+                    PostFailure(Message(error));
+                else
+                    Debug.WriteLine($"RepoTabSession: refresh failed: {error.Message}");
+            }
+        }
+    }
+
+    /// <summary>One pass: the log (first load or reload; the watcher starts beside the first one), the status check,
+    /// then the worktrees; a change in the other worktrees with changes reloads the log once more.</summary>
+    private async Task PassAsync(bool load, bool worktrees, bool check, bool status, CancellationToken ct)
+    {
+        await PrepareAsync(ct).ConfigureAwait(false);
+        if (_complete is null)
+            load = true;
+        if (!load && check && _complete is not null && await ChangedAsync(_complete, ct).ConfigureAwait(false))
+            load = true;
+        if (!load && status && _complete is not null && await StatusChangedAsync(_complete, ct).ConfigureAwait(false))
+            load = true;
+        // The watcher starts beside the first load, so a change made while it reads is queued for the next pass.
+        Task watching = _watchTried ? Task.CompletedTask : StartWatcherAsync(ct);
+        try
+        {
+            if (load)
+                await LoadAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            await watching.ConfigureAwait(false);
+        }
+
+        if (!worktrees || _complete is null)
+            return;
+        IReadOnlyList<WorktreeInfo> list = await ReadWorktreesAsync(ct).ConfigureAwait(false);
+        bool rowsChanged = !Dirty(list).SequenceEqual(_complete.Worktrees);
+        bool listChanged = !list.SequenceEqual(_worktrees);
+        _worktrees = list;
+        if (rowsChanged)
+        {
+            await LoadAsync(ct).ConfigureAwait(false);
+        }
+        else if (listChanged)
+        {
+            // Only counts or worktrees without a row changed: the same rows, other labels, badges and reach.
+            _fade = Fade(_complete, ct);
+            _badges = Badges();
+            Post(new GraphData(_complete, _worktrees, _fade, _badges));
+        }
+    }
+
+    /// <summary>Resolves git, its runner and the read base environment, and the repo's folders, once.</summary>
+    private async Task PrepareAsync(CancellationToken ct)
+    {
+        if (_loader is not null)
+            return;
+        GitExecutable git = await GitExecutable.ResolveAsync(_preferences.Get<string>(PrefKey.GitPath), ct: ct)
+            .ConfigureAwait(false);
+        var runner = new GitRunner(git.ExecutablePath, OnStarted.Value);
+        Dictionary<string, string> @base = GitInvocation.BaseEnvironment(gitExecutable: git.ExecutablePath);
+        _runner = runner;
+        _base = @base;
+        _loader = new RepoLoader(runner, _path, @base, ReadCache);
+    }
+
+    /// <summary>
+    /// Loads the log: the whole history the first time (its first page handed out as soon as it is laid out), else a
+    /// reload from the last complete snapshot (only the new commits when that can be proven safe).
+    /// </summary>
+    private async Task LoadAsync(CancellationToken ct)
+    {
+        int generation = ++_generation;
+        LogReader.Order order = RepoLoader.OrderFrom(_preferences.Get<string>(PrefKey.CommitOrder));
+        GraphLayout.Coloring coloring = RepoLoader.ColoringFrom(_preferences.Get<string>(PrefKey.LaneColors));
+        IReadOnlyList<Worktree> dirty = Dirty(_worktrees);
+        RepoSnapshot? previous = _complete;
+        RepoSnapshot snapshot;
+        // The refs beside the log: the first page has the badges only when they are read by then (it never waits for
+        // them), the complete log always.
+        Task<Refs?> refs = ReadRefsAsync(ct);
+        if (previous is null)
+        {
+            snapshot = await _loader!.LoadAsync(
+                generation, LogFilter.None, dirty, order, coloring,
+                firstPage: page =>
+                {
+                    if (refs.IsCompletedSuccessfully)
+                    {
+                        _refs = refs.Result ?? _refs;
+                        _badges = Badges();
+                    }
+
+                    _shownAny = true;
+                    Post(new GraphData(Sanitized(page, null), _worktrees, null, _badges));
+                    return Task.CompletedTask;
+                },
+                ct).ConfigureAwait(false);
+        }
+        else
+        {
+            snapshot = await _loader!.ReloadAsync(previous, generation, LogFilter.None, dirty, order, coloring, ct)
+                .ConfigureAwait(false);
+        }
+
+        ct.ThrowIfCancellationRequested();
+        _refs = await refs.ConfigureAwait(false) ?? _refs;
+        _badges = Badges();
+        _complete = Sanitized(snapshot, previous);
+        _shownAny = true;
+        _fade = Fade(_complete, ct);
+        Post(new GraphData(_complete, _worktrees, _fade, _badges));
+    }
+
+    /// <summary>The status, the stash list or the refs are not those <paramref name="snapshot"/> and its badges were
+    /// made from.</summary>
+    private async Task<bool> ChangedAsync(RepoSnapshot snapshot, CancellationToken ct)
+    {
+        // As the loader reads them: a bare repo's are an empty status and no stash, the same each time (the status
+        // compares by value, entry by entry), so only its refs can tell a change.
+        Task<(WorkingStatus Status, IReadOnlyList<Stash> Stashes)> read = _loader!.StatusAndStashesAsync(ct);
+        Task<Refs?> refs = ReadRefsAsync(ct);
+        await Task.WhenAll(read, refs).ConfigureAwait(false);
+        (WorkingStatus status, IReadOnlyList<Stash> stashes) = await read.ConfigureAwait(false);
+        return !Equals(status, snapshot.Status)
+            || !stashes.SequenceEqual(snapshot.Stashes)
+            || await refs.ConfigureAwait(false) is { } readRefs && !readRefs.Equals(_refs);
+    }
+
+    /// <summary>
+    /// The status and stashes read again: true when the WIP or stash rows they give are not <paramref name="snapshot"/>'s
+    /// (the log is reloaded); else a changed status (the WIP row's counts) is handed out with the same rows.
+    /// </summary>
+    private async Task<bool> StatusChangedAsync(RepoSnapshot snapshot, CancellationToken ct)
+    {
+        // As the loader reads them (a bare repo: an empty status, no stash).
+        (WorkingStatus status, IReadOnlyList<Stash> stashes) =
+            await _loader!.StatusAndStashesAsync(ct).ConfigureAwait(false);
+        if (!RepoLoader.SyntheticRows(status, stashes, snapshot.Worktrees).SequenceEqual(snapshot.Synthetic)
+            || !stashes.SequenceEqual(snapshot.Stashes))
+        {
+            return true;
+        }
+
+        if (!Equals(status, snapshot.Status))
+        {
+            _complete = snapshot with { Status = status };
+            Post(new GraphData(_complete, _worktrees, _fade, _badges));
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Starts watching the repo's worktree and git dirs (<see cref="RepoWatcher"/>), once: a refs or log change reloads
+    /// the log and the worktrees, a status change reads the status again. A repo that cannot be watched is not, without
+    /// a word (as on the Mac); the tab then refreshes only when shown again.
+    /// </summary>
+    private async Task StartWatcherAsync(CancellationToken ct)
+    {
+        _watchTried = true;
+        try
+        {
+            Dictionary<string, string> env = await ReadEnvironmentAsync(_path, ct).ConfigureAwait(false);
+            if (await DirectoriesAsync(env, ct).ConfigureAwait(false) is not { } directories)
+                return;
+            var watcher = new RepoWatcher(_ownStateDir);
+            watcher.Start(directories, OnWatcherChange);
+            lock (_gate)
+            {
+                if (!_cancel.IsCancellationRequested)
+                {
+                    _watcher = watcher;
+                    return;
+                }
+            }
+
+            watcher.Dispose();
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            Debug.WriteLine($"RepoTabSession: the repo is not watched: {error.Message}");
+        }
+    }
+
+    /// <summary>The watcher's callback (a pool thread; never throws): queues the refresh its scope needs.</summary>
+    private void OnWatcherChange(RefreshScope scope, IReadOnlyList<string>? paths)
+    {
+        bool load = (scope & (RefreshScope.Refs | RefreshScope.Log)) != 0;
+        bool status = !load && (scope & RefreshScope.Status) != 0;
+        lock (_gate)
+        {
+            if (_hidden)
+            {
+                _heldLoad |= load;
+                _heldStatus |= status;
+                return;
+            }
+        }
+
+        if (load)
+            RefreshRefs();
+        else if (status)
+            RefreshStatus();
+    }
+
+    /// <summary>The refs and HEAD (<see cref="RefReader"/>) with the read environment; null when they could not be
+    /// read (the graph keeps the last badges). Throws only a cancellation.</summary>
+    private async Task<Refs?> ReadRefsAsync(CancellationToken ct)
+    {
+        try
+        {
+            Dictionary<string, string> env = await ReadEnvironmentAsync(_path, ct).ConfigureAwait(false);
+            return await RefReader.ReadAsync(_runner!, _path, env, ct).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            Debug.WriteLine($"RepoTabSession: refs not read: {error.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>The badges of the last refs read, with the branches checked out in the other worktrees (and in the
+    /// linked ones) marked; null before the refs are read.</summary>
+    private IReadOnlyDictionary<string, RefBadge[]>? Badges()
+    {
+        if (_refs is not { } refs)
+            return null;
+        var other = new HashSet<string>(StringComparer.Ordinal);
+        var linked = new HashSet<string>(StringComparer.Ordinal);
+        foreach (WorktreeInfo info in _worktrees)
+        {
+            if (info.Worktree.Branch is not { } branch)
+                continue;
+            if (!info.IsCurrent)
+                other.Add(branch);
+            if (!info.Worktree.IsMain)
+                linked.Add(branch);
+        }
+
+        return RefBadge.For(refs, other, linked);
+    }
+
+    /// <summary>
+    /// <c>git worktree list</c> here, then each other worktree's status in its own folder, with the read environment
+    /// built for that folder. A worktree whose status cannot be read gets no counts rather than failing the list; bare,
+    /// missing (prunable), network and device ones are not read. The tab's own worktree is the one whose real path is
+    /// this repo's top folder (none in a bare or network repo, whose top folder is not resolved).
+    /// </summary>
+    private async Task<IReadOnlyList<WorktreeInfo>> ReadWorktreesAsync(CancellationToken ct)
+    {
+        Dictionary<string, string> env = await ReadEnvironmentAsync(_path, ct).ConfigureAwait(false);
+        // A bare repo (no top folder) or a network one (never probed): no worktree is this tab's own.
+        string? current = (await DirectoriesAsync(env, ct).ConfigureAwait(false))?.Worktree;
+        IReadOnlyList<Worktree> list = await StashWorktreeReader.WorktreesAsync(_runner!, _path, env, ct)
+            .ConfigureAwait(false);
+        WorktreeInfo[] infos = await Task.WhenAll(list.Select(worktree => InfoAsync(worktree, current, ct)))
+            .ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        return infos;
+    }
+
+    private async Task<WorktreeInfo> InfoAsync(Worktree worktree, string? current, CancellationToken ct)
+    {
+        PathFlavor flavor = PathFlavor.Host;
+        // The list is the repo's own: a worktree on a share or a device is never probed (its folder would be opened).
+        string? real = worktree.IsBare || worktree.IsPrunable || flavor.IsUncOrDevice(worktree.Path)
+            ? null
+            : WorkspaceDisk.Host.RealPath(worktree.Path);
+        if (real is null || flavor.IsUncOrDevice(real))
+            return new WorktreeInfo(worktree, false, null);
+        if (current is not null && flavor.KeysEqual(real, current))
+            return new WorktreeInfo(worktree, true, null);
+        if (!Directory.Exists(real))
+            return new WorktreeInfo(worktree, false, null);
+        try
+        {
+            Dictionary<string, string> env = await ReadEnvironmentAsync(real, ct).ConfigureAwait(false);
+            WorkingStatus status = await StatusReader.ReadAsync(_runner!, real, env, ct).ConfigureAwait(false);
+            return new WorktreeInfo(worktree, false, WorktreeChanges.Of(status));
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return new WorktreeInfo(worktree, false, null);
+        }
+    }
+
+    /// <summary>
+    /// The repo's folders (<see cref="RepoDirectories"/>), resolved once; null for a bare repo (no top folder) or a
+    /// network or device one (refused, never probed), which is remembered for the session's life: it is not tried again.
+    /// </summary>
+    private async Task<RepoDirectories?> DirectoriesAsync(IReadOnlyDictionary<string, string> env, CancellationToken ct)
+    {
+        if (_directories is not null || _noDirectories)
+            return _directories;
+        try
+        {
+            _directories = await RepoDirectories.ResolveAsync(_runner!, _path, env, ct).ConfigureAwait(false);
+        }
+        catch (GitError)
+        {
+            _noDirectories = true;
+        }
+
+        return _directories;
+    }
+
+    private Task<Dictionary<string, string>> ReadEnvironmentAsync(string cwd, CancellationToken ct) =>
+        GitInvocation.ReadEnvironmentAsync(null, _base!, _runner!, cwd, ReadCache, ct);
+
+    /// <summary>The other worktrees whose changes get a graph row, in <c>git worktree list</c> order.</summary>
+    private static List<Worktree> Dirty(IReadOnlyList<WorktreeInfo> worktrees) =>
+        worktrees.Where(info => !info.IsCurrent && info.IsDirty).Select(info => info.Worktree).ToList();
+
+    /// <summary>
+    /// Which worktrees reach each commit of <paramref name="snapshot"/> (<see cref="WorktreeReach"/>), with this
+    /// worktree's HEAD as the last tip: the graph fades the commits only another worktree reaches. Null when the fading
+    /// is off, the log is not complete, or no other worktree has a HEAD (then nothing fades).
+    /// </summary>
+    private WorktreeFade? Fade(RepoSnapshot snapshot, CancellationToken ct)
+    {
+        if (!_fadeWorktrees || !snapshot.IsComplete)
+            return null;
+        List<string?> tips = _worktrees.Where(info => !info.IsCurrent && !info.Worktree.IsBare)
+            .Take(WorktreeReach.MaxTips - 1).Select(info => info.Worktree.Head).ToList();
+        if (!tips.Any(tip => tip is not null))
+            return null;
+        string? head = snapshot.Status?.Branch.Commit ?? _worktrees.FirstOrDefault(info => info.IsCurrent)?.Worktree.Head;
+        int headBit = tips.Count;
+        tips.Add(head);
+        ulong[] masks = WorktreeReach.Masks(snapshot.Commits, snapshot.CommitIndex, tips, ct);
+        return new WorktreeFade(masks, 1UL << headBit);
+    }
+
+    /// <summary><paramref name="snapshot"/> with each subject made safe to draw and to read through UI Automation; a
+    /// commit <paramref name="previous"/> already holds (an incremental reload reuses it) or whose subject needs no
+    /// change is kept as is.</summary>
+    private static RepoSnapshot Sanitized(RepoSnapshot snapshot, RepoSnapshot? previous)
+    {
+        IReadOnlyList<Commit> commits = snapshot.Commits;
+        Commit[]? sanitized = null;
+        for (int i = 0; i < commits.Count; i++)
+        {
+            Commit commit = commits[i];
+            if (previous is not null && previous.CommitIndex.TryGetValue(commit.Hash, out int at)
+                && at < previous.Commits.Count && ReferenceEquals(previous.Commits[at], commit))
+            {
+                continue;
+            }
+
+            string subject = DisplayText.Sanitize(commit.Subject);
+            if (ReferenceEquals(subject, commit.Subject))
+                continue;
+            sanitized ??= [.. commits];
+            sanitized[i] = commit with { Subject = subject };
+        }
+
+        return sanitized is null ? snapshot : snapshot with { Commits = sanitized };
+    }
+
+    /// <summary>Hands <paramref name="data"/> to the UI thread, in place of any data still waiting. Any thread.</summary>
+    private void Post(GraphData data)
+    {
+        lock (_gate)
+        {
+            _pending = data;
             if (_drainQueued)
                 return;
             _drainQueued = true;
         }
 
+        Enqueue();
+    }
+
+    private void PostFailure(string message)
+    {
+        lock (_gate)
+        {
+            _failure = message;
+            if (_drainQueued)
+                return;
+            _drainQueued = true;
+        }
+
+        Enqueue();
+    }
+
+    private void Enqueue()
+    {
         if (!_dispatcher.TryEnqueue(Drain))
         {
             // The UI thread is shutting down: nothing is shown any more.
@@ -165,22 +627,16 @@ internal sealed class RepoTabSession : IDisposable
         }
     }
 
-    /// <summary>UI thread: appends the pending rows to the shown lists and raises the events, unless disposed.</summary>
+    /// <summary>UI thread: raises the waiting data or failure, unless disposed.</summary>
     private void Drain()
     {
-        List<GraphRow> rows;
-        List<Commit> commits;
-        Outcome outcome;
+        GraphData? data;
         string? failure;
         lock (_gate)
         {
-            rows = _pendingRows;
-            commits = _pendingCommits;
-            _pendingRows = [];
-            _pendingCommits = [];
-            outcome = _outcome;
-            failure = _failure;
-            _outcome = Outcome.Loading;
+            (data, failure) = (_pending, _failure);
+            _pending = null;
+            _failure = null;
             _drainQueued = false;
         }
 
@@ -188,38 +644,16 @@ internal sealed class RepoTabSession : IDisposable
             return;
         try
         {
-            if (rows.Count > 0)
-            {
-                _rows.AddRange(rows);
-                _commits.AddRange(commits);
-                RowsChanged?.Invoke(_rows, _commits);
-            }
-
-            if (outcome == Outcome.Completed)
-                Completed?.Invoke();
-            else if (outcome == Outcome.Failed)
-                Failed?.Invoke(failure ?? "");
+            if (data is not null)
+                Loaded?.Invoke(data);
+            else if (failure is not null)
+                Failed?.Invoke(failure);
         }
         catch (Exception error)
         {
             // A dispatcher callback that throws ends the app; the graph keeps what it shows.
             CrashLog.Recovered("RepoTabSession.Drain (rows not shown)", error);
         }
-    }
-
-    /// <summary>The page with each subject made safe to draw and to read through UI Automation; a commit whose subject
-    /// needs no change is kept as is.</summary>
-    private static Commit[] Sanitized(IReadOnlyList<Commit> page)
-    {
-        var commits = new Commit[page.Count];
-        for (int i = 0; i < page.Count; i++)
-        {
-            Commit commit = page[i];
-            string subject = DisplayText.Sanitize(commit.Subject);
-            commits[i] = ReferenceEquals(subject, commit.Subject) ? commit : commit with { Subject = subject };
-        }
-
-        return commits;
     }
 
     /// <summary>What the graph area says for a failed load (RepoSession.message(for:) at 6fa6d40, the kinds a log read

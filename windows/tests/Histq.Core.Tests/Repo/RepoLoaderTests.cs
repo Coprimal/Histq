@@ -156,4 +156,35 @@ public sealed class RepoLoaderTests
         var upstream = LogFilter.For(new RepoViewState(Hidden: ["refs/remotes/origin/main"]), refs);
         Assert.Equal(["refs/remotes/origin/main"], upstream.Hidden);
     }
+
+    // A bare repo (no worktree: no status, no stash list, no top folder) loads its commits with no WIP or stash row; a
+    // reload reads the whole log again (the common dir is not trusted for an incremental read); the status and stashes
+    // read between loads equal the snapshot's.
+    [Fact]
+    public async Task BareRepoLoadsItsCommits()
+    {
+        using var sandbox = await Sandbox.CreateAsync();
+        var repo = await sandbox.MakeRepoAsync("repo");
+        await File.WriteAllTextAsync(Path.Combine(repo, "tracked.txt"), "second\n", Token);
+        await sandbox.GitAsync(["commit", "-q", "-am", "second"], repo);
+        var bare = Path.Combine(sandbox.Root, "bare.git");
+        await sandbox.GitAsync(["clone", "-q", "--bare", repo, bare], sandbox.Root);
+
+        var loader = new RepoLoader(sandbox.Runner, bare, sandbox.Base);
+        var snapshot = await loader.LoadAsync(
+            1, LogFilter.None, [], LogReader.Order.Date, GraphLayout.Coloring.Branch, ct: Token);
+        var reloaded = await loader.ReloadAsync(
+            snapshot, 2, LogFilter.None, [], LogReader.Order.Date, GraphLayout.Coloring.Branch, Token);
+
+        Assert.Equal(["second", "initial"], snapshot.Commits.Select(commit => commit.Subject));
+        Assert.Empty(snapshot.SyntheticRows);
+        Assert.Empty(snapshot.Hung);
+        Assert.Empty(snapshot.Stashes);
+        Assert.Equal(snapshot.Commits.Select(c => c.Hash), reloaded.Commits.Select(c => c.Hash));
+
+        // The checks between loads read the same: no change, so a bare repo's tab never reloads for nothing.
+        var (status, stashes) = await loader.StatusAndStashesAsync(Token);
+        Assert.Equal(snapshot.Status, status);
+        Assert.Empty(stashes);
+    }
 }
