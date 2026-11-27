@@ -39,10 +39,10 @@ public partial class App
 /// </para>
 /// <para>
 /// Bisect switches of the scroll probe: <c>-HistqBisect &lt;comma list&gt;</c> of <c>noSheetLayoutHook</c> (the main
-/// window's RootGrid.LayoutUpdated stops rebuilding the joined sheet), <c>noScrollBar</c> (the graph stops updating its
-/// scroll bar) and <c>noAutomation</c> (the graph's automation peer creates no row peers and reports no children). Each
-/// is on during the scroll probe only. The probe also counts the layout passes, sheet rebuilds, TransformToVisual
-/// calls, scroll bar updates and automation children requests (and row peers made) over its run.
+/// window's RootGrid.LayoutUpdated stops rebuilding the joined sheet) and <c>noAutomation</c> (the graph's automation
+/// peer creates no row peers and reports no children). Each is on during the scroll probe only. The probe also counts
+/// the layout passes, sheet rebuilds, TransformToVisual calls and automation children requests (and row peers made)
+/// over its run.
 /// </para>
 /// <para>
 /// Without <c>-HistqSpikeLog</c> it only sizes the window, which stays open for the interactive title-bar checks. With
@@ -67,7 +67,6 @@ internal sealed class SpikeHarness
     private const string BisectFlag = "-HistqBisect";
 
     private const string NoSheetLayoutHook = "noSheetLayoutHook";
-    private const string NoScrollBar = "noScrollBar";
     private const string NoAutomation = "noAutomation";
 
     private const int FirstPageSize = LogReader.DefaultPageSize;
@@ -303,17 +302,17 @@ internal sealed class SpikeHarness
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        string? unknown = values.FirstOrDefault(v => v is not (NoSheetLayoutHook or NoScrollBar or NoAutomation));
+        string? unknown = values.FirstOrDefault(v => v is not (NoSheetLayoutHook or NoAutomation));
         if (values.Length == 0 || unknown is not null)
         {
             throw new ArgumentException(
-                $"{BisectFlag} must be a comma list of {NoSheetLayoutHook}, {NoScrollBar} and {NoAutomation}, not '{text}'");
+                $"{BisectFlag} must be a comma list of {NoSheetLayoutHook} and {NoAutomation}, not '{text}'");
         }
 
         return values;
     }
 
-    /// <summary>Turns the <paramref name="bisect"/> switches on or off; off resyncs the scroll bar it held.</summary>
+    /// <summary>Turns the <paramref name="bisect"/> switches on or off.</summary>
     private static void SetBisect(MainWindow window, string[] bisect, bool on)
     {
         GraphCanvas canvas = window.GraphCanvas;
@@ -321,12 +320,6 @@ internal sealed class SpikeHarness
             window.QaNoSheetLayoutHook = on;
         if (bisect.Contains(NoAutomation))
             canvas.QaNoAutomation = on;
-        if (bisect.Contains(NoScrollBar))
-        {
-            canvas.QaNoScrollBar = on;
-            if (!on)
-                canvas.QaSyncScrollBar();
-        }
     }
 
     /// <summary>Zeroes the window's and the graph's QA counters (the scroll probe's start).</summary>
@@ -336,7 +329,6 @@ internal sealed class SpikeHarness
         window.QaLayoutUpdatedCount = 0;
         window.QaSheetUpdateCount = 0;
         window.QaTransformToVisualCount = 0;
-        canvas.QaScrollBarUpdateCount = 0;
         canvas.QaAutomationEventsCount = 0;
         canvas.QaAutomationRowPeersCreated = 0;
     }
@@ -348,7 +340,6 @@ internal sealed class SpikeHarness
         _result.LayoutUpdatedCount = window.QaLayoutUpdatedCount;
         _result.SheetUpdateCount = window.QaSheetUpdateCount;
         _result.TransformToVisualCount = window.QaTransformToVisualCount;
-        _result.ScrollBarUpdateCount = canvas.QaScrollBarUpdateCount;
         _result.AutomationEventsCount = canvas.QaAutomationEventsCount;
         _result.AutomationRowPeersCreated = canvas.QaAutomationRowPeersCreated;
     }
@@ -1154,7 +1145,6 @@ internal sealed class SpikeHarness
         public int? LayoutUpdatedCount { get; set; }
         public int? SheetUpdateCount { get; set; }
         public int? TransformToVisualCount { get; set; }
-        public int? ScrollBarUpdateCount { get; set; }
         public int? AutomationEventsCount { get; set; }
         public int? AutomationRowPeersCreated { get; set; }
         public string? Error { get; set; }

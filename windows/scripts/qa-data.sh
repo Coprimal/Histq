@@ -183,7 +183,6 @@ for key in (
     "layoutUpdatedCount",
     "sheetUpdateCount",
     "transformToVisualCount",
-    "scrollBarUpdateCount",
     "automationEventsCount",
     "automationRowPeersCreated",
 ):

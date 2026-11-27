@@ -7,7 +7,6 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.System;
@@ -25,13 +24,19 @@ public readonly record struct GraphDrawInfo(
 
 /// <summary>
 /// The commit graph, virtualized: a viewport-sized Win2D canvas (never one as tall as the data) that draws only the
-/// visible rows, and its own vertical scroll bar. The scroll offset is a row index and a pixel offset inside that row,
-/// so a million rows times the row height never goes through a float; every drawing coordinate is relative to the
-/// viewport.
+/// visible rows, and its own vertical scroll bar over their right edge (<see cref="GraphScrollBar"/>). The scroll
+/// offset is a row index and a pixel offset inside that row, so a million rows times the row height never goes through
+/// a float; every drawing coordinate is relative to the viewport.
 /// <para>
 /// Wheel and keys (Up, Down, Page Up, Page Down, Home, End) scroll; a press selects the row under the pointer and the
 /// highlight is drawn in the same frame. Each visible row's subject is drawn with one shared text format, so no
 /// per-row text object is made while scrolling.
+/// </para>
+/// <para>
+/// The scroll bar is drawn in the same Draw pass, so a scroll step changes no XAML element (updating a XAML ScrollBar
+/// on every step made the framework induce blocking gen-2 GCs). Its thumb shows while scrolling and while the pointer
+/// is over the right <see cref="GraphScrollBar.ZoneWidth"/> epx, and fades out about a second after the last scroll; a
+/// press on the thumb drags it, a press above or below it pages by one viewport, and no press there selects a row.
 /// </para>
 /// </summary>
 public sealed partial class GraphCanvas : UserControl
@@ -42,9 +47,19 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>Between the graph column and the subject, and after the subject.</summary>
     private const float TextGap = 8;
 
+    /// <summary>The scroll bar's thumb stays fully shown this long after the last scroll, then fades out.</summary>
+    private static readonly TimeSpan ThumbHold = TimeSpan.FromSeconds(1);
+
+    private static readonly TimeSpan ThumbFade = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>The fade's redraw interval (only while it fades).</summary>
+    private static readonly TimeSpan ThumbFadeFrame = TimeSpan.FromMilliseconds(16);
+
     private readonly GraphRowRenderer _renderer = new(GraphMetrics.Regular);
     private readonly CanvasControl _canvas;
-    private readonly ScrollBar _scrollBar;
+
+    /// <summary>Redraws the thumb's fade; one-shot, armed again from its own tick, never per scroll step.</summary>
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _fadeTimer;
 
     private IReadOnlyList<GraphRow> _rows = [];
     private IReadOnlyList<Commit> _commits = [];
@@ -57,8 +72,20 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>The most lanes a drawn row has used since the rows were set: the column only widens while scrolling.</summary>
     private int _columnLanes = 1;
 
-    /// <summary>Set while the code moves the scroll bar, so its ValueChanged does not scroll back.</summary>
-    private bool _settingScrollBar;
+    /// <summary>The last scroll, or the end of the last hover or drag (a Stopwatch timestamp); 0 = never.</summary>
+    private long _thumbActivity;
+
+    /// <summary>The fade timer is armed (kept here so a scroll step reads no WinRT property).</summary>
+    private bool _fadeTimerArmed;
+
+    /// <summary>The pointer is over the scroll bar's zone.</summary>
+    private bool _thumbHover;
+
+    /// <summary>The thumb is dragged: the pointer is captured.</summary>
+    private bool _thumbDrag;
+
+    /// <summary>While dragging: the pointer's Y less the thumb's top at the press.</summary>
+    private double _thumbGrab;
 
     public GraphCanvas()
     {
@@ -69,28 +96,24 @@ public sealed partial class GraphCanvas : UserControl
         _canvas.CreateResources += OnCreateResources;
         _canvas.SizeChanged += (_, _) => OnViewportChanged();
 
-        // A standalone ScrollBar shows nothing until it has an indicator mode.
-        _scrollBar = new ScrollBar
-        {
-            Orientation = Orientation.Vertical,
-            IndicatorMode = ScrollingIndicatorMode.MouseIndicator,
-            Minimum = 0,
-            Maximum = 0,
-            SmallChange = 1,
-            IsEnabled = false,
-        };
-        _scrollBar.ValueChanged += OnScrollBarValueChanged;
-        Grid.SetColumn(_scrollBar, 1);
+        _fadeTimer = DispatcherQueue.CreateTimer();
+        _fadeTimer.IsRepeating = false;
+        _fadeTimer.Tick += OnFadeTick;
 
         // A background, even transparent, makes the whole area hit-testable.
         var root = new Grid { Background = new SolidColorBrush(Colors.Transparent) };
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         root.Children.Add(_canvas);
-        root.Children.Add(_scrollBar);
         Content = root;
 
-        Unloaded += (_, _) => ReleaseDeviceResources();
+        Unloaded += (_, _) =>
+        {
+            // Hidden until the next scroll or hover: no timer runs while unloaded.
+            _fadeTimer.Stop();
+            _fadeTimerArmed = false;
+            _thumbActivity = 0;
+            _thumbHover = false;
+            ReleaseDeviceResources();
+        };
     }
 
     /// <summary>Raised at the end of every Draw, with its time and what it drew.</summary>
@@ -104,26 +127,17 @@ public sealed partial class GraphCanvas : UserControl
     internal bool DrawSubjects { get; set; } = true;
 
 #if HISTQ_QA
-    /// <summary>QA bisect switch: while true, the scroll bar is not updated (the spike harness's scroll probe only).</summary>
-    internal bool QaNoScrollBar { get; set; }
-
     /// <summary>
     /// QA bisect switch: while true, <see cref="GraphAutomationPeer"/> creates no row peers and reports no children
     /// (the spike harness's scroll probe only).
     /// </summary>
     internal bool QaNoAutomation { get; set; }
 
-    /// <summary>QA counter: scroll bar updates that ran (Maximum, ViewportSize, LargeChange, Value, IsEnabled set).</summary>
-    internal int QaScrollBarUpdateCount { get; set; }
-
     /// <summary>QA counter: UI Automation children requests answered by <see cref="GraphAutomationPeer"/>.</summary>
     internal int QaAutomationEventsCount { get; set; }
 
     /// <summary>QA counter: row peers <see cref="GraphAutomationPeer"/> created.</summary>
     internal int QaAutomationRowPeersCreated { get; set; }
-
-    /// <summary>Brings the scroll bar back in line with the offset (after <see cref="QaNoScrollBar"/> is cleared).</summary>
-    internal void QaSyncScrollBar() => UpdateScrollBar();
 #endif
 
     /// <summary>The selected row, -1 for none.</summary>
@@ -138,7 +152,7 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>The height the rows are drawn in, in epx.</summary>
     public double ViewportHeight => Math.Max(0, _canvas.ActualHeight);
 
-    /// <summary>The width the rows are drawn in (the scroll bar is right of it), in epx.</summary>
+    /// <summary>The width the rows are drawn in (the scroll bar is drawn over their right edge), in epx.</summary>
     public double ViewportWidth => Math.Max(0, _canvas.ActualWidth);
 
     /// <summary>The top row on screen, -1 when there is none.</summary>
@@ -146,6 +160,39 @@ public sealed partial class GraphCanvas : UserControl
 
     /// <summary>The bottom row on screen (maybe partly), -1 when there is none.</summary>
     public long LastVisibleRow => LastVisibleRowIn(ViewportHeight);
+
+    /// <summary>Not every row fits in the viewport: there is something to scroll.</summary>
+    internal bool CanScroll
+    {
+        get
+        {
+            (long maxFirst, double maxPixel) = MaxOffset();
+            return maxFirst > 0 || maxPixel > 0;
+        }
+    }
+
+    /// <summary>
+    /// The offset as a fraction of the scroll range: 0 at the top, exactly 1 when the last row's bottom edge is on the
+    /// viewport's bottom edge, 0 when nothing scrolls. The offset in rows is a double, exact to far below a pixel for any
+    /// row count a log has.
+    /// </summary>
+    internal double ScrollFraction
+    {
+        get
+        {
+            (long maxFirst, double maxPixel) = MaxOffset();
+            if (maxFirst == 0 && maxPixel == 0)
+                return 0;
+            if (_firstRow > maxFirst || (_firstRow == maxFirst && _pixelInRow >= maxPixel))
+                return 1;
+            double rh = RowHeight;
+            return Math.Clamp((_firstRow + _pixelInRow / rh) / (maxFirst + maxPixel / rh), 0, 1);
+        }
+    }
+
+    /// <summary>The part of the rows the viewport shows, 0 to 1 (1 when every row fits).</summary>
+    internal double ViewFraction =>
+        _count == 0 ? 1 : Math.Clamp(ViewportHeight / (_count * RowHeight), 0, 1);
 
     /// <summary>
     /// Shows <paramref name="rows"/>, with <paramref name="commits"/>[i] the commit of row i (a shorter list leaves the
@@ -166,7 +213,6 @@ public sealed partial class GraphCanvas : UserControl
         if (SelectedRow >= _count)
             SelectedRow = -1;
         SetOffset(_firstRow, _pixelInRow);
-        UpdateScrollBar();
         _canvas.Invalidate();
     }
 
@@ -186,6 +232,36 @@ public sealed partial class GraphCanvas : UserControl
         if (double.IsFinite(dy))
             SetOffset(_firstRow, _pixelInRow + dy);
     }
+
+    /// <summary>
+    /// Scrolls to <paramref name="fraction"/> of the scroll range: 0 or less is the top, 1 or more exactly the end (the
+    /// last row's bottom edge on the viewport's bottom edge), in between proportionally.
+    /// </summary>
+    internal void ScrollToFraction(double fraction)
+    {
+        if (double.IsNaN(fraction))
+            return;
+        if (fraction <= 0)
+        {
+            SetOffset(0, 0);
+            return;
+        }
+
+        (long maxFirst, double maxPixel) = MaxOffset();
+        if (fraction >= 1)
+        {
+            SetOffset(maxFirst, maxPixel);
+            return;
+        }
+
+        double rh = RowHeight;
+        double rows = fraction * (maxFirst + maxPixel / rh);
+        double first = Math.Floor(rows);
+        SetOffset((long)first, (rows - first) * rh);
+    }
+
+    /// <summary>Scrolls one viewport up (<paramref name="direction"/> -1) or down (+1).</summary>
+    internal void ScrollByPage(int direction) => ScrollByPixels(Math.Sign(direction) * ViewportHeight);
 
     /// <summary>The row under <paramref name="y"/> (epx from the viewport's top), -1 when there is none.</summary>
     public long HitTest(double y)
@@ -225,10 +301,19 @@ public sealed partial class GraphCanvas : UserControl
 
     protected override void OnPointerPressed(PointerRoutedEventArgs e)
     {
-        var position = e.GetCurrentPoint(_canvas).Position;
+        var point = e.GetCurrentPoint(_canvas);
+        var position = point.Position;
         if (position.X < 0 || position.X >= _canvas.ActualWidth)
         {
             base.OnPointerPressed(e);
+            return;
+        }
+
+        if (InScrollBarZone(position.X, position.Y))
+        {
+            if (point.Properties.IsLeftButtonPressed)
+                PressScrollBar(position.Y, e.Pointer);
+            e.Handled = true;
             return;
         }
 
@@ -237,6 +322,50 @@ public sealed partial class GraphCanvas : UserControl
         if (row >= 0)
             Select(row);
         e.Handled = true;
+    }
+
+    protected override void OnPointerMoved(PointerRoutedEventArgs e)
+    {
+        var position = e.GetCurrentPoint(_canvas).Position;
+        if (_thumbDrag)
+        {
+            (_, double length, double track) = Thumb();
+            ScrollToFraction(GraphScrollBar.FractionAt(position.Y - _thumbGrab, track, length));
+            e.Handled = true;
+            return;
+        }
+
+        SetThumbHover(InScrollBarZone(position.X, position.Y));
+        base.OnPointerMoved(e);
+    }
+
+    protected override void OnPointerReleased(PointerRoutedEventArgs e)
+    {
+        if (!_thumbDrag)
+        {
+            base.OnPointerReleased(e);
+            return;
+        }
+
+        EndThumbDrag();
+        ReleasePointerCapture(e.Pointer);
+        var position = e.GetCurrentPoint(_canvas).Position;
+        SetThumbHover(InScrollBarZone(position.X, position.Y));
+        e.Handled = true;
+    }
+
+    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e)
+    {
+        if (_thumbDrag)
+            EndThumbDrag();
+        base.OnPointerCaptureLost(e);
+    }
+
+    protected override void OnPointerExited(PointerRoutedEventArgs e)
+    {
+        if (!_thumbDrag)
+            SetThumbHover(false);
+        base.OnPointerExited(e);
     }
 
     protected override void OnPointerWheelChanged(PointerRoutedEventArgs e)
@@ -312,7 +441,7 @@ public sealed partial class GraphCanvas : UserControl
     }
 
     /// <summary>Moves to (<paramref name="first"/>, <paramref name="pixel"/>), normalized and clamped, and redraws.</summary>
-    private void SetOffset(long first, double pixel, bool syncScrollBar = true)
+    private void SetOffset(long first, double pixel)
     {
         double rh = RowHeight;
         if (!double.IsFinite(pixel))
@@ -341,59 +470,126 @@ public sealed partial class GraphCanvas : UserControl
             return;
         _firstRow = first;
         _pixelInRow = pixel;
-        if (syncScrollBar)
-            UpdateScrollBar();
+        ShowThumb();
         _canvas.Invalidate();
     }
 
-    private void OnViewportChanged()
+    private void OnViewportChanged() => SetOffset(_firstRow, _pixelInRow);
+
+    /// <summary>The point (canvas epx) is over the scroll bar's zone, the canvas's right strip.</summary>
+    private bool InScrollBarZone(double x, double y) =>
+        y >= 0 && y < ViewportHeight && x < ViewportWidth && x >= ViewportWidth - GraphScrollBar.ZoneWidth;
+
+    /// <summary>The thumb's top and length, and the track's length, for the current offset and viewport.</summary>
+    private (double Top, double Length, double Track) Thumb()
     {
-        SetOffset(_firstRow, _pixelInRow);
-        UpdateScrollBar();
+        double track = GraphScrollBar.TrackLength(ViewportHeight);
+        double length = GraphScrollBar.ThumbLength(track, ViewFraction);
+        return (GraphScrollBar.ThumbTop(track, length, ScrollFraction), length, track);
     }
 
-    /// <summary>The scroll bar counts rows: its value is the top row plus the fraction scrolled off it.</summary>
-    private void UpdateScrollBar()
+    /// <summary>A press at <paramref name="y"/> in the scroll bar's zone: drags the thumb, or pages above or below it.</summary>
+    private void PressScrollBar(double y, Pointer pointer)
     {
-#if HISTQ_QA
-        if (QaNoScrollBar)
+        if (!CanScroll)
             return;
-        QaScrollBarUpdateCount++;
-#endif
-        double rh = RowHeight;
-        (long maxFirst, double maxPixel) = MaxOffset();
-        double maximum = maxFirst + maxPixel / rh;
-        double viewportRows = ViewportHeight / rh;
-        _settingScrollBar = true;
-        try
+        (double top, double length, double track) = Thumb();
+        if (track <= 0)
+            return;
+        if (y < top)
         {
-            _scrollBar.Maximum = maximum;
-            _scrollBar.ViewportSize = viewportRows;
-            _scrollBar.LargeChange = Math.Max(1, viewportRows - 1);
-            _scrollBar.Value = Math.Min(maximum, _firstRow + _pixelInRow / rh);
-            _scrollBar.IsEnabled = maximum > 0;
+            ScrollByPage(-1);
         }
-        finally
+        else if (y >= top + length)
         {
-            _settingScrollBar = false;
+            ScrollByPage(1);
+        }
+        else if (CapturePointer(pointer))
+        {
+            _thumbDrag = true;
+            _thumbGrab = y - top;
+            _canvas.Invalidate();
         }
     }
 
-    private void OnScrollBarValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+    private void EndThumbDrag()
     {
-        if (_settingScrollBar)
+        _thumbDrag = false;
+        _thumbHover = false;
+        ShowThumb();
+        _canvas.Invalidate();
+    }
+
+    /// <summary>Records the hover over the zone; its end starts the fade. Redraws only when it changes.</summary>
+    private void SetThumbHover(bool hover)
+    {
+        if (hover == _thumbHover)
+            return;
+        _thumbHover = hover;
+        if (!hover)
+            ShowThumb();
+        _canvas.Invalidate();
+    }
+
+    /// <summary>
+    /// Shows the thumb fully for <see cref="ThumbHold"/> from now, then lets it fade. Called on every scroll step, so it
+    /// only stamps the time and arms the timer when it is not armed already (one Start per burst of scrolling).
+    /// </summary>
+    private void ShowThumb()
+    {
+        _thumbActivity = Stopwatch.GetTimestamp();
+        if (!_fadeTimerArmed)
+            ArmFadeTimer(ThumbHold);
+    }
+
+    private void ArmFadeTimer(TimeSpan interval)
+    {
+        _fadeTimerArmed = true;
+        _fadeTimer.Interval = interval;
+        _fadeTimer.Start();
+    }
+
+    /// <summary>Waits out the hold, then redraws every <see cref="ThumbFadeFrame"/> until the thumb is gone.</summary>
+    private void OnFadeTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        _fadeTimerArmed = false;
+        if (_thumbHover || _thumbDrag)
             return;
 
-        // The end of the bar is exactly the last row, whatever rounding the value went through.
-        if (e.NewValue >= _scrollBar.Maximum)
+        TimeSpan since = Stopwatch.GetElapsedTime(_thumbActivity);
+        if (since < ThumbHold)
         {
-            (long first, double pixel) = MaxOffset();
-            SetOffset(first, pixel, syncScrollBar: false);
+            ArmFadeTimer(ThumbHold - since);
             return;
         }
 
-        double row = Math.Floor(Math.Max(0, e.NewValue));
-        SetOffset((long)row, (Math.Max(0, e.NewValue) - row) * RowHeight, syncScrollBar: false);
+        _canvas.Invalidate();
+        if (since < ThumbHold + ThumbFade)
+            ArmFadeTimer(ThumbFadeFrame);
+    }
+
+    /// <summary>The thumb's opacity now, 0 to 1: full while hovered, dragged or held, then fading out.</summary>
+    private double ThumbOpacity()
+    {
+        if (_thumbHover || _thumbDrag)
+            return 1;
+        if (_thumbActivity == 0)
+            return 0;
+        TimeSpan since = Stopwatch.GetElapsedTime(_thumbActivity);
+        if (since < ThumbHold)
+            return 1;
+        return Math.Max(0, 1 - (since - ThumbHold) / ThumbFade);
+    }
+
+    private void DrawScrollBar(CanvasDrawingSession ds, double width)
+    {
+        double opacity = ThumbOpacity();
+        if (opacity <= 0 || !CanScroll)
+            return;
+        (double top, double length, double track) = Thumb();
+        if (track <= 0)
+            return;
+        GraphScrollBar.Draw(ds, width, top, length, _thumbHover || _thumbDrag, opacity);
     }
 
     private void OnCreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args) =>
@@ -436,6 +632,8 @@ public sealed partial class GraphCanvas : UserControl
 
             lastFull = (last - first + 1) * rh - _pixelInRow <= height + 0.001;
         }
+
+        DrawScrollBar(ds, width);
 
         DrawCompleted?.Invoke(
             this,

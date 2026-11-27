@@ -369,3 +369,66 @@ internal sealed class GraphRowRenderer : IDisposable
         }
     }
 }
+
+/// <summary>
+/// The graph's overlay scroll bar, drawn by <see cref="GraphCanvas"/> over the right edge of its rows, so scrolling
+/// changes no XAML element: no track, only a thin rounded white thumb, 4 epx wide at rest and 8 epx while hovered or
+/// dragged. The geometry is plain double math on a fraction of the scroll range (0 = the top, 1 = exactly the end); the
+/// canvas maps that fraction to and from its (row, pixel) offset.
+/// </summary>
+internal static class GraphScrollBar
+{
+    /// <summary>The canvas's right strip that is the scroll bar: hovering shows the thumb, a press never selects.</summary>
+    public const double ZoneWidth = 12;
+
+    public const double RestWidth = 4;
+
+    public const double ActiveWidth = 8;
+
+    /// <summary>Between the thumb and the canvas's right, top and bottom edges.</summary>
+    public const double Inset = 2;
+
+    public const double MinThumbLength = 24;
+
+    private static readonly Color RestColor = ColorHelper.FromArgb(0x59, 0xFF, 0xFF, 0xFF);
+    private static readonly Color ActiveColor = ColorHelper.FromArgb(0x8C, 0xFF, 0xFF, 0xFF);
+
+    /// <summary>The track's length in a canvas <paramref name="height"/> tall: the height less the insets.</summary>
+    public static double TrackLength(double height) => Math.Max(0, height - 2 * Inset);
+
+    /// <summary>
+    /// The thumb's length on a track <paramref name="trackLength"/> long when the viewport shows
+    /// <paramref name="viewFraction"/> of the rows: at least <see cref="MinThumbLength"/>, at most the track.
+    /// </summary>
+    public static double ThumbLength(double trackLength, double viewFraction) =>
+        Math.Min(trackLength, Math.Max(MinThumbLength, trackLength * Math.Clamp(viewFraction, 0, 1)));
+
+    /// <summary>The thumb's top at scroll <paramref name="fraction"/>: the track's start at 0, its end at 1.</summary>
+    public static double ThumbTop(double trackLength, double thumbLength, double fraction) =>
+        Inset + Math.Clamp(fraction, 0, 1) * Math.Max(0, trackLength - thumbLength);
+
+    /// <summary>The scroll fraction of a thumb whose top is at <paramref name="thumbTop"/>, clamped to 0 and 1.</summary>
+    public static double FractionAt(double thumbTop, double trackLength, double thumbLength)
+    {
+        double travel = trackLength - thumbLength;
+        return travel > 0 ? Math.Clamp((thumbTop - Inset) / travel, 0, 1) : 0;
+    }
+
+    /// <summary>
+    /// Draws the thumb at the right edge of a canvas <paramref name="width"/> wide, wider and brighter when
+    /// <paramref name="active"/> (hovered or dragged), at <paramref name="opacity"/> (0 to 1) of its color.
+    /// </summary>
+    public static void Draw(
+        CanvasDrawingSession ds, double width, double thumbTop, double thumbLength, bool active, double opacity)
+    {
+        double thumbWidth = active ? ActiveWidth : RestWidth;
+        Color color = active ? ActiveColor : RestColor;
+        byte alpha = (byte)Math.Round(color.A * Math.Clamp(opacity, 0, 1));
+        float radius = (float)(thumbWidth / 2);
+        ds.FillRoundedRectangle(
+            new Windows.Foundation.Rect(width - Inset - thumbWidth, thumbTop, thumbWidth, thumbLength),
+            radius,
+            radius,
+            ColorHelper.FromArgb(alpha, color.R, color.G, color.B));
+    }
+}
