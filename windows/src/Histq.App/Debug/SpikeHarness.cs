@@ -1,5 +1,7 @@
 #if HISTQ_QA
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
+using System.Globalization;
 using System.Runtime;
 using System.Text;
 using System.Text.Json;
@@ -27,6 +29,13 @@ public partial class App
 /// <c>-HistqScrollProbe &lt;seconds&gt;</c> (default 10) and <c>-HistqScrollPacing draw|rendering</c> (default draw,
 /// see <see cref="ScrollProbeAsync"/>).
 /// <para>
+/// GC diagnostics of the scroll probe: <c>-HistqGcLatency Batch|Interactive|LowLatency|SustainedLowLatency</c> (default:
+/// the runtime's mode, untouched) is set right before the probe and restored after it; <c>-HistqProbeDelay
+/// &lt;seconds&gt;</c> (default 0) waits that long after the load and the first rows drawn before the probe starts. The
+/// probe records <see cref="GC.GetGCMemoryInfo(GCKind)"/> per kind before and after it, and the runtime's GC events
+/// (<see cref="GcEventListener"/>) while it runs.
+/// </para>
+/// <para>
 /// Without <c>-HistqSpikeLog</c> it only sizes the window, which stays open for the interactive title-bar checks. With
 /// it, the dump is parsed and laid out off the UI thread in pages, each page handed to the graph on the UI thread; then
 /// the scroll, precision and click probes run, <c>&lt;stateDir&gt;\Probes\spike.json</c> is written and the process
@@ -43,6 +52,8 @@ internal sealed class SpikeHarness
     private const string SpikeLogFlag = "-HistqSpikeLog";
     private const string ScrollProbeFlag = "-HistqScrollProbe";
     private const string ScrollPacingFlag = "-HistqScrollPacing";
+    private const string GcLatencyFlag = "-HistqGcLatency";
+    private const string ProbeDelayFlag = "-HistqProbeDelay";
 
     private const int FirstPageSize = LogReader.DefaultPageSize;
     private const int PageSize = 20_000;
@@ -65,6 +76,12 @@ internal sealed class SpikeHarness
     /// <summary>The draw-paced scroll probe counts as starved (the timer steps) after this long without a step.</summary>
     private const double PacingStarvedMs = 50;
 
+    /// <summary>
+    /// The wait after the scroll probe before the GC event listener is disposed: the runtime hands events to it on a
+    /// dispatch thread, a little after they happen.
+    /// </summary>
+    private static readonly TimeSpan GcEventsDrain = TimeSpan.FromMilliseconds(500);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -82,6 +99,9 @@ internal sealed class SpikeHarness
 
     private GraphCanvas? _canvas;
     private GraphDrawInfo? _lastDraw;
+
+    /// <summary>The wall-clock time of the scroll probe's start (its <c>clock</c>'s zero), for the GC event times.</summary>
+    private DateTime _probeStartUtc;
 
     private SpikeHarness(IReadOnlyList<string> arguments)
     {
@@ -140,6 +160,24 @@ internal sealed class SpikeHarness
                 "rendering" => false,
                 var other => throw new ArgumentException($"{ScrollPacingFlag} must be rendering or draw, not '{other}'"),
             };
+            // An explicit list: Enum.TryParse would also take NoGCRegion and numbers.
+            GCLatencyMode? gcLatency = _flags.String(GcLatencyFlag) switch
+            {
+                null => null,
+                "Batch" => GCLatencyMode.Batch,
+                "Interactive" => GCLatencyMode.Interactive,
+                "LowLatency" => GCLatencyMode.LowLatency,
+                "SustainedLowLatency" => GCLatencyMode.SustainedLowLatency,
+                var other => throw new ArgumentException(
+                    $"{GcLatencyFlag} must be Batch, Interactive, LowLatency or SustainedLowLatency, not '{other}'"),
+            };
+            double probeDelay = 0;
+            if (_flags.String(ProbeDelayFlag) is { } delayText)
+            {
+                probeDelay = _flags.Double(ProbeDelayFlag) is >= 0 and var delay
+                    ? delay
+                    : throw new ArgumentException($"{ProbeDelayFlag} must be a number of seconds >= 0, not '{delayText}'");
+            }
 
             _canvas = window.GraphCanvas;
             _canvas.DrawCompleted += OnDrawCompleted;
@@ -162,7 +200,26 @@ internal sealed class SpikeHarness
                 return;
             }
 
-            await ScrollProbeAsync(scrollSeconds, drawPacing);
+            if (probeDelay > 0)
+                await Task.Delay(TimeSpan.FromSeconds(probeDelay));
+            _result.ProbeDelaySeconds = probeDelay;
+
+            GCLatencyMode latencyBefore = GCSettings.LatencyMode;
+            if (gcLatency is { } mode)
+                GCSettings.LatencyMode = mode;
+            _result.GcLatencyModeDuringProbe = GCSettings.LatencyMode.ToString();
+            GcEventListener? gcEvents = StartGcEvents();
+            try
+            {
+                await ScrollProbeAsync(scrollSeconds, drawPacing);
+            }
+            finally
+            {
+                if (gcLatency is not null)
+                    GCSettings.LatencyMode = latencyBefore;
+                await StopGcEventsAsync(gcEvents);
+            }
+
             await PrecisionProbeAsync();
             await ClickProbeAsync();
             _result.Backdrop = window.SystemBackdrop switch
@@ -482,12 +539,14 @@ internal sealed class SpikeHarness
             }
         }
 
+        _result.GcInfoBefore = GcInfoByKind.Read();
         int[] gcBefore = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
         TimeSpan pauseBefore = GC.GetTotalPauseDuration();
         DispatcherQueueTimer? timer = null;
         canvas.DrawCompleted += OnDraw;
         CompositionTarget.Rendering += OnRendering;
         clock.Start();
+        _probeStartUtc = DateTime.UtcNow;
         if (drawPacing)
         {
             timer = dispatcher.CreateTimer();
@@ -517,6 +576,7 @@ internal sealed class SpikeHarness
         // Read before the stats below allocate.
         TimeSpan pauseAfter = GC.GetTotalPauseDuration();
         int[] gcAfter = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
+        _result.GcInfoAfter = GcInfoByKind.Read();
 
         _result.ScrollPacing = drawPacing ? "draw" : "rendering";
         _result.ScrollSeconds = seconds;
@@ -657,6 +717,225 @@ internal sealed class SpikeHarness
         }
     }
 
+    // ---- GC diagnostics ----
+
+    /// <summary>The GC event listener, or null (the error in <c>gcEventsError</c>) when it cannot start.</summary>
+    private GcEventListener? StartGcEvents()
+    {
+        try
+        {
+            return new GcEventListener();
+        }
+        catch (Exception e)
+        {
+            _result.GcEventsError = e.ToString();
+            return null;
+        }
+    }
+
+    /// <summary>Waits <see cref="GcEventsDrain"/>, disposes the listener and records its events; never throws.</summary>
+    private async Task StopGcEventsAsync(GcEventListener? listener)
+    {
+        if (listener is null)
+            return;
+        try
+        {
+            await Task.Delay(GcEventsDrain);
+        }
+        finally
+        {
+            try
+            {
+                listener.Dispose();
+                _result.GcEvents = listener.Events(_probeStartUtc);
+                _result.GcEventsDropped = listener.Dropped;
+                _result.GcEventsError ??= listener.Error
+                    ?? (listener.SourceFound ? null : $"no {GcEventListener.RuntimeSource} event source");
+            }
+            catch (Exception e)
+            {
+                _result.GcEventsError ??= e.ToString();
+            }
+        }
+    }
+
+    /// <summary><see cref="GC.GetGCMemoryInfo(GCKind)"/> of the last GC of a kind (index 0: none yet).</summary>
+    private sealed record GcInfo(
+        long Index,
+        int Generation,
+        bool Concurrent,
+        bool Compacted,
+        double[] PauseDurationsMs,
+        double PauseTimePercentage,
+        long MemoryLoadBytes,
+        long HighMemoryLoadThresholdBytes,
+        long TotalAvailableMemoryBytes,
+        long HeapSizeBytes,
+        long FragmentedBytes,
+        long PromotedBytes)
+    {
+        public static GcInfo Read(GCKind kind)
+        {
+            GCMemoryInfo info = GC.GetGCMemoryInfo(kind);
+            var pauses = new double[info.PauseDurations.Length];
+            for (int i = 0; i < pauses.Length; i++)
+                pauses[i] = info.PauseDurations[i].TotalMilliseconds;
+            return new GcInfo(
+                info.Index,
+                info.Generation,
+                info.Concurrent,
+                info.Compacted,
+                pauses,
+                info.PauseTimePercentage,
+                info.MemoryLoadBytes,
+                info.HighMemoryLoadThresholdBytes,
+                info.TotalAvailableMemoryBytes,
+                info.HeapSizeBytes,
+                info.FragmentedBytes,
+                info.PromotedBytes);
+        }
+    }
+
+    private sealed record GcInfoByKind(GcInfo FullBlocking, GcInfo Background, GcInfo Any)
+    {
+        public static GcInfoByKind Read() =>
+            new(GcInfo.Read(GCKind.FullBlocking), GcInfo.Read(GCKind.Background), GcInfo.Read(GCKind.Any));
+    }
+
+    /// <summary>
+    /// A runtime GC event. <see cref="AtMs"/>: ms since the scroll probe's start, from the event's own time stamp (it
+    /// can be negative). GCStart (id 1) has <see cref="Count"/>, <see cref="Depth"/>, <see cref="Reason"/> and
+    /// <see cref="Type"/>; GCEnd (2) count and depth; GCTriggered (35) the reason; every other event its payload, as
+    /// text. The names are the runtime's gc_reason and gc_type values.
+    /// </summary>
+    private sealed record GcEvent(
+        double AtMs,
+        int Id,
+        string? Name,
+        long? Count = null,
+        long? Depth = null,
+        long? Reason = null,
+        string? ReasonName = null,
+        long? Type = null,
+        string? TypeName = null,
+        Dictionary<string, string>? Payload = null);
+
+    /// <summary>
+    /// Records the runtime's GC events (keyword GC, level Informational) from its creation to its disposal. The runtime
+    /// raises them on its own dispatch thread; nothing here throws, an error goes to <see cref="Error"/>.
+    /// </summary>
+    private sealed class GcEventListener : EventListener
+    {
+        public const string RuntimeSource = "Microsoft-Windows-DotNETRuntime";
+        private const EventKeywords GcKeyword = (EventKeywords)0x1;
+        private const int MaxEvents = 5000;
+
+        private static readonly string[] Reasons =
+        [
+            "AllocSmall", "Induced", "LowMemory", "Empty", "AllocLarge", "OutOfSpaceSOH", "OutOfSpaceLOH",
+            "InducedNotForced", "GCStress", "LowMemoryBlocking", "InducedCompacting", "LowMemoryHost", "PMFullGC",
+            "LowMemoryHostBlocking", "BGCTuningSOH", "BGCTuningLOH", "BGCStepping", "InducedAggressive",
+        ];
+
+        private static readonly string[] Types = ["NonConcurrentGC", "BackgroundGC", "ForegroundGC"];
+
+        // Field initializers run before the base constructor, which can already call OnEventSourceCreated.
+        private readonly Lock _lock = new();
+        private readonly List<(DateTime Utc, GcEvent Event)> _events = new(256);
+
+        public bool SourceFound { get; private set; }
+        public int Dropped { get; private set; }
+        public string? Error { get; private set; }
+
+        /// <summary>The events so far, <see cref="GcEvent.AtMs"/> since <paramref name="originUtc"/>.</summary>
+        public GcEvent[] Events(DateTime originUtc)
+        {
+            lock (_lock)
+                return _events.Select(e => e.Event with { AtMs = (e.Utc - originUtc).TotalMilliseconds }).ToArray();
+        }
+
+        protected override void OnEventSourceCreated(EventSource eventSource)
+        {
+            try
+            {
+                if (eventSource.Name != RuntimeSource)
+                    return;
+                SourceFound = true;
+                EnableEvents(eventSource, EventLevel.Informational, GcKeyword);
+            }
+            catch (Exception e)
+            {
+                Error ??= e.ToString();
+            }
+        }
+
+        protected override void OnEventWritten(EventWrittenEventArgs e)
+        {
+            try
+            {
+                GcEvent record = e.EventId switch
+                {
+                    1 => new GcEvent(
+                        0,
+                        e.EventId,
+                        e.EventName,
+                        Count: Number(e, "Count"),
+                        Depth: Number(e, "Depth"),
+                        Reason: Number(e, "Reason"),
+                        ReasonName: NameOf(Reasons, Number(e, "Reason")),
+                        Type: Number(e, "Type"),
+                        TypeName: NameOf(Types, Number(e, "Type"))),
+                    2 => new GcEvent(0, e.EventId, e.EventName, Count: Number(e, "Count"), Depth: Number(e, "Depth")),
+                    35 => new GcEvent(
+                        0,
+                        e.EventId,
+                        e.EventName,
+                        Reason: Number(e, "Reason"),
+                        ReasonName: NameOf(Reasons, Number(e, "Reason"))),
+                    _ => new GcEvent(0, e.EventId, e.EventName, Payload: Payload(e)),
+                };
+                DateTime utc = e.TimeStamp.ToUniversalTime();
+                lock (_lock)
+                {
+                    if (_events.Count < MaxEvents)
+                        _events.Add((utc, record));
+                    else
+                        Dropped++;
+                }
+            }
+            catch (Exception exception)
+            {
+                Error ??= exception.ToString();
+            }
+        }
+
+        private static long? Number(EventWrittenEventArgs e, string name)
+        {
+            int index = e.PayloadNames?.IndexOf(name) ?? -1;
+            return index >= 0 && e.Payload is { } payload && index < payload.Count && payload[index] is IConvertible value
+                ? value.ToInt64(CultureInfo.InvariantCulture)
+                : null;
+        }
+
+        private static string? NameOf(string[] names, long? value) =>
+            value is { } v && v >= 0 && v < names.Length ? names[v] : null;
+
+        /// <summary>The payload as text, without ClrInstanceID; null when there is none.</summary>
+        private static Dictionary<string, string>? Payload(EventWrittenEventArgs e)
+        {
+            if (e.PayloadNames is not { Count: > 0 } names || e.Payload is not { } values)
+                return null;
+            var payload = new Dictionary<string, string>(names.Count, StringComparer.Ordinal);
+            for (int i = 0; i < names.Count && i < values.Count; i++)
+            {
+                if (names[i] != "ClrInstanceID")
+                    payload[names[i]] = Convert.ToString(values[i], CultureInfo.InvariantCulture) ?? "";
+            }
+
+            return payload.Count > 0 ? payload : null;
+        }
+    }
+
     // ---- Helpers ----
 
     /// <summary>The next draw's info, or null when nothing is drawn within <see cref="DrawWait"/> (no change to draw).</summary>
@@ -769,6 +1048,13 @@ internal sealed class SpikeHarness
         public string? GcLatencyMode { get; set; }
         public bool? GcConcurrent { get; set; }
         public bool? GcServer { get; set; }
+        public double? ProbeDelaySeconds { get; set; }
+        public string? GcLatencyModeDuringProbe { get; set; }
+        public GcInfoByKind? GcInfoBefore { get; set; }
+        public GcInfoByKind? GcInfoAfter { get; set; }
+        public GcEvent[]? GcEvents { get; set; }
+        public int? GcEventsDropped { get; set; }
+        public string? GcEventsError { get; set; }
         public string? Error { get; set; }
     }
 }

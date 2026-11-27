@@ -173,8 +173,52 @@ for key in (
     "gcCount2After",
     "gcPauseTotalMsBeforeProbe",
     "gcPauseMs",
+    "probeDelaySeconds",
+    "gcLatencyModeDuringProbe",
+    "gcEventsDropped",
+    "gcEventsError",
 ):
     print(f"INFO  {key}: {json.dumps(probe[key]) if key in probe else '(absent)'}")
+
+# GC.GetGCMemoryInfo per kind before and after the probe, one compact line each.
+for key in ("gcInfoBefore", "gcInfoAfter"):
+    info = probe.get(key)
+    if not isinstance(info, dict):
+        print(f"INFO  {key}: (absent)")
+        continue
+    for kind, value in info.items():
+        print(f"INFO  {key}.{kind}: {json.dumps(value, separators=(',', ':'))}")
+
+# The runtime's GC events (all of them are in spike.json), compactly: ms since the probe start, then GCStart (count,
+# depth, reason, type), GCEnd (count, depth), and each pause from a GCSuspendEEBegin to the next GCRestartEEEnd.
+events = probe.get("gcEvents")
+if not isinstance(events, list):
+    print("INFO  gcEvents: (absent)")
+else:
+    events = [e for e in events if isinstance(e, dict)]
+    shown = []
+    suspended = None
+    for event in events:
+        at = event.get("atMs")
+        at = at if isinstance(at, (int, float)) and not isinstance(at, bool) else None
+        event_id = event.get("id")
+        if event_id == 1:
+            # The number is the runtime's; the name only a reading of it.
+            reason = "/".join(str(v) for v in (event.get("reason"), event.get("reasonName")) if v is not None)
+            kind = "/".join(str(v) for v in (event.get("type"), event.get("typeName")) if v is not None)
+            shown.append((at, f"GCStart count={event.get('count')} depth={event.get('depth')} reason={reason} type={kind}"))
+        elif event_id == 2:
+            shown.append((at, f"GCEnd   count={event.get('count')} depth={event.get('depth')}"))
+        elif event_id == 9:
+            suspended = at
+        elif event_id == 3:
+            pause = f"{at - suspended:.1f} ms" if at is not None and suspended is not None else "?"
+            shown.append((suspended, f"pause   {pause}"))
+            suspended = None
+    print(f"INFO  gcEvents: {len(events)} events, {len(shown)} shown")
+    # A pause is shown at its start, so it sorts before the GCStart it holds.
+    for at, text in sorted(shown, key=lambda item: float("inf") if item[0] is None else item[0]):
+        print(f"INFO    {at:9.1f} ms  {text}" if at is not None else f"INFO    {'?':>9} ms  {text}")
 
 sys.exit(1 if failed else 0)
 PY

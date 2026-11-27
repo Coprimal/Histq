@@ -1,4 +1,3 @@
-using System.Runtime;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 
@@ -13,10 +12,6 @@ public static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        // The graph and log of a large repository stay in memory, and a blocking gen-2 collection of that heap stalls
-        // the UI thread ~190 ms (the phase 5 scroll probe at 1M commits). Gen-2 runs in the background instead, except
-        // under memory pressure (needs concurrent GC, set in the csproj); never GC.Collect or no-GC regions.
-        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
         WinRT.ComWrappersSupport.InitializeComWrappers();
         Application.Start(_ =>
         {
