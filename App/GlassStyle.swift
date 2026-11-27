@@ -33,6 +33,8 @@ enum Palette {
     /// A tab in the ⇧/⌘ multi-selection that is not the shown one: below the shown tab's `sheet`, so it never
     /// outshines it.
     static let multiSelectFill = color(.white.withAlphaComponent(0.08))
+    /// The selected tab's depth: a shadow around it, outside only, no edge (`SelectedTabShadow`). Black 0.45
+    static let selectedTabShadow = Color.black.opacity(0.45)
     /// A worktree box: the background behind the tabs of one repository's worktrees (`WorktreeBoxShape`), and its 1 pt
     /// edge. White 0.045 / white 0.08
     static let worktreeBoxFill = color(.white.withAlphaComponent(0.045))

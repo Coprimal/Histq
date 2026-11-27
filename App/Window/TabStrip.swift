@@ -19,6 +19,8 @@ enum TabStripMetrics {
     /// The concave curve at each bottom corner of the selected tab, into the sheet's top edge. The row has this much
     /// room on each side inside its scroll view, so the first and last tab's flares are not clipped.
     static let flare: CGFloat = 9
+    /// The selected tab's soft shadow (`SelectedTabShadow`).
+    static let selectedShadowRadius: CGFloat = 5
     /// New Tab and the tab list beside the tabs: smaller than the tabs, so they float above the sheet.
     static let buttonHeight: CGFloat = 24
     static let minTabWidth: CGFloat = 96
@@ -1126,6 +1128,7 @@ struct TabItem: View {
                                     .stroke(groupColor, lineWidth: TabStripMetrics.groupLine)
                             }
                         }
+                        .background { SelectedTabShadow() }
                         .padding(.horizontal, -TabStripMetrics.flare)
                         .matchedGeometryEffect(id: "selectedTab", in: namespace)
                 } else {
@@ -1359,6 +1362,38 @@ struct TabSheetShape: Shape {
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
         if closed { path.closeSubpath() }
         return path
+    }
+}
+
+/// The selected tab's depth, behind it: a soft shadow drawn outside the tab's shape only (the shape is clipped out, so
+/// no edge and no darker core under the translucent fill), in a canvas wider and taller than the shadow reaches, so
+/// nothing cuts it on a straight line. It fades out toward the tab's top, which the strip's scroll view clips 1 pt
+/// above, and stops at the tab's bottom, where it joins the sheet. On a worktree box it darkens the box around the
+/// hole cut for the tab.
+private struct SelectedTabShadow: View {
+    var body: some View {
+        let radius = TabStripMetrics.selectedShadowRadius
+        let reach = 3 * radius
+        Canvas { context, size in
+            let tab = CGRect(x: reach, y: reach, width: size.width - 2 * reach, height: size.height - reach)
+            let shape = TabSheetShape(radius: TabStripMetrics.tabRadius, flare: TabStripMetrics.flare).path(in: tab)
+            var outside = Path(CGRect(origin: .zero, size: size))
+            outside.addPath(shape)
+            context.clip(to: outside, style: FillStyle(eoFill: true))
+            context.addFilter(.shadow(color: Palette.selectedTabShadow, radius: radius, options: .shadowOnly))
+            context.fill(shape, with: .color(.black))
+        }
+        .padding(.horizontal, -reach)
+        .padding(.top, -reach)
+        .mask {
+            GeometryReader { proxy in
+                let top = reach / proxy.size.height
+                LinearGradient(stops: [.init(color: .clear, location: top),
+                                       .init(color: .black, location: min(top + 0.5 * (1 - top), 1))],
+                               startPoint: .top, endPoint: .bottom)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
