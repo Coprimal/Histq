@@ -1,10 +1,10 @@
-// The AI chat's floating bubble (ported from Dblore's `AIBubbleOverlay` and `AIBubbleLayout`): the app logo on the
-// bottom edge of the tab's panels (sidebar, graph and detail), dragged sideways to move it (a move under 4 pt is a
-// click, which opens or closes the card), and the chat card above it, centered on the logo, kept between the margins
-// and resized from its leading, trailing and top edges. The logo's place and the card's size are shared by all tabs
-// and saved only when a drag ends. Only the logo and the card take clicks: the empty space passes them to the panels
-// underneath. Hovering the logo shows an x badge that hides the bubble (logo and card) in every tab until the header's
-// AI button or anything that opens the chat shows it again.
+// The AI chat's floating bubble (ported from Dblore's `AIBubbleOverlay` and `AIBubbleLayout`): the logo (a black
+// and white sphere with the SF `sparkles`) on the bottom edge of the tab's panels (sidebar, graph and detail), dragged
+// sideways to move it (a move under 4 pt is a click, which opens or closes the card), and the chat card above it,
+// centered on the logo, kept between the margins and resized from its leading, trailing and top edges. The logo's
+// place and the card's size are shared by all tabs and saved only when a drag ends. Only the logo and the card take
+// clicks: the empty space passes them to the panels underneath. Hovering the logo shows an x badge that hides the
+// bubble (logo and card) in every tab until the header's AI button or anything that opens the chat shows it again.
 import SwiftUI
 
 struct AIChatBubble: View {
@@ -167,12 +167,8 @@ struct AIChatBubble: View {
     // MARK: Logo
 
     private func logo(containerWidth: CGFloat) -> some View {
-        Image("histq-logo")
-            .resizable()
-            .interpolation(.high)
-            .frame(width: AIChatBubbleLayout.logoSize, height: AIChatBubbleLayout.logoSize)
-            .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
-            .contentShape(Rectangle())
+        orb
+            .contentShape(Circle())
             .scaleEffect(isPressed && !reduceMotion ? 0.92 : 1)
             .animation(reduceMotion ? nil : Motion.press, value: isPressed)
             .gesture(dragGesture(containerWidth: containerWidth))
@@ -184,6 +180,42 @@ struct AIChatBubble: View {
             // After the gesture, so the badge takes its own clicks; the hover covers the badge too.
             .overlay(alignment: .topTrailing) { hideBadge }
             .onHover { isHovering = $0 }
+    }
+
+    /// The SF `sparkles` on a black and white sphere: a radial body lit from the top left (graphite while the card is
+    /// closed, a lighter grey while it is open, cross-faded), a glossy highlight on top, a lighter rim above and a
+    /// darker one below, and soft shadows underneath.
+    private var orb: some View {
+        let size = AIChatBubbleLayout.logoSize
+        return ZStack {
+            orbBody(highlight: 0.42, middle: 0.17, edge: 0.04, size: size)
+            orbBody(highlight: 0.78, middle: 0.46, edge: 0.18, size: size)
+                .opacity(model.isExpanded ? 1 : 0)
+                .animation(.easeOut(duration: 0.2), value: model.isExpanded)
+            Ellipse()
+                .fill(LinearGradient(colors: [.white.opacity(0.6), .white.opacity(0)],
+                                     startPoint: .top, endPoint: .bottom))
+                .frame(width: size * 0.62, height: size * 0.38)
+                .offset(y: -size * 0.24)
+            Circle()
+                .strokeBorder(LinearGradient(colors: [.white.opacity(0.45), .black.opacity(0.3)],
+                                             startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            Image(systemName: "sparkles")
+                .font(.system(size: size * 0.42, weight: .semibold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.5), radius: 1.5, y: 1)
+        }
+        .frame(width: size, height: size)
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.45), radius: 8, y: 4)
+        .shadow(color: .black.opacity(0.4), radius: 2.5, y: 2)
+    }
+
+    /// The sphere's body in greys: `highlight` at the lit top left, `middle`, then `edge` at the far rim.
+    private func orbBody(highlight: Double, middle: Double, edge: Double, size: CGFloat) -> some View {
+        Circle()
+            .fill(RadialGradient(colors: [Color(white: highlight), Color(white: middle), Color(white: edge)],
+                                 center: UnitPoint(x: 0.32, y: 0.26), startRadius: 0, endRadius: size * 0.85))
     }
 
     private var showsHideBadge: Bool {
