@@ -104,7 +104,7 @@ internal sealed class TabKeyboard
     }
 
     private bool IsShown(FrameworkElement item) =>
-        item.Visibility == Visibility.Visible && item.Parent is not null && _strip.FocusOrder().Contains(item);
+        item.Visibility == Visibility.Visible && _strip.IsPlaced(item) && _strip.FocusOrder().Contains(item);
 
     /// <summary>The row's item that has the focus, if any.</summary>
     private FrameworkElement? FocusedItem() =>
@@ -208,7 +208,7 @@ internal sealed class TabKeyboard
     private void OnItemPressed(object sender, PointerRoutedEventArgs e)
     {
         if (sender is FrameworkElement item && e.GetCurrentPoint(item).Properties.IsLeftButtonPressed
-            && item.Visibility == Visibility.Visible && item.Parent is not null)
+            && item.Visibility == Visibility.Visible && _strip.IsPlaced(item))
             item.Focus(FocusState.Pointer);
     }
 

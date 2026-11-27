@@ -89,6 +89,10 @@ public sealed partial class TabStrip : Panel
     private readonly Dictionary<Guid, TabItemView> _tabViews = [];
     private readonly Dictionary<Guid, GroupChipView> _chips = [];
     private readonly Dictionary<string, WorktreeHeadView> _heads = new(StringComparer.Ordinal);
+
+    /// <summary>The canvas each tab, chip and head was put on (<see cref="MoveTo"/>), kept here: FrameworkElement.Parent
+    /// seems not to report it reliably.</summary>
+    private readonly Dictionary<FrameworkElement, Canvas> _homes = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, double> _textWidths = new(StringComparer.Ordinal);
     private readonly TextBlock _measure;
     private readonly TabDragController _drag;
@@ -450,7 +454,7 @@ public sealed partial class TabStrip : Panel
     /// <summary>What clips <paramref name="element"/>'s Passthrough rect: the track's viewport for its items, else the
     /// strip (a narrow window cuts it).</summary>
     internal FrameworkElement ClipOf(FrameworkElement element) =>
-        ReferenceEquals(element.Parent, _trackItems) ? _viewport : this;
+        ReferenceEquals(HomeOf(element), _trackItems) ? _viewport : this;
 
     /// <summary>
     /// The row's items in TabArrangement order for UI Automation: the stow buttons, the pinned tabs, the track (each
@@ -515,12 +519,12 @@ public sealed partial class TabStrip : Panel
         List<FrameworkElement> order = [.. AutomationOrder().Where(element =>
             element.Visibility == Visibility.Visible && !ReferenceEquals(element, _scrollLeft)
             && !ReferenceEquals(element, _scrollRight))];
-        if (order.FirstOrDefault(element => element is TabItemView view && ReferenceEquals(view.Parent, _leadItems))
+        if (order.FirstOrDefault(element => element is TabItemView view && ReferenceEquals(HomeOf(view), _leadItems))
             is { } popped)
         {
             order.Remove(popped);
-            order.Insert(order.TakeWhile(element => element is Button && ReferenceEquals(element.Parent, _leadItems))
-                .Count(), popped);
+            order.Insert(order.TakeWhile(element =>
+                ReferenceEquals(element, _closedGroups) || ReferenceEquals(element, _archive)).Count(), popped);
         }
 
         return order;
@@ -529,7 +533,7 @@ public sealed partial class TabStrip : Panel
     /// <summary>The selected tab's element while it is shown: where Tab into the row lands.</summary>
     internal FrameworkElement? SelectedItem() =>
         _selectedId is { } id && _tabViews.TryGetValue(id, out TabItemView? view) && view.Visibility == Visibility.Visible
-            && view.Parent is not null
+            && HomeOf(view) is not null
             ? view
             : null;
 
@@ -540,7 +544,7 @@ public sealed partial class TabStrip : Panel
     /// never scrolls. Measured against where a running scroll is heading, so asking again does not restart it.</summary>
     internal void RevealItem(FrameworkElement element)
     {
-        if (!ReferenceEquals(element.Parent, _trackItems) || _layout?.Overflows != true || !double.IsFinite(element.Width))
+        if (!ReferenceEquals(HomeOf(element), _trackItems) || _layout?.Overflows != true || !double.IsFinite(element.Width))
             return;
         double start = Canvas.GetLeft(element) - _m.Flare;
         double end = Canvas.GetLeft(element) + element.Width + _m.Flare;
@@ -1057,8 +1061,8 @@ public sealed partial class TabStrip : Panel
     /// <summary>The canvas a pressed element's pointer is measured in, the one it stands on: the track's content (so a
     /// scroll moves the pointer's position with the tabs) or the pinned well; null for the popped-out archived tab.</summary>
     internal UIElement? SpaceOf(FrameworkElement element) =>
-        ReferenceEquals(element.Parent, _trackItems) ? _content
-        : ReferenceEquals(element.Parent, _wellItems) ? _well
+        ReferenceEquals(HomeOf(element), _trackItems) ? _content
+        : ReferenceEquals(HomeOf(element), _wellItems) ? _well
         : null;
 
     /// <summary>A position in <paramref name="space"/> (<see cref="SpaceOf"/>) in the spans' space of
@@ -1415,23 +1419,90 @@ public sealed partial class TabStrip : Panel
 
     // Elements.
 
-    private static void MoveTo(FrameworkElement element, Canvas target)
+    /// <summary>The item canvas a tab, chip or head stands on (<see cref="MoveTo"/>), null while it stands on none.
+    /// </summary>
+    internal Canvas? HomeOf(FrameworkElement element) => _homes.GetValueOrDefault(element);
+
+    /// <summary>A tab, chip or head stands on its canvas; any other element of the row (a button) always does.</summary>
+    internal bool IsPlaced(FrameworkElement element) =>
+        element is not (TabItemView or GroupChipView or WorktreeHeadView) || _homes.ContainsKey(element);
+
+    /// <summary>Puts <paramref name="element"/> on <paramref name="target"/>, off any canvas that holds it before. A
+    /// failure is logged and the sync goes on with the next item; the element is tried again at the next sync.</summary>
+    private void MoveTo(FrameworkElement element, Canvas target)
     {
-        if (ReferenceEquals(element.Parent, target))
+        if (_homes.TryGetValue(element, out Canvas? home) && ReferenceEquals(home, target))
             return;
-        if (element.Parent is Panel old)
-            old.Children.Remove(element);
-        target.Children.Add(element);
+        try
+        {
+            Detach(element);
+            target.Children.Add(element);
+            _homes[element] = target;
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered(
+                $"TabStrip.MoveTo {element.GetType().Name} from {CanvasName(home)} to {CanvasName(target)} (Parent "
+                + $"{element.Parent?.GetType().Name ?? "none"}, visual parent "
+                + $"{VisualTreeHelper.GetParent(element)?.GetType().Name ?? "none"}; item left off the row)", error);
+            // A failed Add must not leave an entry the next layout trips over.
+            try
+            {
+                RemoveFrom(target, element);
+            }
+            catch (Exception cleanup)
+            {
+                CrashLog.Recovered($"TabStrip.MoveTo cleanup on {CanvasName(target)}", cleanup);
+            }
+        }
     }
 
-    private static void RemoveStale<TKey, TView>(Dictionary<TKey, TView> views, IReadOnlySet<TKey> live)
+    /// <summary>Takes <paramref name="element"/> off every canvas that holds it: its home, the other item canvases and
+    /// its visual parent. FrameworkElement.Parent is not used: on Windows it seems not to report the canvas holding a
+    /// tab (a sync added a tab again to the canvas that held it).</summary>
+    private void Detach(FrameworkElement element)
+    {
+        _homes.Remove(element);
+        foreach (Canvas canvas in (Canvas[])[_leadItems, _wellItems, _trackItems])
+            RemoveFrom(canvas, element);
+        if (VisualTreeHelper.GetParent(element) is Panel parent)
+            RemoveFrom(parent, element);
+    }
+
+    /// <summary>Removes each entry of <paramref name="panel"/>'s children that is <paramref name="element"/>, compared by
+    /// reference.</summary>
+    private static void RemoveFrom(Panel panel, UIElement element)
+    {
+        UIElementCollection children = panel.Children;
+        for (int index = children.Count - 1; index >= 0; index--)
+        {
+            if (ReferenceEquals(children[index], element))
+                children.RemoveAt(index);
+        }
+    }
+
+    private string CanvasName(Canvas? canvas) =>
+        canvas is null ? "none"
+        : ReferenceEquals(canvas, _leadItems) ? "lead"
+        : ReferenceEquals(canvas, _wellItems) ? "well"
+        : ReferenceEquals(canvas, _trackItems) ? "track"
+        : canvas.GetType().Name;
+
+    private void RemoveStale<TKey, TView>(Dictionary<TKey, TView> views, IReadOnlySet<TKey> live)
         where TKey : notnull
         where TView : FrameworkElement
     {
         foreach (TKey key in views.Keys.Where(key => !live.Contains(key)).ToList())
         {
-            if (views[key].Parent is Panel parent)
-                parent.Children.Remove(views[key]);
+            try
+            {
+                Detach(views[key]);
+            }
+            catch (Exception error)
+            {
+                CrashLog.Recovered($"TabStrip.RemoveStale {typeof(TView).Name} (left on the row)", error);
+            }
+
             views.Remove(key);
         }
     }
