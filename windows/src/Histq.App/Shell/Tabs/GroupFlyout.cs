@@ -52,8 +52,8 @@ internal sealed class GroupFlyout : TabFlyout
     private FrameworkElement? _moveHolder;
     private FrameworkElement? _deleteHolder;
 
-    public GroupFlyout(TabStrip strip)
-        : base(strip, FlyoutPlacementMode.BottomEdgeAlignedLeft)
+    public GroupFlyout(ITabsView strip)
+        : base(strip, strip.Vertical ? FlyoutPlacementMode.RightEdgeAlignedTop : FlyoutPlacementMode.BottomEdgeAlignedLeft)
     {
     }
 

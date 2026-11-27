@@ -21,8 +21,8 @@ internal sealed class ClosedGroupsFlyout : TabFlyout
 
     private StackPanel? _rows;
 
-    public ClosedGroupsFlyout(TabStrip strip)
-        : base(strip, FlyoutPlacementMode.BottomEdgeAlignedLeft)
+    public ClosedGroupsFlyout(ITabsView strip)
+        : base(strip, strip.Vertical ? FlyoutPlacementMode.RightEdgeAlignedBottom : FlyoutPlacementMode.BottomEdgeAlignedLeft)
     {
     }
 

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Histq.App.Shell.Tabs;
 using Histq.Core;
 using Histq.Platform.IO;
 using Histq.Platform.UI;
@@ -65,6 +66,9 @@ internal sealed partial class WindowManager
 
     /// <summary>The repo key reads and folder checks started and not yet applied (<see cref="Tracked"/>).</summary>
     private int _pendingChecks;
+
+    /// <summary>Where the windows' tabs show; read on first use (<see cref="CurrentTabPosition"/>).</summary>
+    private TabPosition? _tabPosition;
 
     /// <param name="store">Saves the session; <see cref="Restore"/> turns its capture on.</param>
     /// <param name="workspaces">The workspace layouts read at launch: those still <c>open</c> reopen, the others are
@@ -199,6 +203,26 @@ internal sealed partial class WindowManager
     /// <summary>Saves <paramref name="value"/> as <paramref name="key"/> on the write worker; the task ends once it is
     /// written (after every write queued before it).</summary>
     public Task SetPreference<T>(PrefKey key, T value) => Persist(() => Preferences.Set(key, value), key.Name);
+
+    /// <summary>Where every window's tabs show: the preference (in a QA build, the <c>-HistqTabPosition</c> flag over it)
+    /// as first read, then what View › Move Tabs to the Left / Top chose (the flag counts at startup only). New windows
+    /// open with it.</summary>
+    internal TabPosition CurrentTabPosition => _tabPosition ??= TabPositions.Current(Preferences);
+
+    /// <summary>
+    /// View › Move Tabs to the Left / Top (HistqApp.swift toggleTabPosition): every open window swaps between the
+    /// title bar's strip and the vertical panel at once, keeping its selection; the tabPosition preference is written on
+    /// the write worker.
+    /// </summary>
+    internal void SetTabPosition(TabPosition position)
+    {
+        if (position == CurrentTabPosition)
+            return;
+        _tabPosition = position;
+        _ = SetPreference(PrefKey.TabPosition, position == TabPosition.Left ? "left" : "top");
+        foreach (MainWindow window in _windows.ToList())
+            window.SetTabPosition(position);
+    }
 
     /// <summary>
     /// Choose git…: a file picker for git.exe owned by <paramref name="window"/>. The picked file's path; null when the

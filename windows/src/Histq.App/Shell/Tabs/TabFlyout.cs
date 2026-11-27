@@ -37,7 +37,7 @@ internal abstract class TabFlyout
     /// <summary>Hidden by a row's action: the syncs that action causes leave the content as it is.</summary>
     private bool _closing;
 
-    protected TabFlyout(TabStrip strip, FlyoutPlacementMode placement)
+    protected TabFlyout(ITabsView strip, FlyoutPlacementMode placement)
     {
         Strip = strip;
         Flyout = new Flyout
@@ -49,7 +49,8 @@ internal abstract class TabFlyout
         Flyout.Closed += (_, _) => OnClosed();
     }
 
-    protected TabStrip Strip { get; }
+    /// <summary>The strip or the vertical panel that opens it.</summary>
+    protected ITabsView Strip { get; }
 
     protected Flyout Flyout { get; }
 

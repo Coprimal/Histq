@@ -29,7 +29,10 @@ namespace Histq.App;
 /// (Shell/CommandBar) on top and the selected tab's content (<see cref="TabContentHost"/>) under it; the 30 epx footer
 /// is the gap under the sheet; toasts (<see cref="ToastHost"/>) show at its bottom right. One window's tabs are a
 /// <see cref="WindowTabs"/>, changed only through <see cref="Apply"/>, which brings the title bar's tab row
-/// (<see cref="TabStrip"/>) in line with them.
+/// (<see cref="TabStrip"/>) in line with them. With the tab position Left (design §4, <see cref="TabPositions"/>) the
+/// title bar holds only the logo and the caption buttons, the tabs show in the vertical panel
+/// (<see cref="VerticalTabsPanel"/>) left of the sheet, and its selected row joins the sheet's left edge. View › Move
+/// Tabs to the Left / Top switches every window at once (<see cref="SetTabPosition"/>).
 /// </summary>
 public sealed partial class MainWindow : Window
 {
@@ -81,6 +84,10 @@ public sealed partial class MainWindow : Window
 
     /// <summary>The tabs or the frame changed: the session is saved (<see cref="WindowManager"/>).</summary>
     internal event EventHandler? StateChanged;
+
+    /// <summary>Where the tabs show: the app's position as the window opens (<see cref="WindowManager.CurrentTabPosition"/>),
+    /// then each switch (<see cref="SetTabPosition"/>). Only the view it names is synced.</summary>
+    private TabPosition _tabPosition;
 
     // The inputs SheetPath was last built from, so a layout pass that changed nothing does not rebuild it.
     private Rect _sheetRect;
@@ -143,6 +150,13 @@ public sealed partial class MainWindow : Window
         // the strip's scroll and selection slide steps (no layout pass) and every layout pass (resize, scale change,
         // title bar insets) catch position changes.
         AppTitleBar.TabStrip.GeometryChanged += (_, _) => UpdateSheet();
+        // Attached and hooked once, whatever the position: a switch only shows or hides it.
+        VerticalTabs.Attach(this);
+        // The list's scroll moves the selected row (no layout pass): the joined sheet follows it.
+        VerticalTabs.GeometryChanged += (_, _) => UpdateSheet();
+        _tabPosition = manager.CurrentTabPosition;
+        if (_tabPosition == TabPosition.Left)
+            ShowTabPosition();
 #if HISTQ_QA
         RootGrid.LayoutUpdated += (_, _) =>
         {
@@ -182,12 +196,55 @@ public sealed partial class MainWindow : Window
     internal void Apply(Action<WindowTabs> change)
     {
         change(Tabs);
-        AppTitleBar.TabStrip.Sync(Tabs);
+        if (_tabPosition == TabPosition.Left)
+            VerticalTabs.Sync(Tabs);
+        else
+            AppTitleBar.TabStrip.Sync(Tabs);
         ContentHost.Sync(Tabs);
         AppCommandBar.Update();
         UpdateFooter();
         UpdateSheet();
         StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Where the window's tabs show now.</summary>
+    internal TabPosition TabPosition => _tabPosition;
+
+    /// <summary>
+    /// View › Move Tabs to the Left / Top (<see cref="WindowManager.SetTabPosition"/>): the tabs swap between the title
+    /// bar's strip and the vertical panel at once, the selection kept. The view now shown is synced (the other was not
+    /// while hidden) and the joined sheet is built anew.
+    /// </summary>
+    internal void SetTabPosition(TabPosition position)
+    {
+        if (position == _tabPosition)
+            return;
+        _tabPosition = position;
+        ShowTabPosition();
+        if (position == TabPosition.Left)
+        {
+            VerticalTabs.RevealOnNextSync();
+            VerticalTabs.Sync(Tabs);
+        }
+        else
+        {
+            // Shown first (ShowTabPosition), so its layout and Passthrough rects follow this sync.
+            AppTitleBar.TabStrip.Sync(Tabs);
+        }
+
+        _sheetBuilt = false;
+        UpdateSheet();
+    }
+
+    /// <summary>Shows the view of <see cref="_tabPosition"/>: the title bar with or without its strip, the vertical
+    /// panel or not, and the sheet's leading edge beside it.</summary>
+    private void ShowTabPosition()
+    {
+        bool left = _tabPosition == TabPosition.Left;
+        AppTitleBar.SetTabsOnLeft(left);
+        VerticalTabs.Visibility = left ? Visibility.Visible : Visibility.Collapsed;
+        double inset = SheetTabShape.SheetInset;
+        SheetArea.Margin = new Thickness(inset + (left ? VerticalTabs.Width : 0), 0, inset, 0);
     }
 
     /// <summary>Shows a warning toast at the window's bottom right (a refused tab move, a session not saved).</summary>
@@ -266,19 +323,22 @@ public sealed partial class MainWindow : Window
 #endif
 
     /// <summary>
-    /// Rebuilds the joined sheet: inset 8 epx from the window's left and right edges, from the title bar's bottom edge
-    /// down to the footer's top, with the selected tab joined to it.
+    /// Rebuilds the joined sheet: inset 8 epx from the window's left and right edges (from the vertical tabs' trailing
+    /// edge with the tabs on the left), from the title bar's bottom edge down to the footer's top, with the selected tab
+    /// joined to it (its selected row, on the left).
     /// </summary>
     private void UpdateSheet()
     {
+        bool left = _tabPosition == TabPosition.Left;
         double inset = SheetTabShape.SheetInset;
+        double leading = left ? inset + VerticalTabs.Width : inset;
         double top = AppTitleBar.ActualHeight;
         var sheet = new Rect(
-            inset,
+            leading,
             top,
-            Math.Max(0, RootGrid.ActualWidth - 2 * inset),
+            Math.Max(0, RootGrid.ActualWidth - leading - inset),
             Math.Max(0, RootGrid.ActualHeight - top - Footer.ActualHeight));
-        Rect? tab = SelectedTabBounds();
+        Rect? tab = left ? SelectedRowBounds() : SelectedTabBounds();
         if (_sheetBuilt && sheet == _sheetRect && tab == _sheetTab)
             return;
         // A new Data lays the window out again (RootGrid.LayoutUpdated calls back here): counted by the strip's
@@ -292,7 +352,7 @@ public sealed partial class MainWindow : Window
         _sheetBuilt = true;
         _sheetRect = sheet;
         _sheetTab = tab;
-        SheetPath.Data = SheetTabShape.Create(sheet, tab);
+        SheetPath.Data = SheetTabShape.Create(sheet, tab, joinedLeft: left);
     }
 
     /// <summary>
@@ -308,6 +368,18 @@ public sealed partial class MainWindow : Window
         QaTransformToVisualCount++;
 #endif
         return strip.TransformToVisual(RootGrid).TransformBounds(tab);
+    }
+
+    /// <summary>The vertical tabs' selected row in RootGrid (and so SheetPath) coordinates, or null before layout,
+    /// for a pinned cell, or while the row is cut by the list's scrolled edge.</summary>
+    private Rect? SelectedRowBounds()
+    {
+        if (VerticalTabs.XamlRoot is null || VerticalTabs.SelectedRowRect() is not { } row)
+            return null;
+#if HISTQ_QA
+        QaTransformToVisualCount++;
+#endif
+        return VerticalTabs.TransformToVisual(RootGrid).TransformBounds(row);
     }
 
     /// <summary>

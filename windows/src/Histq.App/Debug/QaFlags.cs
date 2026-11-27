@@ -21,6 +21,10 @@ namespace Histq.App
     /// Untitled front window makes a new workspace of the Untitled windows). Then the session and the pending writes
     /// are flushed, <c>&lt;stateDir&gt;\Probes\workspace.json</c> is written and the process exits 0; any failure is
     /// written there as <c>error</c> and the process exits non-zero (1, or 3 when the run takes too long).</item>
+    /// <item><c>-HistqTabPosition left|top</c>: the window's tabs show in the vertical panel (left) or the title bar's
+    /// strip (top), over the tab position preference at startup, which it never writes; a View › Move Tabs switch
+    /// still writes the preference and wins from then on (ported from the Mac's DEBUG flag, VerticalTabsPanel.swift
+    /// at 6fa6d40). Read once, when the first window asks (<see cref="TabPositionFlag"/>).</item>
     /// </list>
     /// workspace.json reads the saved file back as the app opens one and lists each tab of each window with its stored
     /// <c>path</c> / <c>home</c> strings, the native path they resolved to and whether that folder exists (a UNC or
@@ -30,6 +34,7 @@ namespace Histq.App
     {
         private const string OpenWorkspaceFlag = "-HistqOpenWorkspace";
         private const string SaveWorkspaceFlag = "-HistqSaveWorkspace";
+        private const string TabPositionName = "-HistqTabPosition";
 
         /// <summary>How long the save waits for the repo key reads and folder checks.</summary>
         private static readonly TimeSpan SettleLimit = TimeSpan.FromSeconds(10);
@@ -61,6 +66,11 @@ namespace Histq.App
 
         /// <summary>The file to save the workspace to, then exit; null without the flag.</summary>
         public string? SaveWorkspace { get; }
+
+        /// <summary>The <c>-HistqTabPosition</c> value of the launch arguments ("left" or "top"; anything else is
+        /// ignored by <see cref="Shell.Tabs.TabPositions"/>), or null without the flag. Read once.</summary>
+        public static string? TabPositionFlag { get; } =
+            new LaunchFlags(Environment.GetCommandLineArgs().Skip(1).ToList()).String(TabPositionName);
 
         /// <summary>The flags in <paramref name="arguments"/> (the launch arguments, without the program's path).</summary>
         public static QaFlags Read(IReadOnlyList<string> arguments)

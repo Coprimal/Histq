@@ -15,9 +15,9 @@ using IOPath = System.IO.Path;
 namespace Histq.App.Shell.Tabs;
 
 /// <summary>
-/// The right-click menus of a tab and of a worktree head (design header-and-tab-row.md §3.11, ported from TabMenu,
+/// The right-click menus of a tab (a strip tab, a vertical row or pinned cell) and of a worktree head (design header-and-tab-row.md §3.11, ported from TabMenu,
 /// App/Window/TabStrip.swift:820-1000). A tab's: Close Tab, Close Tabs (a multi-selection), Close Other Tabs, Close Tabs
-/// to the Right, each off when it has no tab to close (they never close the popped-out archived tab); the group items,
+/// to the Right (Close Tabs Below in the vertical tabs, whose keyboard menu opens to the trailing side), each off when it has no tab to close (they never close the popped-out archived tab); the group items,
 /// plural on a multi-selection, which they act on whole when the tab is in it; Copy Path, Show in Explorer, Set Alias…,
 /// Set Icon…, Icon Color ›, Pin Tab / Unpin Tab (Pin / Unpin Worktree Tabs on a boxed tab) and Archive This Tab
 /// (Unarchive Tab on the popped-out archived tab), off for a Welcome tab, then Move Tab to Window › (each other
@@ -46,13 +46,16 @@ internal static class TabContextMenu
     {
         if (_open is { IsOpen: true } || item.XamlRoot is null || item.Visibility != Visibility.Visible)
             return;
-        MenuFlyout? menu = item switch
+        (ITabsView View, MenuFlyout? Menu)? built = item switch
         {
-            TabItemView tab when tab.Strip.IsPlaced(tab) => ForTab(tab.Strip, tab.Id),
-            WorktreeHeadView head when head.Strip.IsPlaced(head) => ForHead(head.Strip, head.BoxKey),
+            TabItemView tab when tab.Strip.IsPlaced(tab) => (tab.Strip, ForTab(tab.Strip, tab.Id)),
+            WorktreeHeadView head when head.Strip.IsPlaced(head) => (head.Strip, ForHead(head.Strip, head.BoxKey)),
+            VerticalTabRow row when row.Panel.IsPlaced(row) => (row.Panel, ForTab(row.Panel, row.Id)),
+            VerticalPinnedCell cell => (cell.Panel, ForTab(cell.Panel, cell.Id)),
+            VerticalWorktreeHead head when head.Panel.IsPlaced(head) => (head.Panel, ForHead(head.Panel, head.BoxKey)),
             _ => null,
         };
-        if (menu is null)
+        if (built is not { Menu: { } menu } shown)
             return;
 
         _open = menu;
@@ -63,12 +66,15 @@ internal static class TabContextMenu
         };
         menu.ShowAt(item, at is { } point
             ? new FlyoutShowOptions { Position = point }
-            : new FlyoutShowOptions { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft });
+            : new FlyoutShowOptions
+            {
+                Placement = shown.View.Vertical ? FlyoutPlacementMode.RightEdgeAlignedTop : FlyoutPlacementMode.BottomEdgeAlignedLeft,
+            });
     }
 
     // The tab menu.
 
-    private static MenuFlyout? ForTab(TabStrip strip, Guid id)
+    private static MenuFlyout? ForTab(ITabsView strip, Guid id)
     {
         if (strip.Window is not { } window || strip.Model is not { } model)
             return null;
@@ -106,8 +112,9 @@ internal static class TabContextMenu
             menu.Items.Add(actions.Item("Close Tabs", () => CloseAll(window, targets)));
         menu.Items.Add(actions.Item("Close Other Tabs", () => window.Apply(m => m.CloseOtherTabs(id)),
             enabled: normalCount - (tab.Archived ? 0 : 1) > 0));
-        menu.Items.Add(actions.Item("Close Tabs to the Right", () => window.Apply(m => m.CloseTabsAfter(id)),
-            enabled: !tab.Archived && index < normalCount - 1));
+        // The vertical tabs' menu says Below (TabMenu.entries(vertical:), TabStrip.swift:849).
+        menu.Items.Add(actions.Item(strip.Vertical ? "Close Tabs Below" : "Close Tabs to the Right",
+            () => window.Apply(m => m.CloseTabsAfter(id)), enabled: !tab.Archived && index < normalCount - 1));
         menu.Items.Add(new MenuFlyoutSeparator());
         foreach (MenuFlyoutItemBase entry in GroupEntries(actions, strip, window, model, targets))
             menu.Items.Add(entry);
@@ -170,7 +177,7 @@ internal static class TabContextMenu
     /// <paramref name="ids"/>; the model brings each worktree tab's whole box. All off when a tab is pinned or is the
     /// popped-out archived tab, which are never grouped. A new group's flyout opens (<see cref="GroupFlyout"/>).
     /// </summary>
-    private static List<MenuFlyoutItemBase> GroupEntries(MenuActions actions, TabStrip strip, MainWindow window,
+    private static List<MenuFlyoutItemBase> GroupEntries(MenuActions actions, ITabsView strip, MainWindow window,
         WindowTabs model, IReadOnlySet<Guid> ids)
     {
         List<WindowTabs.Tab> tabs = model.Tabs.Where(tab => ids.Contains(tab.Id)).ToList();
@@ -256,7 +263,7 @@ internal static class TabContextMenu
 
     /// <summary>A worktree head's menu (design §3.11): the box's tabs pin or unpin together, move into a new group, or
     /// close together. Heads show only for unpinned boxes.</summary>
-    private static MenuFlyout? ForHead(TabStrip strip, string boxKey)
+    private static MenuFlyout? ForHead(ITabsView strip, string boxKey)
     {
         if (strip.Window is not { } window || strip.Model is not { } model
             || model.WorktreeBoxes.FirstOrDefault(box => string.Equals(box.Key, boxKey, StringComparison.Ordinal))
@@ -284,7 +291,7 @@ internal static class TabContextMenu
 
     /// <summary>A new group of <paramref name="ids"/>; its flyout opens once its chip is laid out, so it can be named
     /// and colored at once (the Mac's popover after Add Tab to New Group).</summary>
-    private static void NewGroup(TabStrip strip, MainWindow window, IReadOnlySet<Guid> ids)
+    private static void NewGroup(ITabsView strip, MainWindow window, IReadOnlySet<Guid> ids)
     {
         Guid? group = null;
         window.Apply(m => group = m.CreateGroup(ids));

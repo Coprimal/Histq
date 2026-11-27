@@ -19,8 +19,8 @@ internal sealed class ArchiveFlyout : TabFlyout
     private TextBox? _search;
     private StackPanel? _body;
 
-    public ArchiveFlyout(TabStrip strip)
-        : base(strip, FlyoutPlacementMode.BottomEdgeAlignedLeft)
+    public ArchiveFlyout(ITabsView strip)
+        : base(strip, strip.Vertical ? FlyoutPlacementMode.RightEdgeAlignedBottom : FlyoutPlacementMode.BottomEdgeAlignedLeft)
     {
     }
 

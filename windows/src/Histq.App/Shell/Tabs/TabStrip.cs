@@ -32,15 +32,15 @@ namespace Histq.App.Shell.Tabs;
 /// or a worktree head go through its <see cref="TabDragController"/>; while a unit is dragged the strip draws the row
 /// with it at its target (<see cref="ShowDrag"/>), the unit's elements lifted under the pointer, and the drop indicator.
 /// </summary>
-public sealed partial class TabStrip : Panel
+public sealed partial class TabStrip : Panel, ITabDragHost
 {
     // Segoe Fluent Icons: ViewAll, Package (the archive box), ChevronLeft, ChevronRight, Add, ChevronDown.
-    private const string ClosedGroupsGlyph = "";
-    private const string ArchiveGlyph = "";
+    internal const string ClosedGroupsGlyph = "";
+    internal const string ArchiveGlyph = "";
     private const string ScrollLeftGlyph = "";
     private const string ScrollRightGlyph = "";
-    private const string NewTabGlyph = "";
-    private const string AllTabsGlyph = "";
+    internal const string NewTabGlyph = "";
+    internal const string AllTabsGlyph = "";
 
     /// <summary>A wheel notch (120) scrolls the track this far.</summary>
     private const double WheelStep = 48;
@@ -310,7 +310,10 @@ public sealed partial class TabStrip : Panel
 
     /// <summary>A mouse-down on a tab (TabPress, App/Window/TabStrip.swift): a plain press ends the multi-selection and
     /// selects the tab; Shift extends the multi-selection to it and Ctrl toggles it, neither changing the shown tab.</summary>
-    internal void Pick(Guid id, TabPress press) => _window?.Apply(model =>
+    internal void Pick(Guid id, TabPress press) => _window?.Apply(model => PickIn(model, id, press));
+
+    /// <summary><see cref="Pick"/>'s change to <paramref name="model"/> (shared with the vertical tabs).</summary>
+    internal static void PickIn(WindowTabs model, Guid id, TabPress press)
     {
         switch (press)
         {
@@ -325,7 +328,42 @@ public sealed partial class TabStrip : Panel
                 model.SelectTab(id);
                 break;
         }
-    });
+    }
+
+    // ITabDragHost: the strip's own members under the shared names (the menus, flyouts and TabDragController).
+
+    MainWindow? ITabsView.Window => _window;
+
+    WindowTabs? ITabsView.Model => _model;
+
+    bool ITabsView.Vertical => false;
+
+    void ITabsView.CloseTab(Guid id) => CloseTab(id);
+
+    void ITabsView.ShowGroupFlyoutWhenPlaced(Guid id) => ShowGroupFlyoutWhenPlaced(id);
+
+    void ITabsView.OnFlyoutClosed() => OnFlyoutClosed();
+
+    (TabGroupSpans Spans, TabGroupSpans.Positions Positions)? ITabDragHost.DragLayout =>
+        _layout is { } layout ? (layout.Spans, layout.Positions) : null;
+
+    void ITabDragHost.Pick(Guid id, TabPress press) => Pick(id, press);
+
+    void ITabDragHost.ToggleGroup(Guid id) => ToggleGroup(id);
+
+    bool ITabDragHost.PressesAlone(Guid id) => IsPopped(id);
+
+    UIElement? ITabDragHost.SpaceOf(FrameworkElement element) => SpaceOf(element);
+
+    double ITabDragHost.SpansPosition(UIElement space, double along) => SpansX(space, along);
+
+    void ITabDragHost.SetPressHeld(bool held) => SetPressHeld(held);
+
+    void ITabDragHost.ShowDrag(TabDrag drag) => ShowDrag(drag);
+
+    void ITabDragHost.SnapBack(TabDrag drag) => SnapBack(drag);
+
+    void ITabDragHost.EndDrag() => EndDrag();
 
     /// <summary>The close button: closes the tab; the window closes with its last tab.</summary>
     internal void CloseTab(Guid id)
@@ -1733,7 +1771,7 @@ public sealed partial class TabStrip : Panel
     }
 
     /// <summary>A 28 epx rounded square in the color at 0.38 with a white glyph (and an optional count badge).</summary>
-    private static Button StowButton(string glyph, Windows.UI.Color color, TextBlock? badge)
+    internal static Button StowButton(string glyph, Windows.UI.Color color, TextBlock? badge)
     {
         var content = new Grid();
         content.Children.Add(new FontIcon
@@ -1788,7 +1826,7 @@ public sealed partial class TabStrip : Panel
 
     /// <summary>A tab's UI Automation name: its title, then "pinned", "archived", "in group &lt;name&gt;" and
     /// "worktree of &lt;repo&gt;" as they apply. <paramref name="title"/> is the tab's sanitized title.</summary>
-    private static string TabName(string title, WindowTabs.Tab tab, TabGroup? group, WorktreeBox? box)
+    internal static string TabName(string title, WindowTabs.Tab tab, TabGroup? group, WorktreeBox? box)
     {
         var parts = new List<string> { title };
         if (tab.Pinned)
@@ -1807,18 +1845,18 @@ public sealed partial class TabStrip : Panel
 
     /// <summary>The tooltip: the repo path (the title for a Welcome tab); a pinned tab's leads with its title. Each part
     /// is sanitized on its own, so the line break between them stays.</summary>
-    private static string TabToolTip(string title, WindowTabs.Tab tab)
+    internal static string TabToolTip(string title, WindowTabs.Tab tab)
     {
         string path = tab.Path is null ? title : DisplayText.Sanitize(tab.Path);
         return tab.Pinned && !string.Equals(path, title, StringComparison.Ordinal) ? $"{title}\n{path}" : path;
     }
 
-    private static TabGlyph GlyphOf(WindowTabs.Tab tab) =>
+    internal static TabGlyph GlyphOf(WindowTabs.Tab tab) =>
         tab.IsMissing ? TabGlyph.Missing : tab.Path is null ? TabGlyph.Welcome : TabGlyph.Book;
 
     /// <summary>The folder a worktree box's repository lives in: its common dir's parent for a <c>.git</c> dir, else
     /// the common dir's own name without <c>.git</c> (a bare repository), sanitized for display.</summary>
-    private static string RepoName(string key)
+    internal static string RepoName(string key)
     {
         string last = PathFlavor.Host.LastComponent(key);
         if (string.Equals(last, ".git", StringComparison.OrdinalIgnoreCase))
@@ -1827,10 +1865,10 @@ public sealed partial class TabStrip : Panel
     }
 
     /// <summary>A group's name as shown: sanitized, empty for an unnamed group.</summary>
-    private static string GroupName(TabGroup group) => DisplayText.Sanitize(group.Group.Name);
+    internal static string GroupName(TabGroup group) => DisplayText.Sanitize(group.Group.Name);
 
     /// <summary>A chip's text: the name; collapsed, the tab count appended ("Docs · 3", "2" for an unnamed group).</summary>
-    private static string ChipText(TabGroup group)
+    internal static string ChipText(TabGroup group)
     {
         string name = GroupName(group);
         if (!group.Group.Collapsed)
@@ -1840,7 +1878,7 @@ public sealed partial class TabStrip : Panel
     }
 
     /// <summary>The chip's UI Automation name (TabGroup.accessibilityLabel): "Group Docs, 3 tabs", "Group, 2 tabs".</summary>
-    private static string ChipName(TabGroup group)
+    internal static string ChipName(TabGroup group)
     {
         string tabs = group.Count == 1 ? "1 tab" : $"{group.Count.ToString(CultureInfo.InvariantCulture)} tabs";
         string name = GroupName(group);

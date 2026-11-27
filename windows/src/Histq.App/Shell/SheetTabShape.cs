@@ -14,6 +14,9 @@ namespace Histq.App.Shell;
 /// edge, so no seam can show between the tab and the sheet at any scale. The tab row draws the same tab shape as an
 /// open outline (a grouped or popped-out archived tab) and cuts it out of the shapes behind the tabs (a worktree box,
 /// the pinned well), so the translucent selected tab never sits on their fill (TabGroups.swift WorktreeBoxShape).
+/// With the tabs on the left (design §4, VerticalTabSheetShape in App/Window/VerticalTabsPanel.swift) the selected row
+/// joins the sheet's left edge instead: its leading corners rounded by half its height, a concave flare at each
+/// trailing corner running out into the sheet's straight left edge.
 /// </summary>
 internal static class SheetTabShape
 {
@@ -39,7 +42,9 @@ internal static class SheetTabShape
     /// The selected tab's rect (flares excluded), standing on the sheet's top edge; its bottom is taken as the sheet's
     /// top. Left out when null or when the tab and its flares do not fit on the sheet's straight top edge.
     /// </param>
-    public static Geometry? Create(Rect sheet, Rect? tab)
+    /// <param name="joinedLeft">The tab is a vertical row beside the sheet's left edge (its right is taken as the
+    /// sheet's left), left out when it and its flares do not fit on that edge's straight part.</param>
+    public static Geometry? Create(Rect sheet, Rect? tab, bool joinedLeft = false)
     {
         if (sheet.Width <= 0 || sheet.Height <= 0)
             return null;
@@ -56,7 +61,7 @@ internal static class SheetTabShape
         var figure = new PathFigure { StartPoint = new Point(left, top + radius), IsClosed = true, IsFilled = true };
         figure.Segments.Add(Arc(left + radius, top, radius, SweepDirection.Clockwise));
 
-        if (tab is { } t && Fits(t, left + radius, right - radius, top, tabRadius, flare))
+        if (!joinedLeft && tab is { } t && Fits(t, left + radius, right - radius, top, tabRadius, flare))
             AddTab(figure, t.X, t.X + t.Width, t.Y, top, tabRadius, flare);
 
         figure.Segments.Add(Line(right - radius, top));
@@ -66,6 +71,29 @@ internal static class SheetTabShape
         figure.Segments.Add(Line(left + radius, bottom));
         figure.Segments.Add(Arc(left, bottom - radius, radius, SweepDirection.Clockwise));
 
+        // Up the left edge: the row's part, then the figure closes back to the top-left corner.
+        if (joinedLeft && tab is { } row && FitsLeft(row, top + radius, bottom - radius, left, flare))
+            AddRow(figure, row.X, row.Y, row.Y + row.Height, left, row.Height / 2, flare);
+
+        var geometry = new PathGeometry();
+        geometry.Figures.Add(figure);
+        return geometry;
+    }
+
+    /// <summary>
+    /// The selected vertical row's outline without its trailing edge (the vertical <see cref="Outline"/>): from the end
+    /// of the lower flare on the sheet's edge, round the leading side, to the end of the upper flare, inset half of
+    /// <paramref name="thickness"/> on the row's top, bottom and leading side.
+    /// </summary>
+    /// <param name="row">The row's rect, flares excluded; its right is the sheet's left edge.</param>
+    public static Geometry LeftOutline(Rect row, double thickness)
+    {
+        double flare = Flare;
+        double edge = row.X + row.Width;
+        double top = row.Y + thickness / 2;
+        double bottom = row.Y + row.Height - thickness / 2;
+        var figure = new PathFigure { StartPoint = new Point(edge, bottom + flare), IsClosed = false, IsFilled = false };
+        AddRow(figure, row.X + thickness / 2, top, bottom, edge, row.Height / 2 - thickness / 2, flare);
         var geometry = new PathGeometry();
         geometry.Figures.Add(figure);
         return geometry;
@@ -95,21 +123,25 @@ internal static class SheetTabShape
     /// with the selected tab's shape (flares included, down to <paramref name="hole"/>'s bottom) cut out of it when the
     /// two meet. Null when the rect is empty or the hole covers all of it.
     /// </summary>
-    public static Geometry? Box(Rect box, double radius, bool edgeOnly, Rect? hole)
+    /// <param name="joinedLeft">The hole is a vertical row joined on its right (flares above and below its trailing
+    /// end), as <see cref="Create"/> draws it with the tabs on the left.</param>
+    public static Geometry? Box(Rect box, double radius, bool edgeOnly, Rect? hole, bool joinedLeft = false)
     {
         if (box.Width <= 0 || box.Height <= 0)
             return null;
         double corner = Math.Min(radius, Math.Min(box.Width, box.Height) / 2);
         double flare = Flare;
-        if (hole is not { } tab || !(tab.X - flare < box.X + box.Width && tab.X + tab.Width + flare > box.X
-            && tab.Y < box.Y + box.Height && tab.Y + tab.Height > box.Y))
+        double alongFlare = joinedLeft ? 0 : flare;
+        double acrossFlare = joinedLeft ? flare : 0;
+        if (hole is not { } tab || !(tab.X - alongFlare < box.X + box.Width && tab.X + tab.Width + alongFlare > box.X
+            && tab.Y - acrossFlare < box.Y + box.Height && tab.Y + tab.Height + acrossFlare > box.Y))
             return Uncut(box, corner, edgeOnly);
 
         // Drawn while laying out and on every selection slide frame, where an exception would end the app: should the
         // Win2D interop fail, the box is drawn whole (the selected tab then sits on its fill) and the failure is logged.
         try
         {
-            return CutOut(box, corner, edgeOnly, tab);
+            return CutOut(box, corner, edgeOnly, tab, joinedLeft);
         }
         catch (Exception error)
         {
@@ -133,7 +165,7 @@ internal static class SheetTabShape
 
     /// <summary>The box, or its 1 epx inner edge, with the selected tab's shape cut out: Win2D does the boolean work
     /// (XAML geometry has none) and its outline comes back as a XAML path.</summary>
-    private static Geometry CutOut(Rect box, double corner, bool edgeOnly, Rect tab)
+    private static Geometry CutOut(Rect box, double corner, bool edgeOnly, Rect tab, bool joinedLeft)
     {
         CanvasDevice device = CanvasDevice.GetSharedDevice();
         CanvasGeometry shape = CanvasGeometry.CreateRoundedRectangle(
@@ -150,7 +182,7 @@ internal static class SheetTabShape
                 shape = ring;
             }
 
-            using (CanvasGeometry tabShape = TabShape(device, tab))
+            using (CanvasGeometry tabShape = joinedLeft ? RowShape(device, tab) : TabShape(device, tab))
             {
                 CanvasGeometry rest = shape.CombineWith(tabShape, Matrix3x2.Identity, CanvasGeometryCombine.Exclude);
                 shape.Dispose();
@@ -207,6 +239,49 @@ internal static class SheetTabShape
         figure.Segments.Add(Arc(tabRight + flare, baseline, flare, SweepDirection.Counterclockwise));
     }
 
+    /// <summary>A vertical row's part of a figure going up the sheet's left edge <paramref name="edge"/>: from its lower
+    /// flare's start (the current point, below the row on the edge) round its leading side to its upper flare's end on
+    /// the edge, its leading corners rounded by <paramref name="rowRadius"/>.</summary>
+    private static void AddRow(
+        PathFigure figure, double rowLeft, double rowTop, double rowBottom, double edge, double rowRadius, double flare)
+    {
+        figure.Segments.Add(Line(edge, rowBottom + flare));
+        figure.Segments.Add(Arc(edge - flare, rowBottom, flare, SweepDirection.Counterclockwise));
+        figure.Segments.Add(Line(rowLeft + rowRadius, rowBottom));
+        figure.Segments.Add(Arc(rowLeft, rowBottom - rowRadius, rowRadius, SweepDirection.Clockwise));
+        figure.Segments.Add(Line(rowLeft, rowTop + rowRadius));
+        figure.Segments.Add(Arc(rowLeft + rowRadius, rowTop, rowRadius, SweepDirection.Clockwise));
+        figure.Segments.Add(Line(edge - flare, rowTop));
+        figure.Segments.Add(Arc(edge, rowTop - flare, flare, SweepDirection.Counterclockwise));
+    }
+
+    /// <summary>The selected vertical row's closed shape, flares included, as a Win2D geometry (the hole cut out of a
+    /// box with the tabs on the left).</summary>
+    private static CanvasGeometry RowShape(CanvasDevice device, Rect row)
+    {
+        float flare = (float)Flare;
+        float radius = (float)(row.Height / 2);
+        float left = (float)row.X;
+        float edge = (float)(row.X + row.Width);
+        float top = (float)row.Y;
+        float bottom = (float)(row.Y + row.Height);
+        using var builder = new CanvasPathBuilder(device);
+        builder.BeginFigure(edge, bottom + flare);
+        builder.AddArc(new Vector2(edge - flare, bottom), flare, flare, 0, CanvasSweepDirection.CounterClockwise,
+            CanvasArcSize.Small);
+        builder.AddLine(left + radius, bottom);
+        builder.AddArc(new Vector2(left, bottom - radius), radius, radius, 0, CanvasSweepDirection.Clockwise,
+            CanvasArcSize.Small);
+        builder.AddLine(left, top + radius);
+        builder.AddArc(new Vector2(left + radius, top), radius, radius, 0, CanvasSweepDirection.Clockwise,
+            CanvasArcSize.Small);
+        builder.AddLine(edge - flare, top);
+        builder.AddArc(new Vector2(edge, top - flare), flare, flare, 0, CanvasSweepDirection.CounterClockwise,
+            CanvasArcSize.Small);
+        builder.EndFigure(CanvasFigureLoop.Closed);
+        return CanvasGeometry.CreatePath(builder);
+    }
+
     /// <summary>The selected tab's closed shape, flares included, as a Win2D geometry (the hole cut out of a box).</summary>
     private static CanvasGeometry TabShape(CanvasDevice device, Rect tab)
     {
@@ -242,6 +317,18 @@ internal static class SheetTabShape
         && sheetTop - tab.Y >= tabRadius + flare
         && tab.X - flare >= edgeLeft
         && tab.X + tab.Width + flare <= edgeRight;
+
+    /// <summary>
+    /// True when the row, flares included, lies on the straight part of the sheet's left edge (from
+    /// <paramref name="edgeTop"/> to <paramref name="edgeBottom"/>), its right on the edge, and is wide enough for its
+    /// leading corners and flares.
+    /// </summary>
+    private static bool FitsLeft(Rect row, double edgeTop, double edgeBottom, double sheetLeft, double flare) =>
+        row.Height > 0
+        && Math.Abs(row.X + row.Width - sheetLeft) < 0.5
+        && row.Width >= row.Height / 2 + flare
+        && row.Y - flare >= edgeTop
+        && row.Y + row.Height + flare <= edgeBottom;
 
     private static LineSegment Line(double x, double y) => new() { Point = new Point(x, y) };
 

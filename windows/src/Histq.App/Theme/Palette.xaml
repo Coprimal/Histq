@@ -245,6 +245,42 @@
     <!-- The closed groups and archive buttons stand this far apart, wider than the tab gap. -->
     <x:Double x:Key="StowButtonGap">8</x:Double>
     <x:Double x:Key="FlyoutWidth">280</x:Double>
+    <!-- Vertical tabs (design §4, VerticalTabsMetrics in App/Window/VerticalTabsPanel.swift): the panel is 150 wide
+         up to the sheet; rows 28 tall (radius 14, the sheet's joined row), 6 apart, 1 in from the panel's leading
+         edge, padded 10, a 20 epx icon slot then 8; an unselected row's hover capsule stops 3 short of the sheet. -->
+    <x:Double x:Key="VerticalTabsWidth">150</x:Double>
+    <x:Double x:Key="VerticalRowHeight">28</x:Double>
+    <x:Double x:Key="VerticalRowSpacing">6</x:Double>
+    <x:Double x:Key="VerticalRowInset">1</x:Double>
+    <x:Double x:Key="VerticalRowPadding">10</x:Double>
+    <x:Double x:Key="VerticalIconSlot">20</x:Double>
+    <x:Double x:Key="VerticalRowContentSpacing">8</x:Double>
+    <x:Double x:Key="VerticalHoverTrailing">3</x:Double>
+    <!-- A group's header row: 22 tall, radius 6, name 12 semibold, padded 8, 6 short of the sheet; its rows indented
+         12, the 2 epx rail down the middle of that room. -->
+    <x:Double x:Key="VerticalHeaderHeight">22</x:Double>
+    <x:Double x:Key="VerticalHeaderTrailing">6</x:Double>
+    <x:Double x:Key="VerticalHeaderFontSize">12</x:Double>
+    <x:Double x:Key="VerticalGroupIndent">12</x:Double>
+    <x:Double x:Key="VerticalRailThickness">2</x:Double>
+    <!-- A worktree box: radius 8, 2 above and below its rows, 1 short of the sheet; its head line 16 tall with the
+         branch glyph (12) and the repo folder's name (11). -->
+    <x:Double x:Key="VerticalBoxRadius">8</x:Double>
+    <x:Double x:Key="VerticalBoxOutset">2</x:Double>
+    <x:Double x:Key="VerticalBoxTrailing">1</x:Double>
+    <x:Double x:Key="VerticalHeadHeight">16</x:Double>
+    <x:Double x:Key="VerticalHeadFontSize">11</x:Double>
+    <!-- The pinned grid: cells 30 to 34 wide, 30 tall, radius 8, 4 apart, up to 4 to a row, in the pinned well
+         (padded 4, radius TabRadius as on the top row); 6 short of the sheet. -->
+    <x:Double x:Key="VerticalPinnedCell">30</x:Double>
+    <x:Double x:Key="VerticalPinnedCellMax">34</x:Double>
+    <x:Double x:Key="VerticalPinnedSpacing">4</x:Double>
+    <x:Double x:Key="VerticalPinnedColumns">4</x:Double>
+    <x:Double x:Key="VerticalPinnedRadius">8</x:Double>
+    <x:Double x:Key="VerticalPinnedWellPadding">4</x:Double>
+    <x:Double x:Key="VerticalPanelTrailing">6</x:Double>
+    <!-- Under the footer buttons, above the window's footer row. -->
+    <x:Double x:Key="VerticalPanelBottom">6</x:Double>
     <!-- Titled cards on the sheet (SectionCard.swift, SettingsMetrics): radius 14, padding 12 (6 around rows that
          draw their own highlight), header row 32, stacked 8 apart. -->
     <CornerRadius x:Key="CardCornerRadius">14</CornerRadius>

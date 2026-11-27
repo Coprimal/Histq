@@ -23,8 +23,8 @@ internal sealed class AllTabsFlyout : TabFlyout
     private TextBox? _search;
     private StackPanel? _body;
 
-    public AllTabsFlyout(TabStrip strip)
-        : base(strip, FlyoutPlacementMode.BottomEdgeAlignedRight)
+    public AllTabsFlyout(ITabsView strip)
+        : base(strip, strip.Vertical ? FlyoutPlacementMode.RightEdgeAlignedBottom : FlyoutPlacementMode.BottomEdgeAlignedRight)
     {
     }
 

@@ -3,7 +3,8 @@
     x:Class="Histq.App.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:shell="using:Histq.App.Shell">
+    xmlns:shell="using:Histq.App.Shell"
+    xmlns:tabs="using:Histq.App.Shell.Tabs">
     <!-- No Background: the system backdrop shows through, except in the solid fallback (MainWindow.xaml.cs). -->
     <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
@@ -26,6 +27,16 @@
         <!-- Title bar = tab row (layout B, design header-and-tab-row.md §1): logo (app menu), tab strip, drag area,
              caption inset (Shell/TitleBar). -->
         <shell:TitleBar x:Name="AppTitleBar" />
+
+        <!-- Vertical tabs (design §4, Shell/Tabs/VerticalTabsPanel), shown in place of the title bar's strip when the
+             tab position is Left: 150 epx left of the sheet, inset 8 from the window's left; the sheet then starts at
+             its trailing edge (MainWindow.xaml.cs), the selected row joined to it. -->
+        <tabs:VerticalTabsPanel
+            x:Name="VerticalTabs"
+            Grid.Row="1"
+            Margin="8,0,0,0"
+            HorizontalAlignment="Left"
+            Visibility="Collapsed" />
 
         <!-- Page sheet (SheetPath draws it, inset 8 from the window's sides; the footer row is the gap under it): the
              command bar on top, then the selected tab's content. 8 more from the sheet's sides, so the content clears

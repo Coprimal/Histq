@@ -28,9 +28,14 @@ public sealed partial class TitleBar : UserControl
     private MenuFlyoutItem _reopenItem = null!;
     private MenuFlyoutSubItem _recentWorkspacesMenu = null!;
     private MenuFlyoutItem _closeWorkspaceItem = null!;
+    private MenuFlyoutItem _tabPositionItem = null!;
 
     /// <summary>Alt went down with no other key or click since: its release opens the app menu.</summary>
     private bool _altAlone;
+
+    /// <summary>The tabs show in the vertical panel: the bar holds only the logo, a drag area and the caption buttons.
+    /// </summary>
+    private bool _tabsOnLeft;
 
     public TitleBar()
     {
@@ -55,7 +60,7 @@ public sealed partial class TitleBar : UserControl
             BarGrid,
             LeftInsetColumn,
             RightInsetColumn,
-            () => Strip.InteractiveElements().Prepend(LogoButton),
+            () => _tabsOnLeft ? [LogoButton] : Strip.InteractiveElements().Prepend(LogoButton),
             element => ReferenceEquals(element, LogoButton) ? null : Strip.ClipOf(element));
         Strip.Attach(window);
         Strip.GeometryChanged += (_, _) => Regions.Refresh();
@@ -70,6 +75,19 @@ public sealed partial class TitleBar : UserControl
         keyScope.PreviewKeyUp += OnPreviewKeyUp;
         keyScope.AddHandler(PointerPressedEvent, new PointerEventHandler((_, _) => _altAlone = false), true);
         window.Activated += (_, _) => _altAlone = false;
+    }
+
+    /// <summary>
+    /// With the tabs on the left (design §4) the strip is not shown and only the logo stays Passthrough: the rest of
+    /// the bar is caption. With the tabs on top, the strip is back. Its Passthrough rects are set again at once.
+    /// </summary>
+    internal void SetTabsOnLeft(bool left)
+    {
+        if (_tabsOnLeft == left)
+            return;
+        _tabsOnLeft = left;
+        TabStripHost.Visibility = left ? Visibility.Collapsed : Visibility.Visible;
+        Regions?.RefreshAll();
     }
 
     /// <summary>Opens the app menu under the logo, or closes it when it is open.</summary>
@@ -91,9 +109,10 @@ public sealed partial class TitleBar : UserControl
     /// <summary>
     /// The app menu (HistqApp.swift makeMainMenu): File has New Window, New Tab, Open…, the workspace items (New
     /// Workspace, Open Workspace…, Recent Workspaces ›, Save Workspace As…, Close Workspace; WorkspaceCommands.cs), Close
-    /// Tab, Reopen Closed Tab, Close Window and Exit (the app menu's Quit); Window has Maximize / Restore (Zoom) and the
-    /// open windows. Edit, View and Help keep their place but stay disabled until the phases that bring their items (the
-    /// undo journal and text fields, the terminal and layouts, the onboarding).
+    /// Tab, Reopen Closed Tab, Close Window and Exit (the app menu's Quit); View has Move Tabs to the Left (Move Tabs to
+    /// the Top while they are there; HistqApp.swift:1674-1700); Window has Maximize / Restore (Zoom) and the open
+    /// windows. Edit and Help keep their place but stay disabled until the phases that bring their items (the undo
+    /// journal and text fields, the onboarding).
     /// </summary>
     private void BuildAppMenu()
     {
@@ -117,20 +136,33 @@ public sealed partial class TitleBar : UserControl
         file.Items.Add(new MenuFlyoutSeparator());
         file.Items.Add(Item("Exit", AppCommand.Exit));
 
+        var view = new MenuFlyoutSubItem { Text = "View" };
+        _tabPositionItem = Plain(TabPositionTitle(), ToggleTabPosition);
+        view.Items.Add(_tabPositionItem);
+
         _windowMenu = new MenuFlyoutSubItem { Text = "Window" };
         AppMenu.Items.Add(file);
         AppMenu.Items.Add(new MenuFlyoutSubItem { Text = "Edit", IsEnabled = false });
-        AppMenu.Items.Add(new MenuFlyoutSubItem { Text = "View", IsEnabled = false });
+        AppMenu.Items.Add(view);
         AppMenu.Items.Add(_windowMenu);
         AppMenu.Items.Add(new MenuFlyoutSubItem { Text = "Help", IsEnabled = false });
         AppMenu.Opening += (_, _) =>
         {
             _reopenItem.IsEnabled = _window.Tabs.CanReopenClosedTab;
             _closeWorkspaceItem.IsEnabled = _window.Workspace is { IsClosing: false };
+            _tabPositionItem.Text = TabPositionTitle();
             FillRecentWorkspaces();
             FillWindowMenu();
         };
     }
+
+    /// <summary>The View menu's tab position item: where the tabs would go.</summary>
+    private string TabPositionTitle() =>
+        _window.TabPosition == TabPosition.Left ? "Move Tabs to the Top" : "Move Tabs to the Left";
+
+    /// <summary>Moves every window's tabs to the other side (<see cref="WindowManager.SetTabPosition"/>).</summary>
+    private void ToggleTabPosition() => _window.Manager.SetTabPosition(
+        _window.TabPosition == TabPosition.Left ? TabPosition.Top : TabPosition.Left);
 
     /// <summary>A menu item with no shortcut that runs <paramref name="action"/>.</summary>
     private static MenuFlyoutItem Plain(string text, Action action)

@@ -402,7 +402,7 @@ internal sealed partial class WorktreeHeadView : Grid
 
     /// <summary>A branch mark drawn in a <paramref name="size"/> square: two commits on a line, a third branching off
     /// (drawn, so it needs no icon font codepoint).</summary>
-    private static Geometry BranchGlyph(double size)
+    internal static Geometry BranchGlyph(double size)
     {
         double u = size / 12;
         double r = 1.6 * u;
