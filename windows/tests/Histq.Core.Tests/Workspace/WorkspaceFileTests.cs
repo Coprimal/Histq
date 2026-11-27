@@ -621,9 +621,7 @@ public sealed class WorkspaceFileTests
     // Walking up from a local Windows path to its root never probes a UNC or device path.
     [Theory]
     [InlineData(@"C:\a\b\c")]
-    [InlineData(@"\a\b")]
-    [InlineData("/a/b")]
-    [InlineData(@"C:a\b")]
+    [InlineData("C:/a/b")]
     public void IsRepositoryWalkNeverProbesUncOrDevicePath(string path)
     {
         var probed = new List<string>();

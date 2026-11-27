@@ -6,6 +6,7 @@
   <Folder Name="/src/">
     <Project Path="src/Histq.App/Histq.App.csproj" />
     <Project Path="src/Histq.Core/Histq.Core.csproj" />
+    <Project Path="src/Histq.Platform/Histq.Platform.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Histq.Core.Tests/Histq.Core.Tests.csproj" />

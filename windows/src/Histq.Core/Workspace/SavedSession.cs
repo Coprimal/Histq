@@ -45,10 +45,25 @@ public sealed record SavedSession
                 .OrderBy(window => window.TabIndex).ToList())
             .ToList();
 
-    /// <summary>The session as read: one workspace layout per <c>path</c> (the first kept), and null for an empty list.</summary>
-    public SavedSession Normalized()
+    /// <summary>
+    /// Decodes <c>session.json</c>. Throws <see cref="JsonException"/> when it is not a session, or a list in it (windows,
+    /// tabs, manual groups, closed groups and their tabs, workspaces and their windows) holds a null element, as
+    /// Swift's decoder does. The version is not checked here.
+    /// </summary>
+    public static SavedSession Decode(ReadOnlySpan<byte> data)
     {
-        var paths = new HashSet<string>(StringComparer.Ordinal);
+        var session = SwiftJson.Deserialize<SavedSession>(data);
+        return session.HasNullElement() ? throw new JsonException("A list of the session holds null.") : session;
+    }
+
+    /// <summary>The session as read: one workspace layout per <c>path</c> (the first kept, paths compared as keys of
+    /// this OS: case-insensitively on Windows), and null for an empty list.</summary>
+    public SavedSession Normalized() => Normalized(PathFlavor.Host);
+
+    /// <summary><see cref="Normalized()"/> with the path keys of <paramref name="flavor"/>.</summary>
+    internal SavedSession Normalized(PathFlavor flavor)
+    {
+        var paths = new HashSet<string>(flavor.KeyComparer);
         var layouts = Workspaces?.Where(layout => paths.Add(layout.Path)).ToList();
         return new SavedSession(Version, Windows, layouts is { Count: > 0 } ? layouts : null);
     }
@@ -56,17 +71,29 @@ public sealed record SavedSession
     /// <summary>
     /// Whether <paramref name="path"/> still opens as a repo: a folder inside a work tree (<c>.git</c> is a folder, or a
     /// file for a linked worktree or a submodule, in it or in a parent), or a bare repository. File checks only, no git;
-    /// none on a UNC or device path, which is never a repository here.
+    /// none on a relative path, or on a UNC or device path, which is never a repository here: the check for paths read
+    /// from a received <c>.histqws</c>. Paths the user gave this machine use <see cref="IsUserRepository"/>.
     /// </summary>
     public static bool IsRepository(string path) => IsRepository(path, PathFlavor.Host, Directory.Exists, Path.Exists);
 
+    /// <summary>
+    /// <see cref="IsRepository(string)"/> for a path the user gave this machine: a tab of their own
+    /// <c>session.json</c>, a folder they picked, dropped or chose from a recent list. A UNC or device path
+    /// (<c>\\wsl.localhost\Ubuntu\home\me\repo</c>, a redirected home share) is probed too. Never for a path read
+    /// from a received <c>.histqws</c>.
+    /// </summary>
+    public static bool IsUserRepository(string path) =>
+        IsRepository(path, PathFlavor.Host, Directory.Exists, Path.Exists, allowUncOrDevice: true);
+
     /// <summary><see cref="IsRepository(string)"/> with the path rules of <paramref name="flavor"/> and the given
     /// file-system probes, so tests check the Windows guard on any host. Parents of a path that is not UNC or device
-    /// never are, so the walk stays local.</summary>
+    /// never are, so the walk stays local. <paramref name="allowUncOrDevice"/> lifts the UNC and device refusal
+    /// (<see cref="IsUserRepository"/>).</summary>
     internal static bool IsRepository(
-        string path, PathFlavor flavor, Func<string, bool> directoryExists, Func<string, bool> pathExists)
+        string path, PathFlavor flavor, Func<string, bool> directoryExists, Func<string, bool> pathExists,
+        bool allowUncOrDevice = false)
     {
-        if (flavor.IsUncOrDevice(path) || !directoryExists(path))
+        if (!flavor.IsAbsolute(path) || (!allowUncOrDevice && flavor.IsUncOrDevice(path)) || !directoryExists(path))
         {
             return false;
         }
@@ -96,6 +123,15 @@ public sealed record SavedSession
         && SequenceEquality.Equal(Workspaces, other.Workspaces);
 
     public override int GetHashCode() => HashCode.Combine(Version, Windows.Count, Workspaces?.Count);
+
+    /// <summary>Whether a list holds a null element, which SwiftJson does not reject for these types but Swift's
+    /// decoder does.</summary>
+    private bool HasNullElement() =>
+        Windows.Any(window => window is null
+            || window.Tabs.Any(tab => tab is null)
+            || (window.ManualTabGroups?.Any(group => group is null) ?? false)
+            || (window.ClosedTabGroups?.Any(group => group is null || group.Tabs.Any(tab => tab is null)) ?? false))
+        || (Workspaces?.Any(layout => layout is null || layout.Windows.Any(window => window is null)) ?? false);
 }
 
 /// <summary>A document window: its frame, its place in a native tab group, and its app tabs.</summary>

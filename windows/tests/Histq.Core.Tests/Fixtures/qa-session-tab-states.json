@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "windows": [
+    {
+      "closedTabGroups": [
+        {
+          "color": 2,
+          "id": "5E5510A0-0000-4000-8000-000000000004",
+          "name": "Old",
+          "tabs": [
+            {
+              "path": "C:/HistqQA/fx/tabs/old"
+            }
+          ]
+        }
+      ],
+      "group": 0,
+      "height": 700,
+      "isSelectedInGroup": true,
+      "manualTabGroups": [
+        {
+          "color": 0,
+          "id": "5E5510A0-0000-4000-8000-000000000001",
+          "name": "Scratch"
+        },
+        {
+          "collapsed": true,
+          "color": 7,
+          "id": "5E5510A0-0000-4000-8000-000000000002"
+        },
+        {
+          "color": 1,
+          "id": "5E5510A0-0000-4000-8000-000000000003",
+          "name": "Docs"
+        }
+      ],
+      "selectedTab": 18,
+      "tabIndex": 0,
+      "tabs": [
+        {
+          "path": "C:/HistqQA/fx/tabs/docs",
+          "pinned": true
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/notes",
+          "pinned": true
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/lib",
+          "pinned": true
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/lib-w2",
+          "pinned": true
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/scratch",
+          "tabGroup": "5E5510A0-0000-4000-8000-000000000001"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/tmp1",
+          "tabGroup": "5E5510A0-0000-4000-8000-000000000002"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/tmp2",
+          "tabGroup": "5E5510A0-0000-4000-8000-000000000002"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/api",
+          "tabGroup": "5E5510A0-0000-4000-8000-000000000003"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/api-w2",
+          "tabGroup": "5E5510A0-0000-4000-8000-000000000003"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/readme",
+          "tabGroup": "5E5510A0-0000-4000-8000-000000000003"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/histq"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/histq-w3"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/t1"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/t2"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/t3"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/t4"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/t5"
+        },
+        {
+          "path": "C:/HistqQA/fx/tabs/t6"
+        },
+        {
+          "archived": true,
+          "path": "C:/HistqQA/fx/tabs/web"
+        }
+      ],
+      "width": 1100,
+      "x": 120,
+      "y": 80
+    }
+  ]
+}

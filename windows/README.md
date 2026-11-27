@@ -46,6 +46,12 @@ swift run --package-path windows/tools/FixtureBridge fixture-bridge check window
 
 Regenerate on macOS, not Windows, so the files keep LF line endings. FixtureBridge only reads `Packages/HistqCore`; its build output goes to `tools/FixtureBridge/.build` (gitignored).
 
+`qa-session-tab-states.json` is the VM's tab QA state, a `session.json` copied to `C:\HistqQA\state\tabs` (one window, tab paths `C:/HistqQA/fx/tabs/<name>`: pinned tabs and a pinned worktree pair, the groups Scratch, an unnamed collapsed one and Docs, a worktree pair, plain tabs, the archived `web` popped out, the closed group Old). `SessionStoreTests` writes it with the session store's own writer under `HISTQ_WRITE_FIXTURES=1` and always reads it back through the store and the window model; regenerate it on macOS with the same command as `windows-fixtures.json`:
+
+```sh
+HISTQ_WRITE_FIXTURES=1 ~/.dotnet/dotnet test windows/tests/Histq.Core.Tests/Histq.Core.Tests.csproj --filter "FullyQualifiedName~SessionStoreTests"
+```
+
 For the VM's tab QA, `fixture-bridge export-workspace <out>` writes a `.histqws` with HistqCore's own writer as if it were `C:\HistqQA\data\qa-tabs.histqws` (POSIX stand-in `/HistqQA/data/qa-tabs.histqws`): tabs docs (pinned), api and api-w2 in the group Docs, t1 and t2, each stored as `../fx/tabs/<name>`. `fixture-bridge check-workspace <file> <expected>` compares each tab's stored `path`, group and pin in a workspace the Windows app saved with the expected file.
 
 ## CI

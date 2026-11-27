@@ -779,11 +779,13 @@ public sealed record WorkspaceLayout(
     [property: JsonPropertyName("open")] bool Open,
     [property: JsonPropertyName("windows")] IReadOnlyList<WorkspaceLayout.Window> Windows)
 {
+    /// <summary>Equal when every field is; <see cref="Path"/> compares as a key of this OS (case-insensitively on
+    /// Windows), so one file opened with another case is one layout.</summary>
     public bool Equals(WorkspaceLayout? other) =>
-        other is not null && string.Equals(Path, other.Path, StringComparison.Ordinal) && Open == other.Open
+        other is not null && PathFlavor.Host.KeysEqual(Path, other.Path) && Open == other.Open
         && Windows.SequenceEqual(other.Windows);
 
-    public override int GetHashCode() => HashCode.Combine(StringComparer.Ordinal.GetHashCode(Path), Open, Windows.Count);
+    public override int GetHashCode() => HashCode.Combine(PathFlavor.Host.KeyComparer.GetHashCode(Path), Open, Windows.Count);
 
     /// <summary>A workspace window by its id in the file.</summary>
     /// <param name="X">Screen points, as <see cref="SavedWindow"/>.</param>
