@@ -38,6 +38,13 @@ public partial class App
 /// (<see cref="GC.GetTotalAllocatedBytes"/>, every thread).
 /// </para>
 /// <para>
+/// Bisect switches of the scroll probe: <c>-HistqBisect &lt;comma list&gt;</c> of <c>noSheetLayoutHook</c> (the main
+/// window's RootGrid.LayoutUpdated stops rebuilding the joined sheet), <c>noScrollBar</c> (the graph stops updating its
+/// scroll bar) and <c>noAutomation</c> (the graph's automation peer creates no row peers and reports no children). Each
+/// is on during the scroll probe only. The probe also counts the layout passes, sheet rebuilds, TransformToVisual
+/// calls, scroll bar updates and automation children requests (and row peers made) over its run.
+/// </para>
+/// <para>
 /// Without <c>-HistqSpikeLog</c> it only sizes the window, which stays open for the interactive title-bar checks. With
 /// it, the dump is parsed and laid out off the UI thread in pages, each page handed to the graph on the UI thread; then
 /// the scroll, precision and click probes run, <c>&lt;stateDir&gt;\Probes\spike.json</c> is written and the process
@@ -57,6 +64,11 @@ internal sealed class SpikeHarness
     private const string GcLatencyFlag = "-HistqGcLatency";
     private const string ProbeDelayFlag = "-HistqProbeDelay";
     private const string SubjectTextFlag = "-HistqSubjectText";
+    private const string BisectFlag = "-HistqBisect";
+
+    private const string NoSheetLayoutHook = "noSheetLayoutHook";
+    private const string NoScrollBar = "noScrollBar";
+    private const string NoAutomation = "noAutomation";
 
     private const int FirstPageSize = LogReader.DefaultPageSize;
     private const int PageSize = 20_000;
@@ -188,6 +200,9 @@ internal sealed class SpikeHarness
                     : throw new ArgumentException($"{ProbeDelayFlag} must be a number of seconds >= 0, not '{delayText}'");
             }
 
+            string[] bisect = ParseBisect(_flags.String(BisectFlag));
+            _result.Bisect = bisect;
+
             _canvas = window.GraphCanvas;
             _canvas.DrawSubjects = drawSubjects;
             _result.SubjectText = drawSubjects ? "draw" : "off";
@@ -220,12 +235,14 @@ internal sealed class SpikeHarness
                 GCSettings.LatencyMode = mode;
             _result.GcLatencyModeDuringProbe = GCSettings.LatencyMode.ToString();
             GcEventListener? gcEvents = StartGcEvents();
+            SetBisect(window, bisect, on: true);
             try
             {
-                await ScrollProbeAsync(scrollSeconds, drawPacing);
+                await ScrollProbeAsync(window, scrollSeconds, drawPacing);
             }
             finally
             {
+                SetBisect(window, bisect, on: false);
                 if (gcLatency is not null)
                     GCSettings.LatencyMode = latencyBefore;
                 await StopGcEventsAsync(gcEvents);
@@ -275,6 +292,65 @@ internal sealed class SpikeHarness
             Directory.CreateDirectory(Path.GetDirectoryName(_probePath)!);
             File.WriteAllText(_probePath, JsonSerializer.Serialize(_result, JsonOptions));
         }
+    }
+
+    /// <summary>The <see cref="BisectFlag"/> values (none without the flag); throws on an unknown or empty list.</summary>
+    private static string[] ParseBisect(string? text)
+    {
+        if (text is null)
+            return [];
+        string[] values = text
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        string? unknown = values.FirstOrDefault(v => v is not (NoSheetLayoutHook or NoScrollBar or NoAutomation));
+        if (values.Length == 0 || unknown is not null)
+        {
+            throw new ArgumentException(
+                $"{BisectFlag} must be a comma list of {NoSheetLayoutHook}, {NoScrollBar} and {NoAutomation}, not '{text}'");
+        }
+
+        return values;
+    }
+
+    /// <summary>Turns the <paramref name="bisect"/> switches on or off; off resyncs the scroll bar it held.</summary>
+    private static void SetBisect(MainWindow window, string[] bisect, bool on)
+    {
+        GraphCanvas canvas = window.GraphCanvas;
+        if (bisect.Contains(NoSheetLayoutHook))
+            window.QaNoSheetLayoutHook = on;
+        if (bisect.Contains(NoAutomation))
+            canvas.QaNoAutomation = on;
+        if (bisect.Contains(NoScrollBar))
+        {
+            canvas.QaNoScrollBar = on;
+            if (!on)
+                canvas.QaSyncScrollBar();
+        }
+    }
+
+    /// <summary>Zeroes the window's and the graph's QA counters (the scroll probe's start).</summary>
+    private static void ResetCounters(MainWindow window)
+    {
+        GraphCanvas canvas = window.GraphCanvas;
+        window.QaLayoutUpdatedCount = 0;
+        window.QaSheetUpdateCount = 0;
+        window.QaTransformToVisualCount = 0;
+        canvas.QaScrollBarUpdateCount = 0;
+        canvas.QaAutomationEventsCount = 0;
+        canvas.QaAutomationRowPeersCreated = 0;
+    }
+
+    /// <summary>Records the window's and the graph's QA counters (the scroll probe's end).</summary>
+    private void ReadCounters(MainWindow window)
+    {
+        GraphCanvas canvas = window.GraphCanvas;
+        _result.LayoutUpdatedCount = window.QaLayoutUpdatedCount;
+        _result.SheetUpdateCount = window.QaSheetUpdateCount;
+        _result.TransformToVisualCount = window.QaTransformToVisualCount;
+        _result.ScrollBarUpdateCount = canvas.QaScrollBarUpdateCount;
+        _result.AutomationEventsCount = canvas.QaAutomationEventsCount;
+        _result.AutomationRowPeersCreated = canvas.QaAutomationRowPeersCreated;
     }
 
     private double SinceLaunchMs() => (_startAge + _clock.Elapsed).TotalMilliseconds;
@@ -420,7 +496,7 @@ internal sealed class SpikeHarness
     /// setup time when it is longer than the wall-clock time from the subscription to the tick that closed it.
     /// </para>
     /// </summary>
-    private async Task ScrollProbeAsync(double seconds, bool drawPacing)
+    private async Task ScrollProbeAsync(MainWindow window, double seconds, bool drawPacing)
     {
         GraphCanvas canvas = _canvas!;
         DispatcherQueue dispatcher = canvas.DispatcherQueue;
@@ -555,6 +631,7 @@ internal sealed class SpikeHarness
         TimeSpan pauseBefore = GC.GetTotalPauseDuration();
         // Not precise: a precise read suspends the runtime, which would show up as a pause among the GC events.
         long allocatedBefore = GC.GetTotalAllocatedBytes();
+        ResetCounters(window);
         DispatcherQueueTimer? timer = null;
         canvas.DrawCompleted += OnDraw;
         CompositionTarget.Rendering += OnRendering;
@@ -590,6 +667,7 @@ internal sealed class SpikeHarness
         long allocatedAfter = GC.GetTotalAllocatedBytes();
         TimeSpan pauseAfter = GC.GetTotalPauseDuration();
         int[] gcAfter = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
+        ReadCounters(window);
         _result.GcInfoAfter = GcInfoByKind.Read();
 
         _result.ScrollPacing = drawPacing ? "draw" : "rendering";
@@ -1072,6 +1150,13 @@ internal sealed class SpikeHarness
         public GcEvent[]? GcEvents { get; set; }
         public int? GcEventsDropped { get; set; }
         public string? GcEventsError { get; set; }
+        public string[]? Bisect { get; set; }
+        public int? LayoutUpdatedCount { get; set; }
+        public int? SheetUpdateCount { get; set; }
+        public int? TransformToVisualCount { get; set; }
+        public int? ScrollBarUpdateCount { get; set; }
+        public int? AutomationEventsCount { get; set; }
+        public int? AutomationRowPeersCreated { get; set; }
         public string? Error { get; set; }
     }
 }

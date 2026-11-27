@@ -103,6 +103,29 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>Draws the rows' subjects (default); the spike harness turns it off to measure without text.</summary>
     internal bool DrawSubjects { get; set; } = true;
 
+#if HISTQ_QA
+    /// <summary>QA bisect switch: while true, the scroll bar is not updated (the spike harness's scroll probe only).</summary>
+    internal bool QaNoScrollBar { get; set; }
+
+    /// <summary>
+    /// QA bisect switch: while true, <see cref="GraphAutomationPeer"/> creates no row peers and reports no children
+    /// (the spike harness's scroll probe only).
+    /// </summary>
+    internal bool QaNoAutomation { get; set; }
+
+    /// <summary>QA counter: scroll bar updates that ran (Maximum, ViewportSize, LargeChange, Value, IsEnabled set).</summary>
+    internal int QaScrollBarUpdateCount { get; set; }
+
+    /// <summary>QA counter: UI Automation children requests answered by <see cref="GraphAutomationPeer"/>.</summary>
+    internal int QaAutomationEventsCount { get; set; }
+
+    /// <summary>QA counter: row peers <see cref="GraphAutomationPeer"/> created.</summary>
+    internal int QaAutomationRowPeersCreated { get; set; }
+
+    /// <summary>Brings the scroll bar back in line with the offset (after <see cref="QaNoScrollBar"/> is cleared).</summary>
+    internal void QaSyncScrollBar() => UpdateScrollBar();
+#endif
+
     /// <summary>The selected row, -1 for none.</summary>
     public long SelectedRow { get; private set; } = -1;
 
@@ -332,6 +355,11 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>The scroll bar counts rows: its value is the top row plus the fraction scrolled off it.</summary>
     private void UpdateScrollBar()
     {
+#if HISTQ_QA
+        if (QaNoScrollBar)
+            return;
+        QaScrollBarUpdateCount++;
+#endif
         double rh = RowHeight;
         (long maxFirst, double maxPixel) = MaxOffset();
         double maximum = maxFirst + maxPixel / rh;

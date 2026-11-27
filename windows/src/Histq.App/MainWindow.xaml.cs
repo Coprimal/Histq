@@ -33,6 +33,23 @@ public sealed partial class MainWindow : Window
     private Rect? _sheetTab;
     private bool _sheetBuilt;
 
+#if HISTQ_QA
+    /// <summary>
+    /// QA bisect switch: while true, RootGrid.LayoutUpdated no longer rebuilds the sheet (selection and RootGrid size
+    /// changes still do). The spike harness sets it for the scroll probe only.
+    /// </summary>
+    internal bool QaNoSheetLayoutHook { get; set; }
+
+    /// <summary>QA counters, reset and read by the spike harness around the scroll probe.</summary>
+    internal int QaLayoutUpdatedCount { get; set; }
+
+    /// <summary><see cref="UpdateSheet"/> calls that ran past its early return (the sheet was rebuilt).</summary>
+    internal int QaSheetUpdateCount { get; set; }
+
+    /// <summary>TransformToVisual calls made by this window (the selected tab's bounds, the tab-shown check).</summary>
+    internal int QaTransformToVisualCount { get; set; }
+#endif
+
     public MainWindow()
     {
         InitializeComponent();
@@ -54,7 +71,22 @@ public sealed partial class MainWindow : Window
         // Selection rebuilds the joined sheet in the same input event, so it moves in the same frame as the tab
         // highlight; every layout pass (resize, scale change, title bar insets) catches position changes.
         TabStrip.SelectionChanged += (_, _) => UpdateSheet();
+#if HISTQ_QA
+        RootGrid.LayoutUpdated += (_, _) =>
+        {
+            QaLayoutUpdatedCount++;
+            if (!QaNoSheetLayoutHook)
+                UpdateSheet();
+        };
+        // Only while the bisect switch is on, so a size change still rebuilds the sheet without the layout hook.
+        RootGrid.SizeChanged += (_, _) =>
+        {
+            if (QaNoSheetLayoutHook)
+                UpdateSheet();
+        };
+#else
         RootGrid.LayoutUpdated += (_, _) => UpdateSheet();
+#endif
 
         if (MicaController.IsSupported())
             SystemBackdrop = new MicaBackdrop { Kind = MicaKind.BaseAlt };
@@ -83,6 +115,9 @@ public sealed partial class MainWindow : Window
         if (_sheetBuilt && sheet == _sheetRect && tab == _sheetTab)
             return;
 
+#if HISTQ_QA
+        QaSheetUpdateCount++;
+#endif
         _sheetBuilt = true;
         _sheetRect = sheet;
         _sheetTab = tab;
@@ -95,6 +130,9 @@ public sealed partial class MainWindow : Window
         FrameworkElement tab = TabStrip.Tabs[TabStrip.SelectedIndex];
         if (!IsTabShown(tab) || tab.ActualHeight <= 0)
             return null;
+#if HISTQ_QA
+        QaTransformToVisualCount++;
+#endif
         return tab.TransformToVisual(RootGrid).TransformBounds(new Rect(0, 0, tab.ActualWidth, tab.ActualHeight));
     }
 
@@ -108,6 +146,9 @@ public sealed partial class MainWindow : Window
             return false;
         // The inset width, not the star column's ActualWidth: Refresh sets it just before it asks for the elements.
         double limit = AppTitleBar.ActualWidth - RightInsetColumn.Width.Value - DragColumn.MinWidth;
+#if HISTQ_QA
+        QaTransformToVisualCount++;
+#endif
         double right = tab.TransformToVisual(AppTitleBar).TransformPoint(new Point(tab.ActualWidth, 0)).X;
         return right <= limit + 0.5;
     }

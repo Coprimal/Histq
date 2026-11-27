@@ -29,6 +29,11 @@ public sealed partial class GraphAutomationPeer : FrameworkElementAutomationPeer
 
     protected override IList<AutomationPeer> GetChildrenCore()
     {
+#if HISTQ_QA
+        _canvas.QaAutomationEventsCount++;
+        if (_canvas.QaNoAutomation)
+            return [];
+#endif
         long first = _canvas.FirstVisibleRow;
         long last = _canvas.LastVisibleRow;
 
@@ -49,6 +54,9 @@ public sealed partial class GraphAutomationPeer : FrameworkElementAutomationPeer
             if (!_rowPeers.TryGetValue(row, out GraphRowAutomationPeer? peer))
             {
                 peer = new GraphRowAutomationPeer(this, _canvas, row);
+#if HISTQ_QA
+                _canvas.QaAutomationRowPeersCreated++;
+#endif
                 _rowPeers[row] = peer;
             }
             children.Add(peer);

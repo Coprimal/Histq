@@ -179,6 +179,13 @@ for key in (
     "gcLatencyModeDuringProbe",
     "gcEventsDropped",
     "gcEventsError",
+    "bisect",
+    "layoutUpdatedCount",
+    "sheetUpdateCount",
+    "transformToVisualCount",
+    "scrollBarUpdateCount",
+    "automationEventsCount",
+    "automationRowPeersCreated",
 ):
     print(f"INFO  {key}: {json.dumps(probe[key]) if key in probe else '(absent)'}")
 
