@@ -2,7 +2,8 @@
 // popped-out tab, pins, worktree boxes, manual groups (collapse, closed groups), the multi-selection, the stack that
 // Ctrl+Shift+T reopens and the tabs whose layouts stay mounted. The app holds the repo sessions, the unsaved-edits
 // prompts and the pages, and reads the tabs back after each call. Ported from WindowModel.swift at 6fa6d40 (its tab
-// parts; sessions, Settings, toasts, the onboarding demo tab and moves between windows stay in the app).
+// parts and the tab side of a move between windows; sessions, Settings, toasts and the onboarding demo tab stay in the
+// app).
 using System.Globalization;
 
 namespace Histq.Core;
@@ -77,6 +78,10 @@ public sealed class WindowTabs
     /// and the tab to select (its index in <paramref name="Tabs"/>).</summary>
     public sealed record GroupWindow(
         IReadOnlyList<SavedTab> Tabs, SavedTabGroup Group, IReadOnlySet<string> Missing, int Selected = 0);
+
+    /// <summary>A tab on its way to another window (<see cref="DetachTab"/>, <see cref="Adopt"/>): the tab, in no manual
+    /// group.</summary>
+    public sealed record MovedTab(Tab Tab);
 
     /// <summary>A closed repo tab that <see cref="ReopenClosedTab"/> reopens: as saved, its box's key, its manual group as
     /// it was, the batch it closed with (Delete Group), and its index when it closed.</summary>
@@ -951,6 +956,166 @@ public sealed class WindowTabs
         {
             RememberClosed(new ClosedTab(member, null, group, batch, NormalEnd));
         }
+    }
+
+    // Moves between windows.
+
+    /// <summary>
+    /// Why the tab <paramref name="id"/> cannot move from <paramref name="source"/> to <paramref name="destination"/>
+    /// now; null when it can (AppDelegate.moveRefusal, App/HistqApp.swift at 6fa6d40). No I/O: a menu builds its
+    /// entries with it. <paramref name="from"/> and <paramref name="to"/> are the windows' workspaces (null: Untitled);
+    /// <paramref name="fromWindows"/> is how many windows <paramref name="from"/> has open. A move never empties a
+    /// workspace, never takes a tab out of or into a workspace file that is not being written, and never moves a
+    /// missing or archived tab, or one whose repo the destination has open. A UNC or device folder never leaves a
+    /// workspace window: it may come from a received <c>.histqws</c> (a tab just reopened there shows as found until
+    /// its folder check returns), and another window would probe it.
+    /// </summary>
+    public static string? MoveRefusal(
+        Guid id, WindowTabs source, WorkspaceDocument? from, int fromWindows, WindowTabs destination, WorkspaceDocument? to)
+    {
+        if (ReferenceEquals(source, destination) || source.tabs.Find(entry => entry.Id == id) is not { } tab)
+        {
+            return "The tab or the window is gone.";
+        }
+
+        if (to is not null && (to.IsReadOnly || to.WriteFailed))
+        {
+            return to.IsReadOnly ? $"{to.Name} is read-only" : $"{to.Name} is not being saved";
+        }
+
+        // The tab would stay in the source's unwritten file and come back on its next open.
+        if (from is not null && (from.IsReadOnly || from.WriteFailed))
+        {
+            return from.IsReadOnly ? $"{from.Name} is read-only" : $"{from.Name} is not being saved";
+        }
+
+        // A move never empties a workspace: the window would close, and its file would lose its last window.
+        if (from is not null && source.tabs.Count == 1 && source.archivedTabs.Count == 0
+            && source.closedGroups.Count == 0 && fromWindows <= 1)
+        {
+            return $"Last tab of {from.Name} — use Close Workspace";
+        }
+
+        // Its stored path belongs to the source file.
+        if (tab.IsMissing)
+        {
+            return "Locate the repo first";
+        }
+
+        if (tab.Archived)
+        {
+            return "Unarchive the tab to move it.";
+        }
+
+        if (from is not null && tab.Path is { } network && source.flavor.IsUncOrDevice(network))
+        {
+            return "A network folder stays in its workspace";
+        }
+
+        // Adopt would select the destination's own tab of the repo instead.
+        if (tab.Path is { } path && destination.HasRepo(path))
+        {
+            return $"{source.flavor.LastComponent(path)} is already open in that window";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Takes the tab <paramref name="id"/> out of this window to move it to another one (<see cref="Adopt"/>), without
+    /// putting it on the reopen stack. It leaves its manual group (dropped when left empty) and moves alone out of its
+    /// worktree box. The selection moves as when it closes; the window's last tab gives way to a Welcome tab when the
+    /// archive or the closed groups are not empty (as <see cref="CloseTab(Guid)"/>), else no tab is left (the caller
+    /// closes the window). Null, and nothing changes, for the popped-out archived tab or an unknown id.
+    /// </summary>
+    public MovedTab? DetachTab(Guid id)
+    {
+        if (IndexOf(id) is not { } index || tabs[index].Archived)
+        {
+            return null;
+        }
+
+        var moved = new MovedTab(tabs[index] with { GroupId = null });
+        Remove(index, remembering: false);
+        if (tabs.Count == 0 && (archivedTabs.Count > 0 || closedGroups.Count > 0))
+        {
+            // Even for a Welcome tab: a move never loses the archive or the closed groups with a closed window.
+            AddWelcome();
+        }
+        else if (selectedTabId == id)
+        {
+            SelectNeighbor(index);
+        }
+
+        if (tabs.Count > 0)
+        {
+            Normalize();
+        }
+
+        return moved;
+    }
+
+    /// <summary>
+    /// Takes in a tab detached from another window (<see cref="DetachTab"/>) and selects it. When this window has its
+    /// repo open already, that tab is selected instead (popped out of the archive), a safety net:
+    /// <see cref="MoveRefusal"/> refuses such a move first. Otherwise the tab goes where <see cref="OpenTab"/> puts a
+    /// new tab, in no manual group, and joins the worktree box of its repo here, taking the box's pin (else it keeps
+    /// its own).
+    /// </summary>
+    public void Adopt(MovedTab moved)
+    {
+        var tab = moved.Tab with { GroupId = null, Archived = false };
+        if (tab.Path is { } path)
+        {
+            if (tabs.Find(entry => SamePath(entry.Path, path)) is { } existing)
+            {
+                SelectTab(existing.Id);
+                return;
+            }
+
+            if (ArchivedIndex(path) is { } archived)
+            {
+                OpenArchived(archived);
+                return;
+            }
+        }
+
+        // A box is pinned whole: the tab never pins or unpins the box it joins.
+        if (tab.RepoKey is { } key
+            && tabs.Find(peer => string.Equals(peer.RepoKey, key, StringComparison.Ordinal) && !peer.Archived) is { } box)
+        {
+            tab = tab with { Pinned = box.Pinned };
+        }
+
+        tabs.Insert(NormalEnd, tab);
+        Normalize();
+        Select(tab.Id);
+        if (tab.Path is not null && !tab.IsMissing && tab.RepoKey is null)
+        {
+            RequestRepoKeys([tab.Id]);
+        }
+    }
+
+    // Workspace windows.
+
+    /// <summary>The window as its workspace file holds it (<see cref="WorkspaceFile.Build"/>): <paramref name="id"/>,
+    /// its manual groups (their collapse is machine-local, <see cref="LayoutWindow"/>), its tabs and its closed
+    /// groups.</summary>
+    public WorkspaceFile.LiveWindow LiveWindow(Guid id) =>
+        new(id, SavedTabs,
+            SavedTabGroups?.Select(group => new WorkspaceFile.TabGroup(group.Id, group.Color, group.Name)).ToList(),
+            SavedClosedGroups);
+
+    /// <summary>The window as <c>session.json</c> keeps a workspace window (<see cref="WorkspaceLayout"/>): its frame,
+    /// its place among the windows (<paramref name="group"/>, front first), its selected tab's repo path and its
+    /// collapsed manual groups.</summary>
+    public WorkspaceLayout.Window LayoutWindow(Guid id, double x, double y, double width, double height, int group)
+    {
+        var collapsed = groups.Where(entry => entry.Collapsed && tabs.Exists(tab => tab.GroupId == entry.Id))
+            .Select(entry => entry.Id).ToList();
+        return new WorkspaceLayout.Window(
+            id, x, y, width, height, group, TabIndex: 0, IsSelectedInGroup: true,
+            SelectedIndex is { } index ? tabs[index].Path : null, collapsed.Count == 0 ? null : collapsed);
     }
 
     // Multi-selection.

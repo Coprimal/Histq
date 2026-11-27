@@ -1,4 +1,5 @@
 using Histq.App.Shell.Tabs;
+using Histq.Core;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -12,8 +13,8 @@ namespace Histq.App.Shell;
 
 /// <summary>
 /// The window's title bar (design header-and-tab-row.md §1, ported from the logo of App/Window/HeaderToolbar.swift and
-/// the main menu of App/HistqApp.swift at 6fa6d40): the logo, which opens the app menu (File, Edit, View, Window, Help;
-/// Windows has no menu bar), the tab strip (<see cref="Tabs.TabStrip"/>), a free drag area and the caption buttons'
+/// the main menu of App/HistqApp.swift at 6fa6d40): the logo, which opens the app menu (File with the workspace items,
+/// Edit, View, Window, Help; Windows has no menu bar), the tab strip (<see cref="Tabs.TabStrip"/>), a free drag area and the caption buttons'
 /// inset. Only the logo and the strip's items are Passthrough (<see cref="TitleBarRegions"/>); the rest is caption.
 /// The menu holds only the items whose action works in this build; Mac-only items (Hide, Hide Others, Minimize,
 /// Customize Toolbar, Merge All Windows) are left out. Its shortcuts and the tab shortcuts (<see cref="Accelerators"/>,
@@ -25,6 +26,8 @@ public sealed partial class TitleBar : UserControl
     private MainWindow _window = null!;
     private MenuFlyoutSubItem _windowMenu = null!;
     private MenuFlyoutItem _reopenItem = null!;
+    private MenuFlyoutSubItem _recentWorkspacesMenu = null!;
+    private MenuFlyoutItem _closeWorkspaceItem = null!;
 
     /// <summary>Alt went down with no other key or click since: its release opens the app menu.</summary>
     private bool _altAlone;
@@ -86,10 +89,11 @@ public sealed partial class TitleBar : UserControl
     }
 
     /// <summary>
-    /// The app menu (HistqApp.swift makeMainMenu): File has New Window, New Tab, Open…, Close Tab, Reopen Closed Tab,
-    /// Close Window and Exit (the app menu's Quit); Window has Maximize / Restore (Zoom) and the open windows. Edit, View
-    /// and Help keep their place but stay disabled until the phases that bring their items (the undo journal and text
-    /// fields, the terminal and layouts, the onboarding).
+    /// The app menu (HistqApp.swift makeMainMenu): File has New Window, New Tab, Open…, the workspace items (New
+    /// Workspace, Open Workspace…, Recent Workspaces ›, Save Workspace As…, Close Workspace; WorkspaceCommands.cs), Close
+    /// Tab, Reopen Closed Tab, Close Window and Exit (the app menu's Quit); Window has Maximize / Restore (Zoom) and the
+    /// open windows. Edit, View and Help keep their place but stay disabled until the phases that bring their items (the
+    /// undo journal and text fields, the terminal and layouts, the onboarding).
     /// </summary>
     private void BuildAppMenu()
     {
@@ -97,6 +101,14 @@ public sealed partial class TitleBar : UserControl
         file.Items.Add(Item("New Window", AppCommand.NewWindow));
         file.Items.Add(Item("New Tab", AppCommand.NewTab));
         file.Items.Add(Item("Open…", AppCommand.Open));
+        file.Items.Add(new MenuFlyoutSeparator());
+        file.Items.Add(Plain("New Workspace", () => _window.Manager.NewWorkspace(_window)));
+        file.Items.Add(Plain("Open Workspace…", () => _window.Manager.ChooseWorkspace(_window)));
+        _recentWorkspacesMenu = new MenuFlyoutSubItem { Text = "Recent Workspaces" };
+        file.Items.Add(_recentWorkspacesMenu);
+        file.Items.Add(Plain("Save Workspace As…", () => _window.Manager.SaveWorkspaceAs(_window)));
+        _closeWorkspaceItem = Plain("Close Workspace", () => _window.Manager.CloseWorkspace(_window));
+        file.Items.Add(_closeWorkspaceItem);
         file.Items.Add(new MenuFlyoutSeparator());
         file.Items.Add(Item("Close Tab", AppCommand.CloseTab));
         _reopenItem = Item("Reopen Closed Tab", AppCommand.ReopenClosedTab);
@@ -114,8 +126,46 @@ public sealed partial class TitleBar : UserControl
         AppMenu.Opening += (_, _) =>
         {
             _reopenItem.IsEnabled = _window.Tabs.CanReopenClosedTab;
+            _closeWorkspaceItem.IsEnabled = _window.Workspace is { IsClosing: false };
+            FillRecentWorkspaces();
             FillWindowMenu();
         };
+    }
+
+    /// <summary>A menu item with no shortcut that runs <paramref name="action"/>.</summary>
+    private static MenuFlyoutItem Plain(string text, Action action)
+    {
+        var item = new MenuFlyoutItem { Text = text };
+        item.Click += (_, _) => action();
+        return item;
+    }
+
+    /// <summary>Recent Workspaces: the files opened lately, most recent first (a pick opens it; its path is the
+    /// tooltip), then Clear Menu. Built from the list in memory each time the menu opens, never checking the disk.</summary>
+    private void FillRecentWorkspaces()
+    {
+        _recentWorkspacesMenu.Items.Clear();
+        PathFlavor flavor = PathFlavor.Host;
+        foreach (string path in _window.Manager.RecentWorkspaces.Paths)
+        {
+            var item = new MenuFlyoutItem
+            {
+                Text = DisplayText.Sanitize(Path.GetFileNameWithoutExtension(flavor.LastComponent(path))),
+            };
+            ToolTipService.SetToolTip(item, DisplayText.Sanitize(path));
+            item.Click += (_, _) => _window.Manager.OpenWorkspace(path, _window);
+            _recentWorkspacesMenu.Items.Add(item);
+        }
+
+        if (_recentWorkspacesMenu.Items.Count > 0)
+            _recentWorkspacesMenu.Items.Add(new MenuFlyoutSeparator());
+        var clear = new MenuFlyoutItem
+        {
+            Text = "Clear Menu",
+            IsEnabled = _window.Manager.RecentWorkspaces.Paths.Count > 0,
+        };
+        clear.Click += (_, _) => _window.Manager.ClearRecentWorkspaces();
+        _recentWorkspacesMenu.Items.Add(clear);
     }
 
     /// <summary>A menu item that runs <paramref name="command"/>; it only shows the command's shortcut, which

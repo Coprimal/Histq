@@ -20,8 +20,9 @@ namespace Histq.App.Shell.Tabs;
 /// to the Right, each off when it has no tab to close (they never close the popped-out archived tab); the group items,
 /// plural on a multi-selection, which they act on whole when the tab is in it; Copy Path, Show in Explorer, Set Alias…,
 /// Set Icon…, Icon Color ›, Pin Tab / Unpin Tab (Pin / Unpin Worktree Tabs on a boxed tab) and Archive This Tab
-/// (Unarchive Tab on the popped-out archived tab), off for a Welcome tab. Every item but Close Tabs and the group items
-/// acts on the right-clicked tab alone. Move Tab to Window › arrives with 11.1, Profile › with M5. A
+/// (Unarchive Tab on the popped-out archived tab), off for a Welcome tab, then Move Tab to Window › (each other
+/// window, off with its refusal as tooltip). Every item but Close Tabs and the group items acts on the right-clicked tab
+/// alone. Profile › arrives with M5. A
 /// worktree head's (a Windows addition, §3.5): Pin / Unpin Worktree Tabs, Move Worktree Tabs to New Group, Close
 /// Worktree Tabs. Menus are built when they open; an item's action runs once the menu has closed, so the focus is back
 /// on the row before the action syncs it.
@@ -131,7 +132,36 @@ internal static class TabContextMenu
             ? actions.Item("Unarchive Tab", () => window.Apply(m => m.UnarchiveTab(id)))
             : actions.Item("Archive This Tab", () => window.Apply(m => m.ArchiveTab(id)), enabled: isRepo,
                 toolTip: isRepo ? null : "A new tab has no repository to archive."));
+        menu.Items.Add(MoveToWindow(actions, window, tab));
         return menu;
+    }
+
+    /// <summary>
+    /// Move Tab to Window › (TabMenu.moveToWindow): each other window (<see cref="MainWindow.MoveTitle"/>), off with the
+    /// reason as its tooltip when the move would be refused (<see cref="WindowManager.MoveRefusal"/>, no I/O); the
+    /// whole entry is off for an archived or missing tab. The right-clicked tab moves alone, even in a
+    /// multi-selection; a late refusal shows as a toast in this window.
+    /// </summary>
+    private static MenuFlyoutItemBase MoveToWindow(MenuActions actions, MainWindow window, WindowTabs.Tab tab)
+    {
+        const string Title = "Move Tab to Window";
+        string? blocked = tab.Archived ? "Unarchive the tab to move it." : tab.IsMissing ? "Locate the repo first" : null;
+        if (blocked is not null)
+            return actions.Item(Title, () => { }, enabled: false, toolTip: blocked);
+
+        var submenu = new MenuFlyoutSubItem { Text = Title };
+        IReadOnlyList<MainWindow> destinations = window.Manager.MoveDestinations(window);
+        if (destinations.Count == 0)
+            submenu.Items.Add(actions.Item("No other window is open.", () => { }, enabled: false));
+        Guid id = tab.Id;
+        foreach (MainWindow destination in destinations)
+        {
+            string? refusal = window.Manager.MoveRefusal(id, window, destination);
+            submenu.Items.Add(actions.Item(destination.MoveTitle, () => window.Manager.MoveTab(id, window, destination),
+                enabled: refusal is null, toolTip: refusal is null ? null : DisplayText.Sanitize(refusal)));
+        }
+
+        return submenu;
     }
 
     /// <summary>

@@ -47,6 +47,12 @@ public sealed class WorkspaceDocument
     public sealed record Opened(
         WorkspaceDocument Document, WorkspaceFile.Resolved Resolved, IReadOnlyDictionary<string, string> RepoKeys);
 
+    /// <summary>A Save As target computed off the UI thread (<see cref="Rebound"/>): the new file, its identity key and
+    /// the stored strings rebased to its folder.</summary>
+    public sealed record Rebinding(
+        string FilePath, string Key, IReadOnlyDictionary<string, WorkspaceFile.Original> Originals,
+        IReadOnlyDictionary<string, WorkspaceFile.Repo> Carried);
+
     public string FilePath { get; private set; }
 
     /// <summary>The file's identity key (<see cref="WorkspaceFile.IdentityKey"/>).</summary>
@@ -217,16 +223,65 @@ public sealed class WorkspaceDocument
     /// <summary>Points the workspace at <paramref name="filePath"/> after Save As: the resolved paths get fresh strings
     /// relative to the new folder, the missing tabs and carried repos keep their <c>home</c> with a <c>path</c> from the
     /// new folder, and the new file is writable.</summary>
-    public void Rebind(string filePath, string? homePath = null)
+    public void Rebind(string filePath, string? homePath = null) => Rebind(Rebound(filePath, homePath));
+
+    /// <summary>What <see cref="Rebind(string, string?)"/> sets for <paramref name="filePath"/>: the new identity key and
+    /// the rebased stored strings. Reads the disk (call it off the UI thread, on a <see cref="Copy"/>); the document is
+    /// not changed.</summary>
+    public Rebinding Rebound(string filePath, string? homePath = null)
     {
         var (originals, carried) = WorkspaceFile.Rebased(Originals, Missing, Repos, filePath, homePath ?? HomePath);
-        FilePath = filePath;
-        Key = WorkspaceFile.IdentityKey(filePath);
-        Name = NameOf(filePath);
-        Originals = new(originals, PathFlavor.Host.KeyComparer);
-        Repos = new(carried, PathFlavor.Host.KeyComparer);
+        return new Rebinding(filePath, WorkspaceFile.IdentityKey(filePath), originals, carried);
+    }
+
+    /// <summary>Points the workspace at <paramref name="rebinding"/>'s file (<see cref="Rebound"/>), with no I/O.</summary>
+    public void Rebind(Rebinding rebinding)
+    {
+        FilePath = rebinding.FilePath;
+        Key = rebinding.Key;
+        Name = NameOf(rebinding.FilePath);
+        Originals = new(rebinding.Originals, PathFlavor.Host.KeyComparer);
+        Repos = new(rebinding.Carried, PathFlavor.Host.KeyComparer);
         IsReadOnly = false;
         RecordWrite(null);
+    }
+
+    /// <summary>A copy of the document's state, for work off the UI thread (Save As builds and rebases on it) while the
+    /// UI thread keeps the document.</summary>
+    public WorkspaceDocument Copy() =>
+        new(FilePath, Key, IsReadOnly, Profiles, Originals, RepoOrder, ProfileOrder, WindowOrder, Repos, Missing, Views);
+
+    /// <summary>
+    /// The workspace file as <paramref name="windows"/> have it now (their tabs and manual groups), saved at
+    /// <paramref name="filePath"/> (default <see cref="FilePath"/>) with these stored strings and carried repos (default
+    /// the document's): the stored strings of every unchanged path, the graph view of each tab's repo (closed groups'
+    /// and archived tabs' too; a repo with no view gets no entry), and the embedded profiles the tabs use (this build
+    /// has no profile library: an id the file does not embed is not written). Building may read the disk (the file's
+    /// own links, a real path for another drive).
+    /// </summary>
+    public WorkspaceFile Build(
+        IReadOnlyList<WorkspaceFile.LiveWindow> windows, string? filePath = null,
+        IReadOnlyDictionary<string, WorkspaceFile.Original>? originals = null,
+        IReadOnlyDictionary<string, WorkspaceFile.Repo>? carried = null, string? homePath = null)
+    {
+        var flavor = PathFlavor.Host;
+        var tabs = windows.SelectMany(window =>
+            window.Tabs.Concat((window.ClosedTabGroups ?? []).SelectMany(group => group.Tabs))).ToList();
+        var used = tabs.Select(tab => tab.Profile?.ProfileId).OfType<Guid>().ToHashSet();
+        var paths = tabs.Select(tab => tab.Path).OfType<string>().Select(path => flavor.Standardized(path))
+            .ToHashSet(flavor.KeyComparer);
+        var views = new Dictionary<string, RepoViewState>(flavor.KeyComparer);
+        foreach (var (path, view) in Views)
+        {
+            if (paths.Contains(flavor.Standardized(path)))
+            {
+                views[path] = view;
+            }
+        }
+
+        return WorkspaceFile.Build(
+            windows, views, Profiles.Where(profile => used.Contains(profile.Id)).ToList(), carried ?? Repos,
+            originals ?? Originals, RepoOrder, ProfileOrder, filePath ?? FilePath, homePath ?? HomePath);
     }
 
     private static string NameOf(string filePath) =>

@@ -158,8 +158,9 @@ public sealed record WorkspaceFile
     /// opens read-only.</param>
     public sealed record ReadResult(WorkspaceFile File, bool IsLossless);
 
-    /// <summary>Reads the file at <paramref name="path"/> (see <see cref="Decode"/>); a read failure throws its IO error.</summary>
-    public static ReadResult Read(string path) => Decode(File.ReadAllBytes(path));
+    /// <summary>Reads the file at <paramref name="path"/> (see <see cref="Decode"/>); a read failure throws its IO error.
+    /// Uncapped, so tests only: the app reads through <see cref="WorkspaceDocument.Open"/> (8 MB cap).</summary>
+    internal static ReadResult Read(string path) => Decode(File.ReadAllBytes(path));
 
     /// <summary>
     /// Decodes a workspace. Throws <see cref="WorkspaceFileError"/> of kind

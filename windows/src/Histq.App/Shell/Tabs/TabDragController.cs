@@ -36,8 +36,9 @@ internal sealed record TabDrag(
 /// allowed place nearest the pointer (<see cref="TabGroupSpans.DragTarget"/>): a tab (a Shift/Ctrl press turns into a
 /// plain drag of the tab, selected alone), a box from its head, a group from its chip. A box's tab reorders inside its
 /// box until the pointer leaves the box (as the box stands at rest), then drags the whole box. On release the unit
-/// moves (<see cref="WindowTabs.MoveUnit"/>), or snaps back when it would land where it stands or the pointer left the
-/// window (moving a tab to another window is task 11.1). A chip released before the threshold collapses or shows its
+/// moves (<see cref="WindowTabs.MoveUnit"/>), or snaps back when it would land where it stands. Released outside the
+/// window, a lone tab moves to the other Histq window under the pointer (<see cref="WindowManager.DropTarget"/>); a box,
+/// a group, a refused move (its toast in this window) or no Histq window there snaps back. A chip released before the threshold collapses or shows its
 /// group, on release (as on the Mac: a click must be told from a drag). A middle click on a tab closes it. The right
 /// button is left alone (the tab's menu, task 10.1). While a press is held the title bar's Passthrough rects stay put.
 /// </summary>
@@ -193,19 +194,23 @@ internal sealed class TabDragController
         // Cleared first: releasing the capture raises PointerCaptureLost, which must find no press.
         _press = null;
         e.Handled = true;
+        TabDrag? drag = null;
+        bool outside = false;
         if (press.Drag is not null)
         {
             // Injected or fast drags may send few moves: aim at the release point once more.
             Retarget(press, e.GetCurrentPoint(press.Space).Position.X);
-            Drop(press.Drag!, OutsideWindow(e));
-        }
-        else if (press.Kind == Kind.Chip)
-        {
-            _strip.ToggleGroup(press.Id);
+            drag = press.Drag;
+            outside = OutsideWindow(e);
         }
 
+        // Before the drop: a tab moved to another window takes its element out of this row, and may close the window.
         press.Element.ReleasePointerCapture(e.Pointer);
         _strip.SetPressHeld(false);
+        if (drag is not null)
+            Drop(drag, outside);
+        else if (press.Kind == Kind.Chip)
+            _strip.ToggleGroup(press.Id);
     }
 
     /// <summary>The capture went (Alt+Tab, a window over the pointer, an element removed): the drag snaps back.</summary>
@@ -275,11 +280,21 @@ internal sealed class TabDragController
     }
 
     /// <summary>
-    /// Ends a drag (TabStrip.drop): out of the window it snaps back (a lone tab moves to another window in task 11.1);
-    /// inside, the unit moves when it would land elsewhere or in another group, else it snaps back.
+    /// Ends a drag (TabStrip.drop, TabDragOut): out of the window, a lone tab moves to the Histq window under the
+    /// pointer, else it snaps back; inside, the unit moves when it would land elsewhere or in another group, else it
+    /// snaps back.
     /// </summary>
     private void Drop(TabDrag drag, bool outside)
     {
+        if (outside && _strip.Window is { } source && drag.Unit is TabArrangement.Unit.Tab tab
+            && source.Manager.DropTarget(source, drag.Unit) is { } destination)
+        {
+            // Without animation: the tab leaves this window.
+            _strip.EndDrag();
+            source.Manager.MoveTab(tab.Id, source, destination);
+            return;
+        }
+
         if (outside || (drag.Index == drag.Range.First && drag.Group == drag.Origin) || _strip.Window is not { } window)
         {
             _strip.SnapBack(drag);

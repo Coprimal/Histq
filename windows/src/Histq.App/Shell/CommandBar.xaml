@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     The command bar at the top of the page sheet (design header-and-tab-row.md §1.3), client area: nothing here drags
-    the window. Leading: the repo dropdown, then the workspace label (workspace windows only). The branch dropdown, the
-    profile chip and the trailing capsules come with the milestone that implements each action (absent until then).
+    the window. Leading: the repo dropdown, then the workspace dropdown (workspace windows only). The branch dropdown,
+    the profile chip and the trailing capsules come with the milestone that implements each action (absent until then).
 -->
 <UserControl
     x:Class="Histq.App.Shell.CommandBar"
@@ -58,20 +58,28 @@
             </DropDownButton.Flyout>
         </DropDownButton>
 
-        <!-- Workspace label: its name, the file's path as tooltip; a warning when the file is read-only or its last
-             write failed. Collapsed in a window that is not a workspace's. -->
-        <StackPanel
+        <!-- Workspace label: a dropdown with its name, the file's path as tooltip; a warning when the file is read-only
+             or its last write failed. Its menu (the workspace commands and the other recent workspaces) is filled when
+             it opens. Collapsed in a window that is not a workspace's. -->
+        <DropDownButton
             x:Name="WorkspaceLabel"
             Grid.Column="1"
+            Height="{StaticResource CommandButtonHeight}"
+            Padding="10,0,8,0"
             VerticalAlignment="Center"
-            Orientation="Horizontal"
-            Spacing="6"
+            AutomationProperties.Name="Workspace"
+            CornerRadius="14"
             Visibility="Collapsed">
-            <FontIcon x:Name="WorkspaceIcon" FontSize="{StaticResource CommandIconSize}" Glyph="&#xE81E;" />
-            <TextBlock
-                x:Name="WorkspaceText"
-                VerticalAlignment="Center"
-                FontSize="13" />
-        </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <FontIcon x:Name="WorkspaceIcon" FontSize="{StaticResource CommandIconSize}" Glyph="&#xE81E;" />
+                <TextBlock
+                    x:Name="WorkspaceText"
+                    VerticalAlignment="Center"
+                    FontSize="13" />
+            </StackPanel>
+            <DropDownButton.Flyout>
+                <MenuFlyout x:Name="WorkspaceMenu" Placement="BottomEdgeAlignedLeft" />
+            </DropDownButton.Flyout>
+        </DropDownButton>
     </Grid>
 </UserControl>

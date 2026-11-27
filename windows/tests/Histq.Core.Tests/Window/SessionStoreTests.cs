@@ -226,6 +226,41 @@ public sealed class SessionStoreTests
         Assert.Equal(Workspace("b"), WorkspaceFile.Read(path).File);
     }
 
+    [Fact]
+    public async Task WriteNowAsyncWritesOnTheChainCachesAndReopensAFinishedKey()
+    {
+        using var folder = new TempFolder();
+        var clock = new ManualClock();
+        var store = new SessionStore(folder.Path("session.json"), clock.Delay);
+        var path = folder.Path("team.histqws");
+        await Assert.ThrowsAnyAsync<IOException>(() => store.WriteNowAsync(Workspace("a"), folder.Path("gone/x.histqws")));
+
+        var current = Workspace("a");
+        string? captured = null;
+        store.Start(() => new SessionStore.Snapshot(
+            PlainSession("C:/r/a"),
+            captured is null
+                ? NoWorkspaces
+                : new Dictionary<string, (WorkspaceFile, bool)> { [captured] = (current, false) }));
+        var key = await store.WriteNowAsync(Workspace("a"), path);
+        Assert.Equal(WorkspaceFile.IdentityKey(path), key);
+        Assert.Equal(Workspace("a"), WorkspaceFile.Read(path).File);
+
+        // Cached: the first capture of the same model does not write it again.
+        captured = key;
+        File.WriteAllText(path, "untouched");
+        await Pass(store, clock);
+        Assert.Equal("untouched", File.ReadAllText(path));
+
+        // Finished, then written again (Save As back onto it): later passes write it.
+        store.Finish(key);
+        await store.Writes;
+        await store.WriteNowAsync(Workspace("b"), path);
+        current = Workspace("c");
+        await Pass(store, clock);
+        Assert.Equal(Workspace("c"), WorkspaceFile.Read(path).File);
+    }
+
     // Reading session.json.
 
     [Theory]

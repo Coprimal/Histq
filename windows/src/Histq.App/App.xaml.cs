@@ -54,7 +54,13 @@ public partial class App : Application
         Preferences preferences = PreferencesLoad.GetAwaiter().GetResult();
         var recentRepos = new RecentRepos(preferences, PrefKey.RecentRepos);
         _windows = new WindowManager(sessionStore, LoadedSession?.Session.Workspaces, preferences, recentRepos);
-        _windows.Restore(LoadedSession);
+#if HISTQ_QA
+        // The workspace QA flags (Debug/QaFlags.cs) start once the restored windows are open.
+        QaFlags.Read(Environment.GetCommandLineArgs().Skip(1).ToList())
+            .Start(_windows, _windows.Restore(LoadedSession), StatePaths);
+#else
+        _ = _windows.Restore(LoadedSession);
+#endif
     }
 
     /// <summary>

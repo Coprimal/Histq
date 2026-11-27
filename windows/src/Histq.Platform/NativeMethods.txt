@@ -6,3 +6,6 @@ JOBOBJECTINFOCLASS
 JOB_OBJECT_LIMIT
 CreateFileW
 GetFinalPathNameByHandleW
+GetCursorPos
+WindowFromPoint
+GetAncestor

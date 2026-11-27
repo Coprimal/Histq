@@ -20,7 +20,7 @@ internal enum AppCommand
 
 /// <summary>
 /// The window's keyboard shortcuts, all in one place (the File menu of App/HistqApp.swift at 6fa6d40, Ctrl for Cmd, and
-/// design header-and-tab-row.md §3.12): New Window Ctrl+Shift+N, New Tab Ctrl+T (Ctrl+N too, unlisted, as on the Mac),
+/// design header-and-tab-row.md §3.12): New Window Ctrl+Shift+N (in the window's workspace), New Tab Ctrl+T (Ctrl+N too, unlisted, as on the Mac),
 /// Open… Ctrl+O, Close Tab Ctrl+W (the window closes with its last tab), Reopen Closed Tab Ctrl+Shift+T, Close Window
 /// Ctrl+Shift+W, Exit Ctrl+Q; Ctrl+Tab / Ctrl+Shift+Tab cycle the shown tabs, Ctrl+1…8 select the nth shown tab and
 /// Ctrl+9 the last (Windows additions); F10 opens the app menu. Registered once on the window's root, so they work
@@ -58,7 +58,7 @@ internal static class Accelerators
         switch (command)
         {
             case AppCommand.NewWindow:
-                window.Manager.NewWindow();
+                window.Manager.NewWindow(window);
                 break;
             case AppCommand.NewTab:
                 window.Apply(model => model.OpenTab(null));

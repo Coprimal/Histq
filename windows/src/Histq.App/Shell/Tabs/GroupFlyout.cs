@@ -256,7 +256,7 @@ internal sealed class GroupFlyout : TabFlyout
             WindowTabs.GroupWindow? moved = null;
             window.Apply(model => moved = model.MoveGroupToNewWindow(id));
             if (moved is not null)
-                window.Manager.OpenGroupWindow(moved);
+                window.Manager.OpenGroupWindow(window, moved);
         });
     }
 

@@ -125,7 +125,7 @@ internal sealed class ClosedGroupsFlyout : TabFlyout
         WindowTabs.GroupWindow? opened = null;
         window.Apply(model => opened = model.OpenClosedGroupInNewWindow(id));
         if (opened is not null)
-            window.Manager.OpenGroupWindow(opened);
+            window.Manager.OpenGroupWindow(window, opened);
     }
 
     /// <summary>A closed group's Delete Group: asks first, then its tabs go on the reopen stack as one batch.</summary>

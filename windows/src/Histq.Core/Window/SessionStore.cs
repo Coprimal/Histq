@@ -219,6 +219,24 @@ public sealed class SessionStore
         finished.Remove(key);
     }
 
+    /// <summary>
+    /// <see cref="WriteNow"/> without blocking the caller: the identity key and the write run on the writer chain, off
+    /// the store's context; the task ends (or throws the write's error) back on the caller's context, which must be the
+    /// store's (the UI thread), where the key is opened again. Returns the file's identity key.
+    /// </summary>
+    public async Task<string> WriteNowAsync(WorkspaceFile file, string path)
+    {
+        string? key = null;
+        await Enqueue(() =>
+        {
+            key = WorkspaceFile.IdentityKey(path);
+            file.Write(path);
+            written[key] = file;
+        });
+        finished.Remove(key!);
+        return key!;
+    }
+
     /// <summary>Writes <paramref name="session"/> to <paramref name="file"/> as the store does: pretty-printed with
     /// sorted keys, atomically, mode 600 off Windows (it lists the user's repo paths).</summary>
     internal static void WriteSession(SavedSession session, string file) =>

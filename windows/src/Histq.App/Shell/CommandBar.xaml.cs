@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Histq.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -10,8 +11,8 @@ namespace Histq.App.Shell;
 /// <summary>
 /// The command bar at the top of the sheet (design header-and-tab-row.md §1.3, ported from App/Window/HeaderToolbar.swift
 /// at 6fa6d40): the repo dropdown (the selected tab's folder name, "Histq" on a Welcome tab; its menu lists the window's
-/// repo tabs, the recent repos not open here and Open…) and the workspace label (workspace windows only, with its
-/// read-only or not-saved warning). The branch dropdown, the profile chip and the action capsules are absent until the
+/// repo tabs, the recent repos not open here and Open…) and the workspace dropdown (workspace windows only, with its
+/// read-only or not-saved warning; its menu has the workspace commands and the other recent workspaces). The branch dropdown, the profile chip and the action capsules are absent until the
 /// milestone that implements each action. A ToolBar named "Command bar" in UI Automation.
 /// </summary>
 public sealed partial class CommandBar : UserControl
@@ -35,6 +36,7 @@ public sealed partial class CommandBar : UserControl
     {
         InitializeComponent();
         RepoMenu.Opening += (_, _) => FillRepoMenu();
+        WorkspaceMenu.Opening += (_, _) => FillWorkspaceMenu();
     }
 
     internal void Attach(MainWindow window) => _window = window;
@@ -83,6 +85,7 @@ public sealed partial class CommandBar : UserControl
             _workspaceShown = shown;
             WorkspaceText.Text = shown.Text;
             ToolTipService.SetToolTip(WorkspaceLabel, shown.ToolTip);
+            AutomationProperties.SetHelpText(WorkspaceLabel, shown.ToolTip);
             WorkspaceIcon.Glyph = shown.IsWarning ? WarningGlyph : WorkspaceGlyph;
             if (shown.IsWarning)
                 WorkspaceIcon.Foreground = (Brush)Resources["WorkspaceWarningBrush"];
@@ -145,11 +148,91 @@ public sealed partial class CommandBar : UserControl
         RepoMenu.Items.Add(openItem);
     }
 
+    /// <summary>
+    /// The workspace menu, built as it opens (HeaderToolbar.swift workspaceEntries): Show in Explorer, Save Workspace
+    /// As…, Close Workspace, the recent workspaces other than this one (a pick opens it, or brings it forward), then New
+    /// Workspace and Open Workspace…. Listing compares the keys as strings only, never checking the disk.
+    /// </summary>
+    private void FillWorkspaceMenu()
+    {
+        WorkspaceMenu.Items.Clear();
+        if (_window.Workspace is not { } workspace)
+            return;
+        WindowManager manager = _window.Manager;
+        WorkspaceMenu.Items.Add(Plain("Show in Explorer", () => ShowInExplorer(_window, workspace.FilePath)));
+        WorkspaceMenu.Items.Add(Plain("Save Workspace As…", () => manager.SaveWorkspaceAs(_window)));
+        WorkspaceMenu.Items.Add(Plain("Close Workspace", () => manager.CloseWorkspace(_window)));
+
+        PathFlavor flavor = PathFlavor.Host;
+        var recent = manager.RecentWorkspaces.Paths.Where(path => !flavor.KeysEqual(path, workspace.Key)).ToList();
+        if (recent.Count > 0)
+        {
+            WorkspaceMenu.Items.Add(new MenuFlyoutSeparator());
+            WorkspaceMenu.Items.Add(new MenuFlyoutItem { Text = "Recent", IsEnabled = false });
+            foreach (string path in recent)
+            {
+                MenuFlyoutItem item = Plain(
+                    DisplayText.Sanitize(Path.GetFileNameWithoutExtension(flavor.LastComponent(path))),
+                    () => manager.OpenWorkspace(path, _window));
+                ToolTipService.SetToolTip(item, DisplayText.Sanitize(path));
+                WorkspaceMenu.Items.Add(item);
+            }
+        }
+
+        WorkspaceMenu.Items.Add(new MenuFlyoutSeparator());
+        WorkspaceMenu.Items.Add(Plain("New Workspace", () => manager.NewWorkspace(_window)));
+        WorkspaceMenu.Items.Add(Plain("Open Workspace…", () => manager.ChooseWorkspace(_window)));
+    }
+
+    /// <summary>A menu item that runs <paramref name="action"/>.</summary>
+    private static MenuFlyoutItem Plain(string text, Action action)
+    {
+        var item = new MenuFlyoutItem { Text = text };
+        item.Click += (_, _) => action();
+        return item;
+    }
+
     /// <summary>A separator, unless the menu is still empty.</summary>
     private void AddSeparator()
     {
         if (RepoMenu.Items.Count > 0)
             RepoMenu.Items.Add(new MenuFlyoutSeparator());
+    }
+
+    /// <summary>Show in Explorer (the Mac's Reveal in Finder): Explorer opens the workspace file's folder with the file
+    /// selected. The file check and the launch run off the UI thread; the path is passed as an argument, never through
+    /// a shell. A file that is gone, or an Explorer that does not start, shows a toast.</summary>
+    private static async void ShowInExplorer(MainWindow window, string path)
+    {
+        string? problem;
+        try
+        {
+            problem = await Task.Run(() => Reveal(path));
+        }
+        catch (Exception)
+        {
+            // Expected (a path Windows refuses, Explorer not starting): a toast, not a crash.log entry.
+            problem = "Explorer could not be opened.";
+        }
+
+        if (problem is not null)
+            window.ShowToast("Show in Explorer", problem);
+    }
+
+    /// <summary>Starts Explorer with the file at <paramref name="path"/> selected; the reason it did not, or null.</summary>
+    private static string? Reveal(string path)
+    {
+        string full = Path.GetFullPath(path);
+        if (!File.Exists(full))
+            return "The workspace file is gone.";
+
+        string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        var start = new ProcessStartInfo(explorer) { UseShellExecute = false };
+        start.ArgumentList.Add("/select,");
+        start.ArgumentList.Add(full);
+        // Explorer hands the window to its running instance and exits with 1: its exit code means nothing.
+        using Process? process = Process.Start(start);
+        return process is null ? "Explorer could not be opened." : null;
     }
 }
 

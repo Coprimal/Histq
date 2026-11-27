@@ -17,6 +17,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Windows.Graphics;
+using WinRT.Interop;
 
 namespace Histq.App;
 
@@ -50,6 +51,34 @@ public sealed partial class MainWindow : Window
     /// <summary>The window in the Window menu: its selected tab's title.</summary>
     internal string MenuTitle => Tabs.SelectedIndex is { } index ? DisplayText.Sanitize(Tabs.Tabs[index].Title) : "Histq";
 
+    /// <summary>The window as Move Tab to Window › lists it (TabMenu.windowTitle): its selected tab's title, then its
+    /// workspace's name or "Untitled", sanitized.</summary>
+    internal string MoveTitle =>
+        (Tabs.SelectedIndex is { } index ? DisplayText.Sanitize(Tabs.Tabs[index].Title) : "New Tab") + " \u2014 "
+        + (Workspace is { } workspace ? DisplayText.Sanitize(workspace.Name) : "Untitled");
+
+    /// <summary>The workspace the window belongs to; null for an Untitled window. Setting it shows its label in the
+    /// command bar.</summary>
+    internal WorkspaceDocument? Workspace
+    {
+        get => _workspace;
+        set
+        {
+            _workspace = value;
+            ShowWorkspace();
+        }
+    }
+
+    /// <summary>The window's id in its workspace file: the file's on restore, else a new one. Stable while it is open.</summary>
+    internal Guid WindowId { get; set; } = Guid.NewGuid();
+
+    /// <summary>The window's place in the order the windows opened (a workspace's windows that are not in its file yet
+    /// are written in this order).</summary>
+    internal long Sequence { get; init; }
+
+    /// <summary>The window's handle (a tab dropped on it is found by the window under the pointer).</summary>
+    internal nint Handle => WindowNative.GetWindowHandle(this);
+
     /// <summary>The tabs or the frame changed: the session is saved (<see cref="WindowManager"/>).</summary>
     internal event EventHandler? StateChanged;
 
@@ -61,6 +90,8 @@ public sealed partial class MainWindow : Window
     /// <summary>The window's last frame in the normal (not minimized or maximized) state, in physical screen pixels:
     /// what the session saves, read without touching a closing window.</summary>
     private RectInt32 _frame;
+
+    private WorkspaceDocument? _workspace;
 
 #if HISTQ_QA
     private GraphCanvas? _qaGraph;
@@ -172,6 +203,16 @@ public sealed partial class MainWindow : Window
     internal SavedWindow Saved(int order) =>
         new(_frame.X, _frame.Y, _frame.Width, _frame.Height, Group: order, TabIndex: 0, IsSelectedInGroup: true,
             Tabs.SavedTabs, Tabs.SavedSelectedIndex, Tabs.SavedTabGroups, Tabs.SavedClosedGroups);
+
+    /// <summary>The window as <c>session.json</c> keeps a workspace window (<see cref="WorkspaceLayout"/>): as
+    /// <see cref="Saved"/>, with its selected tab's path and its collapsed groups instead of its tabs (those are in
+    /// the workspace file).</summary>
+    internal WorkspaceLayout.Window LayoutWindow(int order) =>
+        Tabs.LayoutWindow(WindowId, _frame.X, _frame.Y, _frame.Width, _frame.Height, order);
+
+    /// <summary>The workspace label in the command bar from <see cref="Workspace"/> as it is now (name, read-only, last
+    /// write's error).</summary>
+    internal void ShowWorkspace() => AppCommandBar.ShowWorkspace(_workspace);
 
     /// <summary>
     /// Takes the saved frame (physical screen pixels, as <see cref="Saved"/> writes it) when it is big enough and its
