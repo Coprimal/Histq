@@ -1,3 +1,4 @@
+using Histq.App.Theme;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -31,8 +32,8 @@ public sealed partial class SpikeTabStrip : StackPanel
         Spacing = TabGap;
         VerticalAlignment = VerticalAlignment.Bottom;
 
-        var selectedText = new SolidColorBrush(Colors.White);
-        var unselectedText = new SolidColorBrush(ColorHelper.FromArgb(0x99, 0xFF, 0xFF, 0xFF));
+        Brush selectedText = PaletteResources.Brush("TabTitleSelectedBrush");
+        Brush unselectedText = PaletteResources.Brush("TabTitleBrush");
         _tabs = new SpikeTab[TabCount];
         for (int i = 0; i < TabCount; i++)
         {

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The command bar at the top of the page sheet (design header-and-tab-row.md §1.3), client area: nothing here drags
+    the window. Leading: the repo dropdown, then the workspace label (workspace windows only). The branch dropdown, the
+    profile chip and the trailing capsules come with the milestone that implements each action (absent until then).
+-->
+<UserControl
+    x:Class="Histq.App.Shell.CommandBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Height="{StaticResource CommandBarHeight}">
+    <UserControl.Resources>
+        <!-- Capsules: fill white 0.06, hover 0.10, pressed 0.20, no border (design §1.3). -->
+        <StaticResource x:Key="ButtonBackground" ResourceKey="TabFillBrush" />
+        <StaticResource x:Key="ButtonBackgroundPointerOver" ResourceKey="HoverFillBrush" />
+        <StaticResource x:Key="ButtonBackgroundPressed" ResourceKey="PressedFillBrush" />
+        <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+        <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+        <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+        <!-- A read-only or unsaved workspace's triangle: the orange accent (lane 1), as the Mac's. -->
+        <SolidColorBrush x:Key="WorkspaceWarningBrush" Color="{StaticResource Lane1Color}" />
+    </UserControl.Resources>
+
+    <Grid Padding="8,0,8,0" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Repo dropdown: a fixed width, so nothing after it moves between tabs; the title is cut with an ellipsis.
+             Its menu is filled when it opens. -->
+        <DropDownButton
+            x:Name="RepoButton"
+            Width="154"
+            Height="{StaticResource CommandButtonHeight}"
+            Padding="10,0,8,0"
+            VerticalAlignment="Center"
+            HorizontalContentAlignment="Stretch"
+            AutomationProperties.Name="Repository"
+            CornerRadius="14">
+            <Grid ColumnSpacing="6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <FontIcon FontSize="{StaticResource CommandIconSize}" Glyph="&#xE82D;" />
+                <TextBlock
+                    x:Name="RepoTitle"
+                    Grid.Column="1"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    Text="Histq"
+                    TextTrimming="CharacterEllipsis" />
+            </Grid>
+            <DropDownButton.Flyout>
+                <MenuFlyout x:Name="RepoMenu" Placement="BottomEdgeAlignedLeft" />
+            </DropDownButton.Flyout>
+        </DropDownButton>
+
+        <!-- Workspace label: its name, the file's path as tooltip; a warning when the file is read-only or its last
+             write failed. Collapsed in a window that is not a workspace's. -->
+        <StackPanel
+            x:Name="WorkspaceLabel"
+            Grid.Column="1"
+            VerticalAlignment="Center"
+            Orientation="Horizontal"
+            Spacing="6"
+            Visibility="Collapsed">
+            <FontIcon x:Name="WorkspaceIcon" FontSize="{StaticResource CommandIconSize}" Glyph="&#xE81E;" />
+            <TextBlock
+                x:Name="WorkspaceText"
+                VerticalAlignment="Center"
+                FontSize="13" />
+        </StackPanel>
+    </Grid>
+</UserControl>

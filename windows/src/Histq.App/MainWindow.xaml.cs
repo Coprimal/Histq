@@ -1,39 +1,75 @@
 using System.Reflection;
+#if HISTQ_QA
 using Histq.App.Graph;
+#endif
 using Histq.App.Shell;
+using Histq.App.Theme;
+using Histq.Core;
 using Microsoft.UI;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+#if HISTQ_QA
+using Microsoft.UI.Xaml.Automation;
+#endif
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
+using Windows.Graphics;
 
 namespace Histq.App;
 
 /// <summary>
-/// The main window: Mica (BaseAlt) where supported, else DesktopAcrylic, else a solid #1C1C1E (macOS WindowGlass base).
-/// The content extends into a 48 epx title bar that is the tab row (design header-and-tab-row.md §1, layout B); the
-/// page sheet under it is joined to the selected tab (§3.2).
+/// The main window: Mica (BaseAlt) where supported, else DesktopAcrylic, else a solid WindowBaseColor (macOS WindowGlass
+/// base, Theme/Palette.xaml).
+/// The content extends into a 48 epx title bar that is the tab row (design header-and-tab-row.md §1, layout B; Shell/
+/// TitleBar, with the app menu); the page sheet under it is joined to the selected tab (§3.2), with the command bar
+/// (Shell/CommandBar) on top and the selected tab's content (<see cref="TabContentHost"/>) under it; the 30 epx footer
+/// is the gap under the sheet. One window's tabs are a <see cref="WindowTabs"/>, changed only through
+/// <see cref="Apply"/>. The title bar still shows the phase 5 spike tab strip, which is not bound to them (phase 9
+/// makes the real row).
 /// </summary>
 public sealed partial class MainWindow : Window
 {
-    /// <summary>The entry assembly's informational version (the build's Version plus any +commit suffix).</summary>
+    /// <summary>The entry assembly's informational version without its +commit suffix (the build's Version).</summary>
     private static string Version { get; } =
-        Assembly.GetEntryAssembly()?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? "0.0.0";
+        (Assembly.GetEntryAssembly()?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? "0.0.0").Split('+')[0];
 
-    /// <summary>The title bar's Passthrough regions; call <see cref="TitleBarRegions.Refresh"/> after a tab-model change.</summary>
-    internal TitleBarRegions TitleBarRegions { get; }
+    /// <summary>A saved frame smaller than this (physical pixels) is not restored.</summary>
+    private const int MinRestoredWidth = 400;
+    private const int MinRestoredHeight = 300;
 
-    /// <summary>The commit graph in the sheet (the spike harness sets its rows and drives it).</summary>
-    internal GraphCanvas GraphCanvas => CommitGraph;
+    /// <summary>The app's windows: the app menu's and the command bar's actions go through it.</summary>
+    internal WindowManager Manager { get; }
+
+    /// <summary>This window's tabs; change them only through <see cref="Apply"/>.</summary>
+    internal WindowTabs Tabs { get; }
+
+    /// <summary>The window in the Window menu: its selected tab's title.</summary>
+    internal string MenuTitle => Tabs.SelectedIndex is { } index ? Tabs.Tabs[index].Title : "Histq";
+
+    /// <summary>The tabs or the frame changed: the session is saved (<see cref="WindowManager"/>).</summary>
+    internal event EventHandler? StateChanged;
 
     // The inputs SheetPath was last built from, so a layout pass that changed nothing does not rebuild it.
     private Rect _sheetRect;
     private Rect? _sheetTab;
     private bool _sheetBuilt;
 
+    /// <summary>The window's last frame in the normal (not minimized or maximized) state, in physical screen pixels:
+    /// what the session saves, read without touching a closing window.</summary>
+    private RectInt32 _frame;
+
 #if HISTQ_QA
+    private GraphCanvas? _qaGraph;
+
+    /// <summary>
+    /// The commit graph the spike harness sets its rows in and drives: made on first use and shown in place of the
+    /// selected tab's content (the graph is the tab content of a spike run).
+    /// </summary>
+    internal GraphCanvas GraphCanvas => _qaGraph ??= ContentHost.ShowQaContent(NewQaGraph());
+
     /// <summary>
     /// QA bisect switch: while true, RootGrid.LayoutUpdated no longer rebuilds the sheet (selection and RootGrid size
     /// changes still do). The spike harness sets it for the scroll probe only.
@@ -50,8 +86,14 @@ public sealed partial class MainWindow : Window
     internal int QaTransformToVisualCount { get; set; }
 #endif
 
-    public MainWindow()
+    /// <param name="manager">The app's windows.</param>
+    /// <param name="tabs">The window's tabs; the caller restores them through <see cref="Apply"/>.</param>
+    /// <param name="saved">The saved window whose frame it takes, when that frame fits on a display; null for a new
+    /// window.</param>
+    internal MainWindow(WindowManager manager, WindowTabs tabs, SavedWindow? saved)
     {
+        Manager = manager;
+        Tabs = tabs;
         InitializeComponent();
         Title = "Histq";
 
@@ -60,18 +102,16 @@ public sealed partial class MainWindow : Window
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         StyleCaptionButtons(AppWindow.TitleBar);
 
-        TitleBarRegions = new TitleBarRegions(
-            this,
-            AppTitleBar,
-            LeftInsetColumn,
-            RightInsetColumn,
-            () => TabStrip.Tabs.Where(IsTabShown).Prepend(LogoButton));
-        TabStrip.TitleBarRegions = TitleBarRegions;
+        // The app menu's shortcuts, Alt and F10 on the root, so they work wherever the focus is.
+        AppTitleBar.Attach(this, RootGrid);
+        AppCommandBar.Attach(this);
+        ContentHost.Attach(this);
 
         // Selection rebuilds the joined sheet in the same input event, so it moves in the same frame as the tab
         // highlight; every layout pass (resize, scale change, title bar insets) catches position changes.
-        TabStrip.SelectionChanged += (_, _) => UpdateSheet();
+        AppTitleBar.TabStrip.SelectionChanged += (_, _) => UpdateSheet();
 #if HISTQ_QA
+        AppTitleBar.QaTransformCounted = () => QaTransformToVisualCount++;
         RootGrid.LayoutUpdated += (_, _) =>
         {
             QaLayoutUpdatedCount++;
@@ -93,14 +133,94 @@ public sealed partial class MainWindow : Window
         else if (DesktopAcrylicController.IsSupported())
             SystemBackdrop = new DesktopAcrylicBackdrop();
         else
-            RootGrid.Background = new SolidColorBrush(ColorHelper.FromArgb(0xFF, 0x1C, 0x1C, 0x1E));
+            RootGrid.Background = PaletteResources.Brush("WindowBaseBrush");
 
-        VersionText.Text = $"Histq {Version}";
+        VersionText.Text = $"v{Version}";
+
+        if (saved is not null)
+            RestoreFrame(saved);
+        _frame = new RectInt32(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
+        AppWindow.Changed += OnAppWindowChanged;
     }
 
     /// <summary>
-    /// Rebuilds the joined sheet: inset 8 epx from the window's left, right and bottom edges, from the title bar's bottom
-    /// edge down, with the selected tab joined to it.
+    /// Runs <paramref name="change"/> on the tabs, then brings the content, the command bar and the footer in line with
+    /// them (the tab's content swaps in this call, so in the same frame) and saves the session.
+    /// </summary>
+    internal void Apply(Action<WindowTabs> change)
+    {
+        change(Tabs);
+        ContentHost.Sync(Tabs);
+        AppCommandBar.Update();
+        UpdateFooter();
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>The recent repos changed (saved after an open): its Welcome page lists them again.</summary>
+    internal void ShowRecentRepos() => ContentHost.ShowRecentRepos();
+
+    /// <summary>
+    /// The window as the session saves it: its own native "group" <paramref name="order"/> (front first; Windows has no
+    /// native window tabs, so each window is alone in its group), its normal frame in physical screen pixels, its tabs.
+    /// </summary>
+    internal SavedWindow Saved(int order) =>
+        new(_frame.X, _frame.Y, _frame.Width, _frame.Height, Group: order, TabIndex: 0, IsSelectedInGroup: true,
+            Tabs.SavedTabs, Tabs.SavedSelectedIndex, Tabs.SavedTabGroups, Tabs.SavedClosedGroups);
+
+    /// <summary>
+    /// Takes the saved frame (physical screen pixels, as <see cref="Saved"/> writes it) when it is big enough and its
+    /// top edge lies on a display's work area, so the title bar can always be reached; else the system places the window.
+    /// </summary>
+    private void RestoreFrame(SavedWindow saved)
+    {
+        if (!double.IsFinite(saved.X) || !double.IsFinite(saved.Y) || !double.IsFinite(saved.Width)
+            || !double.IsFinite(saved.Height) || saved.Width < MinRestoredWidth || saved.Height < MinRestoredHeight
+            || Math.Abs(saved.X) > int.MaxValue / 2 || Math.Abs(saved.Y) > int.MaxValue / 2
+            || saved.Width > int.MaxValue / 2 || saved.Height > int.MaxValue / 2)
+            return;
+
+        var frame = new RectInt32((int)saved.X, (int)saved.Y, (int)saved.Width, (int)saved.Height);
+        if (DisplayArea.GetFromRect(frame, DisplayAreaFallback.None) is not { } display)
+            return;
+        RectInt32 work = display.WorkArea;
+        bool topOnScreen = frame.Y >= work.Y && frame.Y < work.Y + work.Height
+            && frame.X < work.X + work.Width && frame.X + frame.Width > work.X;
+        if (topOnScreen)
+            AppWindow.MoveAndResize(frame);
+    }
+
+    private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (!args.DidPositionChange && !args.DidSizeChange)
+            return;
+        if (sender.Presenter is OverlappedPresenter { State: not OverlappedPresenterState.Restored })
+            return;
+        _frame = new RectInt32(sender.Position.X, sender.Position.Y, sender.Size.Width, sender.Size.Height);
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>The footer's path: the selected tab's folder (none for a Welcome tab), its tooltip the same.</summary>
+    private void UpdateFooter()
+    {
+        string? path = Tabs.SelectedIndex is { } index ? Tabs.Tabs[index].Path : null;
+        if (string.Equals(PathText.Text, path ?? string.Empty, StringComparison.Ordinal))
+            return;
+        PathText.Text = path ?? string.Empty;
+        ToolTipService.SetToolTip(PathText, path);
+    }
+
+#if HISTQ_QA
+    private static GraphCanvas NewQaGraph()
+    {
+        var graph = new GraphCanvas();
+        AutomationProperties.SetName(graph, "Commit graph");
+        return graph;
+    }
+#endif
+
+    /// <summary>
+    /// Rebuilds the joined sheet: inset 8 epx from the window's left and right edges, from the title bar's bottom edge
+    /// down to the footer's top, with the selected tab joined to it.
     /// </summary>
     private void UpdateSheet()
     {
@@ -110,7 +230,7 @@ public sealed partial class MainWindow : Window
             inset,
             top,
             Math.Max(0, RootGrid.ActualWidth - 2 * inset),
-            Math.Max(0, RootGrid.ActualHeight - top - inset));
+            Math.Max(0, RootGrid.ActualHeight - top - Footer.ActualHeight));
         Rect? tab = SelectedTabBounds();
         if (_sheetBuilt && sheet == _sheetRect && tab == _sheetTab)
             return;
@@ -127,8 +247,9 @@ public sealed partial class MainWindow : Window
     /// <summary>The selected tab's bounds in RootGrid (and so SheetPath) coordinates, or null before layout.</summary>
     private Rect? SelectedTabBounds()
     {
-        FrameworkElement tab = TabStrip.Tabs[TabStrip.SelectedIndex];
-        if (!IsTabShown(tab) || tab.ActualHeight <= 0)
+        SpikeTabStrip strip = AppTitleBar.TabStrip;
+        FrameworkElement tab = strip.Tabs[strip.SelectedIndex];
+        if (!AppTitleBar.IsTabShown(tab) || tab.ActualHeight <= 0)
             return null;
 #if HISTQ_QA
         QaTransformToVisualCount++;
@@ -137,37 +258,20 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// True when the tab ends before the free drag column. A tab that a narrow window clips takes no input and gets no
-    /// sheet bump, so the drag column stays caption (phase 9 replaces this with the scrolling track).
-    /// </summary>
-    private bool IsTabShown(FrameworkElement tab)
-    {
-        if (tab.XamlRoot is null || tab.ActualWidth <= 0)
-            return false;
-        // The inset width, not the star column's ActualWidth: Refresh sets it just before it asks for the elements.
-        double limit = AppTitleBar.ActualWidth - RightInsetColumn.Width.Value - DragColumn.MinWidth;
-#if HISTQ_QA
-        QaTransformToVisualCount++;
-#endif
-        double right = tab.TransformToVisual(AppTitleBar).TransformPoint(new Point(tab.ActualWidth, 0)).X;
-        return right <= limit + 0.5;
-    }
-
-    /// <summary>
     /// Caption buttons (design §1): transparent backgrounds, hover fill white at 0.10, pressed 0.20; Close hover stays
     /// the system red. The system ignores alpha on foreground colors, so white at 0.85 (active) and 0.45 (inactive) are
-    /// pre-blended over the #1C1C1E window base.
+    /// pre-blended over the window base (CaptionForegroundColor, CaptionInactiveForegroundColor).
     /// </summary>
     private static void StyleCaptionButtons(AppWindowTitleBar bar)
     {
-        var foreground = ColorHelper.FromArgb(0xFF, 0xDD, 0xDD, 0xDD);
+        var foreground = PaletteResources.Color("CaptionForegroundColor");
         bar.ButtonBackgroundColor = Colors.Transparent;
         bar.ButtonInactiveBackgroundColor = Colors.Transparent;
-        bar.ButtonHoverBackgroundColor = ColorHelper.FromArgb(0x1A, 0xFF, 0xFF, 0xFF);
-        bar.ButtonPressedBackgroundColor = ColorHelper.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
+        bar.ButtonHoverBackgroundColor = PaletteResources.Color("HoverFillColor");
+        bar.ButtonPressedBackgroundColor = PaletteResources.Color("PressedFillColor");
         bar.ButtonForegroundColor = foreground;
         bar.ButtonHoverForegroundColor = foreground;
         bar.ButtonPressedForegroundColor = foreground;
-        bar.ButtonInactiveForegroundColor = ColorHelper.FromArgb(0xFF, 0x82, 0x82, 0x83);
+        bar.ButtonInactiveForegroundColor = PaletteResources.Color("CaptionInactiveForegroundColor");
     }
 }

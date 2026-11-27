@@ -1,4 +1,5 @@
 using System.Numerics;
+using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
@@ -63,53 +64,80 @@ internal sealed record GraphMetrics(double RowHeight)
 
 /// <summary>
 /// The graph's Vivid colors by palette index (App/GlassStyle.swift at 6fa6d40): lines and nodes, the faint row band
-/// (0.09) and the selected row's band (0.28); the grey of stash rows and other worktrees' WIP rows.
+/// and the selected row's band; the grey of stash rows and other worktrees' WIP rows. Read once from Theme/Palette.xaml
+/// on the first draw (the UI thread), so no draw call looks a resource up.
 /// </summary>
 internal static class GraphPalette
 {
-    // Blue, orange, green, pink, cyan, yellow, purple, red.
-    private static readonly Color[] Lines =
-    [
-        Rgb(0x4091FD), Rgb(0xFC9F30), Rgb(0x58CD78), Rgb(0xE8519F),
-        Rgb(0x44D4E2), Rgb(0xE9DD3C), Rgb(0xC58FF3), Rgb(0xEF6856),
-    ];
+    private static ColorSet? _colors;
 
-    private static readonly Color[] Bands = WithAlpha(Lines, 0.09);
-    private static readonly Color[] SelectedBands = WithAlpha(Lines, 0.28);
+    private static ColorSet Current => _colors ??= new ColorSet();
 
-    private static readonly Color Stash = Rgb(0x8E8E93);
-    private static readonly Color StashBand = WithAlpha(Stash, 0.09);
-    private static readonly Color StashSelectedBand = WithAlpha(Stash, 0.28);
-
-    /// <summary>The inside of a hollow node (WIP, stash), so the lines under it do not show. #252527</summary>
-    public static readonly Color Surface = Rgb(0x252527);
+    /// <summary>The inside of a hollow node (WIP, stash), so the lines under it do not show.</summary>
+    public static Color Surface => Current.Surface;
 
     /// <summary>A row's subject: white at 0.85, full white on the selected row.</summary>
-    public static readonly Color SubjectText = ColorHelper.FromArgb(0xD9, 0xFF, 0xFF, 0xFF);
+    public static Color SubjectText => Current.SubjectText;
 
-    public static readonly Color SelectedSubjectText = Colors.White;
+    public static Color SelectedSubjectText => Current.SelectedSubjectText;
+
+    /// <summary>The scroll thumb at rest, and hovered or dragged.</summary>
+    public static Color ScrollThumbRest => Current.ScrollThumbRest;
+
+    public static Color ScrollThumbActive => Current.ScrollThumbActive;
 
     /// <summary>A <see cref="GraphRow"/> or <see cref="GraphSegment"/> color: its lane color, or the stash grey.</summary>
-    public static Color Lane(int color) =>
-        color == GraphLayout.StashColor ? Stash : Lines[(int)((uint)color % (uint)Lines.Length)];
+    public static Color Lane(int color)
+    {
+        ColorSet colors = Current;
+        return color == GraphLayout.StashColor
+            ? colors.Stash
+            : colors.Lines[(int)((uint)color % (uint)colors.Lines.Length)];
+    }
 
     /// <summary>The band of a row of <paramref name="color"/>, brighter on the selected row.</summary>
     public static Color Band(int color, bool selected)
     {
+        ColorSet colors = Current;
         if (color == GraphLayout.StashColor)
-            return selected ? StashSelectedBand : StashBand;
-        Color[] bands = selected ? SelectedBands : Bands;
+            return selected ? colors.StashSelectedBand : colors.StashBand;
+        Color[] bands = selected ? colors.SelectedBands : colors.Bands;
         return bands[(int)((uint)color % (uint)bands.Length)];
     }
-
-    private static Color Rgb(int rgb) =>
-        ColorHelper.FromArgb(0xFF, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
 
     private static Color WithAlpha(Color color, double alpha) =>
         ColorHelper.FromArgb((byte)Math.Round(alpha * 255), color.R, color.G, color.B);
 
     private static Color[] WithAlpha(Color[] colors, double alpha) =>
         Array.ConvertAll(colors, color => WithAlpha(color, alpha));
+
+    private sealed class ColorSet
+    {
+        // Blue, orange, green, pink, cyan, yellow, purple, red.
+        public readonly Color[] Lines =
+            Enumerable.Range(0, 8).Select(i => PaletteResources.Color($"Lane{i}Color")).ToArray();
+
+        public readonly Color Stash = PaletteResources.Color("GraphStashColor");
+        public readonly Color Surface = PaletteResources.Color("SheetCardOpaqueColor");
+        public readonly Color SubjectText = PaletteResources.Color("GraphSubjectTextColor");
+        public readonly Color SelectedSubjectText = PaletteResources.Color("GraphSelectedSubjectTextColor");
+        public readonly Color ScrollThumbRest = PaletteResources.Color("ScrollThumbRestColor");
+        public readonly Color ScrollThumbActive = PaletteResources.Color("ScrollThumbActiveColor");
+        public readonly Color[] Bands;
+        public readonly Color[] SelectedBands;
+        public readonly Color StashBand;
+        public readonly Color StashSelectedBand;
+
+        public ColorSet()
+        {
+            double band = PaletteResources.Double("GraphBandOpacity");
+            double selectedBand = PaletteResources.Double("GraphSelectedBandOpacity");
+            Bands = WithAlpha(Lines, band);
+            SelectedBands = WithAlpha(Lines, selectedBand);
+            StashBand = WithAlpha(Stash, band);
+            StashSelectedBand = WithAlpha(Stash, selectedBand);
+        }
+    }
 }
 
 /// <summary>
@@ -390,9 +418,6 @@ internal static class GraphScrollBar
 
     public const double MinThumbLength = 24;
 
-    private static readonly Color RestColor = ColorHelper.FromArgb(0x59, 0xFF, 0xFF, 0xFF);
-    private static readonly Color ActiveColor = ColorHelper.FromArgb(0x8C, 0xFF, 0xFF, 0xFF);
-
     /// <summary>The track's length in a canvas <paramref name="height"/> tall: the height less the insets.</summary>
     public static double TrackLength(double height) => Math.Max(0, height - 2 * Inset);
 
@@ -422,7 +447,7 @@ internal static class GraphScrollBar
         CanvasDrawingSession ds, double width, double thumbTop, double thumbLength, bool active, double opacity)
     {
         double thumbWidth = active ? ActiveWidth : RestWidth;
-        Color color = active ? ActiveColor : RestColor;
+        Color color = active ? GraphPalette.ScrollThumbActive : GraphPalette.ScrollThumbRest;
         byte alpha = (byte)Math.Round(color.A * Math.Clamp(opacity, 0, 1));
         float radius = (float)(thumbWidth / 2);
         ds.FillRoundedRectangle(

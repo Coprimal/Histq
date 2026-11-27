@@ -31,6 +31,14 @@ public sealed class WindowTabs
     {
     }
 
+    /// <summary>
+    /// One Welcome tab, selected, for a window whose tabs are all the user's own (their <c>session.json</c>, folders they
+    /// picked): a folder is there when it still opens as a repo, a UNC or device one included
+    /// (<see cref="SavedSession.IsUserRepository"/>). Never for a window holding tabs read from a received
+    /// <c>.histqws</c>: those use <see cref="WindowTabs()"/>.
+    /// </summary>
+    public static WindowTabs ForUserTabs() => new(PathFlavor.Host, SavedSession.IsUserRepository);
+
     /// <param name="folderExists">Whether a repo folder is there (else its tab shows "Repo not found").</param>
     internal WindowTabs(PathFlavor flavor, Func<string, bool>? folderExists)
     {

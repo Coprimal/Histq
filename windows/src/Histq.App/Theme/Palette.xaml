@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The app's colors, metrics and motion (dark only, one value per token), ported from App/GlassStyle.swift at 6fa6d40
+    (Palette, Motion, BottomBarButtonStyle) and design/header-and-tab-row.md. Views take every color from here, never a
+    hex literal. Code that cannot use {StaticResource} (Win2D draws, AppWindow caption colors) reads them through
+    Theme/PaletteResources.cs. Alphas are round(a * 255): 0.06 = 0F, 0.08 = 14, 0.09 = 17, 0.10 = 1A, 0.14 = 24, ...
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Window glass (GlassStyle.swift Palette) -->
+    <!-- The tint over the window's backdrop: #1C1C1E at 0.6; the solid base where no backdrop is supported. -->
+    <Color x:Key="WindowTintColor">#991C1C1E</Color>
+    <Color x:Key="WindowBaseColor">#FF1C1C1E</Color>
+    <SolidColorBrush x:Key="WindowBaseBrush" Color="{StaticResource WindowBaseColor}" />
+    <Color x:Key="HoverFillColor">#1AFFFFFF</Color>
+    <SolidColorBrush x:Key="HoverFillBrush" Color="{StaticResource HoverFillColor}" />
+    <Color x:Key="PressedFillColor">#33FFFFFF</Color>
+    <SolidColorBrush x:Key="PressedFillBrush" Color="{StaticResource PressedFillColor}" />
+    <!-- The selected sidebar row's capsule and its 1 epx edge: neutral, no accent. -->
+    <Color x:Key="SelectedFillColor">#24FFFFFF</Color>
+    <Color x:Key="SelectedBorderColor">#1FFFFFFF</Color>
+    <!-- A hovered unselected tab, the command bar's capsules and other faint chips: white 0.06. -->
+    <Color x:Key="TabFillColor">#0FFFFFFF</Color>
+    <SolidColorBrush x:Key="TabFillBrush" Color="{StaticResource TabFillColor}" />
+    <!-- A tab in the multi-selection that is not the shown one: below the sheet, so it never outshines it. -->
+    <Color x:Key="MultiSelectFillColor">#14FFFFFF</Color>
+    <!-- A worktree box behind one repository's worktree tabs, and its 1 epx edge. White 0.045 / white 0.08 -->
+    <Color x:Key="WorktreeBoxFillColor">#0BFFFFFF</Color>
+    <Color x:Key="WorktreeBoxBorderColor">#14FFFFFF</Color>
+    <!-- The capsule bars of a loading placeholder, on a surface card. -->
+    <Color x:Key="SkeletonFillColor">#1AFFFFFF</Color>
+    <!-- Darkens a pressed button over its own fill. -->
+    <Color x:Key="PressedOverlayColor">#33000000</Color>
+    <!-- Dims the window behind an open modal or the command palette; darker around a spotlight's target. -->
+    <Color x:Key="ScrimColor">#8C000000</Color>
+    <Color x:Key="SpotlightScrimColor">#B3000000</Color>
+    <!-- The brand blue (the logo's mid blue): spotlight ring, primary buttons, the selected pills. -->
+    <Color x:Key="BrandAccentColor">#FF2F86FB</Color>
+    <SolidColorBrush x:Key="BrandAccentBrush" Color="{StaticResource BrandAccentColor}" />
+    <!-- Text and glyphs on the accent fill. -->
+    <Color x:Key="OnAccentColor">#FFFFFFFF</Color>
+    <!-- Red buttons (Delete Branch, Discard): OKLCH 0.61 0.135 25. -->
+    <Color x:Key="DestructiveFillColor">#FFC75E59</Color>
+    <!-- The WIP panel's Stage All button: OKLCH 0.61 0.115 152. -->
+    <Color x:Key="StageAllFillColor">#FF469760</Color>
+    <!-- Links on the pull request and issue pages: the accent lifted 30 % toward white. -->
+    <Color x:Key="LinkTextColor">#FF6DAAFC</Color>
+    <!-- A merged pull request's pill and box. -->
+    <Color x:Key="MergedToneColor">#FF8250DF</Color>
+    <!-- The WIP panel's Conflicted card: the conflict editor's gold. -->
+    <Color x:Key="ConflictToneColor">#FFF2B630</Color>
+    <!-- A success status in text: the diff's added green. -->
+    <Color x:Key="SuccessColor">#FF5CC98A</Color>
+    <!-- A primary button's label shadow. -->
+    <Color x:Key="OnPrimaryShadowColor">#66000000</Color>
+    <Color x:Key="SwitchOffFillColor">#38FFFFFF</Color>
+    <!-- The shadow of the switch's white knob. -->
+    <Color x:Key="KnobShadowColor">#33000000</Color>
+    <!-- Cards and panels, a step above the window. -->
+    <Color x:Key="SurfaceColor">#FF2C2C2E</Color>
+    <SolidColorBrush x:Key="SurfaceBrush" Color="{StaticResource SurfaceColor}" />
+    <!-- The outer container of the modals, the palette and the vertical tabs: between the window and its cards. -->
+    <Color x:Key="BgCardColor">#FF252527</Color>
+    <SolidColorBrush x:Key="BgCardBrush" Color="{StaticResource BgCardColor}" />
+    <!-- The page sheet joined to the selected tab: white 0.09 over the window glass. -->
+    <Color x:Key="SheetColor">#17FFFFFF</Color>
+    <SolidColorBrush x:Key="SheetBrush" Color="{StaticResource SheetColor}" />
+    <!-- The cards on the sheet: #232325 at 0.9, and their 1 epx edge (white 0.14). -->
+    <Color x:Key="SheetCardColor">#E6232325</Color>
+    <SolidColorBrush x:Key="SheetCardBrush" Color="{StaticResource SheetCardColor}" />
+    <Color x:Key="SheetCardBorderColor">#24FFFFFF</Color>
+    <SolidColorBrush x:Key="SheetCardBorderBrush" Color="{StaticResource SheetCardBorderColor}" />
+    <!-- What a sheet card looks like on the sheet, for draws that must paint opaque inside one (hollow graph nodes). -->
+    <Color x:Key="SheetCardOpaqueColor">#FF252527</Color>
+    <!-- Controls on a card, a step above surface. -->
+    <Color x:Key="InputSurfaceColor">#FF3A3A3C</Color>
+    <!-- A single-input modal's field, set into the modal's card. -->
+    <Color x:Key="ModalInputColor">#FF1A1A1C</Color>
+    <!-- Inline code (a branch name) in a modal's title and message. -->
+    <Color x:Key="InlineCodeFillColor">#1AFFFFFF</Color>
+    <!-- The 1 epx edge of cards and panels. -->
+    <Color x:Key="SurfaceBorderColor">#14FFFFFF</Color>
+    <SolidColorBrush x:Key="SurfaceBorderBrush" Color="{StaticResource SurfaceBorderColor}" />
+    <!-- The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom. -->
+    <LinearGradientBrush x:Key="RaisedRimBrush" StartPoint="0.5,0" EndPoint="0.5,1">
+        <GradientStop Offset="0" Color="#3DFFFFFF" />
+        <GradientStop Offset="0.45" Color="#0DFFFFFF" />
+        <GradientStop Offset="1" Color="#1AFFFFFF" />
+    </LinearGradientBrush>
+    <!-- The light at the top of a raised button's capsule, and of a raised card (top to center). -->
+    <LinearGradientBrush x:Key="ButtonSheenBrush" StartPoint="0.5,0" EndPoint="0.5,0.5">
+        <GradientStop Offset="0" Color="#14FFFFFF" />
+        <GradientStop Offset="1" Color="#00FFFFFF" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="CardSheenBrush" StartPoint="0.5,0" EndPoint="0.5,0.5">
+        <GradientStop Offset="0" Color="#0DFFFFFF" />
+        <GradientStop Offset="1" Color="#00FFFFFF" />
+    </LinearGradientBrush>
+    <!-- The shadows under a raised card (radius 6, y 3) and a raised button (radius 3, y 1.5). -->
+    <Color x:Key="CardShadowColor">#59000000</Color>
+    <Color x:Key="ButtonShadowColor">#59000000</Color>
+
+    <!-- Window chrome (design header-and-tab-row.md §1, §3) -->
+    <!-- Caption buttons: the system ignores alpha on their foregrounds, so white at 0.85 (active) and 0.45 (inactive)
+         are pre-blended over WindowBaseColor. Hover and pressed fills are HoverFillColor and PressedFillColor. -->
+    <Color x:Key="CaptionForegroundColor">#FFDDDDDD</Color>
+    <Color x:Key="CaptionInactiveForegroundColor">#FF828283</Color>
+    <!-- A tab's title: white 0.60, full white when selected. -->
+    <Color x:Key="TabTitleColor">#99FFFFFF</Color>
+    <SolidColorBrush x:Key="TabTitleBrush" Color="{StaticResource TabTitleColor}" />
+    <Color x:Key="TabTitleSelectedColor">#FFFFFFFF</Color>
+    <SolidColorBrush x:Key="TabTitleSelectedBrush" Color="{StaticResource TabTitleSelectedColor}" />
+    <!-- The pinned tabs' well (black 0.18, inner edge white 0.06) and the 1 epx divider after it (white 0.12). -->
+    <Color x:Key="PinnedWellFillColor">#2E000000</Color>
+    <Color x:Key="PinnedWellEdgeColor">#0FFFFFFF</Color>
+    <Color x:Key="TabRowDividerColor">#1FFFFFFF</Color>
+    <!-- The worktree head's branch glyph: white 0.45. -->
+    <Color x:Key="WorktreeHeadGlyphColor">#73FFFFFF</Color>
+
+    <!-- Commit graph and accent colors (Win2D reads them through GraphPalette) -->
+    <!-- The 8 accent colors, also the Vivid lane colors: blue, orange, green, pink, cyan, yellow, purple, red. Tab
+         iconColor indexes them from 0; a group's colorIndex 0 is GroupGreyColor, 1-8 these. -->
+    <Color x:Key="Lane0Color">#FF4091FD</Color>
+    <Color x:Key="Lane1Color">#FFFC9F30</Color>
+    <Color x:Key="Lane2Color">#FF58CD78</Color>
+    <Color x:Key="Lane3Color">#FFE8519F</Color>
+    <Color x:Key="Lane4Color">#FF44D4E2</Color>
+    <Color x:Key="Lane5Color">#FFE9DD3C</Color>
+    <Color x:Key="Lane6Color">#FFC58FF3</Color>
+    <Color x:Key="Lane7Color">#FFEF6856</Color>
+    <!-- The Gradient lane colors, one per column, in hue order: teal, blue, purple, magenta, pink, red, orange, yellow,
+         lime, mint. -->
+    <Color x:Key="GradientLane0Color">#FF4A9EBC</Color>
+    <Color x:Key="GradientLane1Color">#FF2D68EE</Color>
+    <Color x:Key="GradientLane2Color">#FF8218BB</Color>
+    <Color x:Key="GradientLane3Color">#FFB52EB1</Color>
+    <Color x:Key="GradientLane4Color">#FFC72A70</Color>
+    <Color x:Key="GradientLane5Color">#FFBC271B</Color>
+    <Color x:Key="GradientLane6Color">#FFE1673E</Color>
+    <Color x:Key="GradientLane7Color">#FFECCC54</Color>
+    <Color x:Key="GradientLane8Color">#FF92D755</Color>
+    <Color x:Key="GradientLane9Color">#FF66CBA0</Color>
+    <!-- A row's faint band (0.09), the selected row's band (0.28) and a badge or chip fill (0.38), as alphas of the
+         row's or group's color. -->
+    <x:Double x:Key="GraphBandOpacity">0.09</x:Double>
+    <x:Double x:Key="GraphSelectedBandOpacity">0.28</x:Double>
+    <x:Double x:Key="BadgeFillOpacity">0.38</x:Double>
+    <!-- A stash row's node, band and line, outside the lane colors: a neutral grey. -->
+    <Color x:Key="GraphStashColor">#FF8E8E93</Color>
+    <!-- A manual tab group's grey (colorIndex 0); its chip is this at BadgeFillOpacity. -->
+    <Color x:Key="GroupGreyColor">#FF8E8E93</Color>
+    <!-- Text and icons on a badge, and a tag badge's neutral fill (white 0.14). -->
+    <Color x:Key="GraphBadgeTextColor">#FFFFFFFF</Color>
+    <Color x:Key="GraphTagFillColor">#24FFFFFF</Color>
+    <!-- A row's subject: white 0.85, full white on the selected row. -->
+    <Color x:Key="GraphSubjectTextColor">#D9FFFFFF</Color>
+    <Color x:Key="GraphSelectedSubjectTextColor">#FFFFFFFF</Color>
+    <!-- The graph's scroll thumb: white 0.35 at rest, 0.55 hovered or dragged. -->
+    <Color x:Key="ScrollThumbRestColor">#59FFFFFF</Color>
+    <Color x:Key="ScrollThumbActiveColor">#8CFFFFFF</Color>
+
+    <!-- Metrics (epx; macOS pt map 1:1). Window rows: title bar (tab row) 48, command bar 44, footer 30. -->
+    <x:Double x:Key="TitleBarHeight">48</x:Double>
+    <x:Double x:Key="CommandBarHeight">44</x:Double>
+    <x:Double x:Key="FooterHeight">30</x:Double>
+    <!-- The page sheet: inset 8 from the window sides, corner radius 22; panels 8 apart. -->
+    <x:Double x:Key="SheetInset">8</x:Double>
+    <x:Double x:Key="SheetRadius">22</x:Double>
+    <CornerRadius x:Key="SheetCornerRadius">22</CornerRadius>
+    <x:Double x:Key="PanelGap">8</x:Double>
+    <!-- Tabs: 36 tall, 5 apart, radius 18, concave 9 epx flares where the selected tab meets the sheet; unpinned tabs
+         share one width between 96 and 200. -->
+    <x:Double x:Key="TabHeight">36</x:Double>
+    <x:Double x:Key="TabGap">5</x:Double>
+    <x:Double x:Key="TabRadius">18</x:Double>
+    <x:Double x:Key="TabFlare">9</x:Double>
+    <x:Double x:Key="TabMinWidth">96</x:Double>
+    <x:Double x:Key="TabMaxWidth">200</x:Double>
+    <!-- The logo (app menu) button. -->
+    <x:Double x:Key="LogoSize">32</x:Double>
+    <!-- Command bar buttons: 32 x 28, icon 16. -->
+    <x:Double x:Key="CommandButtonWidth">32</x:Double>
+    <x:Double x:Key="CommandButtonHeight">28</x:Double>
+    <x:Double x:Key="CommandIconSize">16</x:Double>
+    <!-- A raised button's default height, and every control of the bottom bars (BottomBarButtonStyle): 34 tall,
+         padded 14. -->
+    <x:Double x:Key="RaisedButtonHeight">28</x:Double>
+    <x:Double x:Key="BottomBarControlHeight">34</x:Double>
+    <x:Double x:Key="BottomBarHorizontalPadding">14</x:Double>
+    <!-- A manual group's chip: 22 tall, radius 6, padding 8, at most 120 wide. -->
+    <x:Double x:Key="ChipHeight">22</x:Double>
+    <CornerRadius x:Key="ChipCornerRadius">6</CornerRadius>
+    <x:Double x:Key="ChipPadding">8</x:Double>
+    <x:Double x:Key="ChipMaxWidth">120</x:Double>
+    <!-- The tab row's trailing buttons (scroll, new tab, all tabs) and its square buttons (archive, closed groups). -->
+    <x:Double x:Key="TabRowButtonSize">24</x:Double>
+    <x:Double x:Key="SquareButtonSize">28</x:Double>
+    <CornerRadius x:Key="SquareButtonCornerRadius">7</CornerRadius>
+    <x:Double x:Key="FlyoutWidth">280</x:Double>
+    <!-- Titled cards on the sheet (SectionCard.swift, SettingsMetrics): radius 14, padding 12 (6 around rows that
+         draw their own highlight), header row 32, stacked 8 apart. -->
+    <CornerRadius x:Key="CardCornerRadius">14</CornerRadius>
+    <Thickness x:Key="CardPadding">12</Thickness>
+    <Thickness x:Key="CardRowsPadding">6</Thickness>
+    <x:Double x:Key="CardHeaderHeight">32</x:Double>
+    <x:Double x:Key="CardSpacing">8</x:Double>
+    <!-- The repo layout's detail panel at its minimum width (RepoLayoutMetrics.detail): the Welcome page's Recent card. -->
+    <x:Double x:Key="DetailPanelMinWidth">320</x:Double>
+    <!-- The Welcome page is at most this wide, centered on a wide window (WelcomeMetrics.maxWidth). -->
+    <x:Double x:Key="WelcomeMaxWidth">1200</x:Double>
+    <!-- A recent repository's name in the Welcome page's Recent card; its parent folder takes the rest of the row. -->
+    <x:Double x:Key="RecentNameMaxWidth">160</x:Double>
+    <!-- A loading spinner's size. -->
+    <x:Double x:Key="SpinnerSize">14</x:Double>
+
+    <!-- Motion (GlassStyle.swift Motion). x:String time spans, as WinUI's own ControlNormalAnimationDuration: XAML
+         converts them where a Duration or KeyTime is expected; code parses them (TimeSpan.Parse, invariant). -->
+    <!-- Pages, tabs, panels, lists and the pill. -->
+    <x:String x:Key="MotionStandardDuration">00:00:00.250</x:String>
+    <!-- Hover highlights. -->
+    <x:String x:Key="MotionHoverDuration">00:00:00.120</x:String>
+    <!-- Sheets and the search bar opening. -->
+    <x:String x:Key="MotionSheetDuration">00:00:00.300</x:String>
+    <!-- A view leaving: a short fade. -->
+    <x:String x:Key="MotionExitDuration">00:00:00.100</x:String>
+    <!-- A button going down and back up. -->
+    <x:String x:Key="MotionPressDuration">00:00:00.120</x:String>
+    <!-- Switches and disclosure chevrons. -->
+    <x:String x:Key="MotionToggleDuration">00:00:00.200</x:String>
+    <!-- A loading state's spinner shows only after this (UI rule), then fades in, so a fast load never flashes it. -->
+    <x:String x:Key="SpinnerDelay">00:00:00.150</x:String>
+</ResourceDictionary>

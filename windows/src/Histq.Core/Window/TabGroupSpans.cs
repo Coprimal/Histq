@@ -21,12 +21,23 @@ public static class RepoGroupKey
     public static string? Of(string folder) =>
         Of(folder, PathFlavor.Host, Directory.Exists, ReadSmallFile);
 
+    /// <summary>
+    /// <see cref="Of(string)"/> for a folder the user gave this machine (a tab of their own <c>session.json</c>, a folder
+    /// they picked): a UNC or device folder (<c>\\wsl.localhost\Ubuntu\home\me\repo</c>) is read too. A <c>gitdir:</c>
+    /// or <c>commondir</c> that points to one still gives no key. Never for a path read from a received <c>.histqws</c>.
+    /// </summary>
+    public static string? OfUserFolder(string folder) =>
+        Of(folder, PathFlavor.Host, Directory.Exists, ReadSmallFile, allowUncOrDeviceFolder: true);
+
     /// <summary><see cref="Of(string)"/> with the path rules of <paramref name="flavor"/> and the given probes, so tests
-    /// check the UNC guard on any host. <paramref name="readFile"/> gives a file's text, or null when it cannot be read.</summary>
+    /// check the UNC guard on any host. <paramref name="readFile"/> gives a file's text, or null when it cannot be read.
+    /// <paramref name="allowUncOrDeviceFolder"/> lifts the refusal of a UNC or device <paramref name="folder"/> only
+    /// (<see cref="OfUserFolder"/>).</summary>
     internal static string? Of(
-        string folder, PathFlavor flavor, Func<string, bool> directoryExists, Func<string, string?> readFile)
+        string folder, PathFlavor flavor, Func<string, bool> directoryExists, Func<string, string?> readFile,
+        bool allowUncOrDeviceFolder = false)
     {
-        if (flavor.IsUncOrDevice(folder))
+        if (!allowUncOrDeviceFolder && flavor.IsUncOrDevice(folder))
         {
             return null;
         }

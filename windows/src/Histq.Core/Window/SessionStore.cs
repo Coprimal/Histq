@@ -71,6 +71,10 @@ public sealed class SessionStore
     /// the file holds that content.</summary>
     public Action<string, Exception?>? WriteResult { get; set; }
 
+    /// <summary>A failed write of <c>session.json</c>. Called on the writer thread, not the store's context, so a failure
+    /// during <see cref="Flush"/> (quit) is reported before Flush returns; the handler must be thread-safe.</summary>
+    public Action<Exception>? SessionWriteFailed { get; set; }
+
     /// <summary>The writes queued so far; tests wait on it.</summary>
     internal Task Writes => writer;
 
@@ -281,6 +285,7 @@ public sealed class SessionStore
         catch (Exception error)
         {
             Debug.WriteLine($"session.json not saved: {error.Message}");
+            SessionWriteFailed?.Invoke(error);
         }
     }
 

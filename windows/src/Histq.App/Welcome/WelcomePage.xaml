@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The page of a tab with no repository (ported from WelcomeView.swift at 6fa6d40, its open and recent parts): cards on
+    the page sheet, at most WelcomeMaxWidth wide and centered. Left: why git cannot run (only when it cannot) and Open;
+    right: the recent repositories. Clone and Init come in a later phase (absent until then). Events are wired in
+    WelcomePage.xaml.cs; the recent rows are built there too.
+-->
+<UserControl
+    x:Class="Histq.App.Welcome.WelcomePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <!-- A titled card (SectionCard.swift): the sheet's card fill and its 1 epx edge. -->
+        <Style x:Key="CardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SheetCardBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource SheetCardBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="{StaticResource CardCornerRadius}" />
+        </Style>
+        <!-- A card's header row: icon and title, 12 epx in from the card's sides. -->
+        <Style x:Key="CardHeaderStyle" TargetType="Grid">
+            <Setter Property="Height" Value="{StaticResource CardHeaderHeight}" />
+            <Setter Property="Padding" Value="12,0,12,0" />
+            <Setter Property="ColumnSpacing" Value="6" />
+        </Style>
+        <Style x:Key="CardTitleStyle" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style x:Key="CaptionStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Opacity" Value="0.6" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid
+        x:Name="PageGrid"
+        MaxWidth="{StaticResource WelcomeMaxWidth}"
+        ColumnSpacing="{StaticResource PanelGap}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="{StaticResource CardSpacing}">
+
+                <!-- Why git cannot run, and the ways out (GitProblemCard): collapsed unless the check found a problem. -->
+                <Border
+                    x:Name="GitProblemCard"
+                    AutomationProperties.Name="Git problem"
+                    Style="{StaticResource CardStyle}"
+                    Visibility="Collapsed">
+                    <StackPanel>
+                        <Grid Style="{StaticResource CardHeaderStyle}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon
+                                VerticalAlignment="Center"
+                                FontSize="{StaticResource CommandIconSize}"
+                                Glyph="&#xE7BA;" />
+                            <TextBlock
+                                x:Name="GitProblemTitle"
+                                Grid.Column="1"
+                                Style="{StaticResource CardTitleStyle}"
+                                TextTrimming="CharacterEllipsis" />
+                        </Grid>
+                        <StackPanel Padding="12,0,12,12" Spacing="8">
+                            <TextBlock
+                                x:Name="GitProblemText"
+                                FontSize="13"
+                                IsTextSelectionEnabled="True"
+                                Opacity="0.6"
+                                TextWrapping="Wrap" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button x:Name="ChooseGitButton" Content="Choose git…" />
+                                <Button
+                                    x:Name="AutomaticGitButton"
+                                    Content="Use automatic git"
+                                    Visibility="Collapsed" />
+                                <Button x:Name="CheckAgainButton" Content="Check again" />
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Opens a folder in this tab (OpenCard). The header's trailing edge says git is being checked. -->
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <Grid Style="{StaticResource CardHeaderStyle}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon
+                                VerticalAlignment="Center"
+                                FontSize="{StaticResource CommandIconSize}"
+                                Glyph="&#xE8B7;" />
+                            <TextBlock
+                                Grid.Column="1"
+                                Style="{StaticResource CardTitleStyle}"
+                                Text="Open" />
+                            <!-- Checking git: shown at once; its spinner fades in after SpinnerDelay (code-behind). -->
+                            <StackPanel
+                                x:Name="GitCheckingRow"
+                                Grid.Column="2"
+                                VerticalAlignment="Center"
+                                Orientation="Horizontal"
+                                Spacing="6"
+                                Visibility="Collapsed">
+                                <ProgressRing
+                                    x:Name="GitCheckingRing"
+                                    Width="{StaticResource SpinnerSize}"
+                                    Height="{StaticResource SpinnerSize}"
+                                    MinWidth="0"
+                                    MinHeight="0"
+                                    IsActive="False"
+                                    Opacity="0" />
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    FontSize="12"
+                                    Opacity="0.6"
+                                    Text="Checking git…" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid Padding="{StaticResource CardPadding}" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock FontSize="13" Text="Open a repository" />
+                                <TextBlock Style="{StaticResource CaptionStyle}" Text="A folder with a git repository on this PC." />
+                            </StackPanel>
+                            <Button
+                                x:Name="OpenFolderButton"
+                                Grid.Column="1"
+                                VerticalAlignment="Center"
+                                AutomationProperties.Name="Open folder"
+                                Content="Open folder" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- The repositories opened lately (RecentCard): a click opens one in this tab. The list stays in the tree when
+             it is empty, with the empty text over it. -->
+        <Border
+            Grid.Column="1"
+            Width="{StaticResource DetailPanelMinWidth}"
+            Style="{StaticResource CardStyle}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid Style="{StaticResource CardHeaderStyle}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon
+                        VerticalAlignment="Center"
+                        FontSize="{StaticResource CommandIconSize}"
+                        Glyph="&#xE823;" />
+                    <TextBlock
+                        Grid.Column="1"
+                        Style="{StaticResource CardTitleStyle}"
+                        Text="Recent" />
+                    <TextBlock
+                        x:Name="RecentCount"
+                        Grid.Column="2"
+                        VerticalAlignment="Center"
+                        FontSize="12"
+                        Opacity="0.6" />
+                </Grid>
+                <Grid Grid.Row="1" Padding="{StaticResource CardRowsPadding}">
+                    <ListView
+                        x:Name="RecentList"
+                        AutomationProperties.Name="Recent repositories"
+                        IsItemClickEnabled="True"
+                        SelectionMode="None" />
+                    <TextBlock
+                        x:Name="RecentEmptyText"
+                        Margin="6,4,6,4"
+                        FontSize="13"
+                        Opacity="0.6"
+                        Text="No recent repositories yet."
+                        Visibility="Collapsed" />
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

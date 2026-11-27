@@ -18,8 +18,8 @@ namespace Histq.App;
 
 public partial class App
 {
-    /// <summary>The main window once <see cref="OnLaunched"/> has made it (QA builds, for <see cref="SpikeHarness"/>).</summary>
-    internal MainWindow? QaMainWindow => _window;
+    /// <summary>The front window once <see cref="OnLaunched"/> has opened the windows (QA builds, for <see cref="SpikeHarness"/>).</summary>
+    internal MainWindow? QaMainWindow => _windows?.Windows.FirstOrDefault();
 }
 
 /// <summary>
