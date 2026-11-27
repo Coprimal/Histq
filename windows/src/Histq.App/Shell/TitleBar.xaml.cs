@@ -57,6 +57,8 @@ public sealed partial class TitleBar : UserControl
         Strip.Attach(window);
         Strip.GeometryChanged += (_, _) => Regions.Refresh();
         Strip.PressHeldChanged += (_, held) => Regions.Frozen = held;
+        // A flyout anchored in the row (group, archive, closed groups, All Tabs) closed: the rects are set again.
+        Strip.FlyoutClosed += (_, _) => Regions.RefreshAll();
 
         BuildAppMenu();
         Accelerators.Register(keyScope, window, OpenAppMenu);

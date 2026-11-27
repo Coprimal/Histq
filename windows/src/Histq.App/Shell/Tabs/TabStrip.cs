@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using Histq.App.Support;
 using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.UI;
@@ -98,6 +99,15 @@ public sealed partial class TabStrip : Panel
     private readonly TextBlock _measure;
     private readonly TabDragController _drag;
     private readonly TabKeyboard _keyboard;
+
+    // The row's flyouts (design §3.4, 3.7-3.9), made on first use.
+    private GroupFlyout? _groupFlyout;
+    private ArchiveFlyout? _archiveFlyout;
+    private ClosedGroupsFlyout? _closedFlyout;
+    private AllTabsFlyout? _allTabsFlyout;
+
+    /// <summary>A new group whose flyout opens once its chip is laid out (Add Tab(s) to New Group).</summary>
+    private Guid? _pendingGroupFlyout;
 
     private MainWindow? _window;
     private WindowTabs? _model;
@@ -198,6 +208,8 @@ public sealed partial class TabStrip : Panel
         };
         _closedGroups = StowButton(ClosedGroupsGlyph, PaletteResources.Color("GroupGreyColor"), _closedCount);
         _archive = StowButton(ArchiveGlyph, TabColors.Archive, null);
+        _closedGroups.Click += (_, _) => (_closedFlyout ??= new ClosedGroupsFlyout(this)).Open(_closedGroups);
+        _archive.Click += (_, _) => (_archiveFlyout ??= new ArchiveFlyout(this)).Open(_archive);
         _leadItems.Children.Add(_closedGroups);
         _leadItems.Children.Add(_archive);
         _lead.Children.Add(_leadBack);
@@ -240,6 +252,7 @@ public sealed partial class TabStrip : Panel
         _newTab = RowButton(NewTabGlyph, "New Tab");
         _allTabs = RowButton(AllTabsGlyph, "All Tabs");
         _newTab.Click += (_, _) => _window?.Apply(model => model.OpenTab(null));
+        _allTabs.Click += (_, _) => (_allTabsFlyout ??= new AllTabsFlyout(this)).Open(_allTabs);
         _buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = _m.Gap };
         _buttons.Children.Add(_newTab);
         _buttons.Children.Add(_allTabs);
@@ -263,8 +276,24 @@ public sealed partial class TabStrip : Panel
     /// rects stay as they are while it is held, so a drag never turns into a window move (design §3.10).</summary>
     internal event EventHandler<bool>? PressHeldChanged;
 
-    /// <summary>The window whose tabs it shows; call before the first <see cref="Sync"/>.</summary>
-    internal void Attach(MainWindow window) => _window = window;
+    /// <summary>A flyout of the row closed: the title bar sets its Passthrough rects again.</summary>
+    internal event EventHandler? FlyoutClosed;
+
+    /// <summary>The window whose tabs it shows; call before the first <see cref="Sync"/>. Until the window closes, the
+    /// tabs' icons are drawn again when the icon images change (an image loaded, uploaded or removed).</summary>
+    internal void Attach(MainWindow window)
+    {
+        _window = window;
+        CustomIconImages.Shared.Changed += OnIconImagesChanged;
+        window.Closed += (_, _) => CustomIconImages.Shared.Changed -= OnIconImagesChanged;
+    }
+
+    /// <summary>Raised on the UI thread, outside any layout pass.</summary>
+    private void OnIconImagesChanged(object? sender, EventArgs e)
+    {
+        foreach (TabItemView view in _tabViews.Values)
+            view.RefreshIcon();
+    }
 
     internal MainWindow? Window => _window;
 
@@ -311,6 +340,25 @@ public sealed partial class TabStrip : Panel
 
     /// <summary>A click on a group's chip: collapses or expands it.</summary>
     internal void ToggleGroup(Guid id) => _window?.Apply(model => model.ToggleGroup(id));
+
+    /// <summary>Opens group <paramref name="id"/>'s flyout at its chip (a right click, Shift+F10 or the Menu key on
+    /// it); nothing while the chip is not shown.</summary>
+    internal void ShowGroupFlyout(Guid id)
+    {
+        if (_chips.TryGetValue(id, out GroupChipView? chip) && chip.Visibility == Visibility.Visible && IsPlaced(chip))
+            (_groupFlyout ??= new GroupFlyout(this)).ShowFor(id, chip);
+    }
+
+    /// <summary>A group just made (Add Tab(s) to New Group): its flyout opens once the next layout has placed its chip,
+    /// which scrolls into view first (the Mac's popover after a new group).</summary>
+    internal void ShowGroupFlyoutWhenPlaced(Guid id)
+    {
+        _pendingGroupFlyout = id;
+        InvalidateArrange();
+    }
+
+    /// <summary>A flyout of the row closed (<see cref="TabFlyout"/>).</summary>
+    internal void OnFlyoutClosed() => FlyoutClosed?.Invoke(this, EventArgs.Empty);
 
     /// <summary>
     /// Brings the row in line with <paramref name="model"/>: one element per tab, group chip and worktree head (kept
@@ -435,6 +483,12 @@ public sealed partial class TabStrip : Panel
         // the size stays the same.
         InvalidateArrange();
         _keyboard.AfterSync();
+
+        // An open flyout shows the tabs as they are now, or hides when what it shows went.
+        _groupFlyout?.Synced(model);
+        _archiveFlyout?.Synced(model);
+        _closedFlyout?.Synced(model);
+        _allTabsFlyout?.Synced(model);
     }
 
     /// <summary>
@@ -566,9 +620,10 @@ public sealed partial class TabStrip : Panel
     /// <summary>A press on a tab, chip or head is held (a possible drag): the keyboard leaves the row alone.</summary>
     internal bool PressHeld => _pressHeld;
 
-    /// <summary>Scrolls a track item (a focused one), flares included, into view; an item of the lead or the well
-    /// never scrolls. Measured against where a running scroll is heading, so asking again does not restart it.</summary>
-    internal void RevealItem(FrameworkElement element)
+    /// <summary>Scrolls a track item (a focused one, a new group's chip), flares included, into view; an item of the
+    /// lead or the well never scrolls. Measured against where a running scroll is heading, so asking again does not
+    /// restart it. Unanimated, it jumps there.</summary>
+    internal void RevealItem(FrameworkElement element, bool animate = true)
     {
         if (!ReferenceEquals(HomeOf(element), _trackItems) || _layout?.Overflows != true || !double.IsFinite(element.Width))
             return;
@@ -581,7 +636,7 @@ public sealed partial class TabStrip : Panel
         else if (end > current + _trackWidth)
             target = end - _trackWidth;
         if (Math.Abs(target - current) > 0.5)
-            ScrollTo(target, animate: true);
+            ScrollTo(target, animate);
     }
 
     /// <summary>A button of the row: lightweight styling of the default template (the default Button keeps its focus
@@ -1089,12 +1144,37 @@ public sealed partial class TabStrip : Panel
         if (!_pressHeld && _layout is not null)
             _keyboard.Arranged();
 
+        OpenPendingGroupFlyout();
+
         UpdateFades();
         UpdateArrows();
         UpdateDecorations();
         UpdateIndicator();
         NotifyAutomationChildren();
         RaiseGeometryChanged();
+    }
+
+    /// <summary>
+    /// The post-layout step's part for <see cref="ShowGroupFlyoutWhenPlaced"/>: once the new group's chip stands on the
+    /// track, it scrolls into view at once (unanimated, so the flyout anchors where it stops) and the flyout opens on the
+    /// next dispatcher turn, outside the layout pass. A group gone meanwhile drops it.
+    /// </summary>
+    private void OpenPendingGroupFlyout()
+    {
+        if (_pendingGroupFlyout is not { } id || _pressHeld)
+            return;
+        if (!_chips.TryGetValue(id, out GroupChipView? chip))
+        {
+            if (_model?.Groups.Any(group => group.Id == id) != true)
+                _pendingGroupFlyout = null;
+            return;
+        }
+
+        if (!IsPlaced(chip) || chip.Visibility != Visibility.Visible)
+            return;
+        _pendingGroupFlyout = null;
+        RevealItem(chip, animate: false);
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ShowGroupFlyout(id));
     }
 
     /// <summary>Raises <see cref="GeometryChanged"/> when the row's geometry differs from what it last reported: its

@@ -186,6 +186,65 @@ public sealed class WindowTabsTests
     }
 
     [Fact]
+    public void ReopeningClosedGroupWithDeferredFolderCheckProbesNothingInTheCall()
+    {
+        var probed = new List<string>();
+        var model = new WindowTabs(PathFlavor.Posix, Record(probed, true));
+        model.OpenTab("/r/a");
+        model.OpenTab("/r/b");
+        model.OpenTab("/r/c");
+        var work = model.CreateGroup([Id(model, "/r/b"), Id(model, "/r/c")])!.Value;
+        model.CloseGroup(work);
+        IReadOnlyList<(Guid Id, string Path)>? asked = null;
+        model.FolderChecksNeeded = requests => asked = requests;
+        probed.Clear();
+
+        model.OpenClosedGroup(work);
+
+        Assert.Empty(probed);
+        Assert.Equal(["/r/b", "/r/c"], asked!.Select(request => request.Path));
+        Assert.All(model.Tabs, tab => Assert.False(tab.IsMissing));
+
+        model.CloseGroup(work);
+        var window = model.OpenClosedGroupInNewWindow(work)!;
+        Assert.Empty(probed);
+        Assert.Empty(window.Missing);
+    }
+
+    [Fact]
+    public void MovingGroupToNewWindowHandsOverItsTabsAndKeepsTheGroup()
+    {
+        var model = Open("/r/a", "/r/b", "/r/c", "/r/d");
+        var work = model.CreateGroup([Id(model, "/r/b"), Id(model, "/r/c")])!.Value;
+        model.SetGroupName(work, "Work");
+        model.SetGroupColor(work, 5);
+        model.SelectTab(Id(model, "/r/c"));
+
+        var window = model.MoveGroupToNewWindow(work);
+
+        Assert.NotNull(window);
+        Assert.Equal(["/r/b", "/r/c"], window.Tabs.Select(tab => tab.Path));
+        Assert.All(window.Tabs, tab => Assert.Equal(work, tab.TabGroup));
+        Assert.Equal(new SavedTabGroup(work, 5, "Work"), window.Group);
+        Assert.Equal(1, window.Selected);
+        // Gone from this window, not onto the reopen stack; the selection moved to the next shown tab.
+        Assert.Equal(["/r/a", "/r/d"], model.Tabs.Select(tab => tab.Path));
+        Assert.Equal("/r/d", SelectedPath(model));
+        Assert.Empty(model.ManualGroups);
+        Assert.False(model.CanReopenClosedTab);
+    }
+
+    [Fact]
+    public void MovingGroupHoldingEveryTabDoesNothing()
+    {
+        var model = Open("/r/a", "/r/b");
+        var all = model.CreateGroup([Id(model, "/r/a"), Id(model, "/r/b")])!.Value;
+
+        Assert.Null(model.MoveGroupToNewWindow(all));
+        Assert.Equal(["/r/a", "/r/b"], model.Tabs.Select(tab => tab.Path));
+    }
+
+    [Fact]
     public void AliasEmojiAndIconColorSetters()
     {
         var model = Open("/r/a");

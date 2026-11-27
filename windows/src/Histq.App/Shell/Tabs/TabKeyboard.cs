@@ -13,8 +13,9 @@ namespace Histq.App.Shell.Tabs;
 /// Left / Right move the focus through <see cref="TabStrip.FocusOrder"/> (the stow buttons, the popped-out archived tab,
 /// the pinned well, the track's chips, worktree heads and tabs, New Tab and All Tabs, as drawn), the track scrolling
 /// the focused item into view. Enter selects a tab, collapses or shows a chip's group, and selects a worktree head's
-/// first tab; Delete closes the focused tab (as its middle click does). Shift+F10 and the Menu key open the focused
-/// item's context menu once task 10.1 brings it; until then they are swallowed, so no system menu shows. A left press
+/// first tab; Delete closes the focused tab (as its middle click does). Shift+F10 and the Menu key open the focused tab's
+/// or worktree head's context menu (<see cref="TabContextMenu"/>) under it, and a chip's group flyout
+/// (<see cref="GroupFlyout"/>); on a button they are swallowed, so no system menu shows. A left press
 /// on an item focuses it without a focus ring (ListView-like), so the arrows then go on from there. When a sync
 /// removes or hides the focused item, the focus moves to the nearest item still shown.
 /// </summary>
@@ -136,19 +137,27 @@ internal sealed class TabKeyboard
     }
 
     /// <summary>Shift+F10 and the Menu key, taken on the way down so no other handler (the F10 app menu, the system
-    /// menu) sees them. They open the focused item's context menu once task 10.1 brings the tab, chip and head menus;
-    /// until then nothing opens.</summary>
+    /// menu) sees them: they open the focused tab's or worktree head's context menu under it, or the focused chip's
+    /// group flyout.</summary>
     private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
         bool menuKey = e.Key == VirtualKey.Application
             || (e.Key == VirtualKey.F10 && IsDown(VirtualKey.Shift) && !IsDown(VirtualKey.Control)
                 && !IsDown(VirtualKey.Menu));
-        if (menuKey && FocusedItem() is not null)
-            e.Handled = true;
+        if (!menuKey || FocusedItem() is not { } item)
+            return;
+        e.Handled = true;
+        if (e.KeyStatus.WasKeyDown)
+            return;
+        if (item is TabItemView or WorktreeHeadView)
+            TabContextMenu.Open(item, null);
+        else if (item is GroupChipView chip && chip.Strip == _strip)
+            _strip.ShowGroupFlyout(chip.GroupId);
     }
 
-    /// <summary>A context menu asked for from the keyboard by another route: nothing opens until task 10.1. A right
-    /// click is left alone.</summary>
+    /// <summary>A context menu asked for from the keyboard by a route the items did not take (a button): nothing opens.
+    /// A right click is left alone; tabs, worktree heads and chips open their own
+    /// (<see cref="TabContextMenu.OnContextRequested"/>, the chip's group flyout).</summary>
     private void OnContextRequested(UIElement sender, ContextRequestedEventArgs e)
     {
         if (!e.TryGetPosition(_strip, out _))

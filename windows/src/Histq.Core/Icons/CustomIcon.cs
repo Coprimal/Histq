@@ -5,7 +5,10 @@
 // read. Its type comes from its first bytes (PNG, JPEG, WebP) and its pixel size from its header, never from its name;
 // nothing is decoded here. An SVG is recognised by its root element `<svg>`, read with XmlReader with DTDs prohibited
 // and no resolver (so no entity expansion and no external reference), and has no pixel size to check; the app draws
-// it. Ported from CustomIcon.swift at 6fa6d40, where ImageIO sniffs and measures the image.
+// it, but only a self-contained one (IsSelfContainedSvg: no script, image, foreign object or style sheet, no reference
+// outside the document), checked at upload and again before each draw of a stored file. A file is read with a bounded
+// read (ReadFile), never past MaxBytes + 1 bytes. Ported from CustomIcon.swift at 6fa6d40, where ImageIO sniffs and
+// measures the image.
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Xml;
@@ -29,8 +32,23 @@ public static class CustomIcon
     /// <summary>The extension an SVG is stored with.</summary>
     public const string SvgExtension = "svg";
 
+    /// <summary>The deepest element nesting accepted in an SVG (a renderer may recurse once per level).</summary>
+    public const int MaxSvgDepth = 64;
+
     /// <summary>The extensions the accepted bitmap types (PNG, JPEG, WebP) are stored with.</summary>
     internal static readonly string[] ImageExtensions = ["png", "jpg", "webp"];
+
+    /// <summary>SVG elements that run code, load another resource, bring a style sheet or change an attribute as they
+    /// animate (which could set an outside <c>href</c>); refused wherever they are.</summary>
+    private static readonly string[] SvgRefusedElements =
+    [
+        "script", "image", "foreignObject", "style", "feImage", "iframe", "object", "embed", "audio", "video", "handler",
+        "set", "animate", "animateMotion", "animateTransform",
+    ];
+
+    /// <summary>SVG attributes whose values are CSS or animation values, where a backslash escape or a <c>/*</c>
+    /// comment could hide a <c>url(</c> from the check.</summary>
+    private static readonly string[] SvgEscapableAttributes = ["style", "to", "from", "values", "by"];
 
     /// <summary>The reference for a stored file name.</summary>
     public static string Ref(string fileName) => Prefix + fileName;
@@ -95,6 +113,174 @@ public static class CustomIcon
     }
 
     /// <summary>
+    /// Whether the SVG <paramref name="data"/> draws from itself alone: read whole with DTDs prohibited and no resolver,
+    /// it has no processing instruction (an <c>xml-stylesheet</c>), no element of <see cref="SvgRefusedElements"/>, no
+    /// event handler attribute (<c>on…</c>), no <c>href</c> that is not a fragment (<c>#id</c>), no <c>url(…)</c> that
+    /// is not a fragment, no <c>@import</c>, no backslash or <c>/*</c> in an attribute of
+    /// <see cref="SvgEscapableAttributes"/>, and no nesting deeper than <see cref="MaxSvgDepth"/>. False for anything
+    /// that does not read as XML.
+    /// </summary>
+    public static bool IsSelfContainedSvg(byte[] data)
+    {
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            IgnoreComments = true,
+            IgnoreProcessingInstructions = false,
+            IgnoreWhitespace = true,
+        };
+        try
+        {
+            using var reader = XmlReader.Create(new MemoryStream(data, writable: false), settings);
+            while (reader.Read())
+            {
+                switch (reader.NodeType)
+                {
+                    case XmlNodeType.ProcessingInstruction:
+                        return false;
+                    case XmlNodeType.Element:
+                        if (reader.Depth > MaxSvgDepth
+                            || SvgRefusedElements.Contains(reader.LocalName, StringComparer.OrdinalIgnoreCase)
+                            || !SvgAttributesSelfContained(reader))
+                        {
+                            return false;
+                        }
+
+                        break;
+                    case XmlNodeType.Text or XmlNodeType.CDATA:
+                        if (!SvgValueSelfContained(reader.Value))
+                        {
+                            return false;
+                        }
+
+                        break;
+                }
+            }
+
+            return true;
+        }
+        catch (XmlException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The current element's attributes: no event handler, every <c>href</c> a fragment, no backslash or
+    /// <c>/*</c> in an attribute of <see cref="SvgEscapableAttributes"/>, every value self-contained
+    /// (<see cref="SvgValueSelfContained"/>). Leaves the reader on the element.</summary>
+    private static bool SvgAttributesSelfContained(XmlReader reader)
+    {
+        if (!reader.MoveToFirstAttribute())
+        {
+            return true;
+        }
+
+        try
+        {
+            do
+            {
+                var name = reader.LocalName;
+                var value = reader.Value;
+                if (name.StartsWith("on", StringComparison.OrdinalIgnoreCase)
+                    || (string.Equals(name, "href", StringComparison.OrdinalIgnoreCase)
+                        && !value.TrimStart().StartsWith('#'))
+                    || (SvgEscapableAttributes.Contains(name, StringComparer.OrdinalIgnoreCase)
+                        && (value.Contains('\\', StringComparison.Ordinal) || value.Contains("/*", StringComparison.Ordinal)))
+                    || !SvgValueSelfContained(value))
+                {
+                    return false;
+                }
+            }
+            while (reader.MoveToNextAttribute());
+
+            return true;
+        }
+        finally
+        {
+            reader.MoveToElement();
+        }
+    }
+
+    /// <summary>A value with no <c>@import</c> and whose every <c>url(</c> (any case, spaces and quotes allowed)
+    /// names a fragment (<c>url(#id)</c>).</summary>
+    private static bool SvgValueSelfContained(string value)
+    {
+        if (value.Contains("@import", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var index = 0;
+        while ((index = value.IndexOf("url(", index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            index += "url(".Length;
+            var target = value.AsSpan(index).TrimStart().TrimStart("\"'").TrimStart();
+            if (target.IsEmpty || target[0] != '#')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The bytes of the file at <paramref name="path"/>, read with a bounded read: never more than
+    /// <see cref="MaxBytes"/> + 1 bytes, whatever its size says, and a Windows device path (<c>\\.\</c>, <c>\\?\</c>)
+    /// or a stream that cannot seek (a pipe, a character device) is refused before any read. Throws
+    /// <see cref="Problem"/>: <see cref="ProblemKind.TooLarge"/> past <see cref="MaxBytes"/>,
+    /// <see cref="ProblemKind.Unreadable"/> for a refused path or a failed read.
+    /// </summary>
+    public static byte[] ReadFile(string path)
+    {
+        if (IsDevicePath(path, PathFlavor.Host))
+        {
+            throw Problem.Unreadable();
+        }
+
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 1);
+            if (!stream.CanSeek)
+            {
+                throw Problem.Unreadable();
+            }
+
+            if (stream.Length > MaxBytes)
+            {
+                throw Problem.TooLarge((int)Math.Min(stream.Length, int.MaxValue));
+            }
+
+            var buffer = new byte[MaxBytes + 1];
+            var total = 0;
+            int read;
+            while (total < buffer.Length && (read = stream.Read(buffer, total, buffer.Length - total)) > 0)
+            {
+                total += read;
+            }
+
+            if (total > MaxBytes)
+            {
+                throw Problem.TooLarge(total);
+            }
+
+            return buffer[..total];
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or NotSupportedException
+                                          or ArgumentException)
+        {
+            throw Problem.Unreadable();
+        }
+    }
+
+    /// <summary>Whether <paramref name="path"/> names a Windows device namespace (<c>\\.\</c> or <c>\\?\</c>, either
+    /// separator), where pipes and devices live; never on POSIX.</summary>
+    internal static bool IsDevicePath(string path, PathFlavor flavor) =>
+        flavor == PathFlavor.Windows && path.Length >= 4
+        && path[0] is '\\' or '/' && path[1] is '\\' or '/' && path[2] is '.' or '?' && path[3] is '\\' or '/';
+
+    /// <summary>
     /// The stored extension and pixel size of a PNG, JPEG or WebP image, from its first bytes and header. Throws
     /// <see cref="Problem"/>: <see cref="ProblemKind.UnsupportedType"/> for any other bytes,
     /// <see cref="ProblemKind.Unreadable"/> for a known type whose header is cut short or malformed.
@@ -117,6 +303,26 @@ public static class CustomIcon
         }
 
         throw Problem.UnsupportedType();
+    }
+
+    /// <summary>
+    /// Whether the stored raster file <paramref name="file"/> holds what an upload of it would have been stored as: its
+    /// bytes sniff as PNG, JPEG or WebP (<see cref="Sniff"/>), that type's extension is the file's own, and each side is
+    /// <see cref="MinSide"/>–<see cref="MaxSide"/> px. Checked before a stored file reaches a decoder, so a file put in
+    /// the folder by hand or by a sync (a GIF, a TIFF, any other codec's format) never does.
+    /// </summary>
+    public static bool IsStoredRaster(string file, byte[] data)
+    {
+        try
+        {
+            var (extension, width, height) = Sniff(data);
+            return string.Equals(System.IO.Path.GetExtension(file), "." + extension, StringComparison.Ordinal)
+                   && width is >= MinSide and <= MaxSide && height is >= MinSide and <= MaxSide;
+        }
+        catch (Problem)
+        {
+            return false;
+        }
     }
 
     /// <summary>The IHDR chunk's width and height, which must come first.</summary>
@@ -239,6 +445,7 @@ public static class CustomIcon
         UnsupportedType,
         SizeOutOfRange,
         Unreadable,
+        NotSelfContained,
     }
 
     /// <summary>Why an image was refused, with a user-facing <see cref="Exception.Message"/>. Equal when the kind and
@@ -278,6 +485,10 @@ public static class CustomIcon
 
         public static Problem Unreadable() => new(ProblemKind.Unreadable, 0, 0, 0, "The image could not be read.");
 
+        public static Problem NotSelfContained() =>
+            new(ProblemKind.NotSelfContained, 0, 0, 0,
+                "The SVG has scripts, images, style sheets or links to other files. Use a self-contained SVG.");
+
         public bool Equals(Problem? other) =>
             other is not null && Kind == other.Kind && Bytes == other.Bytes && Width == other.Width && Height == other.Height;
 
@@ -298,30 +509,10 @@ public static class CustomIcon
         /// </summary>
         public string Add(string path)
         {
-            byte[] data;
-            try
-            {
-                var size = new FileInfo(path).Length;
-                if (size > MaxBytes)
-                {
-                    throw Problem.TooLarge((int)Math.Min(size, int.MaxValue));
-                }
-
-                data = File.ReadAllBytes(path);
-            }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-            {
-                throw Problem.Unreadable();
-            }
-
-            if (data.Length > MaxBytes)
-            {
-                throw Problem.TooLarge(data.Length);
-            }
-
+            var data = ReadFile(path);
             if (IsSvg(data))
             {
-                return Store(data, SvgExtension);
+                return IsSelfContainedSvg(data) ? Store(data, SvgExtension) : throw Problem.NotSelfContained();
             }
 
             var (extension, width, height) = Sniff(data);

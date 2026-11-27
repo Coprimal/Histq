@@ -72,9 +72,11 @@ public sealed class WindowTabs
         public string Title => Alias ?? (Path is null ? "New Tab" : PathFlavor.Host.LastComponent(Path));
     }
 
-    /// <summary>A closed group to open in a new window (<see cref="OpenClosedGroupInNewWindow"/>): its tabs in its
-    /// group, the group table, and the folders that are gone. Its first tab is selected.</summary>
-    public sealed record GroupWindow(IReadOnlyList<SavedTab> Tabs, SavedTabGroup Group, IReadOnlySet<string> Missing);
+    /// <summary>A group to open in a new window (<see cref="MoveGroupToNewWindow"/>,
+    /// <see cref="OpenClosedGroupInNewWindow"/>): its tabs in its group, the group table, the folders known to be gone,
+    /// and the tab to select (its index in <paramref name="Tabs"/>).</summary>
+    public sealed record GroupWindow(
+        IReadOnlyList<SavedTab> Tabs, SavedTabGroup Group, IReadOnlySet<string> Missing, int Selected = 0);
 
     /// <summary>A closed repo tab that <see cref="ReopenClosedTab"/> reopens: as saved, its box's key, its manual group as
     /// it was, the batch it closed with (Delete Group), and its index when it closed.</summary>
@@ -748,6 +750,54 @@ public sealed class WindowTabs
         ClearSelection();
     }
 
+    /// <summary>
+    /// Move Group to New Window: the group's tabs leave this window (not onto the reopen stack) and the caller opens a
+    /// new window with what it returns: the tabs in the group (same id, name and color), the folders known to be gone (no
+    /// I/O) and the selected one (the group's selected tab, else its first). The selection moves as when the group
+    /// collapses. Null, and nothing changes, when the group holds every normal tab or has no tab to move.
+    /// </summary>
+    public GroupWindow? MoveGroupToNewWindow(Guid id)
+    {
+        if (groups.Find(group => group.Id == id) is not { } group || GroupHoldsAllNormalTabs(id))
+        {
+            return null;
+        }
+
+        var members = tabs.Where(tab => tab.GroupId == id && !tab.Pinned && !tab.Archived).ToList();
+        if (members.Count == 0)
+        {
+            return null;
+        }
+
+        var entries = members.Select(Saved).ToList();
+        var missing = members.Where(tab => tab.IsMissing).Select(tab => tab.Path).OfType<string>()
+            .ToHashSet(flavor.KeyComparer);
+        var selected = Math.Max(0, members.FindIndex(tab => tab.Id == selectedTabId));
+        var leaving = members.Select(tab => tab.Id).ToHashSet();
+        if (selectedTabId is { } current && leaving.Contains(current))
+        {
+            int? popped = ArchivedOut is null ? null : tabs.Count - 1;
+            if ((ShownNeighbor(leaving) ?? popped) is { } next)
+            {
+                SelectTab(next);
+            }
+            else
+            {
+                OpenTab(null);
+            }
+        }
+
+        int index;
+        while ((index = tabs.FindIndex(tab => leaving.Contains(tab.Id))) >= 0)
+        {
+            Remove(index, remembering: false);
+        }
+
+        Normalize();
+        ClearSelection();
+        return new GroupWindow(entries, new SavedTabGroup(id, group.ColorIndex, group.Name), missing, selected);
+    }
+
     // Closed groups.
 
     /// <summary>
@@ -841,7 +891,7 @@ public sealed class WindowTabs
                 continue;
             }
 
-            var tab = new Tab(member.Path, member.Path is { } folder && !folderExists(folder), Alias: member.Alias,
+            var tab = new Tab(member.Path, member.Path is { } folder && IsMissingNow(folder), Alias: member.Alias,
                 Emoji: member.Mark, IconColor: member.IconColor, GroupId: id, Profile: member.Profile);
             tabs.Insert(NormalEnd, tab);
             opened[offset] = tab.Id;
@@ -861,10 +911,12 @@ public sealed class WindowTabs
         }
 
         RequestRepoKeys(tabs.Where(tab => reopened.Contains(tab.Id) && !tab.IsMissing).Select(tab => tab.Id));
+        RequestFolderChecks(reopened);
     }
 
     /// <summary>Open Group in New Window: the group leaves the closed groups; the caller opens a new window with what it
-    /// returns. Null when there is no such group.</summary>
+    /// returns. Null when there is no such group. Its folders are checked in the call only when
+    /// <see cref="FolderChecksNeeded"/> is unset; else none is listed as gone and the caller checks the new window's.</summary>
     public GroupWindow? OpenClosedGroupInNewWindow(Guid id)
     {
         var at = closedGroups.FindIndex(group => group.Id == id);
@@ -876,7 +928,7 @@ public sealed class WindowTabs
         var entry = closedGroups[at];
         closedGroups.RemoveAt(at);
         var entries = entry.Tabs.Select(member => member with { TabGroup = id }).ToList();
-        var missing = entries.Select(member => member.Path).OfType<string>().Where(path => !folderExists(path))
+        var missing = entries.Select(member => member.Path).OfType<string>().Where(IsMissingNow)
             .ToHashSet(flavor.KeyComparer);
         return new GroupWindow(entries, new SavedTabGroup(id, entry.Color, entry.Name), missing);
     }

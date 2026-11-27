@@ -28,7 +28,8 @@ internal sealed record TabItemState(
 /// on hover (white 0.06) or in the multi-selection (0.08), stopping 4.5 epx above the row's bottom; the selected tab
 /// has none: the sheet's joined shape (MainWindow's SheetPath) is its fill. Its presses (a left press selects it at once,
 /// click-first rule; Shift/Ctrl multi-select; drag; middle-click close) go through the strip's
-/// <see cref="TabDragController"/>; the strip places it and draws every outline around it.
+/// <see cref="TabDragController"/>; the strip places it and draws every outline around it. Its right-click menu is
+/// <see cref="TabContextMenu"/>.
 /// </summary>
 internal sealed partial class TabItemView : Grid
 {
@@ -121,6 +122,8 @@ internal sealed partial class TabItemView : Grid
         PointerEntered += (_, _) => SetHovered(true);
         PointerExited += (_, _) => SetHovered(false);
         PointerCanceled += (_, _) => SetHovered(false);
+        // Right click, touch hold, Shift+F10 and the Menu key (TabKeyboard opens it first from the keyboard).
+        ContextRequested += (_, e) => TabContextMenu.OnContextRequested(this, e);
     }
 
     public Guid Id { get; }
@@ -153,6 +156,9 @@ internal sealed partial class TabItemView : Grid
         if (wasSelected != state.Selected)
             TabAutomation.RaisePropertyChanged(this, SelectionItemPatternIdentifiers.IsSelectedProperty, wasSelected, state.Selected);
     }
+
+    /// <summary>The icon images changed: the icon is drawn again if it shows an image.</summary>
+    internal void RefreshIcon() => _icon.RefreshImage();
 
     protected override AutomationPeer OnCreateAutomationPeer() => new TabItemAutomationPeer(this);
 
@@ -222,8 +228,8 @@ internal sealed partial class TabItemAutomationPeer : FrameworkElementAutomation
 /// A manual group's chip before its first tab (design §3.4, TabGroupChip in App/Window/TabStrip.swift): 22 epx tall,
 /// radius 6, the group color at 0.38, its name in white 11 semibold (an unnamed group is a color square); collapsed, its
 /// tab count is appended ("Docs · 3"). A click toggles the collapse on release and a drag moves the whole group (the
-/// strip's <see cref="TabDragController"/>); its flyout is task 10.2. UI Automation: a Button with the ExpandCollapse
-/// pattern.
+/// strip's <see cref="TabDragController"/>); a right click (or Shift+F10 / the Menu key, <see cref="TabKeyboard"/>)
+/// opens its <see cref="GroupFlyout"/>. UI Automation: a Button with the ExpandCollapse pattern.
 /// </summary>
 internal sealed partial class GroupChipView : Grid
 {
@@ -253,6 +259,11 @@ internal sealed partial class GroupChipView : Grid
             IsHitTestVisible = false,
         };
         Children.Add(_text);
+        ContextRequested += (_, e) =>
+        {
+            e.Handled = true;
+            _strip.ShowGroupFlyout(GroupId);
+        };
     }
 
     public Guid GroupId { get; }
@@ -335,7 +346,8 @@ internal sealed partial class GroupChipAutomationPeer : FrameworkElementAutomati
 /// <summary>
 /// The head at a worktree box's start (design §3.5, a Windows addition): a 20 epx part of the box with a 12 epx branch
 /// glyph at white 0.45; its tooltip names the repository and the count. A press selects the box's first tab and a drag
-/// moves the whole box (the strip's <see cref="TabDragController"/>). UI Automation: a Button.
+/// moves the whole box (the strip's <see cref="TabDragController"/>); a right click opens its <see cref="TabContextMenu"/>.
+/// UI Automation: a Button.
 /// </summary>
 internal sealed partial class WorktreeHeadView : Grid
 {
@@ -362,6 +374,7 @@ internal sealed partial class WorktreeHeadView : Grid
             VerticalAlignment = VerticalAlignment.Center,
             IsHitTestVisible = false,
         });
+        ContextRequested += (_, e) => TabContextMenu.OnContextRequested(this, e);
     }
 
     /// <summary>The box's first tab, which a click selects.</summary>

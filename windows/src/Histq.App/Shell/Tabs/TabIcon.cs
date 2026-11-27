@@ -1,7 +1,9 @@
+using Histq.App.Support;
 using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
@@ -40,7 +42,7 @@ internal readonly record struct TabIconState(
 /// </summary>
 internal static class TabColors
 {
-    private const int LaneCount = 8;
+    internal const int LaneCount = 8;
 
     /// <summary>The archive's lane: index 1, the orange.</summary>
     private const int ArchiveLane = 1;
@@ -93,11 +95,15 @@ internal static class TabColors
 }
 
 /// <summary>
-/// A tab's icon in its 16 epx slot (ported from TabIcon, App/Window/TabStrip.swift): its own emoji, else (a book with
-/// neither its own icon nor its own color) Settings › Appearance's default tab icon, else its glyph, tinted by its own
-/// color or the default color, else the title's color. The profile's color dot sits on its lower-right corner in a
-/// white ring. Uploaded image icons (<c>icon:&lt;sha&gt;</c>) arrive with the icon library (task 10.3); until then a
-/// reference counts as no icon, as a missing image does on the Mac.
+/// A tab's icon in its 16 epx slot (ported from TabIcon, App/Window/TabStrip.swift): its own emoji or uploaded image,
+/// else (a book with neither its own icon nor its own color) Settings › Appearance's default tab icon (an emoji or an
+/// image), else its glyph, tinted by its own color or the default color, else the title's color. An image
+/// (<c>icon:&lt;sha&gt;</c>, <see cref="CustomIconImages"/>) is fitted in the emoji's square, never cropped; the slot
+/// stays empty while it loads, and an image found missing counts as no icon. An emoji read from a session or workspace
+/// file is shown only as <see cref="TabEmoji.Normalized"/> keeps it (its last emoji), and not when that is longer than
+/// <see cref="DisplayText.MaxElementLength"/>. The profile's color dot sits on its lower-right corner in a white ring.
+/// UI Automation reads it as an Image named by its emoji, or "Custom icon"; a glyph is not read (the tab's name says
+/// it all).
 /// </summary>
 internal sealed partial class TabIcon : Grid
 {
@@ -107,6 +113,7 @@ internal sealed partial class TabIcon : Grid
     private const string WelcomeGlyph = "";
 
     private readonly TextBlock _emoji;
+    private readonly Image _image;
     private readonly FontIcon _glyph;
     private readonly Ellipse _dot;
     private TabIconState? _shown;
@@ -125,6 +132,17 @@ internal sealed partial class TabIcon : Grid
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             TextLineBounds = TextLineBounds.Tight,
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+        // A fixed size, so a source that arrives later changes no layout.
+        _image = new Image
+        {
+            Width = size,
+            Height = size,
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
             Visibility = Visibility.Collapsed,
             IsHitTestVisible = false,
         };
@@ -154,33 +172,59 @@ internal sealed partial class TabIcon : Grid
         };
 
         Children.Add(_emoji);
+        Children.Add(_image);
         Children.Add(_glyph);
         Children.Add(_dot);
     }
 
-    /// <summary>The emoji shown, or null when the glyph is (UI Automation reads it with the tab's name).</summary>
-    public string? ShownEmoji => _emoji.Visibility == Visibility.Visible ? _emoji.Text : null;
+    /// <summary>What UI Automation reads: the emoji shown, "Custom icon" for an image, null for the glyph.</summary>
+    public string? ShownName =>
+        _emoji.Visibility == Visibility.Visible ? _emoji.Text
+        : _image.Visibility == Visibility.Visible ? "Custom icon"
+        : null;
 
     public void Update(TabIconState state)
     {
         if (_shown == state)
             return;
         _shown = state;
+        Show(state);
+    }
 
-        string? own = state.Emoji is { } mark && !CustomIcon.IsRef(mark) ? mark : null;
+    /// <summary>The icon images changed (<see cref="CustomIconImages.Changed"/>): an icon that shows or waits for an
+    /// image is drawn again.</summary>
+    public void RefreshImage()
+    {
+        if (_shown is { } state && (CustomIcon.IsRef(state.Emoji) || CustomIcon.IsRef(state.DefaultEmoji)))
+            Show(state);
+    }
+
+    private void Show(TabIconState state)
+    {
+        CustomIconImages images = CustomIconImages.Shared;
+        string? own = Present(state.Emoji, images);
         bool usesDefault = own is null && state.IconColor is null && state.Glyph == TabGlyph.Book;
-        string? fallback = CustomIcon.IsRef(state.DefaultEmoji) ? null : TabEmoji.Normalized(state.DefaultEmoji);
-        string? emoji = own ?? (usesDefault ? fallback : null);
+        string? icon = own ?? (usesDefault ? Present(state.DefaultEmoji, images) : null);
 
-        if (emoji is not null)
+        _emoji.Visibility = Visibility.Collapsed;
+        _image.Visibility = Visibility.Collapsed;
+        _glyph.Visibility = Visibility.Collapsed;
+        if (icon is not null && CustomIcon.IsRef(icon))
         {
-            _emoji.Text = emoji;
+            // Empty until the image has loaded.
+            ImageSource? source = images.Image(icon);
+            if (source is null)
+                images.Load(icon);
+            _image.Source = source;
+            _image.Visibility = Visibility.Visible;
+        }
+        else if (icon is not null)
+        {
+            _emoji.Text = icon;
             _emoji.Visibility = Visibility.Visible;
-            _glyph.Visibility = Visibility.Collapsed;
         }
         else
         {
-            _emoji.Visibility = Visibility.Collapsed;
             _glyph.Visibility = Visibility.Visible;
             _glyph.Glyph = state.Glyph switch
             {
@@ -205,4 +249,37 @@ internal sealed partial class TabIcon : Grid
             _dot.Visibility = Visibility.Collapsed;
         }
     }
+
+    protected override AutomationPeer OnCreateAutomationPeer() => new TabIconAutomationPeer(this);
+
+    /// <summary>What an icon slot value shows: an image reference unless its image was found missing, else its last
+    /// emoji (<see cref="TabEmoji.Normalized"/>) when that is short enough; null for none.</summary>
+    private static string? Present(string? value, CustomIconImages images)
+    {
+        if (string.IsNullOrEmpty(value))
+            return null;
+        if (CustomIcon.IsRef(value))
+            return images.IsMissing(value) ? null : value;
+        return TabEmoji.Normalized(value) is { Length: > 0 and <= DisplayText.MaxElementLength } emoji
+            && DisplayText.Sanitize(emoji) is { Length: > 0 } shown
+            ? shown
+            : null;
+    }
+}
+
+/// <summary>A tab's icon in UI Automation: an Image named by the emoji it shows, or "Custom icon"; with the glyph it
+/// is not read. It has no children (its emoji is its name).</summary>
+internal sealed partial class TabIconAutomationPeer(TabIcon owner) : FrameworkElementAutomationPeer(owner)
+{
+    protected override string GetNameCore() => owner.ShownName ?? string.Empty;
+
+    protected override AutomationControlType GetAutomationControlTypeCore() => AutomationControlType.Image;
+
+    protected override string GetClassNameCore() => nameof(TabIcon);
+
+    protected override IList<AutomationPeer>? GetChildrenCore() => null;
+
+    protected override bool IsControlElementCore() => owner.ShownName is not null;
+
+    protected override bool IsContentElementCore() => owner.ShownName is not null;
 }

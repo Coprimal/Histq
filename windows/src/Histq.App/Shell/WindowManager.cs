@@ -97,6 +97,26 @@ internal sealed class WindowManager
         _store.Schedule();
     }
 
+    /// <summary>
+    /// Move Group to New Window and a closed group's Open Group in New Window (<see cref="WindowTabs.GroupWindow"/>): a
+    /// new window, in front, with the group's tabs in the group (same id, name and color) and its tab
+    /// <see cref="WindowTabs.GroupWindow.Selected"/> selected; the system places it. Its folders are then checked off
+    /// the UI thread, as a reopened tab's are (a folder gone shows "Repo not found").
+    /// </summary>
+    public void OpenGroupWindow(WindowTabs.GroupWindow group)
+    {
+        if (_quitting || group.Tabs.Count == 0)
+            return;
+        var saved = new SavedWindow(0, 0, 0, 0, Group: 0, TabIndex: 0, IsSelectedInGroup: true, group.Tabs,
+            Math.Clamp(group.Selected, 0, group.Tabs.Count - 1), [group.Group]);
+        MainWindow window = Open(saved, group.Missing);
+        List<(Guid Id, string Path)> folders = [.. window.Tabs.Tabs
+            .Where(tab => tab.Path is not null).Select(tab => (tab.Id, tab.Path!))];
+        if (folders.Count > 0)
+            _ = CheckFoldersAsync(window, folders);
+        _store.Schedule();
+    }
+
     /// <summary>Brings the front window forward (a second launch handed its activation here).</summary>
     public void BringForward()
     {

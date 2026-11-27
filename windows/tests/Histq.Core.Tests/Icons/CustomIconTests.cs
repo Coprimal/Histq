@@ -129,6 +129,72 @@ public sealed class CustomIconTests
         Assert.Equal([reference], library.Refs());
     }
 
+    public static TheoryData<string> NotSelfContainedSvgs => new(
+        """<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="data:image/png;base64,AA=="/></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><p>x</p></foreignObject></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: red }</style></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="\\server\share\a.svg#x"/></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><use href="https://example.com/a.svg#x"/></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url( 'file:///C:/a.svg#g')"/></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill: URL(http://example.com/x)"/></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>""",
+        """<?xml-stylesheet href="http://example.com/a.css"?><svg xmlns="http://www.w3.org/2000/svg"/>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><use href="#r"><set attributeName="href" to="http://x/"/></use></svg>""",
+        """<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:u\72l(http://x)"/></svg>""",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\">" + string.Concat(Enumerable.Repeat("<g>", CustomIcon.MaxSvgDepth + 1))
+            + string.Concat(Enumerable.Repeat("</g>", CustomIcon.MaxSvgDepth + 1)) + "</svg>");
+
+    // An SVG that runs code, loads another file or resource, or nests too deep is refused and nothing is stored.
+    [Theory]
+    [MemberData(nameof(NotSelfContainedSvgs))]
+    public void AddRefusesSvgThatIsNotSelfContained(string svg)
+    {
+        using var folder = new TempFolder();
+        var library = folder.Library();
+        var file = folder.Write("icon.svg", Encoding.UTF8.GetBytes(svg));
+
+        Assert.Equal(CustomIcon.Problem.NotSelfContained(), Assert.Throws<CustomIcon.Problem>(() => library.Add(file)));
+        Assert.Empty(Files(library.Directory));
+    }
+
+    // References inside the document (a gradient by url(#id), a use by href="#id") are kept.
+    [Fact]
+    public void SvgWithFragmentReferencesIsSelfContained()
+    {
+        var svg = Encoding.UTF8.GetBytes(
+            """
+            <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 8 8">
+              <defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient><rect id="r" width="4" height="4"/></defs>
+              <rect width="8" height="8" fill="url(#g)"/><use xlink:href="#r"/><use href=" #r"/>
+            </svg>
+            """);
+        Assert.True(CustomIcon.IsSelfContainedSvg(svg));
+    }
+
+    // A Windows device path (pipes, devices) is refused before any read; drive, UNC and POSIX paths are not.
+    [Theory]
+    [InlineData(@"\\.\pipe\x", PathFlavor.Windows, true)]
+    [InlineData(@"\\?\C:\a.png", PathFlavor.Windows, true)]
+    [InlineData("//./CON", PathFlavor.Windows, true)]
+    [InlineData(@"C:\a.png", PathFlavor.Windows, false)]
+    [InlineData(@"\\server\share\a.png", PathFlavor.Windows, false)]
+    [InlineData("//./x", PathFlavor.Posix, false)]
+    public void DevicePathsAreRefused(string path, PathFlavor flavor, bool refused) =>
+        Assert.Equal(refused, CustomIcon.IsDevicePath(path, flavor));
+
+    // A file of exactly the limit is read whole.
+    [Fact]
+    public void ReadFileReadsUpToTheLimit()
+    {
+        using var folder = new TempFolder();
+        var data = new byte[CustomIcon.MaxBytes];
+        data[^1] = 7;
+        Assert.Equal(data, CustomIcon.ReadFile(folder.Write("full.bin", data)));
+        Assert.Equal(CustomIcon.Problem.Unreadable(),
+            Assert.Throws<CustomIcon.Problem>(() => CustomIcon.ReadFile(Path.Join(Path.GetTempPath(), "HistqNoSuchFile.png"))));
+    }
+
     // JPEG and WebP are recognised by their first bytes and measured from their headers, whatever the file's name.
     [Fact]
     public void JpegAndWebPAreSniffedAndMeasured()
@@ -144,6 +210,22 @@ public sealed class CustomIconTests
             CustomIcon.Problem.SizeOutOfRange(600, 20),
             Assert.Throws<CustomIcon.Problem>(() => library.Add(folder.Write("wide.webp", WebPExtended(600, 20)))));
         Assert.Equal(2, library.Refs().Count);
+    }
+
+    // A stored raster file reaches a decoder only when its bytes are the type its extension names and its size is in
+    // range: a GIF, a BMP or a JPEG saved under a .png name is refused before any decode.
+    [Fact]
+    public void StoredRasterMustMatchItsExtension()
+    {
+        var file = $"{Hash}.png";
+        Assert.True(CustomIcon.IsStoredRaster(file, Png(32, 32)));
+        Assert.False(CustomIcon.IsStoredRaster(file, Png(8, 8)));
+        Assert.False(CustomIcon.IsStoredRaster(file, Jpeg(64, 48)));
+        Assert.True(CustomIcon.IsStoredRaster($"{Hash}.jpg", Jpeg(64, 48)));
+        byte[] gif = [.. "GIF89a"u8, 32, 0, 32, 0, 0, 0, 0, 0x3B];
+        Assert.False(CustomIcon.IsStoredRaster(file, gif));
+        byte[] bmp = [.. "BM"u8, .. new byte[52]];
+        Assert.False(CustomIcon.IsStoredRaster(file, bmp));
     }
 
     // A known type whose header is cut short is unreadable, and a file over the limit is refused before it is read.

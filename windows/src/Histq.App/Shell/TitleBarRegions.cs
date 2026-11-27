@@ -136,9 +136,10 @@ public sealed class TitleBarRegions
 
     private void OnXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => RefreshAll();
 
-    /// <summary>Sets the rects even when equal to the last ones: the title bar was loaded, resized, rescaled or let go.
-    /// Only the tab strip's frequent <see cref="Refresh"/> calls skip an equal list.</summary>
-    private void RefreshAll()
+    /// <summary>Sets the rects even when equal to the last ones: the title bar was loaded, resized, rescaled or let go,
+    /// or a flyout anchored in it closed. Only the tab strip's frequent <see cref="Refresh"/> calls skip an equal list.
+    /// </summary>
+    public void RefreshAll()
     {
         _rects = null;
         Refresh();
