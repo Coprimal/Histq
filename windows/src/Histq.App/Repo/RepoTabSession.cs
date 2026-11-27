@@ -57,6 +57,13 @@ internal sealed partial class RepoTabSession : IDisposable
     /// <summary>Puts every git process in the app's job; null when Windows refused to make the job (logged once).</summary>
     private static readonly Lazy<Action<Process>?> OnStarted = new(JoinJob);
 
+    /// <summary>The launch timeline's marks (QA builds: <c>QaTimeline</c>, the load probe's breakdown); null otherwise.</summary>
+#if HISTQ_QA
+    private static readonly Action<string>? Mark = QaTimeline.Mark;
+#else
+    private static readonly Action<string>? Mark = null;
+#endif
+
     private readonly string _path;
     private readonly Preferences _preferences;
     private readonly bool _fadeWorktrees;
@@ -73,7 +80,9 @@ internal sealed partial class RepoTabSession : IDisposable
 
     /// <summary>The filter the last log was read with (the pump's): the badges leave its hidden refs out.</summary>
     private LogFilter _filter = LogFilter.None;
-    private readonly DispatcherQueue _dispatcher;
+    /// <summary>The UI thread's queue (under _gate); null for a session started before its tab exists, whose data waits
+    /// until <see cref="Attach"/>.</summary>
+    private DispatcherQueue? _dispatcher;
     private readonly CancellationTokenSource _cancel = new();
 
     /// <summary>Guards the requests and the data waiting for the UI thread.</summary>
@@ -117,7 +126,7 @@ internal sealed partial class RepoTabSession : IDisposable
     private bool _shownAny;
     private bool _watchTried;
 
-    // UI thread only.
+    // UI thread only (a launch session's Start runs on a worker before any UI thread sees it).
     private bool _disposed;
     private bool _started;
 
@@ -126,11 +135,12 @@ internal sealed partial class RepoTabSession : IDisposable
     /// <param name="preferences">The app's preferences, read off the UI thread only.</param>
     /// <param name="fadeWorktrees">Other worktrees' commits fade (graphFadeOtherWorktrees): their reach is computed.</param>
     /// <param name="ownStateDir">Histq's own state folder: the watcher ignores its changes (a repo holding it).</param>
-    /// <param name="dispatcher">The UI thread's queue, where every event is raised.</param>
+    /// <param name="dispatcher">The UI thread's queue, where every event is raised; null for a session started at launch,
+    /// before its tab exists (<see cref="GitWarmup.Prestart"/>): nothing is raised until <see cref="Attach"/>.</param>
     /// <param name="view">The graph's view the workspace holds for this repo; null to read the folder's own file
     /// (<see cref="RepoViewState.FileFor"/> under <paramref name="ownStateDir"/>).</param>
     public RepoTabSession(
-        string path, Preferences preferences, bool fadeWorktrees, string? ownStateDir, DispatcherQueue dispatcher,
+        string path, Preferences preferences, bool fadeWorktrees, string? ownStateDir, DispatcherQueue? dispatcher,
         RepoViewState? view = null)
     {
         _view = view;
@@ -139,6 +149,27 @@ internal sealed partial class RepoTabSession : IDisposable
         _fadeWorktrees = fadeWorktrees;
         _ownStateDir = ownStateDir;
         _dispatcher = dispatcher;
+    }
+
+    /// <summary>
+    /// The UI thread's queue for a session started without one (at launch): what it read meanwhile is raised from now
+    /// on. Hook the events first. UI thread; nothing for a session that has its queue.
+    /// </summary>
+    public void Attach(DispatcherQueue dispatcher)
+    {
+        bool queue;
+        lock (_gate)
+        {
+            if (_dispatcher is not null)
+                return;
+            _dispatcher = dispatcher;
+            queue = !_drainQueued && (_pending is not null || _failure is not null || _pendingView is not null);
+            if (queue)
+                _drainQueued = true;
+        }
+
+        if (queue)
+            Enqueue();
     }
 
     /// <summary>The graph's rows, worktrees and fading: a first page, a complete log or a reload. UI thread.</summary>
@@ -166,6 +197,7 @@ internal sealed partial class RepoTabSession : IDisposable
         if (_started || _disposed)
             return;
         _started = true;
+        Mark?.Invoke("sessionStart");
         Request(load: true, worktrees: true);
     }
 
@@ -322,18 +354,24 @@ internal sealed partial class RepoTabSession : IDisposable
         }
     }
 
-    /// <summary>Resolves git, its runner and the read base environment, and the repo's folders, once.</summary>
+    /// <summary>
+    /// Resolves git (the app's shared resolution, <see cref="GitWarmup"/>, started at launch), its runner and the read
+    /// base environment, once; then reads the folder's read environment once, so the log, the refs and the watcher that
+    /// start next all find it cached instead of each listing it at the same time.
+    /// </summary>
     private async Task PrepareAsync(CancellationToken ct)
     {
         if (_loader is not null)
             return;
-        GitExecutable git = await GitExecutable.ResolveAsync(_preferences.Get<string>(PrefKey.GitPath), ct: ct)
-            .ConfigureAwait(false);
+        GitExecutable git = await GitWarmup.GitAsync(_preferences.Get<string>(PrefKey.GitPath), ct).ConfigureAwait(false);
+        Mark?.Invoke("gitResolved");
         var runner = new GitRunner(git.ExecutablePath, OnStarted.Value);
         Dictionary<string, string> @base = GitInvocation.BaseEnvironment(gitExecutable: git.ExecutablePath);
         _runner = runner;
         _base = @base;
-        _loader = new RepoLoader(runner, _path, @base, ReadCache);
+        await ReadEnvironmentAsync(_path, ct).ConfigureAwait(false);
+        Mark?.Invoke("readEnv");
+        _loader = new RepoLoader(runner, _path, @base, ReadCache, Mark);
     }
 
     /// <summary>Reads the folder's own view file once, unless a view was given or set; it goes to the UI thread before
@@ -743,7 +781,19 @@ internal sealed partial class RepoTabSession : IDisposable
 
     private void Enqueue()
     {
-        if (!_dispatcher.TryEnqueue(Drain))
+        DispatcherQueue? dispatcher;
+        lock (_gate)
+        {
+            dispatcher = _dispatcher;
+            // No UI thread yet (a launch session): Attach queues the drain.
+            if (dispatcher is null)
+            {
+                _drainQueued = false;
+                return;
+            }
+        }
+
+        if (!dispatcher.TryEnqueue(Drain))
         {
             // The UI thread is shutting down: nothing is shown any more.
             lock (_gate)

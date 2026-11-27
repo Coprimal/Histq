@@ -187,4 +187,38 @@ public sealed class RepoLoaderTests
         Assert.Equal(snapshot.Status, status);
         Assert.Empty(stashes);
     }
+
+    // A shallow clone (its common dir read beside the log, the shallow check made once the first page comes) loads as
+    // shallow, and a reload never reads it incrementally: the whole log again.
+    [Fact]
+    public async Task ShallowCloneLoadsAsShallowAndReloadsWhole()
+    {
+        using var sandbox = await Sandbox.CreateAsync();
+        var repo = await sandbox.MakeRepoAsync("repo");
+        foreach (var subject in new[] { "second", "third" })
+        {
+            await File.WriteAllTextAsync(Path.Combine(repo, "tracked.txt"), subject + "\n", Token);
+            await sandbox.GitAsync(["commit", "-q", "-am", subject], repo);
+        }
+
+        var shallow = Path.Combine(sandbox.Root, "shallow");
+        await sandbox.GitAsync(["clone", "-q", "--depth", "2", new Uri(repo).AbsoluteUri, shallow], sandbox.Root);
+
+        var loader = new RepoLoader(sandbox.Runner, shallow, sandbox.Base);
+        var firstPages = new List<RepoSnapshot>();
+        var snapshot = await loader.LoadAsync(
+            1, LogFilter.None, [], LogReader.Order.Date, GraphLayout.Coloring.Branch,
+            first => { firstPages.Add(first); return Task.CompletedTask; }, Token);
+        var incremental = await loader.ReloadIncrementallyAsync(snapshot, 2, LogFilter.None, [], Token);
+        var reloaded = await loader.ReloadAsync(
+            snapshot, 3, LogFilter.None, [], LogReader.Order.Date, GraphLayout.Coloring.Branch, Token);
+
+        Assert.True(snapshot.IsComplete);
+        Assert.True(snapshot.IsShallow);
+        Assert.True(Assert.Single(firstPages).IsShallow);
+        Assert.Equal(["third", "second"], snapshot.Commits.Select(commit => commit.Subject));
+        Assert.Null(incremental); // In doubt: ReloadAsync falls back to the whole log.
+        Assert.True(reloaded.IsShallow);
+        Assert.Equal(snapshot.Commits.Select(c => c.Hash), reloaded.Commits.Select(c => c.Hash));
+    }
 }

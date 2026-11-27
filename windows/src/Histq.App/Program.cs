@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Histq.App.Repo;
 using Histq.App.Shell;
 using Histq.Core;
 using Microsoft.UI.Dispatching;
@@ -54,12 +55,42 @@ public static class Program
             TaskContinuationOptions.None,
             TaskScheduler.Default);
 
+        // The launch's folders (and workspace files), checked on a worker while XAML starts, so OnLaunched can open them
+        // in the same call as the restored windows; once the preferences (gitPath) are read too, git is resolved and each
+        // launch folder's session starts (its log read) while XAML starts, its tab taking it over (GitWarmup).
+        List<string> launchPaths = [.. LaunchFlags.Positional(args)];
+#if HISTQ_QA
+        if (QaFlags.OpenFolder(args) is { } openFolder)
+            launchPaths.Add(openFolder);
+#endif
+        Task<IReadOnlyList<(string Path, bool IsWorkspace)>> launchEntries =
+            Task.Run(() => WindowManager.LaunchEntries(launchPaths));
+        _ = Task.WhenAll(preferencesLoad, launchEntries).ContinueWith(
+            _ =>
+            {
+                if (!preferencesLoad.IsCompletedSuccessfully || !launchEntries.IsCompletedSuccessfully)
+                    return;
+                Preferences preferences = preferencesLoad.Result;
+                _ = GitWarmup.GitAsync(preferences.Get<string>(PrefKey.GitPath));
+                foreach ((string path, bool isWorkspace) in launchEntries.Result)
+                {
+                    if (!isWorkspace)
+                        GitWarmup.Prestart(path, preferences, paths.Root);
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+
         Application.Start(_ =>
         {
             var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
             SynchronizationContext.SetSynchronizationContext(context);
             // Application.Current keeps it alive, as in the XAML-generated Main.
-            var app = new App { StatePaths = paths, SessionLoad = sessionLoad, PreferencesLoad = preferencesLoad };
+            var app = new App
+            {
+                StatePaths = paths, SessionLoad = sessionLoad, PreferencesLoad = preferencesLoad, LaunchEntries = launchEntries,
+            };
             CrashLog.Watch(app);
             instance.Activated += app.OnRedirectedActivation;
 #if HISTQ_QA

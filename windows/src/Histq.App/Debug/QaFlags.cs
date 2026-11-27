@@ -1634,7 +1634,11 @@ namespace Histq.App
     /// do (as the Mac's flag; the graph's view is unchanged).</item>
     /// <item><c>-HistqLoadProbe YES</c>: <c>Probes\load.json</c>: <c>firstRowsMs</c> (process start to the first draw
     /// with rows), <c>fullLoadMs</c> (to the first draw of the complete log), <c>commits</c>, <c>rows</c>,
-    /// <c>lateHook</c> (the graph had drawn before the probe hooked it: the times are late).</item>
+    /// <c>dataBeforeHook</c> (the graph had its rows when the probe hooked it on the first frame its layout existed: a
+    /// draw before that frame, if any, is missed and the times are late), and the breakdown, each in ms
+    /// from process start (<see cref="QaTimeline"/>; null when the step did not happen): <c>onLaunchedMs</c>,
+    /// <c>windowFirstFrameMs</c>, <c>sessionStartMs</c>, <c>gitResolvedMs</c>, <c>readEnvMs</c>, <c>loaderEnvMs</c>,
+    /// <c>stashesMs</c>, <c>logSpawnMs</c>, <c>firstPageParsedMs</c>, <c>statusMs</c>, <c>firstPagePostedMs</c>.</item>
     /// <item><c>-HistqRowsProbe &lt;n&gt;|auto</c> (auto: 50): <c>Probes\rows.json</c>: the complete log's first n
     /// commits (no WIP or stash row) as <c>hash</c>, <c>parents</c> (in order) and <c>refs</c> (sorted full ref names at
     /// the commit: local and remote branches, tags at their peeled commit, <c>HEAD</c> when detached there), what
@@ -1683,9 +1687,6 @@ namespace Histq.App
         /// <summary>An unknown <c>-HistqScrollPacing</c>: the scroll probe fails with it (exit 1).</summary>
         private string? _pacingError;
 
-        /// <summary>The process's age when the probes were made; <see cref="_clock"/> runs from then.</summary>
-        private readonly TimeSpan _startAge;
-        private readonly Stopwatch _clock = Stopwatch.StartNew();
         private readonly Lock _gate = new();
 
         /// <summary>The probe files not written yet, by name (a failure writes its error to each).</summary>
@@ -1699,8 +1700,6 @@ namespace Histq.App
         {
             (_find, _showHidden, _scrollSeconds, _drawPacing, _rows, _load, _watch) =
                 (find, showHidden, scrollSeconds, drawPacing, rows, load, watch);
-            using var process = Process.GetCurrentProcess();
-            _startAge = DateTime.Now - process.StartTime;
         }
 
         private bool Exits => _load || _rows is not null || _scrollSeconds is not null || _watch;
@@ -1756,7 +1755,7 @@ namespace Histq.App
             _ = RunAsync(windows, ready);
         }
 
-        private double SinceLaunchMs() => Math.Round((_startAge + _clock.Elapsed).TotalMilliseconds, 1);
+        private static double SinceLaunchMs() => QaTimeline.Now();
 
         /// <summary>The load probe: hooks the shown repo tab's graph on the first frame it exists, then records its first
         /// draw with rows and its first draw of the complete log.</summary>
@@ -1798,7 +1797,7 @@ namespace Histq.App
                 }
 
                 graph = layout.QaGraph;
-                result.LateHook = graph.Data is not null;
+                result.DataBeforeHook = graph.Data is not null;
                 graph.Canvas.DrawCompleted += OnDrawn;
                 CompositionTarget.Rendering -= OnRendering;
             }
@@ -1826,6 +1825,17 @@ namespace Histq.App
                         throw new TimeoutException($"the load probe saw no complete draw within {LoadLimit.TotalMinutes} minutes");
                     LoadResult load = await _loaded.Task;
                     load.Ok = true;
+                    load.OnLaunchedMs = QaTimeline.At("onLaunched");
+                    load.WindowFirstFrameMs = QaTimeline.At("windowFirstFrame");
+                    load.SessionStartMs = QaTimeline.At("sessionStart");
+                    load.GitResolvedMs = QaTimeline.At("gitResolved");
+                    load.ReadEnvMs = QaTimeline.At("readEnv");
+                    load.LoaderEnvMs = QaTimeline.At("loaderEnv");
+                    load.StashesMs = QaTimeline.At("stashes");
+                    load.LogSpawnMs = QaTimeline.At("logSpawn");
+                    load.FirstPageParsedMs = QaTimeline.At("firstPageParsed");
+                    load.StatusMs = QaTimeline.At("status");
+                    load.FirstPagePostedMs = QaTimeline.At("firstPagePosted");
                     Write("load.json", load);
                 }
 
@@ -2048,7 +2058,18 @@ namespace Histq.App
             public double? FullLoadMs { get; set; }
             public int Commits { get; set; }
             public long Rows { get; set; }
-            public bool LateHook { get; set; }
+            public bool DataBeforeHook { get; set; }
+            public double? OnLaunchedMs { get; set; }
+            public double? WindowFirstFrameMs { get; set; }
+            public double? SessionStartMs { get; set; }
+            public double? GitResolvedMs { get; set; }
+            public double? ReadEnvMs { get; set; }
+            public double? LoaderEnvMs { get; set; }
+            public double? StashesMs { get; set; }
+            public double? LogSpawnMs { get; set; }
+            public double? FirstPageParsedMs { get; set; }
+            public double? StatusMs { get; set; }
+            public double? FirstPagePostedMs { get; set; }
         }
 
         private sealed record RowProbe(string Hash, IReadOnlyList<string> Parents, IReadOnlyList<string> Refs);

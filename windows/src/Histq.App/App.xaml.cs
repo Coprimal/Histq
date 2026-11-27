@@ -31,11 +31,18 @@ public partial class App : Application
     /// <summary>The preferences' read, started by Program off the UI thread.</summary>
     internal Task<Preferences> PreferencesLoad { get; init; } = null!;
 
+    /// <summary>The launch's folders and workspace files, checked by Program on a worker.</summary>
+    internal Task<IReadOnlyList<(string Path, bool IsWorkspace)>> LaunchEntries { get; init; } = null!;
+
     /// <summary>The session read at launch, or null when there is none.</summary>
     internal SessionStore.Loaded? LoadedSession { get; private set; }
 
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+#if HISTQ_QA
+        QaTimeline.Mark("onLaunched");
+        QaTimeline.WatchFirstFrame();
+#endif
         // Program started the reads before XAML; by now they have (nearly always) finished, and no window exists yet.
         LoadedSession = SessionLoad.GetAwaiter().GetResult();
 
@@ -54,20 +61,14 @@ public partial class App : Application
         Preferences preferences = PreferencesLoad.GetAwaiter().GetResult();
         var recentRepos = new RecentRepos(preferences, PrefKey.RecentRepos);
         _windows = new WindowManager(sessionStore, LoadedSession?.Session.Workspaces, preferences, recentRepos);
-        List<string> arguments = Environment.GetCommandLineArgs().Skip(1).ToList();
         Task restored = _windows.Restore(LoadedSession);
         // A folder or workspace file given on the command line (all builds, as on the Mac) opens once the restored
-        // windows are open; a QA build's -HistqOpen folder too.
-        List<string> launchPaths = [.. LaunchFlags.Positional(arguments)];
-#if HISTQ_QA
-        if (QaFlags.OpenFolder(arguments) is { } openFolder)
-            launchPaths.Add(openFolder);
-#endif
-        Task launched = _windows.OpenAtLaunchAsync(restored, launchPaths);
+        // windows are open, in this call when they already are (a QA build's -HistqOpen folder too).
+        Task launched = _windows.OpenAtLaunchAsync(restored, LaunchEntries);
 #if HISTQ_QA
         // The QA flags (Debug/QaFlags.cs) start once the restored windows are open; the tab probes once the launch's
         // folders are open too.
-        QaFlags.Read(arguments).Start(_windows, restored, launched, StatePaths);
+        QaFlags.Read([.. Environment.GetCommandLineArgs().Skip(1)]).Start(_windows, restored, launched, StatePaths);
 #else
         _ = launched;
 #endif

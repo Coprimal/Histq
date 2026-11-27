@@ -138,12 +138,16 @@ public sealed partial class RepoLayoutView : UserControl, IRepoMenuHost
         RepoViewState? stored = _window.Manager.WorkspaceView(_window, path);
         if (stored is not null)
             (_view, _viewKnown) = (stored, true);
-        _session = new RepoTabSession(
-            path, _window.Manager.Preferences, _window.Manager.GraphLook.FadeOtherWorktrees,
-            ((App)Application.Current).StatePaths.Root, DispatcherQueue.GetForCurrentThread(), stored);
+        // A launch folder's session already reading since the launch (none with a workspace's stored view: it read the
+        // folder's own), else a new one.
+        _session = (stored is null ? GitWarmup.TakeSession(path) : null)
+            ?? new RepoTabSession(
+                path, _window.Manager.Preferences, _window.Manager.GraphLook.FadeOtherWorktrees,
+                ((App)Application.Current).StatePaths.Root, DispatcherQueue.GetForCurrentThread(), stored);
         _session.ViewLoaded += OnViewLoaded;
         _session.Loaded += OnLoaded;
         _session.Failed += OnFailed;
+        _session.Attach(DispatcherQueue.GetForCurrentThread());
         _session.Start();
         RegisterPropertyChangedCallback(VisibilityProperty, OnVisibilityChanged);
     }

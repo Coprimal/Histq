@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using Histq.App.Repo;
 using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.UI.Dispatching;
@@ -13,7 +14,7 @@ namespace Histq.App.Welcome;
 /// The page of a tab with no repository (ported from WelcomeModel and WelcomeView, App/Welcome/WelcomeView.swift at
 /// 6fa6d40, their open and recent parts). Open folder and a click on a recent repository open it in this tab at once
 /// (<see cref="Shell.WindowManager"/>: the tab becomes the repo's, which swaps this page out). Each page checks once that
-/// a usable git is found (<see cref="GitExecutable.ResolveAsync"/>, which honours the gitPath preference) off the UI
+/// a usable git is found (<see cref="GitWarmup.GitAsync"/>, the app's shared resolution, which honours the gitPath preference) off the UI
 /// thread: "checking" from the first frame, its spinner shown after SpinnerDelay; a problem shows why, with Choose
 /// git…, Use automatic git and Check again. Opening never waits for the check, as on the Mac.
 /// </summary>
@@ -74,7 +75,7 @@ public sealed partial class WelcomePage : UserControl
             bool hasOverride = !string.IsNullOrWhiteSpace(overridePath);
             try
             {
-                await GitExecutable.ResolveAsync(overridePath).ConfigureAwait(false);
+                await GitWarmup.GitAsync(overridePath).ConfigureAwait(false);
                 return ((GitExecutableError?)null, hasOverride);
             }
             catch (GitExecutableError error)

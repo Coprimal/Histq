@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Histq.App.Graph;
+using Histq.App.Repo;
 using Histq.App.Shell.Tabs;
 using Histq.App.Sidebar;
 using Histq.Core;
@@ -343,16 +344,15 @@ internal sealed partial class WindowManager
     /// (<see cref="OpenRepo"/>: the selected Welcome tab filled, else a new tab), as the Mac's application(_:open:)
     /// does; anything else is skipped. Never faults.
     /// </summary>
-    public async Task OpenAtLaunchAsync(Task restored, IReadOnlyList<string> paths)
+    public async Task OpenAtLaunchAsync(Task restored, Task<IReadOnlyList<(string Path, bool IsWorkspace)>> entries)
     {
-        if (paths.Count == 0)
-            return;
         try
         {
+            // Both are usually done by now (the entries were checked while XAML started): the folders then open in this
+            // call, before the window's first frame, and a repo tab's load starts at once. Else the awaits resume on the
+            // UI thread (its SynchronizationContext).
             await restored;
-            List<(string Path, bool IsWorkspace)> found = await Task.Run(() =>
-                paths.Select(LaunchEntry).OfType<(string Path, bool IsWorkspace)>().ToList());
-            // The awaits resume on the UI thread (its SynchronizationContext).
+            IReadOnlyList<(string Path, bool IsWorkspace)> found = await entries;
             foreach ((string path, bool isWorkspace) in found)
             {
                 if (_quitting)
@@ -366,6 +366,12 @@ internal sealed partial class WindowManager
         catch (Exception error)
         {
             CrashLog.Recovered("OpenAtLaunch (launch folders not opened)", error);
+        }
+        finally
+        {
+            // A launch folder's session its tab did not take (not opened, or opened in a workspace window with its own
+            // view of the repo) stops.
+            GitWarmup.ReleaseLaunchSessions();
         }
     }
 
@@ -816,6 +822,11 @@ internal sealed partial class WindowManager
 
         OpenRepo(window, path);
     }
+
+    /// <summary>The launch arguments <see cref="OpenAtLaunchAsync"/> opens (<see cref="LaunchEntry"/>), in order. Runs on
+    /// a worker.</summary>
+    internal static IReadOnlyList<(string Path, bool IsWorkspace)> LaunchEntries(IReadOnlyList<string> paths) =>
+        [.. paths.Select(LaunchEntry).OfType<(string Path, bool IsWorkspace)>()];
 
     /// <summary>A launch argument as <see cref="OpenAtLaunchAsync"/> opens it: a workspace file (by its extension, as on
     /// the Mac; opening it reports a file that cannot be read), an existing folder, else null. Runs on a worker.</summary>

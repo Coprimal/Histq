@@ -15,8 +15,11 @@ namespace Histq.Core;
 /// <param name="base">The read base environment (<see cref="GitInvocation.BaseEnvironment"/>): never the write one,
 /// and never with a profile, since an automatic read of an untrusted repo needs no identity, signing or SSH key.</param>
 /// <param name="cache">The driver listings shared by every tab's reads; null lists them on every load.</param>
+/// <param name="mark">Told the steps of a first load as they happen (QA timings: <c>loaderEnv</c>, <c>stashes</c>,
+/// <c>logSpawn</c>, <c>firstPageParsed</c>, <c>status</c>, <c>firstPagePosted</c>); null for none.</param>
 public sealed class RepoLoader(
-    GitRunner runner, string cwd, IReadOnlyDictionary<string, string> @base, ReadEnvironmentCache? cache = null)
+    GitRunner runner, string cwd, IReadOnlyDictionary<string, string> @base, ReadEnvironmentCache? cache = null,
+    Action<string>? mark = null)
 {
     /// <summary>The repo's common dir and bareness, resolved on first use; a race resolves them twice the same.</summary>
     private RepoInfo? _info;
@@ -55,8 +58,8 @@ public sealed class RepoLoader(
     }
 
     /// <summary>
-    /// Reads the whole log and lays it out below the WIP and stash rows (the status and the stashes are read alongside
-    /// the common dir, before git walks the history). <paramref name="firstPage"/> gets a snapshot of the first page,
+    /// Reads the whole log and lays it out below the WIP and stash rows (the stashes, whose bases the log reads too, are
+    /// read before git walks the history; the status and the common dir beside it). <paramref name="firstPage"/> gets a snapshot of the first page,
     /// laid out, as soon as it is ready (not complete; never for a repo without commits). Throws
     /// <see cref="GitError"/>, <see cref="GraphTooWideException"/>, and <see cref="OperationCanceledException"/> when
     /// <paramref name="ct"/> is cancelled.
@@ -69,14 +72,19 @@ public sealed class RepoLoader(
         GraphLayout.Coloring coloring, Func<RepoSnapshot, Task>? firstPage = null, CancellationToken ct = default)
     {
         var env = await ReadEnvironmentAsync(ct).ConfigureAwait(false);
+        mark?.Invoke("loaderEnv");
         // The status runs beside the stashes and the history: it is awaited only when the first rows are laid out.
         using var statusCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var info = InfoAsync(env, ct);
         var status = StartStatus(env, info, statusCancel.Token);
         try
         {
-            var (stashes, commonDir) = await StashesAndCommonDirAsync(env, info, ct).ConfigureAwait(false);
-            var isShallow = IsShallow(commonDir);
+            // Only the stashes hold the log back (their bases are read too); the common dir is awaited with the first
+            // page.
+            var stashes = await StashesAsync(env, info, ct).ConfigureAwait(false);
+            mark?.Invoke("stashes");
+            string? commonDir = null;
+            var isShallow = false;
             // The stashes' bases are read too, which no branch may hold any more (not in solo mode).
             var pages = LogReader.PagesAsync(
                 runner, cwd, env, alsoFrom: filter.Solo.Count == 0 ? stashes.Select(stash => stash.Base).ToList() : [],
@@ -91,19 +99,29 @@ public sealed class RepoLoader(
             var rows = new List<GraphRow>();
             var lanes = 0;
 
-            // Once git has started on the history (or ended without a commit): the status, then the top rows.
+            // Once git has started on the history (or ended without a commit): the common dir and the status, then the
+            // top rows.
             async Task<GraphLayout> BeginAsync()
             {
+                commonDir = (await info.ConfigureAwait(false)).CommonDir;
+                isShallow = IsShallow(commonDir);
                 read = await status.ConfigureAwait(false);
+                mark?.Invoke("status");
                 synthetic = SyntheticRows(read, stashes, worktrees);
                 (layout, top, syntheticRows) = BeginLayout(synthetic, filter, coloring, isComplete: false, index);
                 lanes = LanesOf(syntheticRows);
                 return layout;
             }
 
+            mark?.Invoke("logSpawn");
             await foreach (var page in pages.ConfigureAwait(false))
             {
                 var isFirst = layout is null;
+                if (isFirst)
+                {
+                    mark?.Invoke("firstPageParsed");
+                }
+
                 var pageLayout = layout ?? await BeginAsync().ConfigureAwait(false);
                 for (var offset = 0; offset < page.Count; offset++)
                 {
@@ -125,6 +143,7 @@ public sealed class RepoLoader(
                         Worktrees = worktrees, IsShallow = isShallow, Generation = generation, Filter = filter,
                         Order = order, Coloring = coloring, Status = read,
                     }).ConfigureAwait(false);
+                    mark?.Invoke("firstPagePosted");
                 }
             }
 
@@ -336,9 +355,16 @@ public sealed class RepoLoader(
         }
     }
 
-    /// <summary>The stashes and the common dir, read side by side. A bare repo has no stash list (git refuses it
-    /// without a working tree): no stash row.</summary>
+    /// <summary>The stashes and the common dir, read side by side.</summary>
     private async Task<(IReadOnlyList<Stash> Stashes, string? CommonDir)> StashesAndCommonDirAsync(
+        IReadOnlyDictionary<string, string> env, Task<RepoInfo> info, CancellationToken ct)
+    {
+        var stashes = await StashesAsync(env, info, ct).ConfigureAwait(false);
+        return (stashes, (await info.ConfigureAwait(false)).CommonDir);
+    }
+
+    /// <summary>The stashes. A bare repo has no stash list (git refuses it without a working tree): no stash row.</summary>
+    private async Task<IReadOnlyList<Stash>> StashesAsync(
         IReadOnlyDictionary<string, string> env, Task<RepoInfo> info, CancellationToken ct)
     {
         IReadOnlyList<Stash> stashes;
@@ -356,7 +382,7 @@ public sealed class RepoLoader(
             stashes = [];
         }
 
-        return (stashes, (await info.ConfigureAwait(false)).CommonDir);
+        return stashes;
     }
 
     /// <summary>

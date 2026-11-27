@@ -43,8 +43,12 @@
 
         <graph:GraphCanvas x:Name="Rows" Grid.Row="1" />
 
+        <!-- Opaque (the graph card's surface, hover and press fills too), so the column title under it never shows
+             through: the Mac's raised chip. -->
         <Button
             x:Name="VisibilityChip"
+            BorderBrush="{StaticResource SheetCardBorderBrush}"
+            BorderThickness="1"
             Height="22"
             Margin="0,2,8,0"
             Padding="10,0,10,0"
@@ -54,6 +58,14 @@
             CornerRadius="11"
             ToolTipService.ToolTip="Show every branch in the graph"
             Visibility="Collapsed">
+            <Button.Resources>
+                <SolidColorBrush x:Key="ButtonBackground" Color="{StaticResource SheetCardOpaqueColor}" />
+                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{StaticResource SurfaceColor}" />
+                <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{StaticResource InputSurfaceColor}" />
+                <StaticResource x:Key="ButtonBorderBrush" ResourceKey="SheetCardBorderBrush" />
+                <StaticResource x:Key="ButtonBorderBrushPointerOver" ResourceKey="SheetCardBorderBrush" />
+                <StaticResource x:Key="ButtonBorderBrushPressed" ResourceKey="SheetCardBorderBrush" />
+            </Button.Resources>
             <!-- The runs on one line: whitespace between inlines would show as extra spaces. -->
             <TextBlock FontSize="11"><Run x:Name="VisibilitySummary" /><Run Text=" · " /><Run Foreground="{StaticResource BrandAccentBrush}" Text="Show All" /></TextBlock>
         </Button>

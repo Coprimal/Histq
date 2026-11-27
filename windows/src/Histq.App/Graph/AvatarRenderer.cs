@@ -209,7 +209,11 @@ internal sealed class AvatarRenderer : IDisposable
             WordWrapping = CanvasWordWrapping.NoWrap,
             Options = CanvasDrawTextOptions.EnableColorFont,
         };
-        using var layout = new CanvasTextLayout(ds, emoji, format, 10 * size, 10 * size);
+        // The layout draws with its own options (not the format's): color glyphs need EnableColorFont on it.
+        using var layout = new CanvasTextLayout(ds, emoji, format, 10 * size, 10 * size)
+        {
+            Options = CanvasDrawTextOptions.EnableColorFont,
+        };
         Windows.Foundation.Rect glyph = layout.DrawBounds;
         if (glyph.Width <= 0 || glyph.Height <= 0)
             return;
