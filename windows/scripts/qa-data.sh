@@ -173,6 +173,8 @@ for key in (
     "gcCount2After",
     "gcPauseTotalMsBeforeProbe",
     "gcPauseMs",
+    "gcTotalAllocatedBytesProbe",
+    "subjectText",
     "probeDelaySeconds",
     "gcLatencyModeDuringProbe",
     "gcEventsDropped",

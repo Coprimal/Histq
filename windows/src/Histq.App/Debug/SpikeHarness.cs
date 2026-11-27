@@ -27,13 +27,15 @@ public partial class App
 /// <c>-HistqWindowSize W,H</c> (the client size in physical pixels), <c>-HistqSpikeLog &lt;dump&gt;</c> (a
 /// NUL-terminated log in <see cref="LogReader.Arguments"/>' format, made by windows/scripts/qa-data.sh dump) and
 /// <c>-HistqScrollProbe &lt;seconds&gt;</c> (default 10) and <c>-HistqScrollPacing draw|rendering</c> (default draw,
-/// see <see cref="ScrollProbeAsync"/>).
+/// see <see cref="ScrollProbeAsync"/>), and <c>-HistqSubjectText draw|off</c> (default draw; off leaves the rows'
+/// subjects undrawn, to measure the graph without text).
 /// <para>
 /// GC diagnostics of the scroll probe: <c>-HistqGcLatency Batch|Interactive|LowLatency|SustainedLowLatency</c> (default:
 /// the runtime's mode, untouched) is set right before the probe and restored after it; <c>-HistqProbeDelay
 /// &lt;seconds&gt;</c> (default 0) waits that long after the load and the first rows drawn before the probe starts. The
-/// probe records <see cref="GC.GetGCMemoryInfo(GCKind)"/> per kind before and after it, and the runtime's GC events
-/// (<see cref="GcEventListener"/>) while it runs.
+/// probe records <see cref="GC.GetGCMemoryInfo(GCKind)"/> per kind before and after it, the runtime's GC events
+/// (<see cref="GcEventListener"/>) while it runs, and the bytes the process allocated over it
+/// (<see cref="GC.GetTotalAllocatedBytes"/>, every thread).
 /// </para>
 /// <para>
 /// Without <c>-HistqSpikeLog</c> it only sizes the window, which stays open for the interactive title-bar checks. With
@@ -54,6 +56,7 @@ internal sealed class SpikeHarness
     private const string ScrollPacingFlag = "-HistqScrollPacing";
     private const string GcLatencyFlag = "-HistqGcLatency";
     private const string ProbeDelayFlag = "-HistqProbeDelay";
+    private const string SubjectTextFlag = "-HistqSubjectText";
 
     private const int FirstPageSize = LogReader.DefaultPageSize;
     private const int PageSize = 20_000;
@@ -171,6 +174,12 @@ internal sealed class SpikeHarness
                 var other => throw new ArgumentException(
                     $"{GcLatencyFlag} must be Batch, Interactive, LowLatency or SustainedLowLatency, not '{other}'"),
             };
+            bool drawSubjects = _flags.String(SubjectTextFlag) switch
+            {
+                null or "draw" => true,
+                "off" => false,
+                var other => throw new ArgumentException($"{SubjectTextFlag} must be draw or off, not '{other}'"),
+            };
             double probeDelay = 0;
             if (_flags.String(ProbeDelayFlag) is { } delayText)
             {
@@ -180,6 +189,8 @@ internal sealed class SpikeHarness
             }
 
             _canvas = window.GraphCanvas;
+            _canvas.DrawSubjects = drawSubjects;
+            _result.SubjectText = drawSubjects ? "draw" : "off";
             _canvas.DrawCompleted += OnDrawCompleted;
             await LoadRowsAsync(pages);
             await WaitForAsync(
@@ -542,6 +553,8 @@ internal sealed class SpikeHarness
         _result.GcInfoBefore = GcInfoByKind.Read();
         int[] gcBefore = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
         TimeSpan pauseBefore = GC.GetTotalPauseDuration();
+        // Not precise: a precise read suspends the runtime, which would show up as a pause among the GC events.
+        long allocatedBefore = GC.GetTotalAllocatedBytes();
         DispatcherQueueTimer? timer = null;
         canvas.DrawCompleted += OnDraw;
         CompositionTarget.Rendering += OnRendering;
@@ -574,6 +587,7 @@ internal sealed class SpikeHarness
         }
 
         // Read before the stats below allocate.
+        long allocatedAfter = GC.GetTotalAllocatedBytes();
         TimeSpan pauseAfter = GC.GetTotalPauseDuration();
         int[] gcAfter = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
         _result.GcInfoAfter = GcInfoByKind.Read();
@@ -636,6 +650,7 @@ internal sealed class SpikeHarness
         _result.GcCount2After = gcAfter[2];
         _result.GcPauseTotalMsBeforeProbe = pauseBefore.TotalMilliseconds;
         _result.GcPauseMs = (pauseAfter - pauseBefore).TotalMilliseconds;
+        _result.GcTotalAllocatedBytesProbe = allocatedAfter - allocatedBefore;
     }
 
     /// <summary>
@@ -1045,6 +1060,8 @@ internal sealed class SpikeHarness
         public int? GcCount2After { get; set; }
         public double? GcPauseTotalMsBeforeProbe { get; set; }
         public double? GcPauseMs { get; set; }
+        public long? GcTotalAllocatedBytesProbe { get; set; }
+        public string? SubjectText { get; set; }
         public string? GcLatencyMode { get; set; }
         public bool? GcConcurrent { get; set; }
         public bool? GcServer { get; set; }

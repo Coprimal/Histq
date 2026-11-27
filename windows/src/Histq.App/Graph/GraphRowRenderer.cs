@@ -118,14 +118,15 @@ internal static class GraphPalette
 /// out of the node; the node; and the subject. Coordinates are relative to the row's top, so the caller's scroll offset
 /// never reaches a float beyond the viewport.
 /// <para>
-/// Nothing here allocates per frame: lines are drawn as such, the four quarter arcs of a bend are built once per device
-/// and drawn at an offset, and the stroke styles and text format are shared. It needs only a drawing session and a
+/// Nothing here allocates per frame (but the cut copy of a subject over 512 chars): lines are drawn as such, the four
+/// quarter arcs of a bend are built once per device and drawn at an offset, and the stroke styles and text format are
+/// shared. It needs only a drawing session and a
 /// resource creator, so it draws the same on any Win2D host.
 /// </para>
 /// </summary>
 internal sealed class GraphRowRenderer : IDisposable
 {
-    /// <summary>The subject is cut here before it is laid out: a hostile repository's huge subject stays cheap.</summary>
+    /// <summary>The subject is cut here before it is drawn: a hostile repository's huge subject stays cheap.</summary>
     private const int MaxSubjectLength = 512;
 
     // The quarter arcs of a bend, by direction (see Bend).
@@ -232,16 +233,27 @@ internal sealed class GraphRowRenderer : IDisposable
             DrawNode(ds, row, new Vector2(nodeX, mid), laneColor);
     }
 
-    /// <summary>Lays out a subject for <see cref="DrawSubject"/>, <paramref name="width"/> wide, one row tall.</summary>
-    public CanvasTextLayout CreateSubjectLayout(ICanvasResourceCreator resourceCreator, string subject, float width)
+    /// <summary>
+    /// Draws <paramref name="subject"/> from <paramref name="x"/>, <paramref name="width"/> wide (more than 0), on one
+    /// line vertically centered in the row, ending in an ellipsis when cut. No text layout object is kept: each call
+    /// draws with the shared format, so scrolling makes no managed wrapper per row.
+    /// </summary>
+    public void DrawSubject(CanvasDrawingSession ds, string subject, float x, float top, float width, bool selected)
     {
-        string text = subject.Length > MaxSubjectLength ? subject[..MaxSubjectLength] : subject;
-        return new CanvasTextLayout(resourceCreator, text, _subjectFormat, width, (float)Metrics.RowHeight);
-    }
+        string text = subject;
+        if (text.Length > MaxSubjectLength)
+        {
+            // Cut on a surrogate boundary: never half a pair.
+            int length = char.IsHighSurrogate(text[MaxSubjectLength - 1]) ? MaxSubjectLength - 1 : MaxSubjectLength;
+            text = text[..length];
+        }
 
-    /// <summary>Draws a subject laid out by <see cref="CreateSubjectLayout"/>, vertically centered in the row.</summary>
-    public static void DrawSubject(CanvasDrawingSession ds, CanvasTextLayout layout, float x, float top, bool selected) =>
-        ds.DrawTextLayout(layout, x, top, selected ? GraphPalette.SelectedSubjectText : GraphPalette.SubjectText);
+        ds.DrawText(
+            text,
+            new Windows.Foundation.Rect(x, top, width, Metrics.RowHeight),
+            selected ? GraphPalette.SelectedSubjectText : GraphPalette.SubjectText,
+            _subjectFormat);
+    }
 
     /// <summary>
     /// One line piece. Top half: from the row's top edge at lane <c>From</c> to the center at lane <c>To</c>. Bottom

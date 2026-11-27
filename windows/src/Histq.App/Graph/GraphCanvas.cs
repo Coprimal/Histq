@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using Histq.Core;
 using Microsoft.Graphics.Canvas;
-using Microsoft.Graphics.Canvas.Text;
 using Microsoft.Graphics.Canvas.UI;
 using Microsoft.Graphics.Canvas.UI.Xaml;
 using Microsoft.UI;
@@ -31,8 +30,8 @@ public readonly record struct GraphDrawInfo(
 /// viewport.
 /// <para>
 /// Wheel and keys (Up, Down, Page Up, Page Down, Home, End) scroll; a press selects the row under the pointer and the
-/// highlight is drawn in the same frame. The rows' subjects are laid out once while their rows stay on screen
-/// (a ring of text layouts, one per visible row, disposed when the row scrolls off).
+/// highlight is drawn in the same frame. Each visible row's subject is drawn with one shared text format, so no
+/// per-row text object is made while scrolling.
 /// </para>
 /// </summary>
 public sealed partial class GraphCanvas : UserControl
@@ -60,12 +59,6 @@ public sealed partial class GraphCanvas : UserControl
 
     /// <summary>Set while the code moves the scroll bar, so its ValueChanged does not scroll back.</summary>
     private bool _settingScrollBar;
-
-    /// <summary>The visible rows' subject layouts, row r in slot r % length; longer than the most rows on screen.</summary>
-    private TextSlot[] _textSlots = [];
-
-    /// <summary>The width the cached layouts were made for; another width drops them.</summary>
-    private float _textWidth = -1;
 
     public GraphCanvas()
     {
@@ -107,6 +100,9 @@ public sealed partial class GraphCanvas : UserControl
 
     public long RowCount => _count;
 
+    /// <summary>Draws the rows' subjects (default); the spike harness turns it off to measure without text.</summary>
+    internal bool DrawSubjects { get; set; } = true;
+
     /// <summary>The selected row, -1 for none.</summary>
     public long SelectedRow { get; private set; } = -1;
 
@@ -138,12 +134,8 @@ public sealed partial class GraphCanvas : UserControl
     {
         ArgumentNullException.ThrowIfNull(rows);
         ArgumentNullException.ThrowIfNull(commits);
-        if (!ReferenceEquals(rows, _rows) || !ReferenceEquals(commits, _commits))
-        {
-            ClearTextSlots();
-            if (!ReferenceEquals(rows, _rows))
-                _columnLanes = 1;
-        }
+        if (!ReferenceEquals(rows, _rows))
+            _columnLanes = 1;
 
         _rows = rows;
         _commits = commits;
@@ -379,11 +371,7 @@ public sealed partial class GraphCanvas : UserControl
     private void OnCreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args) =>
         ReleaseDeviceResources();
 
-    private void ReleaseDeviceResources()
-    {
-        ClearTextSlots();
-        _renderer.ResetDeviceResources();
-    }
+    private void ReleaseDeviceResources() => _renderer.ResetDeviceResources();
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
@@ -405,7 +393,7 @@ public sealed partial class GraphCanvas : UserControl
             float column = (float)Math.Min(m.Width(_columnLanes), Math.Max(m.MinColumnWidth, width * 0.5));
             float textX = column + TextGap;
             float textWidth = width - textX - TextGap;
-            PrepareTextSlots(height, textWidth);
+            bool drawText = DrawSubjects && textWidth > 0;
 
             for (long r = first; r <= last; r++)
             {
@@ -414,76 +402,15 @@ public sealed partial class GraphCanvas : UserControl
                 bool selected = r == SelectedRow;
                 GraphRow row = _rows[(int)r];
                 _renderer.DrawRow(ds, row, top, column, selected);
-                if (textWidth > 0 && SubjectLayout(ds, r, textWidth) is { } layout)
-                    GraphRowRenderer.DrawSubject(ds, layout, textX, top, selected);
+                if (drawText && SubjectOf(r) is { Length: > 0 } subject)
+                    _renderer.DrawSubject(ds, subject, textX, top, textWidth, selected);
             }
 
-            SweepTextSlots(first, last);
             lastFull = (last - first + 1) * rh - _pixelInRow <= height + 0.001;
         }
 
         DrawCompleted?.Invoke(
             this,
             new GraphDrawInfo(Stopwatch.GetElapsedTime(started).TotalMilliseconds, first, last, lastFull, SelectedRow));
-    }
-
-    /// <summary>Makes the ring long enough for the viewport and drops layouts made for another width.</summary>
-    private void PrepareTextSlots(double height, float textWidth)
-    {
-        int needed = (int)Math.Ceiling(height / RowHeight) + 2;
-        if (_textSlots.Length < needed)
-        {
-            ClearTextSlots();
-            _textSlots = new TextSlot[needed];
-        }
-
-        if (textWidth != _textWidth)
-        {
-            ClearTextSlots();
-            _textWidth = textWidth;
-        }
-    }
-
-    /// <summary><paramref name="row"/>'s subject layout, from the ring or made now; null for a row without subject.</summary>
-    private CanvasTextLayout? SubjectLayout(ICanvasResourceCreator resourceCreator, long row, float width)
-    {
-        ref TextSlot slot = ref _textSlots[(int)(row % _textSlots.Length)];
-        if (slot.Layout is not null && slot.Row == row)
-            return slot.Layout;
-
-        string subject = SubjectOf(row);
-        slot.Layout?.Dispose();
-        slot.Layout = subject.Length == 0 ? null : _renderer.CreateSubjectLayout(resourceCreator, subject, width);
-        slot.Row = row;
-        return slot.Layout;
-    }
-
-    /// <summary>Disposes the layouts of rows that are no longer on screen.</summary>
-    private void SweepTextSlots(long first, long last)
-    {
-        for (int i = 0; i < _textSlots.Length; i++)
-        {
-            ref TextSlot slot = ref _textSlots[i];
-            if (slot.Layout is not null && (slot.Row < first || slot.Row > last))
-            {
-                slot.Layout.Dispose();
-                slot.Layout = null;
-            }
-        }
-    }
-
-    private void ClearTextSlots()
-    {
-        for (int i = 0; i < _textSlots.Length; i++)
-        {
-            _textSlots[i].Layout?.Dispose();
-            _textSlots[i].Layout = null;
-        }
-    }
-
-    private struct TextSlot
-    {
-        public long Row;
-        public CanvasTextLayout? Layout;
     }
 }
