@@ -9,6 +9,7 @@
 // The rows (with their tokens) are built off the main actor when the diff loads: the table only draws the rows on
 // screen, so its cost does not grow with the file.
 import AppKit
+import CoreText
 import HistqCore
 import SwiftUI
 
@@ -361,6 +362,9 @@ struct DiffLineTable: NSViewRepresentable {
     /// file (`isFirst`) when none has it.
     var jump: DiffJump?
     var isFirst = true
+    /// The open file's search (`DiffSearch`) as this table shows it: its matches marked, the current one scrolled into
+    /// view. nil without a search (and outside the file's diff).
+    var search: DiffTableSearch?
     /// Gets the table once made (the session's `diffTable`, the keyboard's target when the tab shows).
     var onTable: @MainActor (NSView) -> Void = { _ in }
     /// A pull request's Files changed only: its review threads, each in a row under its line. nil everywhere else
@@ -1143,6 +1147,12 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
     private var heightsWidth: CGFloat = -1
     /// The last jump this table saw (followed or not), so a redraw does not repeat it.
     private var jumpSerial: Int?
+    /// The search's matches by row (`DiffTableSearch`), the result they came from, the current match, and the last move
+    /// to a match this table saw.
+    private var searchRows: [Int: [DiffSearchMatch]] = [:]
+    private var searchToken: Int?
+    private var currentMatch: DiffSearchMatch?
+    private var revealSerial: Int?
     /// Text selected by a drag; it and the selected lines never go together.
     private var textSelection: DiffTextSelection?
     /// The threads the rows hold (`DiffLineTable.inlineThreads`), the ones shown collapsed, the rows they are in, and
@@ -1199,6 +1209,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
         guard let table else { return }
         let key = Shown(loadID: view.loadID, mode: view.mode, side: view.section.side, wraps: view.wraps,
                         fontSize: view.fontSize)
+        // Before the rows reload, so the cells they make mark the new matches.
+        let searchChanged = adoptSearch(view)
         DiffLayout.use(view.fontSize)
         // Always empty outside a pull request's Files changed.
         let threads = view.inlineThreads?.threads ?? []
@@ -1218,8 +1230,11 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             && zip(threads, shownThreads).allSatisfy { $0.id == $1.id && $0.line == $1.line && $0.newSide == $1.newSide }
         if !samePlaces, key != shown || threads != shownThreads || newComments?.composer != shownComposer {
             let modeChanged = shown.map { $0.mode != key.mode } ?? false
-            // A table that just appeared takes the press before it as seen.
-            if shown == nil { jumpSerial = view.jump?.serial }
+            // A table that just appeared takes the press (and the move to a match) before it as seen.
+            if shown == nil {
+                jumpSerial = view.jump?.serial
+                revealSerial = view.search?.reveal
+            }
             shown = key
             let opened = Self.openedEditors(from: shownThreads, to: threads)
             shownThreads = threads
@@ -1289,6 +1304,88 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             jumpSerial = jump.serial
             if isJumpTarget(table, view) { self.jump(jump.direction, in: table) }
         }
+        if searchChanged { refreshFound(table) }
+        if let search = view.search, search.reveal != revealSerial {
+            revealSerial = search.reveal
+            if let currentMatch { reveal(currentMatch, in: table) }
+        }
+    }
+
+    // MARK: Search
+
+    /// Takes `view`'s search (only when found in the rows it shows); true when the marks changed.
+    private func adoptSearch(_ view: DiffLineTable) -> Bool {
+        let search = view.search.flatMap { $0.loadID == view.loadID && $0.mode == view.mode ? $0 : nil }
+        let current = search.flatMap { search in
+            search.current.flatMap { search.matches.indices.contains($0) ? search.matches[$0] : nil }
+        }
+        if search?.token != searchToken {
+            searchToken = search?.token
+            searchRows = Dictionary(grouping: search?.matches ?? [], by: \.row)
+            currentMatch = current
+            return true
+        }
+        guard current != currentMatch else { return false }
+        currentMatch = current
+        return true
+    }
+
+    /// The matches in `row`'s line on `column`. A split context line's are on its old half and mark both halves.
+    private func found(row: Int, column: DiffTextColumn) -> DiffLineDrawing.Found {
+        guard let matches = searchRows[row] else { return DiffLineDrawing.Found() }
+        var column = column
+        if column == .new, case .pair(let old, _) = rows[row], old?.kind == .context { column = .old }
+        let mine = matches.filter { $0.column == column }
+        let current = currentMatch.flatMap { $0.row == row && $0.column == column ? $0.range : nil }
+        return DiffLineDrawing.Found(ranges: mine.map(\.range), current: current)
+    }
+
+    /// Marks the visible rows' matches again.
+    private func refreshFound(_ table: NSTableView) {
+        let visible = table.rows(in: table.visibleRect)
+        for index in visible.location..<NSMaxRange(visible) {
+            switch table.view(atColumn: 0, row: index, makeIfNecessary: false) {
+            case let cell as DiffLineCellView:
+                cell.found = found(row: index, column: .unified)
+            case let cell as DiffSplitCellView:
+                cell.oldFound = found(row: index, column: .old)
+                cell.newFound = found(row: index, column: .new)
+            default:
+                break
+            }
+        }
+    }
+
+    /// Scrolls `match` into view: its row to the middle when it is off screen, and sideways (as little as it takes)
+    /// when its text is.
+    private func reveal(_ match: DiffSearchMatch, in table: NSTableView) {
+        guard rows.indices.contains(match.row), let scroll = table.enclosingScrollView else { return }
+        let clip = scroll.contentView
+        let rowRect = table.rect(ofRow: match.row)
+        var target = rowRect
+        if let line = line(match.row, match.column),
+           let (origin, wrapWidth) = textOrigin(row: match.row, column: match.column) {
+            if wrapWidth == nil {
+                let span = DiffLineDrawing.span(of: match.range, in: DiffLineDrawing.lineOffsets(line.text))
+                target = NSRect(x: origin.x + span.lowerBound, y: rowRect.minY,
+                                width: span.upperBound - span.lowerBound, height: rowRect.height)
+            } else if let part = DiffLineDrawing.rangeRects([match.range], in: line.text, wrapWidth: wrapWidth).first {
+                target = part.offsetBy(dx: origin.x, dy: origin.y)
+            }
+        }
+        let visible = clip.bounds
+        var point = visible.origin
+        if target.minY < visible.minY || target.maxY > visible.maxY { point.y = target.midY - visible.height / 2 }
+        // A few characters' room at the trailing edge, where the overlay scroller sits.
+        let margin = 4 * DiffLayout.charWidth
+        if target.minX < visible.minX || target.maxX > visible.maxX - margin {
+            // The least scroll that shows it at the trailing edge; back to the gutters when it fits from there.
+            let end = target.maxX + margin
+            point.x = end <= visible.width ? 0 : end - visible.width
+        }
+        guard point != visible.origin else { return }
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: point, size: visible.size)).origin)
+        scroll.reflectScrolledClipView(clip)
     }
 
     /// In Full file mode the first change is the interesting part: it goes near the top.
@@ -1902,6 +1999,7 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             cell.layout = layout
             cell.wraps = view?.wraps == true
             cell.selection = selectionPart(row: row, column: .unified)
+            cell.found = found(row: row, column: .unified)
             cell.needsDisplay = true
             return cell
         case .pair(let old, let new):
@@ -1915,6 +2013,8 @@ final class DiffTableController: NSObject, NSTableViewDataSource, NSTableViewDel
             cell.wraps = view?.wraps == true
             cell.oldSelection = selectionPart(row: row, column: .old)
             cell.newSelection = selectionPart(row: row, column: .new)
+            cell.oldFound = found(row: row, column: .old)
+            cell.newFound = found(row: row, column: .new)
             cell.needsDisplay = true
             return cell
         case .thread(let thread):
@@ -2466,6 +2566,12 @@ enum DiffLineDrawing {
         var throughEnd: Bool
     }
 
+    /// The search's matches in a line's text (UTF-16), and the current one among them.
+    struct Found: Equatable {
+        var ranges: [NSRange] = []
+        var current: NSRange?
+    }
+
     /// `text` laid out as it draws: one line, or wrapped at `wrapWidth`. The storage owns the layout manager.
     private static func textLayout(_ text: String, wrapWidth: CGFloat?) -> (NSTextStorage, NSLayoutManager, NSTextContainer) {
         let storage = NSTextStorage(string: text, attributes: wrapWidth == nil ? style.text : style.wrappedText)
@@ -2499,6 +2605,104 @@ enum DiffLineDrawing {
         return NSAttributedString(string: text).doubleClick(at: min(offset, length - 1))
     }
 
+    /// The rects of `ranges` of `text` as it draws, from the text's top left corner: a rect per wrapped line each covers.
+    static func rangeRects(_ ranges: [NSRange], in text: String, wrapWidth: CGFloat?) -> [NSRect] {
+        guard !ranges.isEmpty else { return [] }
+        let (storage, manager, container) = textLayout(text, wrapWidth: wrapWidth)
+        return rangeRects(ranges, length: storage.length, manager: manager, container: container)
+    }
+
+    /// `rangeRects` in a layout already made. Each range costs a walk along its line: give it only the ranges to draw.
+    private static func rangeRects(_ ranges: [NSRange], length: Int, manager: NSLayoutManager,
+                                   container: NSTextContainer) -> [NSRect] {
+        var rects: [NSRect] = []
+        for range in ranges {
+            let range = NSIntersectionRange(range, NSRange(location: 0, length: length))
+            guard range.length > 0 else { continue }
+            let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            manager.enumerateEnclosingRects(forGlyphRange: glyphs,
+                                            withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                            in: container) { rect, _ in rects.append(rect) }
+        }
+        return rects
+    }
+
+    /// The x of each UTF-16 offset of `text` drawn on one line, from its start (the last one, at the end, is the line's
+    /// width), read from CoreText's glyph positions in one pass. An offset inside a character (a surrogate pair's second
+    /// half, a combining mark) has none (NaN). An NSLayoutManager rect walks the line for each range instead: 10,000
+    /// matches on a 120,000-character line (minified code) took 4 s.
+    static func lineOffsets(_ text: String) -> [CGFloat] {
+        // Kept for the last line: its tiles, its redraws for each move to a match, and the scroll to it read it again.
+        let size = DiffLayout.metrics.size
+        if let cached = offsetsCache, cached.size == size, cached.text == text { return cached.offsets }
+        let string = NSAttributedString(string: text, attributes: style.text)
+        let line = CTLineCreateWithAttributedString(string)
+        var offsets = [CGFloat](repeating: .nan, count: string.length + 1)
+        for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] {
+            let count = CTRunGetGlyphCount(run)
+            var positions = [CGPoint](repeating: .zero, count: count)
+            var indices = [CFIndex](repeating: 0, count: count)
+            CTRunGetPositions(run, CFRange(location: 0, length: 0), &positions)
+            CTRunGetStringIndices(run, CFRange(location: 0, length: 0), &indices)
+            for glyph in 0..<count where indices[glyph] < string.length {
+                let index = indices[glyph]
+                if offsets[index].isNaN || positions[glyph].x < offsets[index] { offsets[index] = positions[glyph].x }
+            }
+        }
+        offsets[string.length] = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        offsetsCache = (text, size, offsets)
+        return offsets
+    }
+
+    private static var offsetsCache: (text: String, size: CGFloat, offsets: [CGFloat])?
+
+    /// Where `range` of a line starts and ends (`lineOffsets`), from the characters around an offset with none.
+    static func span(of range: NSRange, in offsets: [CGFloat]) -> ClosedRange<CGFloat> {
+        let last = offsets.count - 1
+        var start = min(max(range.location, 0), last)
+        while start > 0, offsets[start].isNaN { start -= 1 }
+        var end = min(max(NSMaxRange(range), start), last)
+        while end < last, offsets[end].isNaN { end += 1 }
+        let lower = offsets[start].isNaN ? 0 : offsets[start]
+        return lower...max(lower, offsets[end])
+    }
+
+    /// Fills the search's matches of `text` under its glyphs, the current one stronger. `origin` is the text's top left
+    /// corner; one line (`wrapWidth` nil) fills the row's height (`rowRect`) less a point at each edge, as the mark.
+    /// Only the matches in the area being drawn (the clip): a long line (minified code) can hold thousands.
+    private static func drawFound(_ found: Found, in text: String, origin: NSPoint, rowRect: NSRect,
+                                  wrapWidth: CGFloat?) {
+        guard !found.ranges.isEmpty else { return }
+        let clip = NSGraphicsContext.current?.cgContext.boundingBoxOfClipPath ?? .infinite
+        guard let wrapWidth else {
+            let offsets = lineOffsets(text)
+            for (ranges, color) in [(found.ranges.filter { $0 != found.current }, Palette.diffFindMatch),
+                                    (found.current.map { [$0] } ?? [], Palette.diffFindCurrent)] {
+                color.setFill()
+                for range in ranges {
+                    let span = span(of: range, in: offsets)
+                    let rect = NSRect(x: origin.x + span.lowerBound, y: rowRect.minY + 1,
+                                      width: span.upperBound - span.lowerBound, height: rowRect.height - 2)
+                    if rect.intersects(clip) { NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill() }
+                }
+            }
+            return
+        }
+        let (storage, manager, container) = textLayout(text, wrapWidth: wrapWidth)
+        // The wrapped lines in the clip (whole lines: short ones).
+        let glyphs = manager.glyphRange(forBoundingRect: clip.isNull || clip.isInfinite ? NSRect(origin: .zero, size: container.size)
+            : clip.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
+        let drawn = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        let shown = found.ranges.filter { NSIntersectionRange($0, drawn).length > 0 }
+        for (ranges, color) in [(shown.filter { $0 != found.current }, Palette.diffFindMatch),
+                                (shown.filter { $0 == found.current }, Palette.diffFindCurrent)] {
+            color.setFill()
+            for part in rangeRects(ranges, length: storage.length, manager: manager, container: container) {
+                NSBezierPath(roundedRect: part.offsetBy(dx: origin.x, dy: origin.y), xRadius: 2, yRadius: 2).fill()
+            }
+        }
+    }
+
     /// The selection's rects, from the text's top left corner: a rect per wrapped line it covers, and a character-wide
     /// mark after the text when it goes on to the next line (so a selected empty line shows).
     private static func selectionRects(_ selection: Selection, in text: String, wrapWidth: CGFloat?) -> [NSRect] {
@@ -2524,7 +2728,8 @@ enum DiffLineDrawing {
     }
 
     /// Draws `row` in `rect` (a flipped view's coordinates). The numbers and the sign sit on the first line.
-    static func draw(_ row: DiffRow, in rect: NSRect, spots: Spots, selection: Selection? = nil) {
+    static func draw(_ row: DiffRow, in rect: NSRect, spots: Spots, selection: Selection? = nil,
+                     found: Found = Found()) {
         let style = style
         switch row.kind {
         case .added:
@@ -2567,6 +2772,15 @@ enum DiffLineDrawing {
             if let emphasis = row.emphasis, NSMaxRange(emphasis) <= length {
                 text.addAttribute(.backgroundColor, value: emphasisFill, range: emphasis)
             }
+            // The matches show over the mark, not under it.
+            if let emphasis = row.emphasis {
+                for range in found.ranges where NSIntersectionRange(range, emphasis).length > 0 {
+                    text.removeAttribute(.backgroundColor, range: NSIntersectionRange(range, NSRange(location: 0, length: length)))
+                }
+            }
+            drawFound(found, in: row.text,
+                      origin: NSPoint(x: rect.minX + spots.textX, y: rect.minY + DiffLayout.wrapPadding / 2),
+                      rowRect: rect, wrapWidth: wrapWidth)
             if let selection {
                 // The selection shows over the mark, not under it.
                 text.removeAttribute(.backgroundColor, range: NSIntersectionRange(selection.range,
@@ -2590,6 +2804,8 @@ enum DiffLineDrawing {
                                              height: rect.height - 2),
                          xRadius: 2, yRadius: 2).fill()
         }
+        drawFound(found, in: row.text, origin: NSPoint(x: rect.minX + spots.textX, y: rect.minY), rowRect: rect,
+                  wrapWidth: nil)
         if let selection {
             // The row's whole height, as the mark.
             Palette.diffTextSelection.setFill()
@@ -2611,6 +2827,10 @@ final class DiffLineCellView: NSView {
     /// The selected part of its text.
     var selection: DiffLineDrawing.Selection? {
         didSet { if selection != oldValue { needsDisplay = true } }
+    }
+    /// The search's matches in its text.
+    var found = DiffLineDrawing.Found() {
+        didSet { if found != oldValue { needsDisplay = true } }
     }
 
     override var isFlipped: Bool { true }
@@ -2638,7 +2858,8 @@ final class DiffLineCellView: NSView {
             : [(row.oldLine, 0), (row.newLine, layout.newNumberX)]
         DiffLineDrawing.draw(row, in: bounds, spots: DiffLineDrawing.Spots(
             numbers: numbers, numberWidth: layout.numberWidth, signX: layout.signX, textX: layout.textX,
-            wrapWidth: wraps ? layout.wrapWidth(rowWidth: bounds.width, split: false) : nil), selection: selection)
+            wrapWidth: wraps ? layout.wrapWidth(rowWidth: bounds.width, split: false) : nil), selection: selection,
+            found: found)
     }
 }
 
@@ -2655,6 +2876,13 @@ final class DiffSplitCellView: NSView {
     }
     var newSelection: DiffLineDrawing.Selection? {
         didSet { if newSelection != oldValue { needsDisplay = true } }
+    }
+    /// The search's matches in the old (left) and the new (right) line's text.
+    var oldFound = DiffLineDrawing.Found() {
+        didSet { if oldFound != oldValue { needsDisplay = true } }
+    }
+    var newFound = DiffLineDrawing.Found() {
+        didSet { if newFound != oldValue { needsDisplay = true } }
     }
 
     override var isFlipped: Bool { true }
@@ -2685,16 +2913,17 @@ final class DiffSplitCellView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let half = (bounds.width / 2).rounded(.down)
         let wrapWidth = wraps ? layout.wrapWidth(rowWidth: bounds.width, split: true) : nil
-        for (row, rect, number, selection) in [
-            (old, NSRect(x: 0, y: 0, width: half, height: bounds.height), old?.oldLine, oldSelection),
-            (new, NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height), new?.newLine, newSelection),
+        for (row, rect, number, selection, found) in [
+            (old, NSRect(x: 0, y: 0, width: half, height: bounds.height), old?.oldLine, oldSelection, oldFound),
+            (new, NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height), new?.newLine, newSelection,
+             newFound),
         ] {
             guard let row else { continue }
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(rect: rect).addClip()
             DiffLineDrawing.draw(row, in: rect, spots: DiffLineDrawing.Spots(
                 numbers: [(number, 0)], numberWidth: layout.numberWidth, signX: layout.numberWidth,
-                textX: layout.splitTextX, wrapWidth: wrapWidth), selection: selection)
+                textX: layout.splitTextX, wrapWidth: wrapWidth), selection: selection, found: found)
             NSGraphicsContext.restoreGraphicsState()
         }
         NSColor.separatorColor.setFill()

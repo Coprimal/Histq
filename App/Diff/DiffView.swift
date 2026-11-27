@@ -144,15 +144,29 @@ struct DiffView: View {
     let target: FileTarget
     @Environment(WindowModel.self) private var model
     @AppStorage(PrefKey.diffIgnoreWhitespace.rawValue, store: Preferences.defaults) private var ignoresWhitespace = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
             DiffControlsCard(session: session, target: target)
+            if session.diffSearch.isOpen {
+                FindBar(search: session.diffSearch, floats: false)
+                    .transition(reduceMotion ? .opacity
+                        : .modifier(active: FindBarSlide(hidden: true), identity: FindBarSlide(hidden: false)))
+                    // Over the cards: closing, they move up at once and covered it before it slid away.
+                    .zIndex(1)
+            }
             cards
         }
+        // The bar slides down and the cards make room for it (the graph's bar: `Motion.sheet`).
+        .animation(reduceMotion ? nil : Motion.sheet, value: session.diffSearch.isOpen)
         // One pref for every window: a switch in Settings or another window's diff reads this file again (a no-op
         // when the session already has the value).
         .onChange(of: ignoresWhitespace, initial: true) { _, new in session.setIgnoresWhitespace(new) }
+        // New rows (a load, another mode): the open search reads them again.
+        // Initial too: back from the Edit tab (which unmounts this view) after a save.
+        .onChange(of: session.fileDiff.value?.loadID, initial: true) { session.diffSearch.contentDidChange() }
+        .onChange(of: session.diffMode) { session.diffSearch.contentDidChange() }
     }
 
     private var cards: some View {
@@ -185,6 +199,19 @@ struct DiffView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+/// The diff's find bar coming in: it slides down inside its own place, clipped to it, so it seems to come out from
+/// under the controls card (a plain move showed it through the gaps between the controls' groups), and fades in.
+private struct FindBarSlide: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: hidden ? -(FindBar<DiffSearch>.height + 2 * 6) : 0)
+            .opacity(hidden ? 0 : 1)
+            .clipped()
     }
 }
 
@@ -463,11 +490,16 @@ struct DiffControlsCard: View {
         }
     }
 
-    /// Previous / Next Change (only with lines to move between), then Ignore Whitespace and Wrap Lines.
+    /// Find in File, Previous / Next Change (only with lines), then Ignore Whitespace and Wrap Lines.
     private var viewControls: some View {
         let hasLines = session.fileDiff.value.map { if case .sections = $0.content { true } else { false } } ?? false
+        let finds = session.diffSearch.isOpen
         return HStack(spacing: Self.groupSpacing) {
             HStack(spacing: Self.buttonSpacing) {
+                Self.iconButton("magnifyingglass", help: finds ? "Close Find in File" : "Find in File (⌘F)",
+                                isOn: finds) {
+                    if finds { session.diffSearch.close() } else { session.diffSearch.open() }
+                }
                 Self.iconButton("arrow.up", help: "Previous Change") { session.jumpToChange(.previous) }
                 Self.iconButton("arrow.down", help: "Next Change") { session.jumpToChange(.next) }
             }
@@ -502,7 +534,8 @@ struct DiffControlsCard: View {
 
     private var closeButton: some View {
         Self.roundButton("xmark") { session.closeFileAsking() }
-        .keyboardShortcut(.cancelAction)
+        // While the find bar shows, Esc closes it first (its field's own Esc, the table's).
+        .keyboardShortcut(target != nil && session.diffSearch.isOpen ? nil : .cancelAction)
         .help(closesPane ? "Close the diff (Esc)"
             : closesHistory ? "Close the File History (Esc)" : "Back to the \(backName) (Esc)")
         .accessibilityLabel(closesPane ? "Close the diff"
@@ -662,10 +695,13 @@ private struct DiffContent: View {
             DiffLineTable(
                 section: section, mode: session.diffMode, loadID: detail.loadID, repo: session.url.lastPathComponent,
                 reverts: session.revertsCommitHunks, readOnly: detail.ignoresWhitespace, wraps: wrapLines,
-                jump: session.diffJump, isFirst: isFirst,
+                jump: session.diffJump, isFirst: isFirst, search: session.diffSearch.tableSearch(for: section.side),
                 onTable: { [session] table in if isFirst { session.diffTable = table } },
                 onApply: { [session] action, lines, file in session.apply(action, lines: lines, of: file) },
-                onClose: { [session] in session.closeFileAsking() })
+                onClose: { [session] in
+                    // Esc in the table: the find bar first, then the file.
+                    if session.diffSearch.isOpen { session.diffSearch.close() } else { session.closeFileAsking() }
+                })
                 .frame(maxHeight: .infinity)
         }
     }

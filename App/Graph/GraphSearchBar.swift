@@ -35,7 +35,7 @@ struct GraphDimming: Sendable {
 /// new log keeps the current match when its row is still there.
 @Observable
 @MainActor
-final class GraphSearch {
+final class GraphSearch: FindBarModel {
     /// The bar shows.
     private(set) var isOpen = false
     var query = "" {
@@ -66,7 +66,7 @@ final class GraphSearch {
     /// The graph table, which takes the focus back when the bar closes.
     @ObservationIgnored weak var table: NSView?
     /// The open bar's field anchor (`GraphSearchBar`), from which `field` finds its text field.
-    @ObservationIgnored fileprivate weak var fieldAnchor: FieldAnchor.Box?
+    @ObservationIgnored weak var fieldAnchor: FieldAnchor.Box?
     /// The open bar's text field: the keyboard goes to it when the tab shows (`WindowModel.focusShownTab`). nil while
     /// closed or not in a window yet.
     var field: NSTextField? { isOpen ? fieldAnchor?.textField() : nil }
@@ -140,6 +140,11 @@ final class GraphSearch {
         guard isFresh, !matches.isEmpty else { return }
         go(to: current.map { ($0 - 1 + matches.count) % matches.count } ?? firstAtOrAfterSelection())
     }
+
+    var hasMatches: Bool { !matches.isEmpty }
+    var isShown: Bool { session?.isShown != false }
+    var fieldTitle: String { "Find commits" }
+    var fieldPrompt: String { "Find commit or stash message, or hash" }
 
     /// "3 of 12", "No results", or nothing without a query; with " · loading" while the log is still being read.
     var summary: String {
@@ -301,17 +306,44 @@ final class GraphSearch {
     }
 }
 
-/// The search bar floating over the bottom of the graph card, in a raised card: a capsule field with the magnifying
-/// glass, the match count, the previous and next buttons and a close button. Enter goes to the next match, Shift-Enter
-/// to the previous one, Esc closes the bar.
-struct GraphSearchBar: View {
-    @Bindable var search: GraphSearch
+/// What a `FindBar` searches: the graph's commits (`GraphSearch`) or the open file's lines (`DiffSearch`).
+@MainActor
+protocol FindBarModel: AnyObject, Observable {
+    var query: String { get set }
+    /// "3 of 12", "No results", or nothing without a query.
+    var summary: String { get }
+    var hasMatches: Bool { get }
+    /// The matches belong to the current query (its search is done).
+    var isFresh: Bool { get }
+    /// New with each open (⌘F, also while open): the bar focuses its field and selects its text.
+    var focusToken: Int { get }
+    /// The bar's tab shows: a hidden tab's bar never takes the focus.
+    var isShown: Bool { get }
+    /// The open bar's field anchor, from which the model finds its text field.
+    var fieldAnchor: FieldAnchor.Box? { get set }
+    /// The field's label and placeholder.
+    var fieldTitle: String { get }
+    var fieldPrompt: String { get }
+    func next()
+    func previous()
+    func close()
+}
+
+/// The graph's search bar.
+typealias GraphSearchBar = FindBar<GraphSearch>
+
+/// A search bar: a capsule field with the magnifying glass, the match count, the previous and next buttons and a close
+/// button. Enter goes to the next match, Shift-Enter to the previous one, Esc closes the bar. `floats` (the graph's):
+/// over the bottom of the graph card, in a raised card; otherwise a card of its own in a column of cards (the diff's).
+struct FindBar<Search: FindBarModel>: View {
+    @Bindable var search: Search
+    var floats = true
     @FocusState private var fieldFocused: Bool
     @State private var anchor = FieldAnchor.Box()
 
-    static let height: CGFloat = 26
-    /// The bar with its card and margins: what it covers of the graph's bottom (`GraphView.bottomInset`).
-    static let overlayHeight: CGFloat = height + 2 * 6 + 2 * 8
+    static var height: CGFloat { 26 }
+    /// The floating bar with its card and margins: what it covers of the graph's bottom (`GraphView.bottomInset`).
+    static var overlayHeight: CGFloat { height + 2 * 6 + 2 * 8 }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -321,7 +353,7 @@ struct GraphSearchBar: View {
                     .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(RaisedButtonStyle(height: Self.height - 2))
-            .disabled(search.matches.isEmpty)
+            .disabled(!search.hasMatches)
             .help("Previous match (⇧↩)")
             .accessibilityLabel("Previous match")
             Button { search.next() } label: {
@@ -329,7 +361,7 @@ struct GraphSearchBar: View {
                     .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(RaisedButtonStyle(height: Self.height - 2))
-            .disabled(search.matches.isEmpty)
+            .disabled(!search.hasMatches)
             .help("Next match (↩)")
             .accessibilityLabel("Next match")
             Button { search.close() } label: {
@@ -344,10 +376,10 @@ struct GraphSearchBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        // A raised card floating over the graph's last rows: opaque, so the rows under it do not show through.
-        .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius, raised: true))
-        .environment(\.cardSurface, Palette.surface)
-        .padding(8)
+        // Floating: a raised card over the graph's last rows, opaque, so the rows under it do not show through.
+        .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius, raised: floats))
+        .modifier(OpaqueSurface(isOn: floats))
+        .padding(floats ? 8 : 0)
         .onAppear {
             search.fieldAnchor = anchor
             focusField()
@@ -360,7 +392,7 @@ struct GraphSearchBar: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            TextField("Find commits", text: $search.query, prompt: Text("Find commit or stash message, or hash"))
+            TextField(search.fieldTitle, text: $search.query, prompt: Text(search.fieldPrompt))
                 .textFieldStyle(.plain)
                 .labelsHidden()
                 .autocorrectionDisabled()
@@ -388,12 +420,12 @@ struct GraphSearchBar: View {
     private func focusField() {
         // The bar is installed on this turn: ask for the focus on the next one, as the palette does.
         DispatchQueue.main.async {
-            guard search.session?.isShown != false else { return }
+            guard search.isShown else { return }
             fieldFocused = true
             // SwiftUI can hold the request until its next update (the next key or mouse event, so the graph kept the
             // focus after ⌘F): on the turn after, AppKit focuses the field itself when it still has not got it.
             DispatchQueue.main.async {
-                guard search.session?.isShown != false, let field = anchor.textField(), let window = field.window
+                guard search.isShown, let field = anchor.textField(), let window = field.window
                 else { return }
                 if field.currentEditor() == nil || window.firstResponder !== field.currentEditor() {
                     window.makeFirstResponder(field)
@@ -419,11 +451,21 @@ struct GraphSearchBar: View {
     }
 }
 
+/// The floating bar's card surface (`Palette.surface`, opaque); the cards' own surface otherwise.
+private struct OpaqueSurface: ViewModifier {
+    let isOn: Bool
+
+    func body(content: Content) -> some View {
+        if isOn { content.environment(\.cardSurface, Palette.surface) } else { content }
+    }
+}
+
 /// An empty AppKit view behind the search field, at its frame: finds the field's `NSTextField` (the editable one under
 /// it in the window) for `GraphSearchBar.focusField`'s AppKit fallback. Clicks pass through it.
-private struct FieldAnchor: NSViewRepresentable {
+struct FieldAnchor: NSViewRepresentable {
     let box: Box
 
+    @MainActor
     final class Box {
         weak var view: NSView?
 

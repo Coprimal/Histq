@@ -359,7 +359,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// DEBUG `-HistqFind "<query>[;next|prev…]"` (QA of the graph search): once the front repo tab's whole log is read,
     /// opens its search through `findCommits` (the menu's path), types the query a character at a time (120 ms apart,
     /// a fast typist), waits for its result, then runs each step 300 ms apart. `GraphSearch` logs a `find-key` line
-    /// per keystroke and a `find …` line per result and step.
+    /// per keystroke and a `find …` line per result and step. With a file opened by `-HistqSelect file:` or
+    /// `commitfile:`, ⌘F opens the diff's search instead (`diff-find` lines); the steps `diff`, `split` and `full`
+    /// switch its mode, `esc` hands the diff's table an Esc key (`find esc open=<bar> file=<open file>`), and `scroll`
+    /// pages the first table down 30 times, each drawn at once (`find scroll pages=<n> max=<ms> avg=<ms>`). Each
+    /// keystroke and step of the diff's search then logs the main thread's holds (`find frame <label> max= over16=`).
     private func debugFind(_ spec: String) async {
         let parts = spec.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
         let early = AppState.launchFindEarly
@@ -369,29 +373,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         // The graph's first layout.
         if !early { try? await Task.sleep(for: .milliseconds(500)) }
-        findCommits(nil)
-        guard let search = target()?.model.actionSession?.graphSearch, search.isOpen else {
-            return UITiming.find("\(spec) cannot open")
+        if let kind = AppState.launchSelection?.kind, [.file, .commitfile].contains(kind) {
+            for _ in 0..<250 {
+                if target()?.model.actionSession?.fileDiff.value != nil { break }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
         }
+        findCommits(nil)
+        let session = target()?.model.actionSession
+        let search: (any FindBarModel)? = session?.graphSearch.isOpen == true ? session?.graphSearch
+            : session?.diffSearch.isOpen == true ? session?.diffSearch : nil
+        guard let search else { return UITiming.find("\(spec) cannot open") }
+        let isDiff = search is DiffSearch
         var typed = ""
         if early { search.query = parts.first ?? "" }
         for character in early ? "" : parts.first ?? "" {
             typed.append(character)
             search.query = typed
-            try? await Task.sleep(for: .milliseconds(120))
+            if isDiff {
+                await findFrames("key \(typed)", for: .milliseconds(120))
+            } else {
+                try? await Task.sleep(for: .milliseconds(120))
+            }
         }
         for _ in 0..<100 {
             if search.isFresh { break }
             try? await Task.sleep(for: .milliseconds(20))
         }
         for step in parts.dropFirst() {
-            try? await Task.sleep(for: .milliseconds(300))
+            if !isDiff { try? await Task.sleep(for: .milliseconds(300)) }
             switch step {
             case "next": search.next()
             case "prev": search.previous()
+            case "diff", "split", "full": session?.diffMode = DiffMode(rawValue: step) ?? .diff
+            case "esc":
+                if let table = session?.diffTable, let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: table.window?.windowNumber ?? 0, context: nil, characters: "\u{1b}",
+                    charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) {
+                    table.keyDown(with: event)
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                UITiming.find("esc open=\(session?.diffSearch.isOpen == true) file=\(session?.openFile?.path ?? "-")")
+            case "scroll":
+                guard let table = session?.diffTable, let scroll = table.enclosingScrollView else { break }
+                let clip = scroll.contentView
+                var longest = Duration.zero
+                var total = Duration.zero
+                for _ in 0..<30 {
+                    let start = ContinuousClock.now
+                    var origin = clip.bounds.origin
+                    origin.y += clip.bounds.height
+                    clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size)).origin)
+                    scroll.reflectScrolledClipView(clip)
+                    scroll.layoutSubtreeIfNeeded()
+                    scroll.displayIfNeeded()
+                    let took = ContinuousClock.now - start
+                    longest = max(longest, took)
+                    total += took
+                    try? await Task.sleep(for: .milliseconds(16))
+                }
+                let ms: (Duration) -> String = { String(format: "%.1f", Double($0 / .microseconds(1)) / 1000) }
+                UITiming.find("scroll pages=30 max=\(ms(longest)) avg=\(ms(total / 30))")
             default: UITiming.find("\(step) unknown step")
             }
+            if isDiff { await findFrames(step, for: .milliseconds(300)) }
         }
+    }
+
+    /// Ticks every 5 ms on the main actor for `duration` and logs `find frame <label> max=<ms> over16=<ms>`: the
+    /// largest gap between two ticks and the sum of the gaps over 16 ms (the main thread's holds), as `paletteProbe`.
+    private func findFrames(_ label: String, for duration: Duration) async {
+        let start = ContinuousClock.now
+        var last = start
+        var longest = Duration.zero
+        var over16 = Duration.zero
+        while last - start < duration {
+            try? await Task.sleep(for: .milliseconds(5))
+            let now = ContinuousClock.now
+            let gap = now - last
+            longest = max(longest, gap)
+            if gap > .milliseconds(16) { over16 += gap }
+            last = now
+        }
+        let ms: (Duration) -> String = { String(format: "%.1f", Double($0 / .microseconds(1)) / 1000) }
+        UITiming.find("frame \(label) max=\(ms(longest)) over16=\(ms(over16))")
     }
     #endif
 
@@ -1567,7 +1633,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }()
 
     /// Edit › Find… (⌘F). A focused view with its own find bar (the terminal, the conflict editor's output) shows it;
-    /// anywhere else in a repo tab the graph search opens, or takes the focus again. Not nil-targeted: a text field or
+    /// an open file's diff opens its search; anywhere else in a repo tab the graph search opens, or takes the focus
+    /// again. Not nil-targeted: a text field or
     /// a text view without a find bar answers `performFindPanelAction(_:)` with a disabled item, which would end the
     /// responder chain there, so this asks the chain itself and only hands the action to a view that takes it.
     @objc func findCommits(_ sender: Any?) {
@@ -1581,6 +1648,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard target()?.model.isShowingModal != true else { return }
         if let responder = findPanelResponder() {
             NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: responder, from: findPanelItem)
+            return
+        }
+        if let session = diffSearchSession() {
+            session.diffSearch.open()
             return
         }
         guard let session = searchableSession() else { return }
@@ -1601,6 +1672,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return validator.validateUserInterfaceItem(findPanelItem) ? responder : nil
         }
         return responder
+    }
+
+    /// The selected repo tab whose open file shows its diff (not its editor, not a conflict), when no modal covers it.
+    /// Not once the file has loaded without lines (an image, a binary or too large file, a submodule).
+    private func diffSearchSession() -> RepoSession? {
+        guard let model = target()?.model, !model.isShowingModal, let session = model.actionSession,
+              session.openHosted == nil, let file = session.openFile, !file.isConflict,
+              !(session.editor?.showsEditor == true && session.isEditedFile(file))
+        else { return nil }
+        if let content = session.fileDiff.value?.content, case .sections = content {} else if session.fileDiff.value != nil {
+            return nil
+        }
+        return session
     }
 
     /// The selected repo tab whose graph shows, when nothing covers it: no modal, Settings or palette, no open file,
@@ -1643,7 +1727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if menuItem.action == #selector(findCommits(_:)) {
             if target()?.model.canFindInSettings == true { return true }
             guard target()?.model.isShowingModal != true else { return false }
-            return findPanelResponder() != nil || searchableSession() != nil
+            return findPanelResponder() != nil || diffSearchSession() != nil || searchableSession() != nil
         }
         if menuItem.action == #selector(toggleTerminal(_:)) {
             let session = target()?.model.actionSession

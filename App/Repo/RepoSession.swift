@@ -926,6 +926,8 @@ final class RepoSession: Identifiable {
     }
     /// The graph's ⌘F search (`GraphSearch`): searched again with every new log snapshot.
     let graphSearch = GraphSearch()
+    /// The open file's ⌘F search (`DiffSearch`): closed with the file.
+    let diffSearch = DiffSearch()
     /// The open diff's first table and the open blame's table, set by their views: the keyboard goes to them when the
     /// tab shows (`WindowModel.focusShownTab`).
     @ObservationIgnored weak var diffTable: NSView?
@@ -1308,6 +1310,7 @@ final class RepoSession: Identifiable {
     init(url: URL) {
         self.url = url
         graphSearch.session = self
+        diffSearch.session = self
         pullDetail.beginOperation = { [weak self] in self?.beginOperation($0) ?? {} }
         pullDetail.localFiles = { [weak self] in await self?.pullRequestFiles(of: $0, remote: $1) ?? .idle }
         issueDetail.beginOperation = { [weak self] in self?.beginOperation($0) ?? {} }
@@ -3458,6 +3461,7 @@ final class RepoSession: Identifiable {
         fileTask = nil
         fileDiffPrefetch?.cancel()
         fileDiffPrefetch = nil
+        diffSearch.close(focusesTable: false)
         openFile = nil
         fileDiff = .idle
         conflict = .idle

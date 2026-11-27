@@ -215,6 +215,10 @@ enum Palette {
     /// Selected text in a diff line, under the glyphs: the accent, see-through so the band and syntax colors show.
     /// #2F86FB at 0.45
     static let diffTextSelection = srgb(0x2F86FB).withAlphaComponent(0.45)
+    /// The find bar's matches in a diff line, under the glyphs: amber, the current match stronger.
+    /// #F2B035 at 0.30 / 0.70
+    static let diffFindMatch = srgb(0xF2B035).withAlphaComponent(0.30)
+    static let diffFindCurrent = srgb(0xF2B035).withAlphaComponent(0.70)
 
     // MARK: Conflict editor (AppKit: its panes draw their rows in `draw(_:)`)
 
