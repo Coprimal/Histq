@@ -8,8 +8,8 @@ using Microsoft.Windows.AppLifecycle;
 namespace Histq.App;
 
 /// <summary>
-/// The application: dark theme only (App.xaml), the saved session's windows opened once it is read (WindowManager), and
-/// the session saved when the last window closes (quit).
+/// The application: dark theme only (App.xaml), the saved session's windows opened once it is read (WindowManager), the
+/// launch's folder and workspace arguments opened after them, and the session saved when the last window closes (quit).
 /// </summary>
 public partial class App : Application
 {
@@ -54,12 +54,22 @@ public partial class App : Application
         Preferences preferences = PreferencesLoad.GetAwaiter().GetResult();
         var recentRepos = new RecentRepos(preferences, PrefKey.RecentRepos);
         _windows = new WindowManager(sessionStore, LoadedSession?.Session.Workspaces, preferences, recentRepos);
+        List<string> arguments = Environment.GetCommandLineArgs().Skip(1).ToList();
+        Task restored = _windows.Restore(LoadedSession);
+        // A folder or workspace file given on the command line (all builds, as on the Mac) opens once the restored
+        // windows are open; a QA build's -HistqOpen folder too.
+        List<string> launchPaths = [.. LaunchFlags.Positional(arguments)];
 #if HISTQ_QA
-        // The workspace QA flags (Debug/QaFlags.cs) start once the restored windows are open.
-        QaFlags.Read(Environment.GetCommandLineArgs().Skip(1).ToList())
-            .Start(_windows, _windows.Restore(LoadedSession), StatePaths);
+        if (QaFlags.OpenFolder(arguments) is { } openFolder)
+            launchPaths.Add(openFolder);
+#endif
+        Task launched = _windows.OpenAtLaunchAsync(restored, launchPaths);
+#if HISTQ_QA
+        // The QA flags (Debug/QaFlags.cs) start once the restored windows are open; the tab probes once the launch's
+        // folders are open too.
+        QaFlags.Read(arguments).Start(_windows, restored, launched, StatePaths);
 #else
-        _ = _windows.Restore(LoadedSession);
+        _ = launched;
 #endif
     }
 

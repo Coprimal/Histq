@@ -11,6 +11,35 @@ public sealed class LaunchFlags(IReadOnlyList<string> arguments)
 {
     private const NumberStyles Whitespace = NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite;
 
+    /// <summary>
+    /// The positional arguments (a folder or a workspace file to open, as the Mac's <c>open -a Histq &lt;folder&gt;</c>):
+    /// every argument that neither starts with <c>-</c> nor is the value after one, which is a flag's (launch flags are
+    /// <c>-Name value</c> pairs, so a flag's value is never opened, whatever it looks like; a flag followed by another
+    /// flag has no value). Empty ones are left out.
+    /// </summary>
+    public static IReadOnlyList<string> Positional(IReadOnlyList<string> arguments)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+        var positional = new List<string>();
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            var argument = arguments[i];
+            if (argument.StartsWith('-'))
+            {
+                if (i + 1 < arguments.Count && !arguments[i + 1].StartsWith('-'))
+                {
+                    i++;
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(argument))
+            {
+                positional.Add(argument);
+            }
+        }
+
+        return positional;
+    }
+
     /// <summary>The value after the first <paramref name="name"/>, or null.</summary>
     public string? String(string name) => StatePaths.LaunchFlag(arguments, name);
 

@@ -70,6 +70,9 @@ internal sealed partial class WindowManager
     /// <summary>Where the windows' tabs show; read on first use (<see cref="CurrentTabPosition"/>).</summary>
     private TabPosition? _tabPosition;
 
+    /// <summary>The repo layouts' side panel widths (<see cref="PanelWidths"/>), shared by every window.</summary>
+    private PanelWidths _panelWidths;
+
     /// <param name="store">Saves the session; <see cref="Restore"/> turns its capture on.</param>
     /// <param name="workspaces">The workspace layouts read at launch: those still <c>open</c> reopen, the others are
     /// saved back while their file is in Recent Workspaces.</param>
@@ -83,8 +86,17 @@ internal sealed partial class WindowManager
         Preferences = preferences;
         RecentRepos = recentRepos;
         RecentWorkspaces = new RecentRepos(preferences, PrefKey.RecentWorkspaces);
+        // Read here, before any preference write is queued, so it never waits on one.
+        _panelWidths = PanelWidths.Decode(preferences.Get<string>(PrefKey.PanelWidths));
         _store.WriteResult = OnWorkspaceWritten;
     }
+
+    /// <summary>A divider drag ended and changed <see cref="PanelWidths"/>: every repo layout takes the new widths.</summary>
+    public event EventHandler? PanelWidthsChanged;
+
+    /// <summary>The repo layouts' stored side panel widths (the panelWidths preference, as on the Mac one value for
+    /// every tab and window), before they are fitted in a layout's width.</summary>
+    public PanelWidths PanelWidths => _panelWidths;
 
     /// <summary>The open windows, the front one first.</summary>
     public IReadOnlyList<MainWindow> Windows => _windows;
@@ -185,7 +197,7 @@ internal sealed partial class WindowManager
     /// <summary>
     /// Open… and the Welcome page's Open folder: a folder picker owned by <paramref name="window"/>; the picked folder
     /// opens there at once (<see cref="OpenRepo"/>), as on the Mac: it is not probed first, and a folder that is not a
-    /// git repository shows its tab's placeholder until the repo load exists (phase 13/14).
+    /// git repository says so in its graph area (the repo layout's load).
     /// </summary>
     public void ChooseFolder(MainWindow window) => _ = ChooseFolderAsync(window);
 
@@ -198,6 +210,58 @@ internal sealed partial class WindowManager
     {
         window.Apply(model => model.OpenTab(path));
         _ = AddRecentAsync(path);
+    }
+
+    /// <summary>A divider drag ended on <paramref name="widths"/>: kept for every repo layout at once (they are told
+    /// through <see cref="PanelWidthsChanged"/>) and saved as the panelWidths preference on the write worker.</summary>
+    public void SetPanelWidths(PanelWidths widths)
+    {
+        if (widths == _panelWidths)
+            return;
+        _panelWidths = widths;
+        _ = SetPreference(PrefKey.PanelWidths, widths.Encoded);
+        PanelWidthsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// "Repo not found"'s Locate: a folder picker owned by <paramref name="window"/>; the folder picked then shows in the
+    /// tab <paramref name="id"/> (<see cref="WindowTabs.Locate"/>) and, when the tab took it, joins the recent repos. The
+    /// picker cannot start at the nearest folder that still exists, as the Mac's does (the system picker takes no start
+    /// folder), and nothing about the old path is probed.
+    /// </summary>
+    public void LocateRepo(MainWindow window, Guid id) => _ = LocateRepoAsync(window, id);
+
+    /// <summary>
+    /// The folders and workspace files of the launch (positional arguments, and a QA build's <c>-HistqOpen</c>), once
+    /// <paramref name="restored"/> (the session's windows are open): each is checked off the UI thread, a
+    /// <c>.histqws</c> file opens as a workspace (Open Workspace…), a folder as a tab of the front window
+    /// (<see cref="OpenRepo"/>: the selected Welcome tab filled, else a new tab), as the Mac's application(_:open:)
+    /// does; anything else is skipped. Never faults.
+    /// </summary>
+    public async Task OpenAtLaunchAsync(Task restored, IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0)
+            return;
+        try
+        {
+            await restored;
+            List<(string Path, bool IsWorkspace)> found = await Task.Run(() =>
+                paths.Select(LaunchEntry).OfType<(string Path, bool IsWorkspace)>().ToList());
+            // The awaits resume on the UI thread (its SynchronizationContext).
+            foreach ((string path, bool isWorkspace) in found)
+            {
+                if (_quitting)
+                    return;
+                if (isWorkspace)
+                    OpenWorkspace(path, null);
+                else if (_windows.Count > 0)
+                    OpenRepo(_windows[0], path);
+            }
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("OpenAtLaunch (launch folders not opened)", error);
+        }
     }
 
     /// <summary>Saves <paramref name="value"/> as <paramref name="key"/> on the write worker; the task ends once it is
@@ -641,10 +705,51 @@ internal sealed partial class WindowManager
 
     private async Task ChooseFolderAsync(MainWindow window)
     {
-        if (_picking)
+        // The await resumes on the UI thread; the window may have closed meanwhile.
+        if (await PickFolderAsync(window) is not { } path || _quitting || !_windows.Contains(window))
             return;
+
+        OpenRepo(window, path);
+    }
+
+    /// <summary>A launch argument as <see cref="OpenAtLaunchAsync"/> opens it: a workspace file (by its extension, as on
+    /// the Mac; opening it reports a file that cannot be read), an existing folder, else null. Runs on a worker.</summary>
+    private static (string Path, bool IsWorkspace)? LaunchEntry(string argument)
+    {
+        try
+        {
+            string path = Path.GetFullPath(argument);
+            if (path.EndsWith(WorkspaceExtension, StringComparison.OrdinalIgnoreCase))
+                return (path, true);
+            return Directory.Exists(path) ? (path, false) : null;
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException
+                                          or UnauthorizedAccessException)
+        {
+            Trace.WriteLine($"Histq: launch argument skipped: {error.Message}");
+            return null;
+        }
+    }
+
+    private async Task LocateRepoAsync(MainWindow window, Guid id)
+    {
+        // The await resumes on the UI thread; the window may have closed meanwhile.
+        if (await PickFolderAsync(window) is not { } path || _quitting || !_windows.Contains(window))
+            return;
+
+        bool located = false;
+        window.Apply(model => located = model.Locate(id, path));
+        if (located)
+            _ = AddRecentAsync(path);
+    }
+
+    /// <summary>A folder picker owned by <paramref name="window"/> (one picker at a time): the folder picked, or null
+    /// (cancelled, a library or other virtual folder with no path, a picker already open or failing).</summary>
+    private async Task<string?> PickFolderAsync(MainWindow window)
+    {
+        if (_picking)
+            return null;
         _picking = true;
-        string? path;
         try
         {
             var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
@@ -652,24 +757,17 @@ internal sealed partial class WindowManager
             // An unpackaged app's picker needs its owner window.
             InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
             StorageFolder? folder = await picker.PickSingleFolderAsync();
-            path = folder?.Path;
+            return string.IsNullOrEmpty(folder?.Path) ? null : folder.Path;
         }
         catch (Exception error)
         {
             Trace.WriteLine($"Histq: folder picker failed: {error.Message}");
-            return;
+            return null;
         }
         finally
         {
             _picking = false;
         }
-
-        // A library or other virtual folder has no path. The await resumes on the UI thread; the window may have
-        // closed meanwhile.
-        if (string.IsNullOrEmpty(path) || _quitting || !_windows.Contains(window))
-            return;
-
-        OpenRepo(window, path);
     }
 
     /// <summary>Puts <paramref name="path"/> first in the recent repos on the write worker, then has the open windows'

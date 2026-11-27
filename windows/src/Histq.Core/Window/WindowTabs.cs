@@ -417,6 +417,46 @@ public sealed class WindowTabs
         }
     }
 
+    /// <summary>
+    /// "Repo not found"'s Locate (WindowModel.locate at 6fa6d40): the tab <paramref name="id"/> now shows the folder
+    /// <paramref name="path"/> the user picked. A tab that already has it is selected and this one closes; an archive
+    /// entry for it pops out and this one goes (removed, not closed, so a lone tab never gives way to a Welcome tab
+    /// first); else the tab takes the path in place (same id, alias and marks), found, its repo key read again. True in
+    /// that last case only (the caller then adds the folder to the recent repos). No I/O.
+    /// </summary>
+    public bool Locate(Guid id, string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        path = flavor.Standardized(path);
+        if (IndexOf(id) is not { } index)
+        {
+            return false;
+        }
+
+        if (tabs.Find(tab => tab.Id != id && SamePath(tab.Path, path)) is { } existing)
+        {
+            CloseTab(id);
+            SelectTab(existing.Id);
+            return false;
+        }
+
+        if (ArchivedIndex(path) is not null)
+        {
+            // A popped-out tab is stowed at the archive's front, so the entry is looked up again after.
+            Remove(index);
+            if (ArchivedIndex(path) is { } archived)
+            {
+                OpenArchived(archived);
+            }
+
+            return false;
+        }
+
+        tabs[index] = tabs[index] with { Path = path, IsMissing = false, RepoKey = null };
+        RequestRepoKeys([id]);
+        return true;
+    }
+
     /// <summary>Whether this window has the repo folder <paramref name="path"/> as a tab or in its archive. No I/O.</summary>
     public bool HasRepo(string path) => tabs.Exists(tab => SamePath(tab.Path, path)) || ArchivedIndex(path) is not null;
 

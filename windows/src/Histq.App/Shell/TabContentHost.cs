@@ -1,18 +1,20 @@
+using Histq.App.Repo;
 using Histq.App.Welcome;
 using Histq.Core;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace Histq.App.Shell;
 
 /// <summary>
 /// The selected tab's area in the sheet (ported from TabContent, App/MainView.swift at 6fa6d40): the layout of a repo
-/// tab, "Repo not found" for a repo that is gone, or the Welcome page of a new tab. The layouts of the repo tabs shown
-/// last (<see cref="WindowTabs.RecentlyShown"/>, at most <see cref="WindowTabs.KeptLayouts"/>) stay mounted, Collapsed
-/// and not hit-testable while another tab shows, so a switch back shows the tab as it was without building it again.
-/// "Repo not found" and Welcome (<see cref="WelcomePage"/>) are made per tab and only while selected. The repo layout and
-/// "Repo not found" are placeholders until phase 13.
+/// tab (<see cref="RepoLayoutView"/>), "Repo not found" for a repo that is gone (<see cref="RepoNotFoundView"/>), or the
+/// Welcome page of a new tab. The layouts of the repo tabs shown last (<see cref="WindowTabs.RecentlyShown"/>, at most
+/// <see cref="WindowTabs.KeptLayouts"/>) stay mounted, Collapsed and not hit-testable while another tab shows, so a
+/// switch back shows the tab as it was without building it again (its log is not read again). "Repo not found" and
+/// Welcome (<see cref="WelcomePage"/>) are made per tab and only while selected. A layout unmounted (its tab gone or no
+/// longer kept, the window closed) stops its load. In a workspace window a tab on a UNC or device path shows "Repo not
+/// found" whatever its folder check says, so no git ever runs in a received network folder.
 /// </summary>
 public sealed partial class TabContentHost : Grid
 {
@@ -35,8 +37,18 @@ public sealed partial class TabContentHost : Grid
     /// found again, keeps its id but gets new content.</summary>
     private sealed record Mounted(ContentKind Kind, string? Path, FrameworkElement Element);
 
-    /// <summary>The window whose tabs it shows; call it before the first <see cref="Sync"/>.</summary>
-    internal void Attach(MainWindow window) => _window = window;
+    /// <summary>The window whose tabs it shows; call it before the first <see cref="Sync"/>. Its close stops every
+    /// mounted repo layout's load.</summary>
+    internal void Attach(MainWindow window)
+    {
+        _window = window;
+        // The tree goes with the window: only the loads are stopped.
+        window.Closed += (_, _) =>
+        {
+            foreach (Mounted mounted in _mounted.Values)
+                (mounted.Element as RepoLayoutView)?.Close();
+        };
+    }
 
     /// <summary>The recent repos changed: the mounted Welcome page lists them again.</summary>
     internal void ShowRecentRepos()
@@ -69,8 +81,7 @@ public sealed partial class TabContentHost : Grid
             if (!byId.TryGetValue(id, out var tab) || mounted.Kind != KindOf(tab)
                 || !string.Equals(mounted.Path, tab.Path, StringComparison.Ordinal))
             {
-                Children.Remove(mounted.Element);
-                _mounted.Remove(id);
+                Unmount(id);
             }
         }
 
@@ -114,27 +125,32 @@ public sealed partial class TabContentHost : Grid
     private static bool ShowsQaContent => false;
 #endif
 
-    private static ContentKind KindOf(WindowTabs.Tab tab) =>
-        tab.Path is null ? ContentKind.Welcome : tab.IsMissing ? ContentKind.Missing : ContentKind.Repo;
-
-    /// <summary>A tab's content: the Welcome page, else a placeholder (the repo layout lands in phase 13).</summary>
-    private FrameworkElement Make(ContentKind kind, WindowTabs.Tab tab)
+    /// <summary>A tab's kind of content. A received UNC or device folder (a workspace window's) is never read: it shows
+    /// as missing (a string check, nothing probed).</summary>
+    private ContentKind KindOf(WindowTabs.Tab tab)
     {
-        if (kind == ContentKind.Welcome)
-            return new WelcomePage(_window);
+        if (tab.Path is not { } path)
+            return ContentKind.Welcome;
+        bool received = _window.Workspace is not null && PathFlavor.Host.IsUncOrDevice(path);
+        return tab.IsMissing || received ? ContentKind.Missing : ContentKind.Repo;
+    }
 
-        string text = DisplayText.Sanitize(kind == ContentKind.Missing ? $"Repo not found: {tab.Path}" : tab.Title);
-        var label = new TextBlock
-        {
-            Text = text,
-            FontSize = 13,
-            Opacity = 0.6,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-        };
-        var content = new Grid { Children = { label } };
-        AutomationProperties.SetName(content, text);
-        return content;
+    /// <summary>A tab's content: the Welcome page, the repo layout (its log load starts here, off the UI thread) or
+    /// "Repo not found".</summary>
+    private FrameworkElement Make(ContentKind kind, WindowTabs.Tab tab) => kind switch
+    {
+        ContentKind.Welcome => new WelcomePage(_window),
+        ContentKind.Repo => new RepoLayoutView(_window, tab.Path!),
+        _ => new RepoNotFoundView(_window, tab.Id, tab.Path ?? ""),
+    };
+
+    /// <summary>Removes a tab's content; a repo layout stops its load.</summary>
+    private void Unmount(Guid id)
+    {
+        if (!_mounted.Remove(id, out Mounted? mounted))
+            return;
+        Children.Remove(mounted.Element);
+        if (mounted.Element is RepoLayoutView layout)
+            layout.Close();
     }
 }

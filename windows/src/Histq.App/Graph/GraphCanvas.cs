@@ -216,6 +216,22 @@ public sealed partial class GraphCanvas : UserControl
         _canvas.Invalidate();
     }
 
+    /// <summary>
+    /// The graph is gone for good (its repo layout was unmounted): drops its rows and takes its Win2D canvas out of the
+    /// tree, as Win2D asks of a control that is not reused (its event handlers would otherwise keep it alive). Call on
+    /// the UI thread, outside a layout pass; the graph draws nothing after it.
+    /// </summary>
+    internal void Release()
+    {
+        _fadeTimer.Stop();
+        _fadeTimerArmed = false;
+        _rows = [];
+        _commits = [];
+        _count = 0;
+        SelectedRow = -1;
+        _canvas.RemoveFromVisualTree();
+    }
+
     /// <summary>Scrolls <paramref name="row"/> to the top of the viewport, or as near as the end allows.</summary>
     public void ScrollToRow(long row) => SetOffset(Math.Clamp(row, 0, Math.Max(0, _count - 1)), 0);
 
