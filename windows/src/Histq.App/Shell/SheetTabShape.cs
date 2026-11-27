@@ -101,47 +101,69 @@ internal static class SheetTabShape
             return null;
         double corner = Math.Min(radius, Math.Min(box.Width, box.Height) / 2);
         double flare = Flare;
-        bool cut = hole is { } h && h.X - flare < box.X + box.Width && h.X + h.Width + flare > box.X
-            && h.Y < box.Y + box.Height && h.Y + h.Height > box.Y;
-        if (!cut)
-        {
-            if (!edgeOnly || box.Width <= 2 || box.Height <= 2)
-                return RoundedRect(box, corner);
-            // The inner rect lies wholly inside the outer one, so even-odd leaves the 1 epx ring.
-            var ring = new GeometryGroup { FillRule = FillRule.EvenOdd };
-            ring.Children.Add(RoundedRect(box, corner));
-            ring.Children.Add(RoundedRect(
-                new Rect(box.X + 1, box.Y + 1, box.Width - 2, box.Height - 2), Math.Max(corner - 1, 0)));
-            return ring;
-        }
+        if (hole is not { } tab || !(tab.X - flare < box.X + box.Width && tab.X + tab.Width + flare > box.X
+            && tab.Y < box.Y + box.Height && tab.Y + tab.Height > box.Y))
+            return Uncut(box, corner, edgeOnly);
 
-        // Win2D does the boolean work (XAML geometry has none); its outline comes back as a XAML path.
+        // Drawn while laying out and on every selection slide frame, where an exception would end the app: should the
+        // Win2D interop fail, the box is drawn whole (the selected tab then sits on its fill) and the failure is logged.
+        try
+        {
+            return CutOut(box, corner, edgeOnly, tab);
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("SheetTabShape.Box cut-out (box drawn without it)", error);
+            return Uncut(box, corner, edgeOnly);
+        }
+    }
+
+    /// <summary>The box, or its 1 epx inner edge, whole.</summary>
+    private static Geometry Uncut(Rect box, double corner, bool edgeOnly)
+    {
+        if (!edgeOnly || box.Width <= 2 || box.Height <= 2)
+            return RoundedRect(box, corner);
+        // The inner rect lies wholly inside the outer one, so even-odd leaves the 1 epx ring.
+        var ring = new GeometryGroup { FillRule = FillRule.EvenOdd };
+        ring.Children.Add(RoundedRect(box, corner));
+        ring.Children.Add(RoundedRect(
+            new Rect(box.X + 1, box.Y + 1, box.Width - 2, box.Height - 2), Math.Max(corner - 1, 0)));
+        return ring;
+    }
+
+    /// <summary>The box, or its 1 epx inner edge, with the selected tab's shape cut out: Win2D does the boolean work
+    /// (XAML geometry has none) and its outline comes back as a XAML path.</summary>
+    private static Geometry CutOut(Rect box, double corner, bool edgeOnly, Rect tab)
+    {
         CanvasDevice device = CanvasDevice.GetSharedDevice();
         CanvasGeometry shape = CanvasGeometry.CreateRoundedRectangle(
             device, (float)box.X, (float)box.Y, (float)box.Width, (float)box.Height, (float)corner, (float)corner);
-        if (edgeOnly && box.Width > 2 && box.Height > 2)
+        try
         {
-            using CanvasGeometry inner = CanvasGeometry.CreateRoundedRectangle(
-                device, (float)box.X + 1, (float)box.Y + 1, (float)box.Width - 2, (float)box.Height - 2,
-                (float)Math.Max(corner - 1, 0), (float)Math.Max(corner - 1, 0));
-            CanvasGeometry ring = shape.CombineWith(inner, Matrix3x2.Identity, CanvasGeometryCombine.Exclude);
-            shape.Dispose();
-            shape = ring;
-        }
+            if (edgeOnly && box.Width > 2 && box.Height > 2)
+            {
+                using CanvasGeometry inner = CanvasGeometry.CreateRoundedRectangle(
+                    device, (float)box.X + 1, (float)box.Y + 1, (float)box.Width - 2, (float)box.Height - 2,
+                    (float)Math.Max(corner - 1, 0), (float)Math.Max(corner - 1, 0));
+                CanvasGeometry ring = shape.CombineWith(inner, Matrix3x2.Identity, CanvasGeometryCombine.Exclude);
+                shape.Dispose();
+                shape = ring;
+            }
 
-        if (cut && hole is { } tab)
-        {
-            using CanvasGeometry tabShape = TabShape(device, tab);
-            CanvasGeometry rest = shape.CombineWith(tabShape, Matrix3x2.Identity, CanvasGeometryCombine.Exclude);
-            shape.Dispose();
-            shape = rest;
-        }
+            using (CanvasGeometry tabShape = TabShape(device, tab))
+            {
+                CanvasGeometry rest = shape.CombineWith(tabShape, Matrix3x2.Identity, CanvasGeometryCombine.Exclude);
+                shape.Dispose();
+                shape = rest;
+            }
 
-        using (shape)
-        {
             var receiver = new XamlPathReceiver();
             shape.SendPathTo(receiver);
             return receiver.Geometry;
+        }
+        finally
+        {
+            shape.Dispose();
         }
     }
 

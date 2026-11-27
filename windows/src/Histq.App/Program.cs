@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Histq.App.Shell;
 using Histq.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -27,6 +28,7 @@ public static class Program
         IReadOnlyList<string> stateArguments = [];
 #endif
         StatePaths paths = StatePaths.Resolve(stateArguments, Environment.GetEnvironmentVariable);
+        CrashLog.Install(paths);
 
         AppInstance instance = AppInstance.FindOrRegisterForKey(InstanceKey(paths));
         if (!instance.IsCurrent)
@@ -58,6 +60,7 @@ public static class Program
             SynchronizationContext.SetSynchronizationContext(context);
             // Application.Current keeps it alive, as in the XAML-generated Main.
             var app = new App { StatePaths = paths, SessionLoad = sessionLoad, PreferencesLoad = preferencesLoad };
+            CrashLog.Watch(app);
             instance.Activated += app.OnRedirectedActivation;
 #if HISTQ_QA
             // Loads its dump at once; waits for the main window (OnLaunched) before it touches it.

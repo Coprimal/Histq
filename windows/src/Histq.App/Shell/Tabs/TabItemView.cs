@@ -32,6 +32,8 @@ internal sealed record TabItemState(
 /// </summary>
 internal sealed partial class TabItemView : Grid
 {
+    private static readonly SolidColorBrush NoFill = new(Colors.Transparent);
+
     private readonly TabStrip _strip;
     private readonly Border _fill;
     private readonly Grid _row;
@@ -61,6 +63,7 @@ internal sealed partial class TabItemView : Grid
         {
             Margin = new Thickness(0, 0, 0, bottomInset),
             CornerRadius = new CornerRadius((height - bottomInset) / 2),
+            Background = NoFill,
             BackgroundTransition = new BrushTransition { Duration = PaletteResources.TimeSpan("MotionHoverDuration") },
             IsHitTestVisible = false,
         };
@@ -131,6 +134,7 @@ internal sealed partial class TabItemView : Grid
         if (_state == state)
             return;
         bool wasSelected = IsSelected;
+        string? oldName = _state?.Name;
         _state = state;
 
         _icon.Update(state.Icon);
@@ -144,9 +148,10 @@ internal sealed partial class TabItemView : Grid
         ToolTipService.SetToolTip(this, state.ToolTip);
         Refresh();
 
-        if (wasSelected != state.Selected && AutomationPeer.ListenerExists(AutomationEvents.PropertyChanged)
-            && FrameworkElementAutomationPeer.FromElement(this) is { } peer)
-            peer.RaisePropertyChangedEvent(SelectionItemPatternIdentifiers.IsSelectedProperty, wasSelected, state.Selected);
+        if (oldName is not null && !string.Equals(oldName, state.Name, StringComparison.Ordinal))
+            TabAutomation.RaisePropertyChanged(this, AutomationElementIdentifiers.NameProperty, oldName, state.Name);
+        if (wasSelected != state.Selected)
+            TabAutomation.RaisePropertyChanged(this, SelectionItemPatternIdentifiers.IsSelectedProperty, wasSelected, state.Selected);
     }
 
     protected override AutomationPeer OnCreateAutomationPeer() => new TabItemAutomationPeer(this);
@@ -164,10 +169,11 @@ internal sealed partial class TabItemView : Grid
     {
         TabItemState? state = _state;
         bool selected = state?.Selected == true;
-        _fill.Background = selected ? null
+        // Transparent, never null: the fill's BrushTransition animates between solid color brushes only.
+        _fill.Background = selected ? NoFill
             : state?.MultiSelected == true ? TabColors.Brush(PaletteResources.Color("MultiSelectFillColor"))
             : _hovered ? PaletteResources.Brush("TabFillBrush")
-            : null;
+            : NoFill;
         _close.Visibility = _hovered && state is { Pinned: false } ? Visibility.Visible : Visibility.Collapsed;
     }
 }
@@ -260,6 +266,7 @@ internal sealed partial class GroupChipView : Grid
     public void Update(string text, Color color, string name, string toolTip, bool collapsed)
     {
         bool wasCollapsed = IsCollapsed;
+        string oldName = AutomationProperties.GetName(this);
         IsCollapsed = collapsed;
         _text.Text = text;
         Padding = new Thickness(text.Length == 0 ? 0 : PaletteResources.Double("ChipPadding"), 0,
@@ -268,10 +275,13 @@ internal sealed partial class GroupChipView : Grid
         AutomationProperties.SetName(this, name);
         ToolTipService.SetToolTip(this, toolTip);
 
-        if (wasCollapsed != collapsed && AutomationPeer.ListenerExists(AutomationEvents.PropertyChanged)
-            && FrameworkElementAutomationPeer.FromElement(this) is { } peer)
-            peer.RaisePropertyChangedEvent(ExpandCollapsePatternIdentifiers.ExpandCollapseStateProperty,
+        if (oldName.Length > 0 && !string.Equals(oldName, name, StringComparison.Ordinal))
+            TabAutomation.RaisePropertyChanged(this, AutomationElementIdentifiers.NameProperty, oldName, name);
+        if (wasCollapsed != collapsed)
+        {
+            TabAutomation.RaisePropertyChanged(this, ExpandCollapsePatternIdentifiers.ExpandCollapseStateProperty,
                 State(wasCollapsed), State(collapsed));
+        }
     }
 
     internal static ExpandCollapseState State(bool collapsed) =>
@@ -366,8 +376,13 @@ internal sealed partial class WorktreeHeadView : Grid
     {
         FirstTab = firstTab;
         BoxKey = boxKey;
+        string oldName = AutomationProperties.GetName(this);
+        if (string.Equals(oldName, name, StringComparison.Ordinal))
+            return;
         AutomationProperties.SetName(this, name);
         ToolTipService.SetToolTip(this, name);
+        if (oldName.Length > 0)
+            TabAutomation.RaisePropertyChanged(this, AutomationElementIdentifiers.NameProperty, oldName, name);
     }
 
     protected override AutomationPeer OnCreateAutomationPeer() => new WorktreeHeadAutomationPeer(this);
@@ -425,4 +440,28 @@ internal sealed partial class WorktreeHeadAutomationPeer : FrameworkElementAutom
     protected override bool HasKeyboardFocusCore() => Owner.FocusState != FocusState.Unfocused;
 
     protected override void SetFocusCore() => TabKeyboard.FocusFromAutomation(Owner);
+}
+
+/// <summary>UI Automation change events of the tab row's items.</summary>
+internal static class TabAutomation
+{
+    /// <summary>
+    /// Tells UI Automation clients that a property of <paramref name="element"/> changed (its name, a tab's selection,
+    /// a chip's collapse), when one listens and the element has a peer: a client that keeps the tree it read (vmpal_tree,
+    /// Narrator) otherwise keeps the old value. A failure to notify is logged, never left to end the app.
+    /// </summary>
+    public static void RaisePropertyChanged(UIElement element, AutomationProperty property, object oldValue, object newValue)
+    {
+        if (!AutomationPeer.ListenerExists(AutomationEvents.PropertyChanged)
+            || FrameworkElementAutomationPeer.FromElement(element) is not { } peer)
+            return;
+        try
+        {
+            peer.RaisePropertyChangedEvent(property, oldValue, newValue);
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("UI Automation property event (not raised)", error);
+        }
+    }
 }

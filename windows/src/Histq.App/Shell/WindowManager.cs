@@ -326,9 +326,17 @@ internal sealed class WindowManager
             return;
         }
 
-        // The await resumes on the UI thread (its SynchronizationContext).
-        if (_windows.Contains(window))
-            window.Apply(model => model.ApplyRepoKeys(keys));
+        // The await resumes on the UI thread (its SynchronizationContext). Nothing awaits this task, so a failure here
+        // would otherwise go unseen.
+        try
+        {
+            if (_windows.Contains(window))
+                window.Apply(model => model.ApplyRepoKeys(keys));
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("ApplyRepoKeys (tab row not brought in line)", error);
+        }
     }
 
     /// <summary>Checks the folders off the UI thread (<see cref="SavedSession.IsUserRepository"/>, as the user's own tabs
@@ -347,9 +355,17 @@ internal sealed class WindowManager
             return;
         }
 
-        // The await resumes on the UI thread (its SynchronizationContext).
-        if (_windows.Contains(window))
-            window.Apply(model => model.ApplyFolderChecks(checks));
+        // The await resumes on the UI thread (its SynchronizationContext). Nothing awaits this task, so a failure here
+        // would otherwise go unseen.
+        try
+        {
+            if (_windows.Contains(window))
+                window.Apply(model => model.ApplyFolderChecks(checks));
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("ApplyFolderChecks (tab row not brought in line)", error);
+        }
     }
 
     /// <summary>session.json could not be written (<see cref="SessionStore.SessionWriteFailed"/>, marshalled to the UI

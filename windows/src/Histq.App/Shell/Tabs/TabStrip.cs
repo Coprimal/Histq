@@ -136,6 +136,9 @@ public sealed partial class TabStrip : Panel
     private bool _geometryPending;
     private (int Version, Rect? Lead, Rect? Well, Rect? Track, Guid? Selected)? _decorated;
 
+    /// <summary>The automation children last announced (<see cref="NotifyAutomationChildren"/>).</summary>
+    private List<FrameworkElement>? _automationChildren;
+
     // A drag: the unit drawn at its target (_dragLayout, the rest layout with its positions), its elements lifted by
     // _lift from there so they follow the pointer; after a drop that changes nothing, _lift eases back to 0 (snap back).
     private TabDrag? _dragShown;
@@ -1014,7 +1017,36 @@ public sealed partial class TabStrip : Panel
     {
         LayoutUpdated -= OnLayoutDone;
         _geometryPending = false;
+        NotifyAutomationChildren();
         GeometryChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Tells UI Automation clients that the row's items changed (a tab, chip or worktree head came, went, showed, hid or
+    /// moved), once laid out: the strip lists its own children (<see cref="AutomationOrder"/>), so the framework does not
+    /// see them change, and a client that keeps the tree it read (vmpal_tree, Narrator) would miss a new worktree head.
+    /// </summary>
+    private void NotifyAutomationChildren()
+    {
+        if (!AutomationPeer.ListenerExists(AutomationEvents.StructureChanged)
+            || FrameworkElementAutomationPeer.FromElement(this) is not { } peer)
+        {
+            _automationChildren = null;
+            return;
+        }
+
+        List<FrameworkElement> children = [.. AutomationOrder().Where(element => element.Visibility == Visibility.Visible)];
+        if (_automationChildren is { } shown && shown.SequenceEqual(children))
+            return;
+        _automationChildren = children;
+        try
+        {
+            peer.RaiseStructureChangedEvent(AutomationStructureChangeType.ChildrenInvalidated, null);
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("UI Automation structure event (not raised)", error);
+        }
     }
 
     // Drag (TabDragController drives it; design §3.10).
