@@ -1,0 +1,367 @@
+{
+  "profiles" : [
+    {
+      "accounts" : [
+        {
+          "host" : "github.com",
+          "kind" : "github",
+          "login" : "qa-work"
+        },
+        {
+          "basePath" : "/gitlab",
+          "gitUsername" : "oauth2",
+          "host" : "git.example.invalid",
+          "kind" : "gitlab",
+          "login" : "qa",
+          "oauthClientID" : "client-1"
+        }
+      ],
+      "color" : "#3A8EE5",
+      "github" : {
+        "host" : "github.com",
+        "login" : "qa-work"
+      },
+      "id" : "3F2A1B0C-0000-4000-8000-000000000001",
+      "identity" : {
+        "email" : "qa@work.invalid",
+        "name" : "QA Work"
+      },
+      "name" : "Work",
+      "signByDefault" : true,
+      "signing" : {
+        "gpg" : {
+          "keyID" : "ABCDEF0123456789"
+        }
+      },
+      "ssh" : {
+        "agent" : {
+
+        }
+      }
+    },
+    {
+      "color" : "#E5B13A",
+      "id" : "3F2A1B0C-0000-4000-8000-000000000002",
+      "identity" : {
+        "email" : "qa@histq.invalid",
+        "name" : "QA"
+      },
+      "name" : "Personal",
+      "signByDefault" : false,
+      "signing" : {
+        "ssh" : {
+          "keyPath" : "~/.ssh/id_ed25519.pub"
+        }
+      },
+      "ssh" : {
+        "keyFile" : {
+          "path" : "~/.ssh/id_ed25519"
+        }
+      }
+    },
+    {
+      "color" : "#66CBA0",
+      "id" : "3F2A1B0C-0000-4000-8000-000000000003",
+      "identity" : {
+        "email" : "plain@histq.invalid",
+        "name" : "Plain"
+      },
+      "name" : "Plain été",
+      "signByDefault" : false,
+      "signing" : {
+        "none" : {
+
+        }
+      },
+      "ssh" : {
+        "agent" : {
+
+        }
+      }
+    }
+  ],
+  "repoView" : {
+    "hidden" : [
+      "refs/heads/old",
+      "refs/tags/v0.1"
+    ],
+    "hideStale" : true,
+    "pinned" : [
+      "refs/remotes/origin/main"
+    ],
+    "solo" : [
+      "refs/heads/main"
+    ]
+  },
+  "session" : {
+    "version" : 1,
+    "windows" : [
+      {
+        "closedTabGroups" : [
+          {
+            "color" : 5,
+            "id" : "7C1D2E3F-0000-4000-8000-000000000013",
+            "name" : "Old",
+            "tabs" : [
+              {
+                "path" : "/Users/qa/Work/repos/old"
+              }
+            ]
+          }
+        ],
+        "group" : 0,
+        "height" : 800.25,
+        "isSelectedInGroup" : true,
+        "manualTabGroups" : [
+          {
+            "collapsed" : true,
+            "color" : 2,
+            "id" : "7C1D2E3F-0000-4000-8000-000000000011",
+            "name" : "Core"
+          },
+          {
+            "color" : 0,
+            "id" : "7C1D2E3F-0000-4000-8000-000000000012"
+          }
+        ],
+        "selectedTab" : 1,
+        "tabIndex" : 0,
+        "tabs" : [
+          {
+            "alias" : "Alpha",
+            "path" : "/Users/qa/Work/repos/alpha",
+            "pinned" : true,
+            "profile" : "3F2A1B0C-0000-4000-8000-000000000001"
+          },
+          {
+            "emoji" : "🚀",
+            "iconColor" : 3,
+            "path" : "/Users/qa/src/beta",
+            "profile" : "none",
+            "tabGroup" : "7C1D2E3F-0000-4000-8000-000000000011"
+          },
+          {
+            "icon" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
+            "path" : "/Volumes/Ext/gamma",
+            "tabGroup" : "7C1D2E3F-0000-4000-8000-000000000012"
+          },
+          {
+
+          },
+          {
+            "archived" : true,
+            "path" : "/Users/qa/Work/repos/delta"
+          }
+        ],
+        "width" : 1280,
+        "x" : 120.5,
+        "y" : 80
+      },
+      {
+        "group" : 1,
+        "height" : 600,
+        "isSelectedInGroup" : false,
+        "tabIndex" : 0,
+        "tabs" : [
+          {
+
+          }
+        ],
+        "width" : 900,
+        "x" : -40,
+        "y" : 0
+      }
+    ],
+    "workspaces" : [
+      {
+        "open" : true,
+        "path" : "/Users/qa/Work/team.histqws",
+        "windows" : [
+          {
+            "collapsedGroups" : [
+              "7C1D2E3F-0000-4000-8000-000000000011"
+            ],
+            "group" : 2,
+            "height" : 700,
+            "id" : "A1B2C3D4-0000-4000-8000-000000000021",
+            "isSelectedInGroup" : true,
+            "selectedPath" : "/Users/qa/Work/repos/alpha",
+            "tabIndex" : 0,
+            "width" : 1100,
+            "x" : 10,
+            "y" : 20.75
+          },
+          {
+            "group" : 2,
+            "height" : 500,
+            "id" : "A1B2C3D4-0000-4000-8000-000000000022",
+            "isSelectedInGroup" : false,
+            "tabIndex" : 1,
+            "width" : 800,
+            "x" : 30,
+            "y" : 40
+          }
+        ]
+      },
+      {
+        "open" : false,
+        "path" : "/Users/qa/Old/old.histqws",
+        "windows" : [
+
+        ]
+      }
+    ]
+  },
+  "workspace" : {
+    "profiles" : [
+      {
+        "accounts" : [
+          {
+            "host" : "github.com",
+            "kind" : "github",
+            "login" : "qa-work"
+          },
+          {
+            "basePath" : "/gitlab",
+            "gitUsername" : "oauth2",
+            "host" : "git.example.invalid",
+            "kind" : "gitlab",
+            "login" : "qa",
+            "oauthClientID" : "client-1"
+          }
+        ],
+        "color" : "#3A8EE5",
+        "github" : {
+          "host" : "github.com",
+          "login" : "qa-work"
+        },
+        "id" : "3F2A1B0C-0000-4000-8000-000000000001",
+        "identity" : {
+          "email" : "qa@work.invalid",
+          "name" : "QA Work"
+        },
+        "name" : "Work",
+        "signByDefault" : true,
+        "signing" : {
+          "gpg" : {
+            "keyID" : "ABCDEF0123456789"
+          }
+        },
+        "ssh" : {
+          "agent" : {
+
+          }
+        }
+      }
+    ],
+    "repos" : [
+      {
+        "home" : "~/Work/repos/alpha",
+        "path" : "repos/alpha",
+        "view" : {
+          "hidden" : [
+            "refs/heads/old",
+            "refs/tags/v0.1"
+          ],
+          "hideStale" : true,
+          "pinned" : [
+            "refs/remotes/origin/main"
+          ],
+          "solo" : [
+            "refs/heads/main"
+          ]
+        }
+      },
+      {
+        "home" : "~/src/beta",
+        "path" : "../src/beta",
+        "view" : {
+          "hidden" : [
+
+          ],
+          "hideStale" : false,
+          "pinned" : [
+
+          ],
+          "solo" : [
+
+          ]
+        }
+      },
+      {
+        "home" : "~/Work/repos/gone",
+        "path" : "repos/gone"
+      }
+    ],
+    "version" : 1,
+    "windows" : [
+      {
+        "closedTabGroups" : [
+          {
+            "color" : 5,
+            "id" : "7C1D2E3F-0000-4000-8000-000000000013",
+            "name" : "Old",
+            "tabs" : [
+              {
+                "home" : "~/Work/repos/old",
+                "path" : "repos/old"
+              }
+            ]
+          }
+        ],
+        "id" : "A1B2C3D4-0000-4000-8000-000000000021",
+        "tabGroups" : [
+          {
+            "color" : 2,
+            "id" : "7C1D2E3F-0000-4000-8000-000000000011",
+            "name" : "Core"
+          },
+          {
+            "color" : 0,
+            "id" : "7C1D2E3F-0000-4000-8000-000000000012"
+          }
+        ],
+        "tabs" : [
+          {
+            "alias" : "Alpha",
+            "home" : "~/Work/repos/alpha",
+            "path" : "repos/alpha",
+            "pinned" : true,
+            "profile" : "3F2A1B0C-0000-4000-8000-000000000001"
+          },
+          {
+            "emoji" : "🚀",
+            "group" : "7C1D2E3F-0000-4000-8000-000000000011",
+            "home" : "~/src/beta",
+            "iconColor" : 3,
+            "path" : "../src/beta",
+            "profile" : "none"
+          },
+          {
+            "group" : "7C1D2E3F-0000-4000-8000-000000000012",
+            "home" : "/Volumes/Ext/gamma",
+            "icon" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
+            "path" : "../../../Volumes/Ext/gamma"
+          },
+          {
+
+          },
+          {
+            "archived" : true,
+            "home" : "~/Work/repos/delta",
+            "path" : "repos/delta"
+          }
+        ]
+      },
+      {
+        "id" : "A1B2C3D4-0000-4000-8000-000000000022",
+        "tabs" : [
+          {
+            "home" : "~/Work",
+            "path" : "."
+          }
+        ]
+      }
+    ]
+  }
+}

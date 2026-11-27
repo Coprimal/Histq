@@ -1,0 +1,321 @@
+{
+  "profiles": [
+    {
+      "accounts": [
+        {
+          "host": "github.com",
+          "kind": "github",
+          "login": "qa-work"
+        },
+        {
+          "basePath": "/qa-org",
+          "host": "dev.azure.com",
+          "kind": "azureDevOps",
+          "login": "qa"
+        }
+      ],
+      "color": "#3A8EE5",
+      "github": {
+        "host": "github.com",
+        "login": "qa-work"
+      },
+      "id": "4B3C2D1E-0000-4000-8000-000000000001",
+      "identity": {
+        "email": "qa@work.invalid",
+        "name": "QA Work"
+      },
+      "name": "Work",
+      "signByDefault": true,
+      "signing": {
+        "gpg": {
+          "keyID": "ABCDEF0123456789"
+        }
+      },
+      "ssh": {
+        "agent": {}
+      }
+    },
+    {
+      "color": "#E5B13A",
+      "id": "4B3C2D1E-0000-4000-8000-000000000002",
+      "identity": {
+        "email": "qa@histq.invalid",
+        "name": "QA"
+      },
+      "name": "Personal",
+      "signByDefault": false,
+      "signing": {
+        "ssh": {
+          "keyPath": "C:\\Users\\qa\\.ssh\\id_ed25519.pub"
+        }
+      },
+      "ssh": {
+        "keyFile": {
+          "path": "C:\\Users\\qa\\.ssh\\id_ed25519"
+        }
+      }
+    }
+  ],
+  "repoView": {
+    "hidden": [
+      "refs/heads/old",
+      "refs/tags/v0.1"
+    ],
+    "hideStale": true,
+    "pinned": [
+      "refs/remotes/origin/main"
+    ],
+    "solo": [
+      "refs/heads/main"
+    ]
+  },
+  "session": {
+    "version": 1,
+    "windows": [
+      {
+        "closedTabGroups": [
+          {
+            "color": 5,
+            "id": "8D2E3F40-0000-4000-8000-000000000013",
+            "name": "Old",
+            "tabs": [
+              {
+                "path": "C:\\Users\\qa\\Work\\repos\\old"
+              }
+            ]
+          }
+        ],
+        "group": 0,
+        "height": 800.25,
+        "isSelectedInGroup": true,
+        "manualTabGroups": [
+          {
+            "collapsed": true,
+            "color": 2,
+            "id": "8D2E3F40-0000-4000-8000-000000000011",
+            "name": "Core"
+          },
+          {
+            "color": 0,
+            "id": "8D2E3F40-0000-4000-8000-000000000012"
+          }
+        ],
+        "selectedTab": 1,
+        "tabIndex": 0,
+        "tabs": [
+          {
+            "alias": "Alpha",
+            "path": "C:\\Users\\qa\\Work\\repos\\alpha",
+            "pinned": true,
+            "profile": "4B3C2D1E-0000-4000-8000-000000000001"
+          },
+          {
+            "emoji": "\uD83D\uDE80",
+            "iconColor": 3,
+            "path": "C:\\Users\\qa\\src\\beta",
+            "profile": "none",
+            "tabGroup": "8D2E3F40-0000-4000-8000-000000000011"
+          },
+          {
+            "icon": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
+            "path": "D:\\Ext\\gamma",
+            "tabGroup": "8D2E3F40-0000-4000-8000-000000000012"
+          },
+          {},
+          {
+            "archived": true,
+            "path": "C:\\Users\\qa\\Work\\repos\\delta"
+          }
+        ],
+        "width": 1280,
+        "x": 120.5,
+        "y": 80
+      },
+      {
+        "group": 1,
+        "height": 600,
+        "isSelectedInGroup": false,
+        "tabIndex": 0,
+        "tabs": [
+          {}
+        ],
+        "width": 900,
+        "x": -40,
+        "y": 0
+      }
+    ],
+    "workspaces": [
+      {
+        "open": true,
+        "path": "C:\\Users\\qa\\Work\\team.histqws",
+        "windows": [
+          {
+            "collapsedGroups": [
+              "8D2E3F40-0000-4000-8000-000000000011"
+            ],
+            "group": 2,
+            "height": 700,
+            "id": "B2C3D4E5-0000-4000-8000-000000000021",
+            "isSelectedInGroup": true,
+            "selectedPath": "C:\\Users\\qa\\Work\\repos\\alpha",
+            "tabIndex": 0,
+            "width": 1100,
+            "x": 10,
+            "y": 20.75
+          },
+          {
+            "group": 2,
+            "height": 500,
+            "id": "B2C3D4E5-0000-4000-8000-000000000022",
+            "isSelectedInGroup": false,
+            "tabIndex": 1,
+            "width": 800,
+            "x": 30,
+            "y": 40
+          }
+        ]
+      },
+      {
+        "open": false,
+        "path": "C:\\Users\\qa\\Old\\old.histqws",
+        "windows": []
+      }
+    ]
+  },
+  "workspace": {
+    "profiles": [
+      {
+        "accounts": [
+          {
+            "host": "github.com",
+            "kind": "github",
+            "login": "qa-work"
+          },
+          {
+            "basePath": "/qa-org",
+            "host": "dev.azure.com",
+            "kind": "azureDevOps",
+            "login": "qa"
+          }
+        ],
+        "color": "#3A8EE5",
+        "github": {
+          "host": "github.com",
+          "login": "qa-work"
+        },
+        "id": "4B3C2D1E-0000-4000-8000-000000000001",
+        "identity": {
+          "email": "qa@work.invalid",
+          "name": "QA Work"
+        },
+        "name": "Work",
+        "signByDefault": true,
+        "signing": {
+          "gpg": {
+            "keyID": "ABCDEF0123456789"
+          }
+        },
+        "ssh": {
+          "agent": {}
+        }
+      }
+    ],
+    "repos": [
+      {
+        "home": "~/Work/repos/alpha",
+        "path": "repos/alpha",
+        "view": {
+          "hidden": [
+            "refs/heads/old",
+            "refs/tags/v0.1"
+          ],
+          "hideStale": true,
+          "pinned": [
+            "refs/remotes/origin/main"
+          ],
+          "solo": [
+            "refs/heads/main"
+          ]
+        }
+      },
+      {
+        "home": "~/src/beta",
+        "path": "../src/beta",
+        "view": {
+          "hidden": [],
+          "hideStale": false,
+          "pinned": [],
+          "solo": []
+        }
+      }
+    ],
+    "version": 1,
+    "windows": [
+      {
+        "closedTabGroups": [
+          {
+            "color": 5,
+            "id": "8D2E3F40-0000-4000-8000-000000000013",
+            "name": "Old",
+            "tabs": [
+              {
+                "home": "~/Work/repos/old",
+                "path": "repos/old"
+              }
+            ]
+          }
+        ],
+        "id": "B2C3D4E5-0000-4000-8000-000000000021",
+        "tabGroups": [
+          {
+            "color": 2,
+            "id": "8D2E3F40-0000-4000-8000-000000000011",
+            "name": "Core"
+          },
+          {
+            "color": 0,
+            "id": "8D2E3F40-0000-4000-8000-000000000012"
+          }
+        ],
+        "tabs": [
+          {
+            "alias": "Alpha",
+            "home": "~/Work/repos/alpha",
+            "path": "repos/alpha",
+            "pinned": true,
+            "profile": "4B3C2D1E-0000-4000-8000-000000000001"
+          },
+          {
+            "emoji": "\uD83D\uDE80",
+            "group": "8D2E3F40-0000-4000-8000-000000000011",
+            "home": "~/src/beta",
+            "iconColor": 3,
+            "path": "../src/beta",
+            "profile": "none"
+          },
+          {
+            "group": "8D2E3F40-0000-4000-8000-000000000012",
+            "home": "D:\\Ext\\gamma",
+            "icon": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
+            "path": "D:\\Ext\\gamma"
+          },
+          {},
+          {
+            "archived": true,
+            "home": "~/Work/repos/delta",
+            "path": "repos/delta"
+          }
+        ]
+      },
+      {
+        "id": "B2C3D4E5-0000-4000-8000-000000000022",
+        "tabs": [
+          {
+            "home": "~/Work",
+            "path": "."
+          }
+        ]
+      }
+    ]
+  }
+}
