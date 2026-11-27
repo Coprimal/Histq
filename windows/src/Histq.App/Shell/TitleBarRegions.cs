@@ -26,6 +26,9 @@ public sealed class TitleBarRegions
     private bool _closed;
     private bool _frozen;
 
+    /// <summary>The Passthrough rects last set: an equal list is not set again by <see cref="Refresh"/>.</summary>
+    private RectInt32[]? _rects;
+
     /// <param name="window">The window whose content extends into the title bar.</param>
     /// <param name="titleBar">The title bar's root element; rects are clipped to its bounds minus the insets.</param>
     /// <param name="leftInsetColumn">The column kept under the caption buttons in right-to-left layouts.</param>
@@ -66,7 +69,7 @@ public sealed class TitleBarRegions
                 return;
             _frozen = value;
             if (!value)
-                Refresh();
+                RefreshAll();
         }
     }
 
@@ -80,8 +83,9 @@ public sealed class TitleBarRegions
         AppWindowTitleBar bar = _window.AppWindow.TitleBar;
         double leftInset = bar.LeftInset / scale;
         double rightInset = bar.RightInset / scale;
-        _leftInsetColumn.Width = new GridLength(leftInset);
-        _rightInsetColumn.Width = new GridLength(rightInset);
+        // Only a changed width is set: each set lays the title bar out again, and Refresh runs after layouts.
+        SetWidth(_leftInsetColumn, leftInset);
+        SetWidth(_rightInsetColumn, rightInset);
 
         // Never over the caption buttons: clip to the title bar minus the caption-button insets.
         Rect barBounds = BoundsInWindow(_titleBar);
@@ -103,8 +107,18 @@ public sealed class TitleBarRegions
                 rects.Add(rect);
         }
 
+        if (_rects is { } set && set.SequenceEqual(rects))
+            return;
+        _rects = [.. rects];
         InputNonClientPointerSource.GetForWindowId(_window.AppWindow.Id)
-            .SetRegionRects(NonClientRegionKind.Passthrough, rects.ToArray());
+            .SetRegionRects(NonClientRegionKind.Passthrough, _rects);
+    }
+
+    private static void SetWidth(ColumnDefinition column, double width)
+    {
+        GridLength current = column.Width;
+        if (current.GridUnitType != GridUnitType.Pixel || current.Value != width)
+            column.Width = new GridLength(width);
     }
 
     private void OnTitleBarLoaded(object sender, RoutedEventArgs e)
@@ -115,12 +129,20 @@ public sealed class TitleBarRegions
             _xamlRoot = root;
             root.Changed += OnXamlRootChanged;
         }
-        Refresh();
+        RefreshAll();
     }
 
-    private void OnTitleBarSizeChanged(object sender, SizeChangedEventArgs e) => Refresh();
+    private void OnTitleBarSizeChanged(object sender, SizeChangedEventArgs e) => RefreshAll();
 
-    private void OnXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => Refresh();
+    private void OnXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => RefreshAll();
+
+    /// <summary>Sets the rects even when equal to the last ones: the title bar was loaded, resized, rescaled or let go.
+    /// Only the tab strip's frequent <see cref="Refresh"/> calls skip an equal list.</summary>
+    private void RefreshAll()
+    {
+        _rects = null;
+        Refresh();
+    }
 
     private void OnWindowClosed(object sender, WindowEventArgs args) => _closed = true;
 

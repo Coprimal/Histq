@@ -92,8 +92,8 @@ internal sealed class TabKeyboard
     private FrameworkElement? Nearest(List<FrameworkElement> order, Func<FrameworkElement, bool> fits) =>
         order.Skip(_syncIndex + 1).FirstOrDefault(fits) ?? order.Take(_syncIndex).LastOrDefault(fits);
 
-    /// <summary>Called by the strip's arrange, once the new layout has placed the items: scrolls an item a sync focused
-    /// into view (its old place would not do).</summary>
+    /// <summary>Called by the strip's post-layout step (never inside its arrange), once the new layout has placed the
+    /// items: scrolls an item a sync focused into view (its old place would not do).</summary>
     public void Arranged()
     {
         if (_revealAfterLayout is not { } item)

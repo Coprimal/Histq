@@ -240,6 +240,10 @@ public sealed partial class MainWindow : Window
         Rect? tab = SelectedTabBounds();
         if (_sheetBuilt && sheet == _sheetRect && tab == _sheetTab)
             return;
+        // A new Data lays the window out again (RootGrid.LayoutUpdated calls back here): counted by the strip's
+        // layout-loop tripwire, which holds the sheet as it is for the rest of a turn that loops.
+        if (!AppTitleBar.TabStrip.CountPass("MainWindow.UpdateSheet"))
+            return;
 
 #if HISTQ_QA
         QaSheetUpdateCount++;

@@ -3,6 +3,7 @@ using System.Globalization;
 using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.UI;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -130,15 +131,37 @@ public sealed partial class TabStrip : Panel
     private Rect? _slideFrom;
     private TimeSpan _slideStart;
     private bool _sliding;
+
+    /// <summary>The slide's eased progress, sampled once per frame in <see cref="OnRendering"/>: every layout pass of
+    /// a frame sees the same shown rect (sampling the clock during layout made each pass differ, a layout cycle).</summary>
+    private double _slideT = 1;
     private double _scrollFrom;
     private double _scrollTo;
     private TimeSpan _scrollStart;
     private bool _scrolling;
     private bool _renderingHooked;
 
-    private bool _arranging;
+    /// <summary>Inside MeasureOverride or ArrangeOverride: nothing that changes the tree or a layout input runs then;
+    /// it waits for the post-layout step (<see cref="OnLayoutDone"/>).</summary>
+    private bool _inLayout;
     private bool _geometryPending;
-    private (int Version, Rect? Lead, Rect? Well, Rect? Track, Guid? Selected)? _decorated;
+    private (int Version, Rect? Lead, Rect? Well, Rect? Track, Guid? Selected, bool Sliding)? _decorated;
+    private (int Version, TabDrag? Drag)? _indicated;
+
+    /// <summary>The geometry <see cref="GeometryChanged"/> last reported; it fires again only when this differs.</summary>
+    private (int Version, double Offset, double Lift, double Width, Point Origin, Rect? Selected)? _reported;
+
+    // What MeasureOverride last computed the layout for: a new layout version only when they change.
+    private int _syncVersion;
+    private (int Sync, double Available)? _measuredFor;
+
+    // The layout-loop tripwire: layout passes and mutations in one dispatcher turn (or frame). Past MaxPassesPerTurn
+    // the strip logs one Recovered line naming the last mutation and stops mutating until the next turn.
+    private const int MaxPassesPerTurn = 20;
+    private int _passes;
+    private bool _passResetQueued;
+    private bool _tripped;
+    private string _lastMutation = "none";
 
     /// <summary>The automation children last announced (<see cref="NotifyAutomationChildren"/>).</summary>
     private List<FrameworkElement>? _automationChildren;
@@ -405,8 +428,11 @@ public sealed partial class TabStrip : Panel
             _revealPending = true;
         }
 
+        _syncVersion++;
+        _lastMutation = "TabStrip.Sync";
         InvalidateMeasure();
-        // Reveal, the decorations and GeometryChanged run in ArrangeOverride, also when the size stays the same.
+        // Reveal, the decorations and GeometryChanged run after the layout pass ArrangeOverride schedules, also when
+        // the size stays the same.
         InvalidateArrange();
         _keyboard.AfterSync();
     }
@@ -577,6 +603,21 @@ public sealed partial class TabStrip : Panel
 
     protected override Size MeasureOverride(Size availableSize)
     {
+        _inLayout = true;
+        try
+        {
+            return MeasureRow(availableSize);
+        }
+        finally
+        {
+            _inLayout = false;
+        }
+    }
+
+    /// <summary>Lays out the row and measures the sections. Only time-independent values: the same inputs give the
+    /// same placement on every pass (PlaceItems' equal-value sets are no-ops).</summary>
+    private Size MeasureRow(Size availableSize)
+    {
         double height = _m.Height;
         double width = double.IsFinite(availableSize.Width) ? availableSize.Width : double.MaxValue / 4;
         if (_model is not { } model)
@@ -629,7 +670,14 @@ public sealed partial class TabStrip : Panel
         double pair = 2 * _m.ButtonSize + _m.Gap;
         double trackAvailable = width - _trackX - (_m.ArrowSpacing + pair) - (_m.ArrowSpacing + pair);
         _layout = TabTrackLayout.Compute(model, trackAvailable, _m, ChipWidth);
-        _layoutVersion++;
+        // A new version (so the decorations are rebuilt) only when the inputs changed: a re-measure of the same row
+        // must not rebuild anything, or a measure pass would feed the next one.
+        if (_measuredFor != (_syncVersion, trackAvailable))
+        {
+            _measuredFor = (_syncVersion, trackAvailable);
+            _layoutVersion++;
+        }
+
         TabTrackLayout layout = _layout;
         _trackWidth = layout.Overflows ? Math.Max(0, trackAvailable) : layout.RowWidth;
 
@@ -669,7 +717,8 @@ public sealed partial class TabStrip : Panel
 
     protected override Size ArrangeOverride(Size finalSize)
     {
-        _arranging = true;
+        _inLayout = true;
+        CountPass("TabStrip.ArrangeOverride");
         try
         {
             double height = _m.Height;
@@ -685,25 +734,14 @@ public sealed partial class TabStrip : Panel
             _stripClip.Rect = new Rect(0, 0, finalSize.Width, height);
             _arrangedWidth = finalSize.Width;
 
-            if (_revealPending && !_pressHeld && _layout is not null)
-            {
-                _revealPending = false;
-                Reveal();
-            }
-
-            if (!_pressHeld && _layout is not null)
-                _keyboard.Arranged();
-
-            UpdateFades();
-            UpdateArrows();
-            UpdateDecorations();
-            UpdateIndicator();
+            // Only positions here: the reveal, the keyboard's reveal, fades, arrows, decorations, the indicator and
+            // GeometryChanged run once the layout pass is done (OnLayoutDone).
             ScheduleGeometryChanged();
             return new Size(finalSize.Width, height);
         }
         finally
         {
-            _arranging = false;
+            _inLayout = false;
         }
     }
 
@@ -841,13 +879,17 @@ public sealed partial class TabStrip : Panel
             return;
         _offset = offset;
         _scroll.X = -offset;
+        _lastMutation = "TabStrip.SetOffset";
+        if (_inLayout)
+        {
+            ScheduleGeometryChanged();
+            return;
+        }
+
         UpdateFades();
         UpdateArrows();
         UpdateDecorations();
-        if (_arranging)
-            ScheduleGeometryChanged();
-        else
-            GeometryChanged?.Invoke(this, EventArgs.Empty);
+        RaiseGeometryChanged();
     }
 
     /// <summary>
@@ -933,7 +975,7 @@ public sealed partial class TabStrip : Panel
             return null;
         if (!_sliding || _slideFrom is not { } from)
             return target;
-        double t = Ease(Progress(_slideStart));
+        double t = _slideT;
         return new Rect(
             from.X + (target.X - from.X) * t, target.Y, from.Width + (target.Width - from.Width) * t, target.Height);
     }
@@ -948,12 +990,13 @@ public sealed partial class TabStrip : Panel
         }
 
         _slideStart = _clock.Elapsed;
+        _slideT = 0;
         _sliding = true;
         HookRendering();
     }
 
-    private double Progress(TimeSpan start) =>
-        _motion <= TimeSpan.Zero ? 1 : Math.Clamp((_clock.Elapsed - start) / _motion, 0, 1);
+    private double Progress(TimeSpan start, TimeSpan now) =>
+        _motion <= TimeSpan.Zero ? 1 : Math.Clamp((now - start) / _motion, 0, 1);
 
     /// <summary>Fast then settling, as the Mac's snappy animation.</summary>
     private static double Ease(double t) => 1 - Math.Pow(1 - t, 3);
@@ -966,25 +1009,33 @@ public sealed partial class TabStrip : Panel
         CompositionTarget.Rendering += OnRendering;
     }
 
+    /// <summary>
+    /// A frame: the one place the scroll, slide and snap-back progress are sampled from the clock (once, stored), so
+    /// every layout pass of the frame reads the same values; then the frame's decorations and GeometryChanged.
+    /// </summary>
     private void OnRendering(object? sender, object e)
     {
+        ResetPasses();
+        TimeSpan now = _clock.Elapsed;
         if (_scrolling)
         {
-            double t = Progress(_scrollStart);
+            double t = Progress(_scrollStart, now);
             _scrolling = t < 1;
             SetOffset(_scrollFrom + (_scrollTo - _scrollFrom) * Ease(t));
         }
 
         if (_sliding)
         {
-            _sliding = Progress(_slideStart) < 1;
+            double t = Progress(_slideStart, now);
+            _slideT = Ease(t);
+            _sliding = t < 1;
             UpdateDecorations();
-            GeometryChanged?.Invoke(this, EventArgs.Empty);
+            RaiseGeometryChanged();
         }
 
         if (_snapping)
         {
-            double t = Progress(_snapStart);
+            double t = Progress(_snapStart, now);
             _snapping = t < 1;
             if (_snapping)
             {
@@ -997,7 +1048,7 @@ public sealed partial class TabStrip : Panel
             }
 
             UpdateDecorations();
-            GeometryChanged?.Invoke(this, EventArgs.Empty);
+            RaiseGeometryChanged();
         }
 
         if (!_scrolling && !_sliding && !_snapping)
@@ -1007,8 +1058,8 @@ public sealed partial class TabStrip : Panel
         }
     }
 
-    /// <summary>Raises <see cref="GeometryChanged"/> once the current layout pass is done (element bounds are final
-    /// then), not on every later pass.</summary>
+    /// <summary>Runs the post-layout step (<see cref="OnLayoutDone"/>, which raises <see cref="GeometryChanged"/>)
+    /// once the current layout pass is done (element bounds are final then), not on every later pass.</summary>
     private void ScheduleGeometryChanged()
     {
         if (_geometryPending)
@@ -1017,12 +1068,87 @@ public sealed partial class TabStrip : Panel
         LayoutUpdated += OnLayoutDone;
     }
 
+    /// <summary>
+    /// The post-layout step, once per layout pass that arranged the strip: everything that changes the tree or a
+    /// layout input and used to run inside ArrangeOverride. Idempotent: run again on an unchanged row, it changes
+    /// nothing (each step compares with what it last did), so the layout it may cause settles.
+    /// </summary>
     private void OnLayoutDone(object? sender, object e)
     {
         LayoutUpdated -= OnLayoutDone;
         _geometryPending = false;
+        if (_tripped)
+            return;
+
+        if (_revealPending && !_pressHeld && _layout is not null)
+        {
+            _revealPending = false;
+            Reveal();
+        }
+
+        if (!_pressHeld && _layout is not null)
+            _keyboard.Arranged();
+
+        UpdateFades();
+        UpdateArrows();
+        UpdateDecorations();
+        UpdateIndicator();
         NotifyAutomationChildren();
+        RaiseGeometryChanged();
+    }
+
+    /// <summary>Raises <see cref="GeometryChanged"/> when the row's geometry differs from what it last reported: its
+    /// layout, scroll, lift, width, place in the window or the selected tab's shown rect.</summary>
+    private void RaiseGeometryChanged()
+    {
+        if (_tripped)
+            return;
+        Point origin = default;
+        if (XamlRoot is not null)
+            origin = TransformToVisual(null).TransformPoint(default);
+        var geometry = (_layoutVersion, _offset, _lift, _arrangedWidth, origin, SelectedTabRect());
+        if (_reported == geometry)
+            return;
+        _reported = geometry;
+        _lastMutation = "TabStrip.GeometryChanged";
         GeometryChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// The layout-loop tripwire. Counts a layout pass or a mutation from <paramref name="source"/> in this dispatcher
+    /// turn; past <see cref="MaxPassesPerTurn"/> it writes one Recovered line naming the last mutation and returns
+    /// false: the caller then leaves the tree as it is until the next turn (or frame), so a loop left somewhere is named
+    /// in crash.log instead of ending the app in a LayoutCycleException.
+    /// </summary>
+    internal bool CountPass(string source)
+    {
+        if (!_passResetQueued)
+            _passResetQueued = DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, ResetPasses);
+        _passes++;
+        if (!source.EndsWith("ArrangeOverride", StringComparison.Ordinal))
+            _lastMutation = source;
+        if (_tripped)
+            return false;
+        if (_passes <= MaxPassesPerTurn)
+            return true;
+        _tripped = true;
+        CrashLog.Recovered(
+            $"TabStrip layout loop (more than {MaxPassesPerTurn.ToString(CultureInfo.InvariantCulture)} passes in one "
+            + $"turn; last mutation {_lastMutation}; row left as it was until the next frame)",
+            new InvalidOperationException($"Layout loop at {source}"));
+        return false;
+    }
+
+    /// <summary>A new dispatcher turn or frame: the tripwire counts from zero; a tripped strip lays out once more.</summary>
+    private void ResetPasses()
+    {
+        _passResetQueued = false;
+        _passes = 0;
+        if (!_tripped)
+            return;
+        _tripped = false;
+        _reported = null;
+        InvalidateArrange();
     }
 
     /// <summary>
@@ -1215,7 +1341,7 @@ public sealed partial class TabStrip : Panel
         UpdateFades();
         UpdateDecorations();
         UpdateIndicator();
-        GeometryChanged?.Invoke(this, EventArgs.Empty);
+        RaiseGeometryChanged();
     }
 
     /// <summary>
@@ -1225,6 +1351,19 @@ public sealed partial class TabStrip : Panel
     /// </summary>
     private void UpdateIndicator()
     {
+        if (_inLayout)
+        {
+            ScheduleGeometryChanged();
+            return;
+        }
+
+        // Rebuilt only when the drag's target or the layout changed (not as the pointer moves along).
+        (int, TabDrag?) key = (_layoutVersion, _dragShown is { } shown && _dragLayout is not null
+            ? shown with { Translation = 0 }
+            : null);
+        if (_indicated == key || !CountPass("TabStrip.UpdateIndicator"))
+            return;
+        _indicated = key;
         _trackIndicator.Children.Clear();
         _wellIndicator.Children.Clear();
         if (_dragShown is not { } drag || _dragLayout is not { } layout)
@@ -1273,6 +1412,12 @@ public sealed partial class TabStrip : Panel
 
     private void UpdateDecorations()
     {
+        if (_inLayout)
+        {
+            ScheduleGeometryChanged();
+            return;
+        }
+
         if (Shown is not { } layout || _model is null)
             return;
         // The selected shape as the sheet joins it: none while the tab is hidden or cut, so its hole and outline go too.
@@ -1282,8 +1427,8 @@ public sealed partial class TabStrip : Panel
         Rect? inLead = Within(shown, 0, _leadWidth, 0);
         Rect? inWell = Within(shown, _wellX, _wellX + (layout.PinnedCount > 0 ? layout.WellWidth : 0), _wellX);
         Rect? inTrack = Within(shown, _trackX, _trackX + _trackWidth, _trackX - _offset);
-        var key = (_layoutVersion, inLead, inWell, inTrack, _selectedId);
-        if (_decorated == key)
+        var key = (_layoutVersion, inLead, inWell, inTrack, _selectedId, _sliding);
+        if (_decorated == key || !CountPass("TabStrip.UpdateDecorations"))
             return;
         _decorated = key;
 
