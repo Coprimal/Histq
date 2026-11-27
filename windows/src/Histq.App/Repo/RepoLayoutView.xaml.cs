@@ -1,6 +1,7 @@
 using Histq.App.Detail;
 using Histq.App.Graph;
 using Histq.App.Shell;
+using Histq.App.Sidebar;
 using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.UI;
@@ -8,6 +9,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Windows.ApplicationModel.DataTransfer;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -19,7 +21,18 @@ namespace Histq.App.Repo;
 
 /// <summary>
 /// A repo tab (ported from RepoLayoutView, App/Repo/RepoLayoutView.swift at 6fa6d40, its Classic layout): sidebar |
-/// commit graph | detail. Made by <see cref="TabContentHost"/> in the same call as the tab's selection, so its cards and
+/// commit graph | detail. The sidebar (<see cref="SidebarView"/>) lists the refs, worktrees and stashes of the graph's
+/// own data; a click on one of its rows selects that row's commit (or changes' row) in the graph and scrolls it into
+/// view in the same call, as on the Mac (RepoSession.selectRef); a ref whose commit is not in the first page yet is
+/// revealed once the rows come.
+/// <para>
+/// It holds the graph's view of the repo (<see cref="RepoViewState"/>: hidden, soloed and pinned branches, hide stale),
+/// as on the Mac: a workspace window's from its workspace, else the folder's own file (read by the session before the
+/// first rows). The ref and commit menus (<see cref="IRepoMenuHost"/>: the sidebar's rows, the graph's rows) change it
+/// in the click's frame: the sidebar and the graph's "N hidden · Show All" chip follow at once (<see
+/// cref="LogFilter.For"/> on this thread), the session reads the log again through it, and it is saved
+/// (<see cref="WindowManager.SaveRepoView"/>).
+/// </para> Made by <see cref="TabContentHost"/> in the same call as the tab's selection, so its cards and
 /// the graph's placeholder show in that frame; its <see cref="RepoTabSession"/> reads the log off the UI thread and the
 /// graph (<see cref="GraphView"/>, which takes the XAML's plain canvas's place in code) shows the rows as they come. It
 /// stays mounted while another tab shows, among the last tabs shown; shown again, it has its session read the worktrees
@@ -33,13 +46,21 @@ namespace Histq.App.Repo;
 /// they change, from SizeChanged and pointer events, never from a layout pass.
 /// </para>
 /// </summary>
-public sealed partial class RepoLayoutView : UserControl
+public sealed partial class RepoLayoutView : UserControl, IRepoMenuHost
 {
     private readonly MainWindow _window;
+    private readonly string _path;
+
+    /// <summary>The graph's view, the refs last read, and what the graph leaves out for them (UI thread).</summary>
+    private RepoViewState _view = RepoViewState.Empty;
+    private bool _viewKnown;
+    private Refs? _refs;
+    private LogFilter _visibility = LogFilter.None;
     private readonly RepoTabSession _session;
     private readonly GraphView _graph;
     private readonly GraphSearchBar _search;
     private readonly CommitSummaryView _summary = new();
+    private readonly SidebarView _sidebar;
     private readonly GraphDateFormatter _dates;
 
     /// <summary>The detail card, and the skeleton it shows while no row is selected.</summary>
@@ -61,9 +82,14 @@ public sealed partial class RepoLayoutView : UserControl
     /// <summary>Whether the layout was shown when its visibility last changed.</summary>
     private bool _isShown = true;
 
+    /// <summary>A sidebar row's graph items that had no row yet (only the first page is in): revealed when the rows
+    /// come, until the log is complete or another row is selected.</summary>
+    private IReadOnlyList<GraphItem>? _pendingReveal;
+
     internal RepoLayoutView(MainWindow window, string path)
     {
         _window = window;
+        _path = path;
         InitializeComponent();
         Grid graphHost;
         (_graph, graphHost) = SwapInGraphView();
@@ -74,6 +100,12 @@ public sealed partial class RepoLayoutView : UserControl
         _detailSkeleton = _detailCard.Child;
         _graph.SelectionChanged += OnSelectionChanged;
         _summary.ParentClicked += OnParentClicked;
+        _sidebar = new SidebarView(_window.Manager.SidebarSections);
+        SidebarPanel.Children.Add(_sidebar);
+        _sidebar.RowInvoked += OnSidebarRowInvoked;
+        _sidebar.SetHost(this);
+        _graph.RowMenuRequested += OnGraphRowMenuRequested;
+        _graph.ShowAllRequested += () => ((IRepoMenuHost)this).ShowAll();
 
         // Ctrl+F: the graph search of the shown tab (a kept tab's layout is Collapsed and leaves it to the others).
         var find = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
@@ -102,9 +134,14 @@ public sealed partial class RepoLayoutView : UserControl
             divider.PointerCaptureLost += OnDividerCaptureLost;
         }
 
+        // A workspace's own view of the repo; else the session reads the folder's file (ViewLoaded).
+        RepoViewState? stored = _window.Manager.WorkspaceView(_window, path);
+        if (stored is not null)
+            (_view, _viewKnown) = (stored, true);
         _session = new RepoTabSession(
             path, _window.Manager.Preferences, _window.Manager.GraphLook.FadeOtherWorktrees,
-            ((App)Application.Current).StatePaths.Root, DispatcherQueue.GetForCurrentThread());
+            ((App)Application.Current).StatePaths.Root, DispatcherQueue.GetForCurrentThread(), stored);
+        _session.ViewLoaded += OnViewLoaded;
         _session.Loaded += OnLoaded;
         _session.Failed += OnFailed;
         _session.Start();
@@ -171,6 +208,8 @@ public sealed partial class RepoLayoutView : UserControl
     {
         if (_closed)
             return;
+        _pendingReveal = null;
+        _sidebar.ShowGraphSelection(item);
         if (item is not { } selected || _graph.Data is not { } data)
         {
             if (!ReferenceEquals(_detailCard.Child, _detailSkeleton))
@@ -187,11 +226,46 @@ public sealed partial class RepoLayoutView : UserControl
     private void OnParentClicked(string hash) =>
         _graph.Select(new GraphItem(GraphItemKind.Commit, hash), _search.IsOpen ? _search.ActualHeight : 0);
 
+    // Sidebar
+
+    /// <summary>A sidebar row's click: its graph row is selected and scrolled into view now (the detail follows in the
+    /// same call); while only the first page is in and it has no row yet, once the rows come.</summary>
+    private void OnSidebarRowInvoked(SidebarRow row)
+    {
+        if (_closed)
+            return;
+        _pendingReveal = null;
+        if (!Reveal(row.Targets) && _graph.Data?.Snapshot.IsComplete != true)
+            _pendingReveal = row.Targets;
+    }
+
+    /// <summary>The first of <paramref name="targets"/> that has a row in the graph now; null for none.</summary>
+    private GraphItem? Resolve(IReadOnlyList<GraphItem> targets)
+    {
+        foreach (GraphItem target in targets)
+        {
+            if (_graph.RowOf(target) >= 0)
+                return target;
+        }
+
+        return null;
+    }
+
+    /// <summary>Selects and scrolls to the first of <paramref name="targets"/> the graph has a row for; false for none.</summary>
+    private bool Reveal(IReadOnlyList<GraphItem> targets) =>
+        Resolve(targets) is { } item && _graph.Select(item, _search.IsOpen ? _search.ActualHeight : 0);
+
     /// <summary>A first page, the complete log or a reload: the graph shows it (an empty log leaves the graph empty,
     /// as on the Mac).</summary>
     private void OnLoaded(GraphData data)
     {
         _graph.Show(data);
+        if (data.Refs is { } refs)
+            _refs = refs;
+        UpdateVisibility();
+        _sidebar.Show(data);
+        if (_pendingReveal is { } pending && (Reveal(pending) || data.Snapshot.IsComplete))
+            _pendingReveal = null;
         // A WIP or worktree row's summary holds its counts: it follows the new data (other rows' do not change).
         if (_graph.SelectedItem is { Kind: GraphItemKind.Wip or GraphItemKind.Worktree } selected
             && ReferenceEquals(_detailCard.Child, _summary))
@@ -205,6 +279,178 @@ public sealed partial class RepoLayoutView : UserControl
             GraphFailure.Visibility = Visibility.Collapsed;
             _graph.Visibility = Visibility.Visible;
         }
+    }
+
+    // The graph's view
+
+    /// <summary>The folder's own saved view, read before the first rows (not when a menu changed it first). A workspace
+    /// window records it in its workspace, as on the Mac.</summary>
+    private void OnViewLoaded(RepoViewState view)
+    {
+        if (_closed || _viewKnown)
+            return;
+        (_view, _viewKnown) = (view, true);
+        _window.Manager.RecordWorkspaceView(_window, _path, view);
+        UpdateVisibility();
+    }
+
+    /// <summary>What the graph leaves out for the view against the refs; the sidebar and the chip follow.</summary>
+    private void UpdateVisibility()
+    {
+        _visibility = _view.Equals(RepoViewState.Empty) || _refs is not { } refs ? LogFilter.None : LogFilter.For(_view, refs);
+        _graph.ShowVisibility(_visibility.Hidden.Count, _visibility.Solo.Count > 0);
+        _sidebar.ViewChanged();
+    }
+
+    /// <summary>A menu changed the view (RepoSession.viewChanged): in this frame the sidebar and the chip follow, then
+    /// the log is read again through it and it is saved.</summary>
+    private void ChangeView(RepoViewState view)
+    {
+        // Before the saved view is known a change would start from an empty one and overwrite it (the menus disable
+        // their view items meanwhile).
+        if (_closed || !_viewKnown || view.Equals(_view))
+            return;
+        (_view, _viewKnown) = (view, true);
+        UpdateVisibility();
+        _session.SetView(view);
+        _window.Manager.SaveRepoView(_window, _path, view);
+    }
+
+    Refs? IRepoMenuHost.Refs => _refs;
+
+    RepoViewState IRepoMenuHost.View => _view;
+
+    bool IRepoMenuHost.ViewKnown => _viewKnown;
+
+    LogFilter IRepoMenuHost.Visibility => _visibility;
+
+    bool IRepoMenuHost.IsStale(string refName)
+    {
+        if (_refs is not { } refs)
+            return false;
+        DateTimeOffset? date = refs.LocalBranches.FirstOrDefault(branch => branch.RefName == refName)?.TipDate
+            ?? refs.RemoteBranches.FirstOrDefault(branch => branch.RefName == refName)?.TipDate;
+        return date < DateTimeOffset.Now - LogFilter.StaleAge;
+    }
+
+    /// <summary>Hides a branch or tag; never the current branch. Its sidebar row, if selected, no longer is.</summary>
+    void IRepoMenuHost.Hide(string refName)
+    {
+        if (_refs?.Head is Head.Branch head && refName == "refs/heads/" + head.Name)
+            return;
+        if (_view.Hidden.Contains(refName))
+            return;
+        _sidebar.Deselect(refName);
+        ChangeView(_view with { Hidden = [.. _view.Hidden, refName] });
+    }
+
+    /// <summary>Shows a ref again, and the hidden local branches it is the own upstream of.</summary>
+    void IRepoMenuHost.Show(string refName)
+    {
+        HashSet<string> locals = (_refs?.LocalBranches ?? [])
+            .Where(local => LogFilter.TracksOwnName(local) && "refs/remotes/" + local.Upstream == refName)
+            .Select(local => local.RefName)
+            .ToHashSet(StringComparer.Ordinal);
+        List<string> hidden = [.. _view.Hidden.Where(name => name != refName && !locals.Contains(name))];
+        if (hidden.Count != _view.Hidden.Count)
+            ChangeView(_view with { Hidden = hidden });
+    }
+
+    void IRepoMenuHost.Solo(string refName)
+    {
+        if (!_view.Solo.Contains(refName))
+            ChangeView(_view with { Solo = [.. _view.Solo, refName] });
+    }
+
+    void IRepoMenuHost.Unsolo(string refName)
+    {
+        if (_view.Solo.Contains(refName))
+            ChangeView(_view with { Solo = [.. _view.Solo.Where(name => name != refName)] });
+    }
+
+    void IRepoMenuHost.Pin(string refName)
+    {
+        if (!_view.Pinned.Contains(refName))
+            ChangeView(_view with { Pinned = [.. _view.Pinned, refName] });
+    }
+
+    void IRepoMenuHost.Unpin(string refName)
+    {
+        if (_view.Pinned.Contains(refName))
+            ChangeView(_view with { Pinned = [.. _view.Pinned.Where(name => name != refName)] });
+    }
+
+    void IRepoMenuHost.SetHideStale(bool on)
+    {
+        if (_view.HideStale != on)
+            ChangeView(_view with { HideStale = on });
+    }
+
+    /// <summary>Shows every branch: no hidden or soloed one, stale ones too. Pins stay.</summary>
+    void IRepoMenuHost.ShowAll()
+    {
+        if (_view.Hidden.Count > 0 || _view.Solo.Count > 0 || _view.HideStale)
+            ChangeView(_view with { Hidden = [], Solo = [], HideStale = false });
+    }
+
+    /// <summary>Puts <paramref name="text"/> on the clipboard (no I/O); a busy clipboard shows a toast.</summary>
+    void IRepoMenuHost.Copy(string text, string what)
+    {
+        try
+        {
+            var data = new DataPackage();
+            data.SetText(text);
+            Clipboard.SetContent(data);
+            Clipboard.Flush();
+        }
+        catch (Exception)
+        {
+            // Expected (another app holds the clipboard): a toast, not a crash.log entry.
+            _window.ShowToast("Copy " + what, "The clipboard is in use by another app. Try again.");
+        }
+    }
+
+    string? IRepoMenuHost.AuthorEmoji(string email, string name)
+    {
+        string identity = AvatarRenderer.Identity(email, name);
+        return AvatarRenderer.AllowsEmoji(identity)
+            && _window.Manager.GraphLook.AuthorEmojis.TryGetValue(identity, out string? emoji) ? emoji : null;
+    }
+
+    void IRepoMenuHost.AskAuthorEmoji(string email, string name) => _ = AskAuthorEmojiAsync(email, name);
+
+    void IRepoMenuHost.RemoveAuthorEmoji(string email, string name) =>
+        _window.Manager.SetAuthorEmoji(AvatarRenderer.Identity(email, name), null);
+
+    /// <summary>Set Author Emoji…: the dialog, then the emoji for every graph (authorEmojis).</summary>
+    private async Task AskAuthorEmojiAsync(string email, string name)
+    {
+        try
+        {
+            string? current = ((IRepoMenuHost)this).AuthorEmoji(email, name);
+            if (_closed || XamlRoot is null
+                || await AuthorEmojiDialog.AskAsync(XamlRoot, email, name, current) is not { } choice)
+            {
+                return;
+            }
+
+            _window.Manager.SetAuthorEmoji(AvatarRenderer.Identity(email, name), choice.Emoji);
+        }
+        catch (Exception error)
+        {
+            CrashLog.Recovered("Set Author Emoji (not set)", error);
+        }
+    }
+
+    /// <summary>A graph row's menu (a right click, the menu key): at the pointer, else at the row.</summary>
+    private void OnGraphRowMenuRequested(GraphItem item, Windows.Foundation.Point? position)
+    {
+        if (_closed || _graph.Data is not { } data || GraphMenus.For(item, data, this) is not { } menu)
+            return;
+        GraphCanvas canvas = _graph.Canvas;
+        long row = _graph.RowOf(item);
+        var at = position ?? new Windows.Foundation.Point(24, Math.Max(0, canvas.TopOfRow(row) + canvas.RowHeight));
+        menu.ShowAt(canvas, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions { Position = at });
     }
 
     private void OnFailed(string message)

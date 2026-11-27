@@ -8,6 +8,7 @@ using Histq.App.Graph;
 using Histq.App.Repo;
 using Histq.App.Shell;
 using Histq.App.Shell.Tabs;
+using Histq.App.Sidebar;
 using Histq.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
@@ -35,8 +36,11 @@ namespace Histq.App
     /// at 6fa6d40). Read once, when the first window asks (<see cref="TabPositionFlag"/>).</item>
     /// <item>The tab flags <c>-HistqMoveTab</c>, <c>-HistqSelect</c>, <c>-HistqTabWalk</c> and
     /// <c>-HistqTabClickProbe</c>: see <see cref="QaTabProbes"/>.</item>
-    /// <item><c>-HistqRowClickProbe auto|row,row,...</c>: graph row clicks in the front window's selected repo tab, see
-    /// <see cref="QaRowClickProbe"/>.</item>
+    /// <item><c>-HistqRowClickProbe auto|row,row,...|sidebar|sidebar:ref,ref,...</c>: graph row clicks, or sidebar ref
+    /// clicks, in the front window's selected repo tab, see <see cref="QaRowClickProbe"/>.</item>
+    /// <item>The repo tab flags <c>-HistqFind</c>, <c>-HistqShowHidden</c>, <c>-HistqScrollProbe</c> (without
+    /// <c>-HistqSpikeLog</c>), <c>-HistqRowsProbe</c>, <c>-HistqLoadProbe</c> and <c>-HistqWatchProbe</c>: see
+    /// <see cref="QaRepoProbes"/>.</item>
     /// </list>
     /// workspace.json reads the saved file back as the app opens one and lists each tab of each window with its stored
     /// <c>path</c> / <c>home</c> strings, the native path they resolved to and whether that folder exists (a UNC or
@@ -75,8 +79,14 @@ namespace Histq.App
         /// <summary>The row click probe (<see cref="QaRowClickProbe"/>); null without the flag.</summary>
         private readonly QaRowClickProbe? _rowProbe;
 
-        private QaFlags(string? openWorkspace, string? saveWorkspace, QaTabProbes? tabProbes, QaRowClickProbe? rowProbe)
+        /// <summary>The repo tab flags (<see cref="QaRepoProbes"/>); null without any.</summary>
+        private readonly QaRepoProbes? _repoProbes;
+
+        private QaFlags(
+            string? openWorkspace, string? saveWorkspace, QaTabProbes? tabProbes, QaRowClickProbe? rowProbe,
+            QaRepoProbes? repoProbes)
         {
+            _repoProbes = repoProbes;
             OpenWorkspace = openWorkspace;
             SaveWorkspace = saveWorkspace;
             _tabProbes = tabProbes;
@@ -105,7 +115,7 @@ namespace Histq.App
             var flags = new LaunchFlags(arguments);
             return new QaFlags(
                 NonEmpty(flags.String(OpenWorkspaceFlag)), NonEmpty(flags.String(SaveWorkspaceFlag)),
-                QaTabProbes.Read(arguments), QaRowClickProbe.Read(arguments));
+                QaTabProbes.Read(arguments), QaRowClickProbe.Read(arguments), QaRepoProbes.Read(arguments));
         }
 
         /// <summary>
@@ -119,6 +129,7 @@ namespace Histq.App
             Task workspaceRun = StartWorkspace(windows, restored, paths);
             _tabProbes?.Start(windows, Task.WhenAll(restored, launched, workspaceRun), paths);
             _rowProbe?.Start(windows, Task.WhenAll(restored, launched, workspaceRun), paths);
+            _repoProbes?.Start(windows, Task.WhenAll(restored, launched, workspaceRun), paths);
         }
 
         /// <summary>The workspace flags' run (none: a completed task); it never faults.</summary>
@@ -1144,9 +1155,9 @@ namespace Histq.App
     }
 
     /// <summary>
-    /// <c>-HistqRowClickProbe auto|row,row,...</c> (QA builds only; give it a value, or put it last or before another
-    /// flag: launch flags are <c>-Name value</c> pairs, so a bare flag before a positional folder would take the folder
-    /// as its value): once the launch's windows, folders and workspace flags
+    /// <c>-HistqRowClickProbe auto|row,row,...|sidebar|sidebar:ref,ref,...</c> (QA builds only; give it a value, or put
+    /// it last or before another flag: launch flags are <c>-Name value</c> pairs, so a bare flag before a positional
+    /// folder would take the folder as its value): once the launch's windows, folders and workspace flags
     /// are open and the tabs' checks applied, waits (at most 60 s) until the front window's selected tab is a repo
     /// layout whose log is complete, then clicks graph rows one after another through the pointer press's own path
     /// (<see cref="GraphCanvas.PressRow"/>: the focus, then the selection drawn in the same frame): the listed row indices
@@ -1159,6 +1170,19 @@ namespace Histq.App
     /// <c>allMeetCriteria</c>); then the process quits as File › Exit saves (<see cref="WindowManager.QaQuit"/>) and exits
     /// 0, or 1 when the run failed, or 3 when it is not done in 3 minutes. Use it alone (not with the tab probes, which
     /// exit on their own).
+    /// <para>
+    /// Sidebar mode, <c>sidebar</c> or <c>sidebar:ref,ref,...</c>: once the sidebar has the refs too, clicks sidebar ref
+    /// rows one after another through the row's own click path (<see cref="SidebarView.Click"/>, which a pointer's or the
+    /// keyboard's ItemClick calls: the row selected, then the layout's reveal), after showing the row's tab and opening
+    /// its card when needed (not measured). The refs are short names (<c>main</c>, <c>origin/main</c>, <c>v1.0</c>; a
+    /// local branch first, then a remote branch, then a tag of that name) or full ref names (<c>refs/tags/v1.0</c>);
+    /// without a list, the Local, Remote and Tags cards' rows in that order, one per graph row, at most 8. Each click is
+    /// measured as above against the graph row the click reveals (the same resolution as the layout's: the checked-out
+    /// branch's WIP row when it has changes, another worktree's row, else the commit), and each click also records
+    /// <c>ref</c> (the full ref name). Here <c>meetsCriteria</c> is <c>clickToHighlightFrames</c> &lt;= 1 only (the graph
+    /// draws the ref's row selected in the first frame); the placeholder and summary fields are recorded as well.
+    /// rowclick.json then also has <c>mode</c> ("sidebar"; "graph" otherwise) and <c>refs</c> (the refs clicked).
+    /// </para>
     /// </summary>
     internal sealed class QaRowClickProbe
     {
@@ -1175,13 +1199,23 @@ namespace Histq.App
         private static readonly TimeSpan ClickLimit = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan Watchdog = TimeSpan.FromMinutes(3);
 
+        private const string SidebarMode = "sidebar";
+
         private readonly Lock _gate = new();
         private readonly string _rows;
+
+        /// <summary>Sidebar mode: <see cref="_rows"/> then lists refs.</summary>
+        private readonly bool _sidebar;
         private readonly RowClickResult _result = new();
         private string _path = string.Empty;
         private int _finished;
 
-        private QaRowClickProbe(string rows) => _rows = rows;
+        private QaRowClickProbe(string rows, bool sidebar)
+        {
+            _rows = rows;
+            _sidebar = sidebar;
+            _result.Mode = sidebar ? SidebarMode : "graph";
+        }
 
         /// <summary>The probe when <paramref name="arguments"/> hold the flag (its value optional); else null.</summary>
         public static QaRowClickProbe? Read(IReadOnlyList<string> arguments)
@@ -1190,7 +1224,13 @@ namespace Histq.App
             if (at < 0)
                 return null;
             string value = at + 1 < arguments.Count && !arguments[at + 1].StartsWith('-') ? arguments[at + 1].Trim() : "";
-            return new QaRowClickProbe(string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase) ? "" : value);
+            if (value.StartsWith(SidebarMode, StringComparison.OrdinalIgnoreCase)
+                && (value.Length == SidebarMode.Length || value[SidebarMode.Length] == ':'))
+            {
+                return new QaRowClickProbe(value.Length > SidebarMode.Length ? value[(SidebarMode.Length + 1)..] : "", true);
+            }
+
+            return new QaRowClickProbe(string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase) ? "" : value, false);
         }
 
         /// <summary>Runs the probe once <paramref name="ready"/> (never faulting) ends. Call it on the UI thread.</summary>
@@ -1251,6 +1291,8 @@ namespace Histq.App
 
             GraphView graph = layout.QaGraph;
             GraphCanvas canvas = graph.Canvas;
+            if (_sidebar)
+                return await SidebarClickAsync(layout, graph);
             await QaTabProbes.FramesAsync(QuietFrames);
             List<long> rows;
             if (_rows.Length > 0)
@@ -1294,7 +1336,7 @@ namespace Histq.App
                     await QaTabProbes.FramesAsync(QuietFrames);
                 }
 
-                RowClick click = await MeasureAsync(layout, graph, row, step + 1);
+                RowClick click = await MeasureAsync(layout, graph, row, step + 1, () => canvas.PressRow(row), false);
                 lock (_gate)
                     _result.Clicks.Add(click);
                 if (click.TimedOut)
@@ -1312,10 +1354,86 @@ namespace Histq.App
         }
 
         /// <summary>
-        /// Presses <paramref name="row"/> as a pointer press does and counts the frames until the graph has drawn it
-        /// selected and until the detail shows its summary, and the frames its placeholder was up. The handlers only read.
+        /// Clicks the sidebar's refs (sidebar mode) and measures each click against the graph row it reveals; the error,
+        /// else null.
         /// </summary>
-        private static async Task<RowClick> MeasureAsync(RepoLayoutView layout, GraphView graph, long row, int step)
+        private async Task<string?> SidebarClickAsync(RepoLayoutView layout, GraphView graph)
+        {
+            SidebarView sidebar = layout.QaSidebar;
+            var clock = Stopwatch.StartNew();
+            while (!sidebar.QaHasRefs && clock.Elapsed < LoadLimit)
+                await Task.Delay(100);
+            if (!sidebar.QaHasRefs)
+                return $"the sidebar had no refs within {LoadLimit.TotalSeconds} s";
+            await QaTabProbes.FramesAsync(QuietFrames);
+
+            var rows = new List<SidebarRow>();
+            if (_rows.Length > 0)
+            {
+                foreach (string name in _rows.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (sidebar.QaFind(name) is not { } found)
+                        return $"{Flag}: \"{name}\" is not a local branch, remote branch or tag in the sidebar";
+                    rows.Add(found);
+                }
+            }
+            else
+            {
+                // One click per graph row: refs on the same commit (main and origin/main) reveal the same row.
+                var targets = new HashSet<long>();
+                foreach (SidebarRow row in sidebar.QaRefRows())
+                {
+                    if (rows.Count >= DefaultClicks)
+                        break;
+                    if (layout.QaTargetRow(row) is >= 0 and var target && targets.Add(target))
+                        rows.Add(row);
+                }
+            }
+
+            if (rows.Count == 0)
+                return "no sidebar ref with a graph row to click";
+            lock (_gate)
+                _result.Refs = [.. rows.Select(row => row.Key)];
+
+            var revealed = new List<long>();
+            for (int step = 0; step < rows.Count; step++)
+            {
+                SidebarRow row = rows[step];
+                if (sidebar.QaPrepare(row))
+                    await QaTabProbes.FramesAsync(QuietFrames);
+                long target = layout.QaTargetRow(row);
+                if (target < 0)
+                    return $"{row.Key} (step {step + 1}): its commit has no row in the graph";
+                revealed.Add(target);
+                lock (_gate)
+                    _result.Rows = [.. revealed];
+
+                RowClick click = await MeasureAsync(layout, graph, target, step + 1, () => sidebar.Click(row), true);
+                click.Ref = row.Key;
+                lock (_gate)
+                    _result.Clicks.Add(click);
+                if (click.TimedOut)
+                    return $"{row.Key} (step {step + 1}): the graph row {target} or the summary did not show within {ClickLimit.TotalSeconds} s";
+                await QaTabProbes.FramesAsync(QuietFrames);
+            }
+
+            lock (_gate)
+            {
+                _result.AllMeetCriteria = _result.Clicks.All(click => click.MeetsCriteria);
+                _result.Ok = true;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Clicks (<paramref name="press"/>: a graph row's pointer press, a sidebar row's click) and counts the frames
+        /// until the graph has drawn <paramref name="row"/> selected and until the detail shows its summary, and the
+        /// frames its placeholder was up. The handlers only read. <paramref name="highlightOnly"/>: the criteria are the
+        /// highlight's only (sidebar mode).
+        /// </summary>
+        private static async Task<RowClick> MeasureAsync(
+            RepoLayoutView layout, GraphView graph, long row, int step, Action press, bool highlightOnly)
         {
             GraphCanvas canvas = graph.Canvas;
             CommitSummaryView summary = layout.QaSummary;
@@ -1382,7 +1500,7 @@ namespace Histq.App
             try
             {
                 clock.Start();
-                canvas.PressRow(row);
+                press();
                 result.PlaceholderAtClick = summary.QaShowsPlaceholder;
                 await Task.WhenAny(done.Task, Task.Delay(ClickLimit));
             }
@@ -1401,7 +1519,8 @@ namespace Histq.App
             result.Frames = frames;
             result.Selected = canvas.SelectedRow == row;
             result.TimedOut = highlight is null || shown is null;
-            result.MeetsCriteria = !result.TimedOut && highlight <= 1 && placeholder <= 1 && result.SummaryMs <= 300;
+            result.MeetsCriteria = !result.TimedOut && highlight <= 1
+                && (highlightOnly || (placeholder <= 1 && result.SummaryMs <= 300));
             return result;
         }
 
@@ -1444,11 +1563,17 @@ namespace Histq.App
             public bool Ok { get; set; }
             public string? Error { get; set; }
 
+            /// <summary>"graph", or "sidebar" (sidebar ref clicks).</summary>
+            public string? Mode { get; set; }
+
             /// <summary>The selected tab's title.</summary>
             public string? Tab { get; set; }
 
-            /// <summary>The rows clicked, in order.</summary>
+            /// <summary>The rows clicked, in order (sidebar mode: the graph rows the clicks revealed).</summary>
             public List<long>? Rows { get; set; }
+
+            /// <summary>Sidebar mode: the refs clicked, in order (full ref names).</summary>
+            public List<string>? Refs { get; set; }
 
             public List<RowClick> Clicks { get; set; } = [];
 
@@ -1465,6 +1590,9 @@ namespace Histq.App
 
             /// <summary>The row's item: "Commit:&lt;sha&gt;", "Stash:&lt;sha&gt;", "Wip:wip", "Worktree:&lt;path&gt;".</summary>
             public string? Item { get; set; }
+
+            /// <summary>Sidebar mode: the ref clicked (full ref name).</summary>
+            public string? Ref { get; set; }
 
             /// <summary>The row was already selected before the click.</summary>
             public bool WasSelected { get; set; }
@@ -1488,7 +1616,457 @@ namespace Histq.App
             public bool Selected { get; set; }
             public bool TimedOut { get; set; }
 
-            /// <summary>clickToHighlightFrames &lt;= 1, placeholderFrames &lt;= 1, summaryMs &lt;= 300.</summary>
+            /// <summary>clickToHighlightFrames &lt;= 1, placeholderFrames &lt;= 1, summaryMs &lt;= 300; sidebar mode:
+            /// clickToHighlightFrames &lt;= 1 only.</summary>
+            public bool MeetsCriteria { get; set; }
+        }
+    }
+
+    /// <summary>
+    /// The repo tab flags (QA builds only), on the front window's shown repo tab (the <c>-HistqOpen</c> folder's). Every
+    /// flag takes a value (launch flags are <c>-Name value</c> pairs: a bare flag before a positional folder would take
+    /// the folder as its value):
+    /// <list type="bullet">
+    /// <item><c>-HistqFind "&lt;query&gt;[;next|prev…]"</c>: once the log is complete, the graph search opens as Ctrl+F
+    /// does with that query, then each step runs 300 ms apart (for screenshots; the app stays up unless a probe below
+    /// runs).</item>
+    /// <item><c>-HistqShowHidden YES</c>: the Local, Remote and Tags cards list their hidden rows, as their eye buttons
+    /// do (as the Mac's flag; the graph's view is unchanged).</item>
+    /// <item><c>-HistqLoadProbe YES</c>: <c>Probes\load.json</c>: <c>firstRowsMs</c> (process start to the first draw
+    /// with rows), <c>fullLoadMs</c> (to the first draw of the complete log), <c>commits</c>, <c>rows</c>,
+    /// <c>lateHook</c> (the graph had drawn before the probe hooked it: the times are late).</item>
+    /// <item><c>-HistqRowsProbe &lt;n&gt;|auto</c> (auto: 50): <c>Probes\rows.json</c>: the complete log's first n
+    /// commits (no WIP or stash row) as <c>hash</c>, <c>parents</c> (in order) and <c>refs</c> (sorted full ref names at
+    /// the commit: local and remote branches, tags at their peeled commit, <c>HEAD</c> when detached there), what
+    /// <c>windows/scripts/qa-data.sh check-rows</c> compares with git log.</item>
+    /// <item><c>-HistqScrollProbe &lt;seconds&gt;</c> (without <c>-HistqSpikeLog</c>; <c>-HistqScrollPacing
+    /// draw|rendering</c>, default draw): the spike's scroll probe on the repo graph (<see
+    /// cref="SpikeHarness.RepoScrollProbeAsync"/>), from its top: <c>Probes\scroll.json</c> in spike.json's fields,
+    /// checked by <c>qa-data.sh check-scroll</c> (median 17.5, p95 33.4, max 100, draw p95 8 ms).</item>
+    /// <item><c>-HistqWatchProbe YES</c>: once the repo is watched, the app runs <c>git commit --allow-empty
+    /// --no-verify -m &lt;marker&gt;</c> in it (GitRunner, the process job, the base environment with a QA identity:
+    /// a write, QA only), with the graph at its top: <c>Probes\watch.json</c>: <c>commitMs</c> (the git run),
+    /// <c>appearMs</c> (from git's exit to the first draw showing the new commit's row; 0 when drawn first),
+    /// <c>meetsCriteria</c> (appearMs &lt;= 1000).</item>
+    /// </list>
+    /// The probes run in that order (load, rows, scroll, watch) once the log is complete; each writes its file (with
+    /// <c>ok</c> and <c>error</c>; scroll.json only <c>error</c> on failure). With any probe the process then quits as
+    /// File › Exit saves (<see cref="WindowManager.QaQuit"/>) and exits 0, 1 when one failed, 3 when not done in 15
+    /// minutes.
+    /// </summary>
+    internal sealed class QaRepoProbes
+    {
+        private const string FindFlag = "-HistqFind";
+        private const string ShowHiddenFlag = "-HistqShowHidden";
+        private const string ScrollFlag = "-HistqScrollProbe";
+        private const string SpikeLogFlag = "-HistqSpikeLog";
+        private const string PacingFlag = "-HistqScrollPacing";
+        private const string RowsFlag = "-HistqRowsProbe";
+        private const string LoadFlag = "-HistqLoadProbe";
+        private const string WatchFlag = "-HistqWatchProbe";
+        private const int DefaultRows = 50;
+        private const int QuietFrames = 10;
+
+        private static readonly TimeSpan SettleLimit = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan LoadLimit = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan WatchLimit = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan Watchdog = TimeSpan.FromMinutes(15);
+
+        private readonly string? _find;
+        private readonly bool _showHidden;
+        private readonly double? _scrollSeconds;
+        private readonly bool _drawPacing;
+        private readonly int? _rows;
+        private readonly bool _load;
+        private readonly bool _watch;
+
+        /// <summary>An unknown <c>-HistqScrollPacing</c>: the scroll probe fails with it (exit 1).</summary>
+        private string? _pacingError;
+
+        /// <summary>The process's age when the probes were made; <see cref="_clock"/> runs from then.</summary>
+        private readonly TimeSpan _startAge;
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly Lock _gate = new();
+
+        /// <summary>The probe files not written yet, by name (a failure writes its error to each).</summary>
+        private readonly HashSet<string> _pending = new(StringComparer.Ordinal);
+        private readonly TaskCompletionSource<LoadResult> _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private string _folder = string.Empty;
+        private int _finished;
+
+        private QaRepoProbes(
+            string? find, bool showHidden, double? scrollSeconds, bool drawPacing, int? rows, bool load, bool watch)
+        {
+            (_find, _showHidden, _scrollSeconds, _drawPacing, _rows, _load, _watch) =
+                (find, showHidden, scrollSeconds, drawPacing, rows, load, watch);
+            using var process = Process.GetCurrentProcess();
+            _startAge = DateTime.Now - process.StartTime;
+        }
+
+        private bool Exits => _load || _rows is not null || _scrollSeconds is not null || _watch;
+
+        /// <summary>The flags of <paramref name="arguments"/>; null without any. A row count that is not a positive
+        /// number reads as 50; a pacing other than draw or rendering fails the scroll probe.</summary>
+        public static QaRepoProbes? Read(IReadOnlyList<string> arguments)
+        {
+            var flags = new LaunchFlags(arguments);
+            static bool Yes(string? value) => string.Equals(value, "YES", StringComparison.OrdinalIgnoreCase);
+            string? find = QaFlags.NonEmpty(flags.String(FindFlag));
+            double? scroll = flags.String(SpikeLogFlag) is null && flags.Double(ScrollFlag) is > 0 and var seconds
+                ? seconds
+                : null;
+            string? pacing = flags.String(PacingFlag);
+            bool drawPacing = !string.Equals(pacing, "rendering", StringComparison.Ordinal);
+            string? pacingError = pacing is null or "draw" or "rendering"
+                ? null
+                : $"{PacingFlag} must be rendering or draw, not '{pacing}'";
+            int? rows = flags.String(RowsFlag) is null ? null : flags.Int(RowsFlag) is > 0 and var count ? count : DefaultRows;
+            var probes = new QaRepoProbes(
+                find, Yes(flags.String(ShowHiddenFlag)), scroll, drawPacing, rows, Yes(flags.String(LoadFlag)),
+                Yes(flags.String(WatchFlag)))
+            {
+                _pacingError = pacingError,
+            };
+            return find is null && !probes._showHidden && !probes.Exits ? null : probes;
+        }
+
+        /// <summary>Runs the flags once <paramref name="ready"/> (never faulting) ends; the load probe watches the graph
+        /// from now. Call it on the UI thread right after the windows open.</summary>
+        public void Start(WindowManager windows, Task ready, StatePaths paths)
+        {
+            _folder = Path.Combine(paths.Root, "Probes");
+            if (_load)
+                _pending.Add("load.json");
+            if (_rows is not null)
+                _pending.Add("rows.json");
+            if (_scrollSeconds is not null)
+                _pending.Add("scroll.json");
+            if (_watch)
+                _pending.Add("watch.json");
+            if (Exits)
+            {
+                _ = Task.Delay(Watchdog).ContinueWith(
+                    _ => Finish(windows, $"watchdog: the run did not finish in {Watchdog.TotalMinutes} minutes", 3),
+                    TaskScheduler.Default);
+                Application.Current.UnhandledException += (_, e) => Finish(windows, e.Exception.ToString(), 1);
+            }
+
+            if (_load)
+                WatchLoad(windows);
+            _ = RunAsync(windows, ready);
+        }
+
+        private double SinceLaunchMs() => Math.Round((_startAge + _clock.Elapsed).TotalMilliseconds, 1);
+
+        /// <summary>The load probe: hooks the shown repo tab's graph on the first frame it exists, then records its first
+        /// draw with rows and its first draw of the complete log.</summary>
+        private void WatchLoad(WindowManager windows)
+        {
+            var result = new LoadResult();
+            GraphView? graph = null;
+            TimeSpan? previous = null;
+
+            void OnDrawn(object? sender, GraphDrawInfo info)
+            {
+                if (graph?.Data is not { } data || info.FirstRow < 0)
+                    return;
+                result.FirstRowsMs ??= SinceLaunchMs();
+                if (!data.Snapshot.IsComplete)
+                    return;
+                result.FullLoadMs = SinceLaunchMs();
+                result.Commits = data.Snapshot.Commits.Count;
+                result.Rows = data.Snapshot.RowCount;
+                graph.Canvas.DrawCompleted -= OnDrawn;
+                _loaded.TrySetResult(result);
+            }
+
+            void OnRendering(object? sender, object e)
+            {
+                if (e is not RenderingEventArgs args || args.RenderingTime == previous)
+                    return;
+                previous = args.RenderingTime;
+                if (graph is not null)
+                {
+                    CompositionTarget.Rendering -= OnRendering;
+                    return;
+                }
+
+                if (windows.Windows.Count == 0 || windows.Windows[0].QaContentHost.QaShownLayout(windows.Windows[0].Tabs)
+                    is not { } layout)
+                {
+                    return;
+                }
+
+                graph = layout.QaGraph;
+                result.LateHook = graph.Data is not null;
+                graph.Canvas.DrawCompleted += OnDrawn;
+                CompositionTarget.Rendering -= OnRendering;
+            }
+
+            CompositionTarget.Rendering += OnRendering;
+        }
+
+        private async Task RunAsync(WindowManager windows, Task ready)
+        {
+            string? failure = null;
+            try
+            {
+                await ready;
+                await windows.QaSettleAsync(SettleLimit);
+                RepoLayoutView layout = await CompleteLayoutAsync(windows);
+                if (_showHidden)
+                    layout.QaSidebar.QaShowHidden();
+                if (_find is not null)
+                    await FindAsync(layout, _find);
+                if (!Exits)
+                    return;
+                if (_load)
+                {
+                    if (await Task.WhenAny(_loaded.Task, Task.Delay(LoadLimit)) != _loaded.Task)
+                        throw new TimeoutException($"the load probe saw no complete draw within {LoadLimit.TotalMinutes} minutes");
+                    LoadResult load = await _loaded.Task;
+                    load.Ok = true;
+                    Write("load.json", load);
+                }
+
+                if (_rows is { } count)
+                    Write("rows.json", Rows(layout, count));
+                if (_scrollSeconds is { } seconds)
+                {
+                    if (_pacingError is { } pacingError)
+                        throw new ArgumentException(pacingError);
+                    GraphCanvas canvas = layout.QaGraph.Canvas;
+                    canvas.ScrollToRow(0);
+                    await QaTabProbes.FramesAsync(QuietFrames);
+                    string json = await SpikeHarness.RepoScrollProbeAsync(windows.Windows[0], canvas, seconds, _drawPacing);
+                    WriteText("scroll.json", json);
+                }
+
+                if (_watch)
+                    Write("watch.json", await WatchAsync(layout));
+            }
+            catch (Exception error)
+            {
+                failure = error.ToString();
+            }
+
+            if (!Exits)
+            {
+                if (failure is not null)
+                    Trace.WriteLine($"Histq: repo QA flags failed: {failure}");
+                return;
+            }
+
+            windows.QaQuit();
+            Finish(windows, failure, failure is null ? 0 : 1);
+        }
+
+        /// <summary>The front window's shown repo layout once its log is complete; throws when it failed or never came.</summary>
+        private static async Task<RepoLayoutView> CompleteLayoutAsync(WindowManager windows)
+        {
+            var clock = Stopwatch.StartNew();
+            while (clock.Elapsed < LoadLimit)
+            {
+                if (windows.Windows.Count > 0 && windows.Windows[0] is { } window
+                    && window.QaContentHost.QaShownLayout(window.Tabs) is { } layout)
+                {
+                    if (layout.QaLoadFailed)
+                        throw new InvalidOperationException("the repo tab's graph load failed");
+                    if (layout.QaGraph.Data?.Snapshot.IsComplete == true)
+                        return layout;
+                }
+
+                await Task.Delay(50);
+            }
+
+            throw new TimeoutException($"no repo tab with a complete log was shown within {LoadLimit.TotalMinutes} minutes");
+        }
+
+        /// <summary><c>-HistqFind</c>: the search opens with the query, then its steps run 300 ms apart.</summary>
+        private static async Task FindAsync(RepoLayoutView layout, string spec)
+        {
+            string[] parts = spec.Split(';');
+            await QaTabProbes.FramesAsync(QuietFrames);
+            layout.QaSearch.QaFind(parts[0]);
+            foreach (string step in parts.Skip(1))
+            {
+                await Task.Delay(300);
+                switch (step.Trim())
+                {
+                    case "next": layout.QaSearch.QaStep(next: true); break;
+                    case "prev": layout.QaSearch.QaStep(next: false); break;
+                    default: throw new ArgumentException($"{FindFlag}: unknown step '{step}' (next or prev)");
+                }
+            }
+        }
+
+        /// <summary>The complete log's first <paramref name="count"/> commits with their parents and the raw refs at
+        /// each (full names, sorted).</summary>
+        private static RowsResult Rows(RepoLayoutView layout, int count)
+        {
+            GraphData data = layout.QaGraph.Data ?? throw new InvalidOperationException("the graph has no data");
+            var refsAt = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            void Add(string? commit, string refName)
+            {
+                if (commit is null)
+                    return;
+                if (!refsAt.TryGetValue(commit, out List<string>? list))
+                    refsAt[commit] = list = [];
+                list.Add(refName);
+            }
+
+            if (data.Refs is not { } refs)
+                throw new InvalidOperationException("the refs were not read");
+            foreach (LocalBranch branch in refs.LocalBranches)
+                Add(branch.Commit, branch.RefName);
+            foreach (RemoteBranch branch in refs.RemoteBranches)
+                Add(branch.Commit, branch.RefName);
+            foreach (TagRef tag in refs.Tags)
+                Add(tag.Commit ?? tag.Target, tag.RefName);
+            if (refs.Head is Head.Detached detached)
+                Add(detached.Commit, "HEAD");
+
+            List<RowProbe> rows = [.. data.Snapshot.Commits.Take(count).Select(commit => new RowProbe(
+                commit.Hash, commit.Parents,
+                [.. (refsAt.GetValueOrDefault(commit.Hash) ?? []).Order(StringComparer.Ordinal)]))];
+            return new RowsResult { Ok = true, Count = rows.Count, Rows = rows };
+        }
+
+        /// <summary><c>-HistqWatchProbe</c>: an empty commit made by the app itself, then the time until its row is drawn.</summary>
+        private static async Task<WatchResult> WatchAsync(RepoLayoutView layout)
+        {
+            RepoTabSession session = layout.QaSession;
+            var clock = Stopwatch.StartNew();
+            while (!session.QaWatching)
+            {
+                if (clock.Elapsed > WatchLimit)
+                    throw new TimeoutException($"the repo was not watched within {WatchLimit.TotalSeconds} s");
+                await Task.Delay(50);
+            }
+
+            if (session.QaGit is not ({ } runner, { } environment))
+                throw new InvalidOperationException("the session has no git runner");
+            GraphView graph = layout.QaGraph;
+            graph.Canvas.ScrollToRow(0);
+            await QaTabProbes.FramesAsync(QuietFrames);
+
+            string marker = "histq-watch-probe " + Guid.NewGuid().ToString("N");
+            var result = new WatchResult { Marker = marker };
+            var shown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var since = Stopwatch.StartNew();
+            double? committedAt = null;
+
+            void OnDrawn(object? sender, GraphDrawInfo info)
+            {
+                if (graph.Data is not { } data || info.FirstRow < 0)
+                    return;
+                Commit? commit = data.Snapshot.Commits.Take(64)
+                    .FirstOrDefault(c => string.Equals(c.Subject, marker, StringComparison.Ordinal));
+                if (commit is null)
+                    return;
+                long row = graph.RowOf(new GraphItem(GraphItemKind.Commit, commit.Hash));
+                if (row < info.FirstRow || row > info.LastRow)
+                    return;
+                double now = since.Elapsed.TotalMilliseconds;
+                result.AppearMs = Math.Round(committedAt is { } end ? Math.Max(0, now - end) : 0, 1);
+                result.Hash = commit.Hash;
+                shown.TrySetResult();
+            }
+
+            graph.Canvas.DrawCompleted += OnDrawn;
+            try
+            {
+                string path = layout.QaPath;
+                await Task.Run(() => runner.RunAsync(
+                    ["-c", "user.name=Histq QA", "-c", "user.email=qa@histq.invalid", "-c", "commit.gpgSign=false",
+                        // No auto-maintenance (gc, commit-graph) competing with the timed reload.
+                        "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+                        "commit", "--allow-empty", "--no-verify", "-m", marker],
+                    path, environment, timeout: WatchLimit));
+                committedAt = since.Elapsed.TotalMilliseconds;
+                result.CommitMs = Math.Round(committedAt.Value, 1);
+                if (await Task.WhenAny(shown.Task, Task.Delay(WatchLimit)) != shown.Task)
+                    throw new TimeoutException($"the new commit's row was not drawn within {WatchLimit.TotalSeconds} s");
+            }
+            finally
+            {
+                graph.Canvas.DrawCompleted -= OnDrawn;
+            }
+
+            result.Ok = true;
+            result.MeetsCriteria = result.AppearMs <= 1000;
+            return result;
+        }
+
+        private void Write<T>(string name, T result) => WriteText(name, JsonSerializer.Serialize(result, QaFlags.JsonOptions));
+
+        private void WriteText(string name, string json)
+        {
+            lock (_gate)
+            {
+                Directory.CreateDirectory(_folder);
+                File.WriteAllText(Path.Combine(_folder, name), json);
+                _pending.Remove(name);
+            }
+        }
+
+        /// <summary>Writes <paramref name="error"/> to every probe file not written yet, then exits with
+        /// <paramref name="code"/>; once. Any thread.</summary>
+        private void Finish(WindowManager windows, string? error, int code)
+        {
+            if (Interlocked.Exchange(ref _finished, 1) == 1)
+                return;
+            try
+            {
+                if (error is not null)
+                {
+                    string[] pending;
+                    lock (_gate)
+                        pending = [.. _pending];
+                    foreach (string name in pending)
+                        Write(name, new ProbeFailure { Error = error });
+                }
+            }
+            catch (Exception failure)
+            {
+                Trace.WriteLine($"Histq: repo probe files not written: {failure.Message}");
+            }
+
+            Environment.Exit(code);
+        }
+
+        private sealed class ProbeFailure
+        {
+            public bool Ok { get; set; }
+            public string? Error { get; set; }
+        }
+
+        private sealed class LoadResult
+        {
+            public bool Ok { get; set; }
+            public double? FirstRowsMs { get; set; }
+            public double? FullLoadMs { get; set; }
+            public int Commits { get; set; }
+            public long Rows { get; set; }
+            public bool LateHook { get; set; }
+        }
+
+        private sealed record RowProbe(string Hash, IReadOnlyList<string> Parents, IReadOnlyList<string> Refs);
+
+        private sealed class RowsResult
+        {
+            public bool Ok { get; set; }
+            public int Count { get; set; }
+            public List<RowProbe> Rows { get; set; } = [];
+        }
+
+        private sealed class WatchResult
+        {
+            public bool Ok { get; set; }
+            public string? Marker { get; set; }
+            public string? Hash { get; set; }
+            public double? CommitMs { get; set; }
+            public double? AppearMs { get; set; }
             public bool MeetsCriteria { get; set; }
         }
     }
@@ -1716,6 +2294,136 @@ namespace Histq.App.Repo
 
         /// <summary>The detail's summary (<see cref="QaRowClickProbe"/>).</summary>
         internal CommitSummaryView QaSummary => _summary;
+
+        /// <summary>The sidebar (<see cref="QaRowClickProbe"/>).</summary>
+        internal SidebarView QaSidebar => _sidebar;
+
+        /// <summary>The graph row a click on <paramref name="row"/> reveals now (the same resolution as the click's);
+        /// -1 for none.</summary>
+        internal long QaTargetRow(SidebarRow row) => Resolve(row.Targets) is { } item ? _graph.RowOf(item) : -1;
+
+        /// <summary>The graph search (<see cref="QaRepoProbes"/>).</summary>
+        internal GraphSearchBar QaSearch => _search;
+
+        /// <summary>The tab's session and folder (<see cref="QaRepoProbes"/>' watch probe).</summary>
+        internal RepoTabSession QaSession => _session;
+
+        internal string QaPath => _path;
+    }
+
+    /// <summary>What the watch probe reads of a session (<see cref="QaRepoProbes"/>).</summary>
+    internal sealed partial class RepoTabSession
+    {
+        /// <summary>The repo is watched (its watcher started).</summary>
+        internal bool QaWatching
+        {
+            get
+            {
+                lock (_gate)
+                    return _watcher is not null;
+            }
+        }
+
+        /// <summary>The session's git runner (in the app's process job) and base environment; nulls before they are
+        /// set up.</summary>
+        internal (GitRunner? Runner, IReadOnlyDictionary<string, string>? Environment) QaGit => (_runner, _base);
+    }
+}
+
+namespace Histq.App.Graph
+{
+    /// <summary>What the repo probes drive of the graph search (<see cref="QaRepoProbes"/>).</summary>
+    public sealed partial class GraphSearchBar
+    {
+        /// <summary>Opens the search as Ctrl+F does, with <paramref name="query"/> typed in its field.</summary>
+        internal void QaFind(string query)
+        {
+            Open();
+            QueryBox.Text = query;
+        }
+
+        /// <summary>Enter (next match) or Shift+Enter (previous).</summary>
+        internal void QaStep(bool next)
+        {
+            if (next)
+                _search.Next();
+            else
+                _search.Previous();
+        }
+    }
+}
+
+namespace Histq.App.Sidebar
+{
+    /// <summary>What the row click probe's sidebar mode reads and drives (<see cref="QaRowClickProbe"/>).</summary>
+    public sealed partial class SidebarView
+    {
+        /// <summary><c>-HistqShowHidden YES</c>: the Local, Remote and Tags cards list their hidden rows, as their eyes do.</summary>
+        internal void QaShowHidden()
+        {
+            foreach (Card card in new[] { _local, _remote, _tags })
+            {
+                card.ShowsHidden = true;
+                ApplyFilter(card);
+                UpdateCard(card);
+            }
+        }
+
+        /// <summary>The refs came (the Local, Remote and Tags cards have rows).</summary>
+        internal bool QaHasRefs => _refs is not null;
+
+        /// <summary>The Local, Remote and Tags cards' rows, in that order (all of them, not through a filter).</summary>
+        internal IEnumerable<SidebarRow> QaRefRows() =>
+            new[] { _local, _remote, _tags }.SelectMany(card => card.Rows ?? []);
+
+        /// <summary>The ref row named <paramref name="name"/>: a full ref name, else a local branch, a remote branch or a
+        /// tag of that short name, in that order; null for none.</summary>
+        internal SidebarRow? QaFind(string name)
+        {
+            List<SidebarRow> rows = [.. QaRefRows()];
+            foreach (string key in new[] { name, "refs/heads/" + name, "refs/remotes/" + name, "refs/tags/" + name })
+            {
+                if (rows.Find(row => string.Equals(row.Key, key, StringComparison.Ordinal)) is { } found)
+                    return found;
+            }
+
+            return null;
+        }
+
+        /// <summary>Shows <paramref name="row"/>'s tab, opens its card and closes its filter, so the row is listed as a
+        /// pointer would click it; true when anything changed.</summary>
+        internal bool QaPrepare(SidebarRow row)
+        {
+            Card card = row.Kind switch
+            {
+                SidebarRowKind.Local => _local,
+                SidebarRowKind.Remote => _remote,
+                SidebarRowKind.Tag => _tags,
+                SidebarRowKind.Worktree => _worktrees,
+                _ => _stashes,
+            };
+            SidebarTab tab = row.Kind == SidebarRowKind.Tag ? SidebarTab.Tags : SidebarTab.Branches;
+            bool changed = false;
+            if (Tab != tab)
+            {
+                ShowTab(tab);
+                changed = true;
+            }
+
+            if (card.Searching)
+            {
+                CloseSearch(card);
+                changed = true;
+            }
+
+            if (!card.Expanded)
+            {
+                ToggleExpanded(card);
+                changed = true;
+            }
+
+            return changed;
+        }
     }
 }
 #endif

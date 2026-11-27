@@ -198,17 +198,23 @@ public sealed class Preferences
     public static string In(StatePaths paths) => Path.Combine(paths.Root, FileName);
 
     /// <summary>
-    /// The preferences in <paramref name="file"/>; empty (every key at its default) when it is missing or not a JSON
-    /// object. A toast level of "off" (an earlier build's) becomes "errors": a failure always shows its toast.
+    /// The preferences in <paramref name="file"/>; empty (every key at its default) when it is missing, unreadable or not
+    /// a JSON object. A leading UTF-8 BOM (PowerShell 5.1's <c>Set-Content -Encoding UTF8</c>, some editors) is skipped.
+    /// A file that reads but is not a JSON object is moved aside to <c>preferences.json.bak</c> (or, when that exists,
+    /// <c>preferences.json.&lt;yyyyMMddHHmmss&gt;.bak</c>: an earlier backup is never replaced), so the next write does
+    /// not destroy what the user had in it. A toast level of "off" (an earlier build's) becomes
+    /// "errors": a failure always shows its toast.
     /// </summary>
     public static Preferences Load(string file)
     {
         JsonObject values;
         try
         {
-            values = JsonNode.Parse(System.IO.File.ReadAllBytes(file)) as JsonObject ?? [];
+            byte[] bytes = System.IO.File.ReadAllBytes(file);
+            ReadOnlySpan<byte> json = bytes.AsSpan().StartsWith(Utf8Bom) ? bytes.AsSpan(Utf8Bom.Length) : bytes;
+            values = Parse(json) ?? MovedAside(file);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             values = [];
         }
@@ -220,6 +226,48 @@ public sealed class Preferences
         }
 
         return preferences;
+    }
+
+    private static ReadOnlySpan<byte> Utf8Bom => [0xEF, 0xBB, 0xBF];
+
+    /// <summary>The JSON object in <paramref name="json"/>; null when it is not one.</summary>
+    private static JsonObject? Parse(ReadOnlySpan<byte> json)
+    {
+        try
+        {
+            return JsonNode.Parse(json) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Moves the unparsable <paramref name="file"/> to <c>&lt;file&gt;.bak</c>, or a timestamped backup when
+    /// that exists (never over an earlier one; best effort); no values.</summary>
+    private static JsonObject MovedAside(string file)
+    {
+        try
+        {
+            var backup = file + ".bak";
+            if (System.IO.File.Exists(backup))
+            {
+                var stamp = DateTime.Now.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+                backup = $"{file}.{stamp}.bak";
+                for (var n = 2; System.IO.File.Exists(backup); n++)
+                {
+                    backup = $"{file}.{stamp}-{n}.bak";
+                }
+            }
+
+            System.IO.File.Move(file, backup, overwrite: false);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            Debug.WriteLine($"preferences.json not moved aside: {error.Message}");
+        }
+
+        return [];
     }
 
     /// <summary>The value of <paramref name="key"/> as <typeparamref name="T"/>: the stored one, else (never set, or

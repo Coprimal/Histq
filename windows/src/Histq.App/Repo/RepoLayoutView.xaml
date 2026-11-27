@@ -3,9 +3,9 @@
     A repo tab's three panels (ported from RepoLayoutView.swift at 6fa6d40, the Classic layout): the sidebar, the commit
     graph and the detail, cards on the page sheet with an 8 epx gap. The two gaps are draggable dividers; the side
     panels' widths (sidebar 200-420, detail 320-640, the graph at least 360) are set in RepoLayoutView.xaml.cs from the
-    panelWidths preference. TabContentHost's margin is the Mac's inset around the panels. The sidebar's and the detail's
-    content come in later milestones (M2+): until then they show their placeholder. The graph shows its placeholder
-    (skeleton rows, a spinner fading in after SpinnerDelay) until its first rows are in, or the load's error.
+    panelWidths preference. TabContentHost's margin is the Mac's inset around the panels. The sidebar (SidebarView) is
+    made in code, with its section cards. The detail shows its placeholder until a row is selected. The graph shows its
+    placeholder (skeleton rows, a spinner fading in after SpinnerDelay) until its first rows are in, or the load's error.
 -->
 <UserControl
     x:Class="Histq.App.Repo.RepoLayoutView"
@@ -40,18 +40,9 @@
             <ColumnDefinition x:Name="DetailColumn" Width="360" />
         </Grid.ColumnDefinitions>
 
-        <!-- Panel 1: the sidebar (M2: branches, remotes, tags, stashes...). -->
-        <repo:RepoPanel x:Name="SidebarPanel" AutomationProperties.Name="Sidebar">
-            <Border Style="{StaticResource PanelCardStyle}">
-                <StackPanel Padding="12,14,12,0" Spacing="12">
-                    <Border Width="96" Style="{StaticResource SkeletonBarStyle}" />
-                    <Border Width="150" Style="{StaticResource SkeletonBarStyle}" />
-                    <Border Width="120" Style="{StaticResource SkeletonBarStyle}" />
-                    <Border Width="140" Style="{StaticResource SkeletonBarStyle}" />
-                    <Border Width="80" Style="{StaticResource SkeletonBarStyle}" />
-                </StackPanel>
-            </Border>
-        </repo:RepoPanel>
+        <!-- Panel 1: the sidebar (SidebarView, put here in RepoLayoutView.xaml.cs): its tab picker and its section
+             cards, each a card of its own on the sheet, with skeleton rows until the refs come. -->
+        <repo:RepoPanel x:Name="SidebarPanel" AutomationProperties.Name="Sidebar" />
 
         <repo:PanelDivider x:Name="SidebarDivider" Grid.Column="1" />
 

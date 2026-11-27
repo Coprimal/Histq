@@ -62,6 +62,28 @@ For the VM's tab QA, `fixture-bridge export-workspace <out>` writes a `.histqws`
 
 The App builds only on CI (the WinUI XAML compiler does not run on macOS); the package job arrives with the App in phase 2.
 
+## QA
+
+The QA flags exist only in QA builds (`HISTQ_QA`: Debug, or `-p:HistqQa=true`); a Release build ignores them. Their full syntax is in `src/Histq.App/Debug/QaFlags.cs` and `Debug/SpikeHarness.cs`. Every flag takes a value (launch flags are `-Name value` pairs). Probes write `<stateDir>\Probes\<name>.json`, then quit as File › Exit does and exit 0 (ok), 1 (failed) or 3 (watchdog).
+
+| Flag | What |
+|---|---|
+| `-HistqStateDir <dir>` | The state folder (session, preferences, `repo-view`, `Probes`, `Logs\crash.log`). Give each check its own emptied one. |
+| `-HistqOpen <dir>` | Opens the folder in a tab of the front window. |
+| `-HistqOpenWorkspace <file>`, `-HistqSaveWorkspace <file>` | Opens a workspace; saves one and exits (`workspace.json`). |
+| `-HistqTabPosition left\|top`, `-HistqMoveTab`, `-HistqSelect`, `-HistqTabWalk`, `-HistqTabClickProbe` | Tab position and the tab probes. |
+| `-HistqRowClickProbe auto\|<rows>\|sidebar\|sidebar:<refs>` | Graph or sidebar row clicks, frames to highlight (`rowclick.json`). |
+| `-HistqFind "<query>[;next\|prev…]"` | Opens the graph search with the query once the log is complete. |
+| `-HistqShowHidden YES` | The Local, Remote and Tags cards list their hidden rows. |
+| `-HistqLoadProbe YES` | Launch to first rows and to the complete log drawn, in ms (`load.json`). |
+| `-HistqRowsProbe <n>\|auto` | The first n (50) commits: hash, parents, full ref names (`rows.json`). |
+| `-HistqScrollProbe <seconds>` | On a repo tab: the spike's scroll probe on its graph (`scroll.json`); with `-HistqSpikeLog <dump>`: the phase 5 spike (`spike.json`). |
+| `-HistqWatchProbe YES` | The app makes an empty commit in the repo; ms until its row is drawn (`watch.json`). |
+
+`scripts/qa-data.sh` (on the Mac): `fixtures [out]` zips the graph and 200k-commit fixtures (`fx-graph.zip`, `fx-big-200k.zip`, to unzip into `C:\HistqQA\fx`); `check-rows <fixture> <rows.json>` compares `rows.json` with `git log` of the same fixture; `check-scroll <scroll.json>` checks the frame-time thresholds (median 17.5, p95 33.4, max 100 ms); `dump` and `check` are the phase 5 spike's.
+
+The VM (Windows VM 2) runs only CI artifacts: `gh run download <run> -n Histq-win-arm64`, add `scripts/vm-install.ps1`, zip the folder, copy it into the VM's `Downloads` (`VMPalMachine --cli cp`), then `Expand-Archive` and `vm-install.ps1 -Folder <folder> -AppArgs '-HistqStateDir','C:\HistqQA\state\<check>',… -Wait` (`-Launch` alone starts it without arguments). Never build, clone or install toolchains in the VM. Keep fixtures and states in `C:\HistqQA`, unzip a fresh fixture before each check, and look for `<stateDir>\Logs\crash.log` after each run (a recovered or fatal exception is written there in every build).
+
 ## Build cache
 
 .NET builds into each project's `bin/` and `obj/` (gitignored). NuGet packages are cached in `~/.nuget/packages` (on Windows CI `%USERPROFILE%\.nuget\packages`). There is no repo `nuget.config`; packages come from nuget.org.

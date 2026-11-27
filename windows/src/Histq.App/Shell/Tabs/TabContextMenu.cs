@@ -421,8 +421,8 @@ internal static class TabContextMenu
 
     /// <summary>One menu's items: a clicked item's action is kept and runs once the menu has closed (an action that
     /// closes or moves the right-clicked tab then finds the focus back on the row, and no menu anchored to a view the
-    /// sync takes out). A Click after the menu closed runs at once.</summary>
-    private sealed class MenuActions
+    /// sync takes out). A Click after the menu closed runs at once. The repo's ref and graph menus use it too.</summary>
+    internal sealed class MenuActions
     {
         private Action? _pending;
         private bool _closed;
@@ -468,7 +468,7 @@ internal static class TabContextMenu
             }
             catch (Exception error)
             {
-                CrashLog.Recovered("Tab menu action (not done)", error);
+                CrashLog.Recovered("Menu action (not done)", error);
             }
         }
     }

@@ -184,6 +184,14 @@ public sealed partial class GraphCanvas : UserControl
     /// <summary>The user selected a row (a press, Up or Down, UI Automation), already drawn selected; -1 for none.</summary>
     internal event Action<long>? RowSelected;
 
+    /// <summary>A right-button release over a row (its press selected it): the row and where, in the canvas, its menu
+    /// opens.</summary>
+    internal event Action<long, Windows.Foundation.Point>? RowContextRequested;
+
+    /// <summary>The row a right press in the rows selected; -1 when the last press was another (its release opens no
+    /// menu unless it is on that row).</summary>
+    private long _rightPressRow = -1;
+
     public double RowHeight => _renderer.Metrics.RowHeight;
 
     /// <summary>The row height, band and lane sizes and lane colors; a change keeps the top row and redraws.</summary>
@@ -487,6 +495,7 @@ public sealed partial class GraphCanvas : UserControl
     {
         var point = e.GetCurrentPoint(_canvas);
         var position = point.Position;
+        _rightPressRow = -1;
         if (position.X < 0 || position.X >= _canvas.ActualWidth)
         {
             base.OnPointerPressed(e);
@@ -501,7 +510,10 @@ public sealed partial class GraphCanvas : UserControl
             return;
         }
 
-        PressRow(HitTest(position.Y));
+        long row = HitTest(position.Y);
+        if (point.Properties.IsRightButtonPressed)
+            _rightPressRow = row;
+        PressRow(row);
         e.Handled = true;
     }
 
@@ -522,6 +534,23 @@ public sealed partial class GraphCanvas : UserControl
 
     protected override void OnPointerReleased(PointerRoutedEventArgs e)
     {
+        var released = e.GetCurrentPoint(_canvas);
+        if (!_thumbDrag && released.Properties.PointerUpdateKind == Microsoft.UI.Input.PointerUpdateKind.RightButtonReleased)
+        {
+            // Only on the row the right press selected: never another row the pointer moved to, nor after a press
+            // outside the rows.
+            long pressed = _rightPressRow;
+            _rightPressRow = -1;
+            if (pressed >= 0 && !InScrollBarZone(released.Position.X, released.Position.Y)
+                && released.Position.X >= 0 && released.Position.X < _canvas.ActualWidth
+                && HitTest(released.Position.Y) == pressed)
+            {
+                RowContextRequested?.Invoke(pressed, released.Position);
+                e.Handled = true;
+                return;
+            }
+        }
+
         if (!_thumbDrag)
         {
             base.OnPointerReleased(e);

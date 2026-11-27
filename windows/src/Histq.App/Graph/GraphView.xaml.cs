@@ -41,10 +41,11 @@ internal sealed record WorktreeFade(ulong[] Masks, ulong Head);
 
 /// <summary>What a <see cref="GraphView"/> shows: a log snapshot, the repo's worktrees (another worktree's WIP row
 /// shows its name and change counts), with graphFadeOtherWorktrees on which commits fade, and the commits' badges by
-/// hash (<see cref="RefBadge.For"/>; none while the refs are not read).</summary>
+/// hash (<see cref="RefBadge.For"/>; none while the refs are not read). The sidebar reads the same data: the refs the
+/// badges were made from (null while not read), and whether the worktree list was read yet.</summary>
 internal sealed record GraphData(
     RepoSnapshot Snapshot, IReadOnlyList<WorktreeInfo> Worktrees, WorktreeFade? Fade,
-    IReadOnlyDictionary<string, RefBadge[]>? Badges = null);
+    IReadOnlyDictionary<string, RefBadge[]>? Badges = null, Refs? Refs = null, bool WorktreesRead = false);
 
 /// <summary>
 /// The commit graph with its columns (ported from GraphView and GraphTableController, App/Graph/GraphView.swift at
@@ -61,7 +62,11 @@ internal sealed record GraphData(
 /// </para>
 /// <para>
 /// A new snapshot keeps the selected item (wip, stash, commit, worktree) selected wherever its row moved, and the top
-/// rows on screen where they were (a new WIP row shows when the list was at its top). Not ported yet: several selected
+/// rows on screen where they were (a new WIP row shows when the list was at its top). A right click on a row (or the
+/// menu key on the selected one) asks for its menu (<see cref="RowMenuRequested"/>, <see cref="GraphMenus"/>); while
+/// branches are left out a chip over the header's end says how many and shows them all (<see cref="ShowVisibility"/>).
+/// The row density and the authors' emojis follow <see cref="WindowManager.GraphLookChanged"/> live; a row's UI
+/// Automation name ends with its author's emoji when its avatar shows one. Not ported yet: several selected
 /// rows, the lit worktree following the selection (this worktree's always is), the Open Worktree pill, the text size,
 /// and the scroll position of a tab whose layout was unmounted (a kept layout keeps its own).
 /// </para>
@@ -115,13 +120,23 @@ public sealed partial class GraphView : UserControl
         }
 
         Rows.RowSelected += OnRowSelected;
+        Rows.RowContextRequested += OnRowContextRequested;
+        Rows.ContextRequested += OnRowsContextRequested;
         SizeChanged += (_, e) =>
         {
             if (e.NewSize.Width != e.PreviousSize.Width)
                 ApplyLayout();
         };
         _manager.GraphColumnsChanged += OnGraphColumnsChanged;
+        _manager.GraphLookChanged += OnGraphLookChanged;
     }
+
+    /// <summary>A row's menu is asked for (a right click, which selected it; the menu key or Shift+F10 on the selected
+    /// one): its item and where in <see cref="Canvas"/> the menu opens (null: at the row). UI thread.</summary>
+    internal event Action<GraphItem, Windows.Foundation.Point?>? RowMenuRequested;
+
+    /// <summary>The visibility chip's Show All was clicked. UI thread.</summary>
+    internal event Action? ShowAllRequested;
 
     /// <summary>The user selected a row: its item, null for none. UI thread.</summary>
     internal event Action<GraphItem?>? SelectionChanged;
@@ -145,9 +160,9 @@ public sealed partial class GraphView : UserControl
     internal GraphItem? ItemAt(long row) => _source?.ItemAt(row);
 
     /// <summary>
-    /// Selects <paramref name="item"/>'s row as a click does (<see cref="SelectionChanged"/> is raised) and scrolls it to
-    /// the middle when it is not wholly in view above <paramref name="bottomInset"/> epx (the open search bar); false
-    /// when the item has no row.
+    /// Selects <paramref name="item"/>'s row as a click does (<see cref="SelectionChanged"/> is raised when it is another
+    /// row than the selected one) and scrolls it to the middle when it is not wholly in view above
+    /// <paramref name="bottomInset"/> epx (the open search bar); false when the item has no row.
     /// </summary>
     internal bool Select(GraphItem item, double bottomInset = 0)
     {
@@ -157,6 +172,63 @@ public sealed partial class GraphView : UserControl
         Rows.SelectByUser(row);
         Rows.CenterIfHidden(row, bottomInset);
         return true;
+    }
+
+    /// <summary>
+    /// The chip over the header's end while branches are left out (GraphVisibilityChip): "2 hidden · Show All",
+    /// "Solo · Show All" or both; hidden for none. Its UI Automation name is its text.
+    /// </summary>
+    internal void ShowVisibility(int hidden, bool solo)
+    {
+        string summary = string.Join(" · ", new[]
+        {
+            hidden > 0 ? hidden.ToString(System.Globalization.CultureInfo.InvariantCulture) + " hidden" : null,
+            solo ? "Solo" : null,
+        }.OfType<string>());
+        Visibility shown = summary.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (!string.Equals(VisibilitySummary.Text, summary, StringComparison.Ordinal))
+        {
+            VisibilitySummary.Text = summary;
+            AutomationProperties.SetName(VisibilityChip, summary + " · Show All");
+        }
+
+        if (VisibilityChip.Visibility != shown)
+            VisibilityChip.Visibility = shown;
+    }
+
+    private void OnVisibilityChipClick(object sender, RoutedEventArgs e) => ShowAllRequested?.Invoke();
+
+    private void OnRowContextRequested(long row, Windows.Foundation.Point position)
+    {
+        if (ItemAt(row) is { } item)
+            RowMenuRequested?.Invoke(item, position);
+    }
+
+    /// <summary>The menu key or Shift+F10 (no pointer position): the selected row's menu. A pointer's right click is
+    /// <see cref="GraphCanvas.RowContextRequested"/>.</summary>
+    private void OnRowsContextRequested(UIElement sender, ContextRequestedEventArgs e)
+    {
+        if (e.TryGetPosition(Rows, out _))
+            return;
+        e.Handled = true;
+        if (_selected is { } item)
+            RowMenuRequested?.Invoke(item, null);
+    }
+
+    /// <summary>The row density or an author's emoji changed (<see cref="WindowManager.GraphLook"/>): the rows take the
+    /// new height (the graph column its width) and the avatars are drawn again. Outside a draw and a layout pass.</summary>
+    private void OnGraphLookChanged(object? sender, EventArgs e)
+    {
+        if (_released)
+            return;
+        GraphLook look = _manager.GraphLook;
+        Rows.Metrics = look.Metrics;
+        AvatarRenderer? old = Rows.Avatars;
+        Rows.Avatars = new AvatarRenderer(look.AvatarMode, look.AuthorEmojis);
+        old?.Dispose();
+        _layoutWidth = -1;
+        ApplyLayout();
+        Rows.Redraw();
     }
 
     /// <summary>The search's dimming (null: none), kept for the snapshot it was made for.</summary>
@@ -193,7 +265,10 @@ public sealed partial class GraphView : UserControl
                 .ToArray();
         }
 
-        var source = new SnapshotSource(data, _dates) { Dimming = _dimming };
+        var source = new SnapshotSource(data, _dates, commit => Rows.Avatars?.EmojiOf(commit.AuthorEmail, commit.AuthorName))
+        {
+            Dimming = _dimming,
+        };
         _source = source;
         RepoSnapshot snapshot = data.Snapshot;
         // A load's first pages may need fewer lanes than the whole log: the column keeps the last log's until the load
@@ -230,6 +305,7 @@ public sealed partial class GraphView : UserControl
             return;
         _released = true;
         _manager.GraphColumnsChanged -= OnGraphColumnsChanged;
+        _manager.GraphLookChanged -= OnGraphLookChanged;
         _source = null;
         Rows.Release();
         Rows.Avatars?.Dispose();
@@ -349,6 +425,9 @@ public sealed partial class GraphView : UserControl
             return;
         // From the app's settings now: a column shown or hidden in another window meanwhile stays so.
         _manager.SetGraphColumns(_manager.GraphColumns with { EncodedWidths = GraphColumns.Encode(_widths) });
+        // With no net width change no event comes: take a toggle made elsewhere during the drag here too.
+        if (_settings != _manager.GraphColumns)
+            OnGraphColumnsChanged(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -408,10 +487,13 @@ public sealed partial class GraphView : UserControl
         private readonly GraphDateFormatter _dates;
         private readonly WorktreeChanges? _wipChanges;
         private readonly Dictionary<long, GraphRowText> _texts = [];
+        private readonly Func<Commit, string?> _emojiOf;
         private Dictionary<string, Stash>? _stashes;
 
-        public SnapshotSource(GraphData data, GraphDateFormatter dates)
+        /// <param name="emojiOf">The emoji a commit's avatar shows now; null for none.</param>
+        public SnapshotSource(GraphData data, GraphDateFormatter dates, Func<Commit, string?> emojiOf)
         {
+            _emojiOf = emojiOf;
             Data = data;
             _data = data;
             _snapshot = data.Snapshot;
@@ -446,14 +528,19 @@ public sealed partial class GraphView : UserControl
         public override GraphRow RowAt(long row) => _snapshot.EntryAt(row)?.Row ?? default;
 
         /// <summary>The message, a WIP row's counts, then its badges in words ("Fix login [main (HEAD, local,
-        /// remote); v1.0 (tag)]"), so UI Automation reads each row's refs.</summary>
+        /// remote); v1.0 (tag)]"), and the emoji its author's avatar shows ("· avatar 🔥"; only on a row that draws an
+        /// avatar, not a merge), so UI Automation reads each row's refs and emoji.</summary>
         public override string NameOf(long row)
         {
             GraphRowText text = TextOf(row);
             string name = text.Changes is { KindSummary: { Length: > 0 } summary }
                 ? text.Message + "  " + summary
                 : text.Message;
-            return text.Badges is { Count: > 0 } badges ? name + " [" + RefBadge.Describe(badges) + "]" : name;
+            if (text.Badges is { Count: > 0 } badges)
+                name += " [" + RefBadge.Describe(badges) + "]";
+            return CommitOf(row) is { IsMerge: false } commit && _emojiOf(commit) is { } emoji
+                ? name + " · avatar " + emoji
+                : name;
         }
 
         public override Commit? CommitOf(long row) =>

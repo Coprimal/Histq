@@ -3,7 +3,8 @@
     The commit graph with its columns (ported from GraphView.swift at 6fa6d40): the column titles (Branch / Tag, Graph,
     Commit message, Author, Time) on a 26 epx header with a hairline below, then the rows, drawn by one viewport-sized
     Win2D canvas. The titles are made in GraphView.xaml.cs (one per column, with its resize grip); a right-click on the
-    header shows or hides the message, author and date columns.
+    header shows or hides the message, author and date columns. While branches are left out, the chip at the header's
+    end says so ("2 hidden · Show All", "Solo · Show All") and shows them all (GraphVisibilityChip).
 -->
 <UserControl
     x:Class="Histq.App.Graph.GraphView"
@@ -41,5 +42,20 @@
             IsHitTestVisible="False" />
 
         <graph:GraphCanvas x:Name="Rows" Grid.Row="1" />
+
+        <Button
+            x:Name="VisibilityChip"
+            Height="22"
+            Margin="0,2,8,0"
+            Padding="10,0,10,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            Click="OnVisibilityChipClick"
+            CornerRadius="11"
+            ToolTipService.ToolTip="Show every branch in the graph"
+            Visibility="Collapsed">
+            <!-- The runs on one line: whitespace between inlines would show as extra spaces. -->
+            <TextBlock FontSize="11"><Run x:Name="VisibilitySummary" /><Run Text=" · " /><Run Foreground="{StaticResource BrandAccentBrush}" Text="Show All" /></TextBlock>
+        </Button>
     </Grid>
 </UserControl>

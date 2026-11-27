@@ -28,7 +28,8 @@ public partial class App
 /// NUL-terminated log in <see cref="LogReader.Arguments"/>' format, made by windows/scripts/qa-data.sh dump) and
 /// <c>-HistqScrollProbe &lt;seconds&gt;</c> (default 10) and <c>-HistqScrollPacing draw|rendering</c> (default draw,
 /// see <see cref="ScrollProbeAsync"/>), and <c>-HistqSubjectText draw|off</c> (default draw; off leaves the rows'
-/// subjects undrawn, to measure the graph without text).
+/// subjects undrawn, to measure the graph without text). Without <c>-HistqSpikeLog</c>, <c>-HistqScrollProbe</c> is the
+/// repo tab's scroll probe instead (QaFlags' <c>QaRepoProbes</c>, through <see cref="RepoScrollProbeAsync"/>).
 /// <para>
 /// GC diagnostics of the scroll probe: <c>-HistqGcLatency Batch|Interactive|LowLatency|SustainedLowLatency</c> (default:
 /// the runtime's mode, untouched) is set right before the probe and restored after it; <c>-HistqProbeDelay
@@ -323,9 +324,8 @@ internal sealed class SpikeHarness
     }
 
     /// <summary>Zeroes the window's and the graph's QA counters (the scroll probe's start).</summary>
-    private static void ResetCounters(MainWindow window)
+    private static void ResetCounters(MainWindow window, GraphCanvas canvas)
     {
-        GraphCanvas canvas = window.GraphCanvas;
         window.QaLayoutUpdatedCount = 0;
         window.QaSheetUpdateCount = 0;
         window.QaTransformToVisualCount = 0;
@@ -334,14 +334,31 @@ internal sealed class SpikeHarness
     }
 
     /// <summary>Records the window's and the graph's QA counters (the scroll probe's end).</summary>
-    private void ReadCounters(MainWindow window)
+    private void ReadCounters(MainWindow window, GraphCanvas canvas)
     {
-        GraphCanvas canvas = window.GraphCanvas;
         _result.LayoutUpdatedCount = window.QaLayoutUpdatedCount;
         _result.SheetUpdateCount = window.QaSheetUpdateCount;
         _result.TransformToVisualCount = window.QaTransformToVisualCount;
         _result.AutomationEventsCount = canvas.QaAutomationEventsCount;
         _result.AutomationRowPeersCreated = canvas.QaAutomationRowPeersCreated;
+    }
+
+    /// <summary>
+    /// The scroll probe (<see cref="ScrollProbeAsync"/>, the same steps, pacing and measures) on a repo tab's graph
+    /// (QaFlags' <c>-HistqScrollProbe</c> without a dump): spike.json's fields as JSON, for <c>qa-data.sh check-scroll</c>.
+    /// <c>parsedCommits</c> is the graph's row count. Throws when the probe times out.
+    /// </summary>
+    internal static async Task<string> RepoScrollProbeAsync(
+        MainWindow window, GraphCanvas canvas, double seconds, bool drawPacing)
+    {
+        var harness = new SpikeHarness([]) { _canvas = canvas };
+        harness._result.ParsedCommits = canvas.RowCount;
+        harness._result.RowHeight = canvas.RowHeight;
+        harness._result.ViewportHeight = canvas.ViewportHeight;
+        harness._result.GcLatencyMode = GCSettings.LatencyMode.ToString();
+        harness._result.GcServer = GCSettings.IsServerGC;
+        await harness.ScrollProbeAsync(window, seconds, drawPacing);
+        return JsonSerializer.Serialize(harness._result, JsonOptions);
     }
 
     private double SinceLaunchMs() => (_startAge + _clock.Elapsed).TotalMilliseconds;
@@ -622,7 +639,7 @@ internal sealed class SpikeHarness
         TimeSpan pauseBefore = GC.GetTotalPauseDuration();
         // Not precise: a precise read suspends the runtime, which would show up as a pause among the GC events.
         long allocatedBefore = GC.GetTotalAllocatedBytes();
-        ResetCounters(window);
+        ResetCounters(window, canvas);
         DispatcherQueueTimer? timer = null;
         canvas.DrawCompleted += OnDraw;
         CompositionTarget.Rendering += OnRendering;
@@ -658,7 +675,7 @@ internal sealed class SpikeHarness
         long allocatedAfter = GC.GetTotalAllocatedBytes();
         TimeSpan pauseAfter = GC.GetTotalPauseDuration();
         int[] gcAfter = [GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2)];
-        ReadCounters(window);
+        ReadCounters(window, canvas);
         _result.GcInfoAfter = GcInfoByKind.Read();
 
         _result.ScrollPacing = drawPacing ? "draw" : "rendering";

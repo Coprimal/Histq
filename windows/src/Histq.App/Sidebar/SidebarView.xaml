@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    A repo tab's sidebar, panel 1 (ported from SidebarView.swift at 6fa6d40): the tab picker across its width (Branches,
+    Tags), then the shown tab's sections, each its own card on the page sheet (no panel container): the Branches tab's
+    Local, Remote and Worktrees cards in the sidebarSectionOrder / hiddenSidebarSections order, then Stashes; the Tags
+    tab's Tags card. The cards are made in SidebarView.xaml.cs; the templates of their rows are here. Each expanded card
+    with rows takes an equal share of the height and scrolls its virtualized list inside.
+-->
+<UserControl
+    x:Class="Histq.App.Sidebar.SidebarView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:sidebar="using:Histq.App.Sidebar">
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="SidebarSkeletonBrush" Color="{StaticResource SkeletonFillColor}" />
+        <SolidColorBrush x:Key="SidebarSelectedBrush" Color="{StaticResource SelectedFillColor}" />
+        <SolidColorBrush x:Key="SidebarSelectedBorderBrush" Color="{StaticResource SelectedBorderColor}" />
+        <SolidColorBrush x:Key="SidebarClearBrush" Color="Transparent" />
+        <!-- A worktree's pencil (uncommitted changes): the orange of lane 1, as on the Mac. -->
+        <SolidColorBrush x:Key="SidebarChangesBrush" Color="{StaticResource Lane1Color}" />
+
+        <!-- The rows: a neutral capsule when selected, a hover capsule otherwise (SidebarItemStyle on the Mac). -->
+        <StaticResource x:Key="ListViewItemBackgroundPointerOver" ResourceKey="HoverFillBrush" />
+        <StaticResource x:Key="ListViewItemBackgroundPressed" ResourceKey="PressedFillBrush" />
+        <StaticResource x:Key="ListViewItemBackgroundSelected" ResourceKey="SidebarSelectedBrush" />
+        <StaticResource x:Key="ListViewItemBackgroundSelectedPointerOver" ResourceKey="SidebarSelectedBrush" />
+        <StaticResource x:Key="ListViewItemBackgroundSelectedPressed" ResourceKey="PressedFillBrush" />
+        <StaticResource x:Key="ListViewHeaderItemDividerStroke" ResourceKey="SidebarClearBrush" />
+
+        <!-- The tab picker's capsules (CapsuleTabs): the selected one in the selected fill, white text. -->
+        <StaticResource x:Key="ToggleButtonBackground" ResourceKey="SidebarClearBrush" />
+        <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="HoverFillBrush" />
+        <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="PressedFillBrush" />
+        <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="SidebarSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="SidebarSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="PressedFillBrush" />
+        <StaticResource x:Key="ToggleButtonForeground" ResourceKey="TabTitleBrush" />
+        <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TabTitleSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="TabTitleSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TabTitleSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TabTitleSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TabTitleSelectedBrush" />
+        <StaticResource x:Key="ToggleButtonBorderBrush" ResourceKey="SidebarClearBrush" />
+        <StaticResource x:Key="ToggleButtonBorderBrushPointerOver" ResourceKey="SidebarClearBrush" />
+        <StaticResource x:Key="ToggleButtonBorderBrushPressed" ResourceKey="SidebarClearBrush" />
+        <StaticResource x:Key="ToggleButtonBorderBrushChecked" ResourceKey="SidebarSelectedBorderBrush" />
+        <StaticResource x:Key="ToggleButtonBorderBrushCheckedPointerOver" ResourceKey="SidebarSelectedBorderBrush" />
+        <StaticResource x:Key="ToggleButtonBorderBrushCheckedPressed" ResourceKey="SidebarSelectedBorderBrush" />
+
+        <!-- A row: 28 epx capsule, its content from the card's padding. -->
+        <Style x:Key="SidebarRowStyle" TargetType="ListViewItem">
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="10,0,10,0" />
+            <Setter Property="Margin" Value="0,0,0,2" />
+            <Setter Property="CornerRadius" Value="14" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        </Style>
+        <!-- A remote's row over its branches (RemoteRow): not selectable. -->
+        <Style x:Key="SidebarGroupHeaderStyle" TargetType="ListViewHeaderItem">
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="10,0,10,0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        </Style>
+
+        <!-- Icon slot, name (cut in the middle on the Mac, at the end here), a pin (pinned) and a filter (soloed), a pencil
+             for uncommitted changes, the trailing detail (ahead/behind, branch, stash@{n}), then a hidden ref's eye, which
+             shows it again (disabled for a branch hidden as stale). -->
+        <DataTemplate x:Key="SidebarRowTemplate" x:DataType="sidebar:SidebarRow">
+            <Grid
+                Margin="{x:Bind Indent}"
+                ColumnSpacing="4"
+                ToolTipService.ToolTip="{x:Bind Tooltip}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="20" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <FontIcon
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    Glyph="{x:Bind Glyph}"
+                    Opacity="{x:Bind NameOpacity}" />
+                <FontIcon
+                    Grid.Column="2"
+                    VerticalAlignment="Center"
+                    FontSize="10"
+                    Glyph="&#xE718;"
+                    ToolTipService.ToolTip="Pinned to the left"
+                    Visibility="{x:Bind PinVisibility}" />
+                <FontIcon
+                    Grid.Column="3"
+                    VerticalAlignment="Center"
+                    FontSize="10"
+                    Glyph="&#xE71C;"
+                    ToolTipService.ToolTip="Soloed"
+                    Visibility="{x:Bind SoloVisibility}" />
+                <TextBlock
+                    Grid.Column="1"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    Opacity="{x:Bind NameOpacity}"
+                    Text="{x:Bind Name}"
+                    TextTrimming="CharacterEllipsis"
+                    TextWrapping="NoWrap" />
+                <FontIcon
+                    Grid.Column="4"
+                    VerticalAlignment="Center"
+                    FontSize="11"
+                    Foreground="{StaticResource SidebarChangesBrush}"
+                    Glyph="&#xE70F;"
+                    Visibility="{x:Bind ChangesVisibility}" />
+                <TextBlock
+                    Grid.Column="5"
+                    VerticalAlignment="Center"
+                    FontSize="11"
+                    Opacity="0.6"
+                    Text="{x:Bind Detail}"
+                    TextWrapping="NoWrap" />
+                <Button
+                    Grid.Column="6"
+                    Width="22"
+                    Height="22"
+                    Padding="0"
+                    VerticalAlignment="Center"
+                    AutomationProperties.Name="Show Again"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Click="OnShowAgainClick"
+                    CornerRadius="11"
+                    IsEnabled="{x:Bind CanShowAgain}"
+                    ToolTipService.ToolTip="{x:Bind ShowAgainTooltip}"
+                    Visibility="{x:Bind ShowAgainVisibility}">
+                    <FontIcon FontSize="11" Glyph="&#xED1A;" />
+                </Button>
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="SidebarGroupTemplate" x:DataType="sidebar:SidebarGroup">
+            <Grid ColumnSpacing="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="20" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <FontIcon
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    Glyph="&#xE753;"
+                    Opacity="0.72" />
+                <TextBlock
+                    Grid.Column="1"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Opacity="0.72"
+                    Text="{x:Bind Name}"
+                    TextTrimming="CharacterEllipsis"
+                    TextWrapping="NoWrap" />
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid RowSpacing="{StaticResource CardSpacing}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- The tab picker (CapsuleTabs): a padded capsule container, each tab a capsule with its icon and name. -->
+        <Border
+            Padding="3"
+            Background="{StaticResource TabFillBrush}"
+            CornerRadius="17">
+            <Grid x:Name="TabButtons" ColumnSpacing="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <ToggleButton
+                    x:Name="BranchesTab"
+                    Height="28"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="Branches"
+                    Click="OnTabClick"
+                    CornerRadius="14"
+                    IsChecked="True"
+                    ToolTipService.ToolTip="Branches">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon FontSize="12" Glyph="&#xE7F8;" />
+                        <TextBlock FontSize="12" Text="Branches" />
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton
+                    x:Name="TagsTab"
+                    Grid.Column="1"
+                    Height="28"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="Tags"
+                    Click="OnTabClick"
+                    CornerRadius="14"
+                    ToolTipService.ToolTip="Tags">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon FontSize="12" Glyph="&#xE8EC;" />
+                        <TextBlock FontSize="12" Text="Tags" />
+                    </StackPanel>
+                </ToggleButton>
+            </Grid>
+        </Border>
+
+        <!-- The shown tab's cards (made in code). -->
+        <Grid
+            x:Name="BranchesCards"
+            Grid.Row="1"
+            RowSpacing="{StaticResource CardSpacing}" />
+        <Grid
+            x:Name="TagsCards"
+            Grid.Row="1"
+            RowSpacing="{StaticResource CardSpacing}"
+            Visibility="Collapsed" />
+    </Grid>
+</UserControl>

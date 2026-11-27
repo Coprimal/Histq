@@ -71,10 +71,8 @@ internal sealed class AvatarRenderer : IDisposable
             Reset();
 
         string identity = Identity(email, name);
-        string? emoji = AllowsEmoji(identity) && _emojis.TryGetValue(identity, out string? stored)
-            ? DisplayText.Sanitize(stored, 1)
-            : null;
-        string key = emoji is { Length: > 0 } ? "e|" + emoji : _initials ? "i|" + Initials(name) : "g|" + identity;
+        string? emoji = EmojiOf(email, name);
+        string key = emoji is not null ? "e|" + emoji : _initials ? "i|" + Initials(name) : "g|" + identity;
         if (!_drawn.TryGetValue(key, out CanvasRenderTarget? target))
         {
             target = new CanvasRenderTarget(ds, diameter, diameter);
@@ -84,7 +82,7 @@ internal sealed class AvatarRenderer : IDisposable
                 using var disc = CanvasGeometry.CreateCircle(drawing, diameter / 2, diameter / 2, diameter / 2);
                 using (drawing.CreateLayer(1f, disc))
                 {
-                    if (emoji is { Length: > 0 })
+                    if (emoji is not null)
                         DrawEmoji(drawing, emoji, diameter);
                     else if (_initials)
                         DrawInitials(drawing, Initials(name), diameter);
@@ -98,6 +96,17 @@ internal sealed class AvatarRenderer : IDisposable
 
         _byAuthor[(email, name)] = target;
         return target;
+    }
+
+    /// <summary>The emoji the author's avatar shows (sanitized, one text element); null when none is set or the author
+    /// cannot have one (<see cref="AllowsEmoji"/>).</summary>
+    public string? EmojiOf(string email, string name)
+    {
+        string identity = Identity(email, name);
+        return AllowsEmoji(identity) && _emojis.TryGetValue(identity, out string? stored)
+            && DisplayText.Sanitize(stored, 1) is { Length: > 0 } shown
+            ? shown
+            : null;
     }
 
     /// <summary>Drops every drawing (a new device or node size); they are drawn again on use.</summary>
@@ -131,7 +140,7 @@ internal sealed class AvatarRenderer : IDisposable
 
     /// <summary>Whether the author can have an emoji: not without an email, nor a provider's no-reply address, a GitHub
     /// bot or an owner identity.</summary>
-    private static bool AllowsEmoji(string identity)
+    internal static bool AllowsEmoji(string identity)
     {
         if (identity.StartsWith("name:", StringComparison.Ordinal) || identity.StartsWith("owner:", StringComparison.Ordinal)
             || identity.EndsWith("[bot]@users.noreply.github.com", StringComparison.Ordinal))

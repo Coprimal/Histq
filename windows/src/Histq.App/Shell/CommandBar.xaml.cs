@@ -11,7 +11,8 @@ namespace Histq.App.Shell;
 /// <summary>
 /// The command bar at the top of the sheet (design header-and-tab-row.md §1.3, ported from App/Window/HeaderToolbar.swift
 /// at 6fa6d40): the repo dropdown (the selected tab's folder name, "Histq" on a Welcome tab; its menu lists the window's
-/// repo tabs, the recent repos not open here and Open…) and the workspace dropdown (workspace windows only, with its
+/// repo tabs, the recent repos not open here and Open…), the Row Height capsule (the graphs' row density, as on the
+/// Mac) and the workspace dropdown (workspace windows only, with its
 /// read-only or not-saved warning; its menu has the workspace commands and the other recent workspaces). The branch dropdown, the profile chip and the action capsules are absent until the
 /// milestone that implements each action. A ToolBar named "Command bar" in UI Automation.
 /// </summary>
@@ -37,6 +38,25 @@ public sealed partial class CommandBar : UserControl
         InitializeComponent();
         RepoMenu.Opening += (_, _) => FillRepoMenu();
         WorkspaceMenu.Opening += (_, _) => FillWorkspaceMenu();
+        RowHeightMenu.Opening += (_, _) => FillRowHeightMenu();
+    }
+
+    /// <summary>Row Height ▾: Compact, Regular, Comfortable, the current one checked; a pick sets rowDensity for every
+    /// graph at once (HeaderToolbar.rowHeightEntries).</summary>
+    private void FillRowHeightMenu()
+    {
+        RowHeightMenu.Items.Clear();
+        string current = _window.Manager.GraphLook.RowDensity;
+        foreach (string density in new[] { "compact", "regular", "comfortable" })
+        {
+            var item = new ToggleMenuFlyoutItem
+            {
+                Text = char.ToUpperInvariant(density[0]) + density[1..],
+                IsChecked = string.Equals(density, current, StringComparison.Ordinal),
+            };
+            item.Click += (_, _) => _window.Manager.SetRowDensity(density);
+            RowHeightMenu.Items.Add(item);
+        }
     }
 
     internal void Attach(MainWindow window) => _window = window;

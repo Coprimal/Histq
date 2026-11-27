@@ -225,8 +225,9 @@ internal sealed class GraphDateFormatter(string pattern)
 /// <summary>
 /// How the graphs look: the row density (rowDensity: "compact", "regular", "comfortable"), the lane colors (laneColors:
 /// "gradient", else Vivid), the date format (dateFormat), whether other worktrees' commits fade
-/// (graphFadeOtherWorktrees), the avatars (avatarMode) and the authors' emojis (authorEmojis, by identity). Read once at
-/// launch (Windows has no Settings page for them yet, and the graph menu that sets an emoji comes in task 16.2).
+/// (graphFadeOtherWorktrees), the avatars (avatarMode) and the authors' emojis (authorEmojis, by identity). Read at launch
+/// (Windows has no Settings page for them yet); the row density (Row Height ▾) and the emojis (Set Author Emoji…)
+/// change live through <see cref="Shell.WindowManager.GraphLookChanged"/>.
 /// </summary>
 internal sealed record GraphLook(
     string RowDensity, bool Gradient, string DateFormat, bool FadeOtherWorktrees, string AvatarMode,

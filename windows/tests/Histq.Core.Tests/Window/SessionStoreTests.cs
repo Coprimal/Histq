@@ -451,6 +451,36 @@ public sealed class SessionStoreTests
     }
 
     [Fact]
+    public void PreferencesWithUtf8BomAreRead()
+    {
+        using var folder = new TempFolder();
+        var file = folder.Path("preferences.json");
+        File.WriteAllBytes(file, [0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("""{"avatarMode":"initials"}""")]);
+        Assert.Equal("initials", Preferences.Load(file).Get<string>(PrefKey.AvatarMode));
+    }
+
+    [Fact]
+    public void InvalidPreferencesAreMovedAsideWithoutLosingAnEarlierBackup()
+    {
+        using var folder = new TempFolder();
+        var file = folder.Path("preferences.json");
+        byte[] first = Encoding.UTF8.GetBytes("""{"avatarMode":"initials",""");
+        File.WriteAllBytes(file, first);
+        Assert.Equal("generated", Preferences.Load(file).Get<string>(PrefKey.AvatarMode));
+        Assert.False(File.Exists(file));
+        Assert.Equal(first, File.ReadAllBytes(file + ".bak"));
+
+        byte[] second = Encoding.UTF8.GetBytes("not json");
+        File.WriteAllBytes(file, second);
+        Assert.Equal("generated", Preferences.Load(file).Get<string>(PrefKey.AvatarMode));
+        Assert.Equal(first, File.ReadAllBytes(file + ".bak"));
+        string other = Assert.Single(Directory.GetFiles(Path.GetDirectoryName(file)!), path =>
+            Path.GetFileName(path) is var name && name != "preferences.json.bak"
+            && name.StartsWith("preferences.json.", StringComparison.Ordinal) && name.EndsWith(".bak", StringComparison.Ordinal));
+        Assert.Equal(second, File.ReadAllBytes(other));
+    }
+
+    [Fact]
     public void RecentListKeepsTenMostRecentFirstWithoutTouchingTheDisk()
     {
         using var folder = new TempFolder();

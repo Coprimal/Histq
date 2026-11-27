@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-# Data and checks for the Windows spike (phase 5), run on the Mac.
+# Data and checks for the Windows QA runs (the phase 5 spike, the M2 exit), run on the Mac.
 #
 # Usage:
+#   windows/scripts/qa-data.sh fixtures [out]
+#       Builds scripts/make-fixtures.sh's repos (--big 200000 --portable) in a temp folder and zips the graph fixture
+#       and the 200k-commit one into [out] (default ~/Downloads/HistqQA-data): fx-graph.zip (folder graph) and
+#       fx-big-200k.zip (folder big-200k), each unzipped into C:\HistqQA\fx in the VM.
+#   windows/scripts/qa-data.sh check-rows <fixture> <rows.json>
+#       Compares the app's -HistqRowsProbe output with git log of the same fixture on the Mac (LogReader's arguments,
+#       date order): the first rows.json count of commits (50 by default), hash and parents in order, refs as an
+#       unordered set of full ref names (HEAD only when detached; the symbolic refs/remotes/*/HEAD and the refs the log
+#       excludes left out). Prints MATCH, or each difference; exits 1 on any.
+#   windows/scripts/qa-data.sh check-scroll <scroll.json>
+#       The scroll checks of "check" on a repo tab's -HistqScrollProbe output: its run conditions and the frame-time
+#       thresholds (median 17.5, p95 33.4, max 100, draw p95 8 ms).
 #   windows/scripts/qa-data.sh dump <n> [out]
 #       Builds scripts/make-fixtures.sh's big repo with <n> commits in a temp folder (outside the checkout, deleted
 #       afterwards) and writes its history with LogReader's exact git log arguments (date order, the app's default):
@@ -15,7 +27,11 @@
 set -euo pipefail
 
 die() { echo "qa-data: $*" >&2; exit 1; }
-usage() { echo "usage: qa-data.sh dump <n> [out] | check <spike.json> [n]" >&2; exit 2; }
+usage() {
+  echo "usage: qa-data.sh fixtures [out] | check-rows <fixture> <rows.json> | check-scroll <scroll.json>" \
+    "| dump <n> [out] | check <spike.json> [n]" >&2
+  exit 2
+}
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 
@@ -61,16 +77,119 @@ dump() {
   [ "$count" -eq "$n" ] || die "expected $n records, got $count"
 }
 
+fixtures() {
+  [ $# -le 1 ] || usage
+  local out="${1:-$HOME/Downloads/HistqQA-data}"
+  mkdir -p "$out"
+  qa_tmp="$(mktemp -d "${TMPDIR:-/tmp}/histq-qa-fixtures.XXXXXX")"
+  trap 'rm -rf "$qa_tmp"' EXIT
+  "$repo_root/scripts/make-fixtures.sh" "$qa_tmp/fx" --big 200000 --portable >/dev/null
+  mv "$qa_tmp/fx/big" "$qa_tmp/fx/big-200k"
+  local name
+  for name in graph big-200k; do
+    rm -f "$out/fx-$name.zip.partial"
+    ditto -c -k --norsrc --noextattr --keepParent "$qa_tmp/fx/$name" "$out/fx-$name.zip.partial"
+    mv "$out/fx-$name.zip.partial" "$out/fx-$name.zip"
+    echo "$out/fx-$name.zip"
+  done
+}
+
+check_rows() {
+  [ $# -eq 2 ] || usage
+  local fixture="$1" rows="$2"
+  [ -d "$fixture" ] || die "no such folder: $fixture"
+  [ -f "$rows" ] || die "no such file: $rows"
+  qa_tmp="$(mktemp -d "${TMPDIR:-/tmp}/histq-qa-rows.XXXXXX")"
+  trap 'rm -rf "$qa_tmp"' EXIT
+  # LogReader's arguments (date order, the app's default) with full ref names in %D, without the user's or the
+  # system's git config (as the read environment).
+  env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$fixture" log \
+    --exclude=refs/stash '--exclude=refs/notes/*' '--exclude=refs/prefetch/*' '--exclude=refs/remotes/*/HEAD' --all \
+    --date-order --decorate=full '--format=%H%x1f%P%x1f%D' >"$qa_tmp/log"
+  python3 -I - "$rows" "$qa_tmp/log" <<'PY'
+import json
+import re
+import sys
+
+rows_path, log_path = sys.argv[1], sys.argv[2]
+with open(rows_path, encoding="utf-8-sig") as f:
+    probe = json.load(f)
+if probe.get("error"):
+    print(f"FAIL  rows.json error: {probe['error']}")
+    sys.exit(1)
+rows = probe.get("rows")
+if not isinstance(rows, list) or not rows:
+    print("FAIL  rows.json has no rows")
+    sys.exit(1)
+
+# Refs the app never lists: symbolic remote HEADs and what the log excludes.
+EXCLUDED = re.compile(r"^refs/(stash$|notes/|prefetch/|remotes/[^/]+/HEAD$)")
+
+
+def refs_of(decoration):
+    refs = set()
+    for part in filter(None, (p.strip() for p in decoration.split(","))):
+        if part.startswith("HEAD -> "):
+            part = part[len("HEAD -> "):]
+        elif part.startswith("tag: "):
+            part = part[len("tag: "):]
+        if not EXCLUDED.match(part):
+            refs.add(part)
+    return refs
+
+
+expected = []
+with open(log_path, encoding="utf-8") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        sha, parents, decoration = (line.split("\x1f") + ["", ""])[:3]
+        expected.append({"hash": sha, "parents": parents.split() if parents else [], "refs": refs_of(decoration)})
+        if len(expected) == len(rows):
+            break
+
+differences = []
+if len(expected) < len(rows):
+    differences.append(f"git log has {len(expected)} commits, rows.json {len(rows)}")
+for index, (want, got) in enumerate(zip(expected, rows)):
+    if got.get("hash") != want["hash"]:
+        differences.append(f"row {index}: hash {got.get('hash')} != {want['hash']}")
+    if list(got.get("parents") or []) != want["parents"]:
+        differences.append(f"row {index}: parents {got.get('parents')} != {want['parents']}")
+    if set(got.get("refs") or []) != want["refs"]:
+        differences.append(f"row {index}: refs {sorted(got.get('refs') or [])} != {sorted(want['refs'])}")
+
+if differences:
+    for difference in differences:
+        print(f"DIFF  {difference}")
+    print(f"FAIL  {len(differences)} differences in the first {len(rows)} rows")
+    sys.exit(1)
+print(f"MATCH  the first {len(rows)} rows (hash, parents, refs)")
+PY
+}
+
 check() {
   [ $# -ge 1 ] && [ $# -le 2 ] || usage
   local file="$1" n="${2:-1000000}"
   [ -f "$file" ] || die "no such file: $file"
   is_count "$n" || die "[n] must be a positive number"
-  python3 -I - "$file" "$n" <<'PY'
+  check_probe spike "$file" "$n"
+}
+
+check_scroll() {
+  [ $# -eq 1 ] || usage
+  [ -f "$1" ] || die "no such file: $1"
+  check_probe scroll "$1" 0
+}
+
+# check_probe spike|scroll <file> <n>: spike.json (every gate check) or scroll.json (the scroll probe's only).
+check_probe() {
+  python3 -I - "$@" <<'PY'
 import json
 import sys
 
-path, expected = sys.argv[1], int(sys.argv[2])
+mode, path, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(path, encoding="utf-8") as f:
     probe = json.load(f)
 
@@ -97,9 +216,10 @@ if probe.get("error"):
     check("error", False, probe["error"])
 
 parsed = number("parsedCommits")
-check(f"parsedCommits == {expected}", parsed == expected, probe.get("parsedCommits"))
-at_most("firstRowsMs", 1500)
-at_most("fullLoadMs", 15000)
+if mode == "spike":
+    check(f"parsedCommits == {expected}", parsed == expected, probe.get("parsedCommits"))
+    at_most("firstRowsMs", 1500)
+    at_most("fullLoadMs", 15000)
 
 if probe.get("probes") == "skipped":
     print('SKIP  all probe checks: "probes": "skipped" (an interactive -HistqScrollProbe 0 run)')
@@ -121,6 +241,12 @@ at_most("frameIntervalMedianMs", 17.5)
 at_most("frameIntervalP95Ms", 33.4)
 at_most("frameIntervalMaxMs", 100)
 at_most("drawMsP95", 8)
+
+if mode == "scroll":
+    print(f"INFO  parsedCommits (graph rows): {json.dumps(probe.get('parsedCommits'))}")
+    for key in ("scrollPacing", "pacingDrawSteps", "pacingTimerSteps", "intervalsOver33", "intervalsOver100", "topIntervalsMs"):
+        print(f"INFO  {key}: {json.dumps(probe[key]) if key in probe else '(absent)'}")
+    sys.exit(1 if failed else 0)
 
 last = number("lastRowIndex")
 check("lastRowIndex == parsedCommits - 1", parsed is not None and last == parsed - 1, probe.get("lastRowIndex"))
@@ -236,6 +362,9 @@ PY
 command="$1"
 shift
 case "$command" in
+  fixtures) fixtures "$@" ;;
+  check-rows) check_rows "$@" ;;
+  check-scroll) check_scroll "$@" ;;
   dump) dump "$@" ;;
   check) check "$@" ;;
   *) usage ;;

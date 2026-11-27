@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Histq.App.Graph;
 using Histq.App.Shell.Tabs;
+using Histq.App.Sidebar;
 using Histq.Core;
 using Histq.Platform.IO;
 using Histq.Platform.UI;
@@ -94,6 +95,7 @@ internal sealed partial class WindowManager
         _panelWidths = PanelWidths.Decode(preferences.Get<string>(PrefKey.PanelWidths));
         _graphColumns = GraphColumnSettings.Read(preferences);
         GraphLook = GraphLook.Read(preferences);
+        SidebarSections = SidebarSections.Read(preferences);
         _store.WriteResult = OnWorkspaceWritten;
     }
 
@@ -104,8 +106,17 @@ internal sealed partial class WindowManager
     /// graphShowDate), one value for every tab and window, as on the Mac.</summary>
     internal GraphColumnSettings GraphColumns => _graphColumns;
 
-    /// <summary>The graphs' row density, lane colors, date format and worktree fading, as read at launch.</summary>
-    internal GraphLook GraphLook { get; }
+    /// <summary>The graphs' row density, lane colors, date format, worktree fading, avatars and authors' emojis: read at
+    /// launch; the row density (<see cref="SetRowDensity"/>) and the emojis (<see cref="SetAuthorEmoji"/>) change live,
+    /// every graph told through <see cref="GraphLookChanged"/>.</summary>
+    internal GraphLook GraphLook { get; private set; }
+
+    /// <summary>The row density or an author's emoji changed: every graph takes <see cref="GraphLook"/>.</summary>
+    public event EventHandler? GraphLookChanged;
+
+    /// <summary>The sidebars' card order and hidden cards (sidebarSectionOrder, hiddenSidebarSections), as read at
+    /// launch.</summary>
+    internal SidebarSections SidebarSections { get; }
 
     /// <summary>A divider drag ended and changed <see cref="PanelWidths"/>: every repo layout takes the new widths.</summary>
     public event EventHandler? PanelWidthsChanged;
@@ -237,6 +248,65 @@ internal sealed partial class WindowManager
         _panelWidths = widths;
         _ = SetPreference(PrefKey.PanelWidths, widths.Encoded);
         PanelWidthsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Row Height ▾: the graphs' row density ("compact", "regular", "comfortable"), for every graph at once,
+    /// and saved (rowDensity).</summary>
+    internal void SetRowDensity(string density)
+    {
+        if (string.Equals(density, GraphLook.RowDensity, StringComparison.Ordinal))
+            return;
+        GraphLook = GraphLook with { RowDensity = density };
+        _ = SetPreference(PrefKey.RowDensity, density);
+        GraphLookChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Set Author Emoji… / Remove Author Emoji: <paramref name="emoji"/> (null removes it) as the avatar of the
+    /// author <paramref name="identity"/> (<see cref="AvatarRenderer.Identity"/>) in every graph, saved app-wide
+    /// (authorEmojis).</summary>
+    internal void SetAuthorEmoji(string identity, string? emoji)
+    {
+        var emojis = new Dictionary<string, string>(GraphLook.AuthorEmojis, StringComparer.Ordinal);
+        bool changed = emoji is null ? emojis.Remove(identity)
+            : !(emojis.TryGetValue(identity, out string? old) && string.Equals(old, emoji, StringComparison.Ordinal));
+        if (!changed)
+            return;
+        if (emoji is not null)
+            emojis[identity] = emoji;
+        GraphLook = GraphLook with { AuthorEmojis = emojis };
+        _ = SetPreference(PrefKey.AuthorEmojis, emojis);
+        GraphLookChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Saves a repo tab's graph view (hidden, soloed, pinned branches, hide stale) as on the Mac (RepoSession.saveView):
+    /// a workspace window's into its workspace (written with the session), else the folder's own file
+    /// (<see cref="RepoViewState.FileFor"/>), on the preference writes' worker, which a quit waits for.
+    /// </summary>
+    internal void SaveRepoView(MainWindow window, string repoPath, RepoViewState view)
+    {
+        if (OpenWorkspaceOf(window) is { } workspace)
+        {
+            if (workspace.SetView(view, repoPath))
+                _store.Schedule();
+            return;
+        }
+
+        string root = ((App)Application.Current).StatePaths.Root;
+        _ = Persist(() => view.Save(RepoViewState.FileFor(root, repoPath)), "repo view");
+    }
+
+    /// <summary>A workspace window's stored view of <paramref name="repoPath"/>; null in an Untitled window or for a
+    /// repo new to the workspace (its tab then starts from the folder's own file).</summary>
+    internal RepoViewState? WorkspaceView(MainWindow window, string repoPath) =>
+        OpenWorkspaceOf(window)?.View(repoPath);
+
+    /// <summary>A workspace window's repo with no stored view yet: the view its tab started from is recorded, as on the
+    /// Mac, so its file keeps it.</summary>
+    internal void RecordWorkspaceView(MainWindow window, string repoPath, RepoViewState view)
+    {
+        if (OpenWorkspaceOf(window) is { } workspace && workspace.View(repoPath) is null && workspace.SetView(view, repoPath))
+            _store.Schedule();
     }
 
     /// <summary>A graph's column drag ended, or a column was shown or hidden: kept for every graph at once (they are

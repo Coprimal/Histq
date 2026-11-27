@@ -27,6 +27,46 @@ public sealed record RepoViewState(
 
     public override int GetHashCode() => HashCode.Combine(Hidden.Count, Solo.Count, Pinned.Count, HideStale);
 
+    /// <summary>Where an Untitled window's view of the worktree at <paramref name="repoPath"/> is saved:
+    /// <c>&lt;stateRoot&gt;/repo-view/&lt;stateKey&gt;.json</c> (<see cref="RepoKeys.StateKey"/>, which reads the disk: call
+    /// it off the UI thread).</summary>
+    public static string FileFor(string stateRoot, string repoPath) =>
+        Path.Combine(stateRoot, "repo-view", RepoKeys.StateKey(repoPath) + ".json");
+
+    /// <summary>A view file larger than this is not read (no saved view comes near it).</summary>
+    public const int MaxFileSize = 1024 * 1024;
+
+    /// <summary>The view saved in <paramref name="file"/>; a missing, unreadable or invalid file, or one larger than
+    /// <see cref="MaxFileSize"/>, reads as <see cref="Empty"/>.</summary>
+    public static RepoViewState Load(string file)
+    {
+        try
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (stream.Length > MaxFileSize)
+            {
+                return Empty;
+            }
+
+            var data = new byte[MaxFileSize + 1];
+            var length = 0;
+            int read;
+            while (length < data.Length && (read = stream.Read(data, length, data.Length - length)) > 0)
+            {
+                length += read;
+            }
+
+            return length > MaxFileSize ? Empty : SwiftJson.Deserialize<RepoViewState>(data.AsSpan(0, length));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return Empty;
+        }
+    }
+
+    /// <summary>Writes the view to <paramref name="file"/> atomically (its folder made when missing).</summary>
+    public void Save(string file) => AtomicFile.Write(file, SwiftJson.Serialize(this, SwiftJsonFormatting.None));
+
     /// <summary>Reads each field leniently (missing or null is its default, other keys are ignored) and writes all four.</summary>
     private sealed class RepoViewStateJsonConverter : JsonConverter<RepoViewState>
     {

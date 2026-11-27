@@ -133,7 +133,7 @@ public sealed record LogFilter(
     /// hiding <paramref name="local"/> hides too; not a branch others may track as well (<c>feature</c> made from
     /// <c>origin/main</c>).
     /// </summary>
-    internal static bool TracksOwnName(LocalBranch local)
+    public static bool TracksOwnName(LocalBranch local)
     {
         if (local.Upstream is not { } upstream)
         {

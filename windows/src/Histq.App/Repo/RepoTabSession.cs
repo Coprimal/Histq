@@ -24,7 +24,8 @@ namespace Histq.App.Repo;
 /// <para>
 /// The refs are read beside each load (<see cref="RefReader"/>, the same read environment) and become the commits'
 /// badges (<see cref="RefBadge.For"/>), handed out with the rows: with the first page when they are read by then, with
-/// the complete log always.
+/// the complete log always. The refs themselves, the worktree list and the snapshot's stashes go out in the same
+/// <see cref="GraphData"/>, which the sidebar lists (no read of its own).
 /// </para>
 /// <para>
 /// After the first log, the worktree list is read with each other worktree's change count, in its own folder with its
@@ -37,14 +38,18 @@ namespace Histq.App.Repo;
 /// queue: one read runs at a time, and requests made meanwhile run once after it.
 /// </para>
 /// <para>
-/// Not ported yet: hidden, soloed and pinned branches (<see cref="LogFilter.None"/>: the saved view is not kept per
-/// repo outside a workspace yet). The subjects are sanitized for display here, off the UI thread
+/// The graph's view (hidden, soloed and pinned branches, hide stale: <see cref="RepoViewState"/>) is the repo layout's:
+/// a workspace's own is given at construction, else the folder's own file is read before the first load
+/// (<see cref="ViewLoaded"/>); <see cref="SetView"/> hands a changed one over and reloads. Each load reads the log
+/// through <see cref="LogFilter.For"/> of the view against the refs (read first when the view is not empty, so a hidden
+/// branch never shows); when the refs read with it give another filter, the log is read once more. The badges leave the
+/// hidden refs out; <see cref="GraphData.Refs"/> keeps them all (the sidebar lists them). The subjects are sanitized for display here, off the UI thread
 /// (<see cref="DisplayText.Sanitize"/>), only for commits a previous snapshot did not have (an incremental reload reuses
 /// its Commit objects); the badges' names when they are made; author names, stash messages and worktree names stay raw
 /// in the data and are sanitized where the graph shows them.
 /// </para>
 /// </summary>
-internal sealed class RepoTabSession : IDisposable
+internal sealed partial class RepoTabSession : IDisposable
 {
     /// <summary>The driver listings of every tab's read environment (it is keyed by folder, git and environment).</summary>
     private static readonly ReadEnvironmentCache ReadCache = new();
@@ -56,6 +61,18 @@ internal sealed class RepoTabSession : IDisposable
     private readonly Preferences _preferences;
     private readonly bool _fadeWorktrees;
     private readonly string? _ownStateDir;
+
+    /// <summary>The graph's view (under _gate): the layout's last one; null until given or read.</summary>
+    private RepoViewState? _view;
+
+    /// <summary>The folder's own view file was read (or not needed): the pump's.</summary>
+    private bool _viewRead;
+
+    /// <summary>The view read from the folder's file, waiting for the UI thread (under _gate).</summary>
+    private RepoViewState? _pendingView;
+
+    /// <summary>The filter the last log was read with (the pump's): the badges leave its hidden refs out.</summary>
+    private LogFilter _filter = LogFilter.None;
     private readonly DispatcherQueue _dispatcher;
     private readonly CancellationTokenSource _cancel = new();
 
@@ -92,6 +109,7 @@ internal sealed class RepoTabSession : IDisposable
     private bool _noDirectories;
     private RepoSnapshot? _complete;
     private IReadOnlyList<WorktreeInfo> _worktrees = [];
+    private bool _worktreesRead;
     private WorktreeFade? _fade;
     private Refs? _refs;
     private IReadOnlyDictionary<string, RefBadge[]>? _badges;
@@ -109,9 +127,13 @@ internal sealed class RepoTabSession : IDisposable
     /// <param name="fadeWorktrees">Other worktrees' commits fade (graphFadeOtherWorktrees): their reach is computed.</param>
     /// <param name="ownStateDir">Histq's own state folder: the watcher ignores its changes (a repo holding it).</param>
     /// <param name="dispatcher">The UI thread's queue, where every event is raised.</param>
+    /// <param name="view">The graph's view the workspace holds for this repo; null to read the folder's own file
+    /// (<see cref="RepoViewState.FileFor"/> under <paramref name="ownStateDir"/>).</param>
     public RepoTabSession(
-        string path, Preferences preferences, bool fadeWorktrees, string? ownStateDir, DispatcherQueue dispatcher)
+        string path, Preferences preferences, bool fadeWorktrees, string? ownStateDir, DispatcherQueue dispatcher,
+        RepoViewState? view = null)
     {
+        _view = view;
         _path = path;
         _preferences = preferences;
         _fadeWorktrees = fadeWorktrees;
@@ -124,6 +146,19 @@ internal sealed class RepoTabSession : IDisposable
 
     /// <summary>The first load failed: the message to show (sanitized). UI thread.</summary>
     public event Action<string>? Failed;
+
+    /// <summary>The folder's own saved view, read before the first load when none was given (raised before the first
+    /// <see cref="Loaded"/>); not raised when <see cref="SetView"/> came first. UI thread.</summary>
+    public event Action<RepoViewState>? ViewLoaded;
+
+    /// <summary>The graph's view changed (a Hide, Solo, Pin, Show All…): the log is read again through it. UI
+    /// thread.</summary>
+    public void SetView(RepoViewState view)
+    {
+        lock (_gate)
+            _view = view;
+        Request(load: true);
+    }
 
     /// <summary>Starts the load on a worker; at most once. Call on the UI thread after hooking the events.</summary>
     public void Start()
@@ -245,6 +280,7 @@ internal sealed class RepoTabSession : IDisposable
     private async Task PassAsync(bool load, bool worktrees, bool check, bool status, CancellationToken ct)
     {
         await PrepareAsync(ct).ConfigureAwait(false);
+        ReadView();
         if (_complete is null)
             load = true;
         if (!load && check && _complete is not null && await ChangedAsync(_complete, ct).ConfigureAwait(false))
@@ -265,10 +301,14 @@ internal sealed class RepoTabSession : IDisposable
 
         if (!worktrees || _complete is null)
             return;
-        IReadOnlyList<WorktreeInfo> list = await ReadWorktreesAsync(ct).ConfigureAwait(false);
+        // Null: this worktree's folder is not known this pass (a timeout); the list waits for the next read.
+        if (await ReadWorktreesAsync(ct).ConfigureAwait(false) is not { } list)
+            return;
         bool rowsChanged = !Dirty(list).SequenceEqual(_complete.Worktrees);
-        bool listChanged = !list.SequenceEqual(_worktrees);
+        // The first list read is handed out even when it is empty: the sidebar's Worktrees card waits for it.
+        bool listChanged = !list.SequenceEqual(_worktrees) || !_worktreesRead;
         _worktrees = list;
+        _worktreesRead = true;
         if (rowsChanged)
         {
             await LoadAsync(ct).ConfigureAwait(false);
@@ -278,7 +318,7 @@ internal sealed class RepoTabSession : IDisposable
             // Only counts or worktrees without a row changed: the same rows, other labels, badges and reach.
             _fade = Fade(_complete, ct);
             _badges = Badges();
-            Post(new GraphData(_complete, _worktrees, _fade, _badges));
+            Post(Data(_complete, _fade));
         }
     }
 
@@ -296,11 +336,60 @@ internal sealed class RepoTabSession : IDisposable
         _loader = new RepoLoader(runner, _path, @base, ReadCache);
     }
 
+    /// <summary>Reads the folder's own view file once, unless a view was given or set; it goes to the UI thread before
+    /// the first rows.</summary>
+    private void ReadView()
+    {
+        if (_viewRead)
+            return;
+        _viewRead = true;
+        lock (_gate)
+        {
+            if (_view is not null)
+                return;
+        }
+
+        RepoViewState read = _ownStateDir is null
+            ? RepoViewState.Empty
+            : RepoViewState.Load(RepoViewState.FileFor(_ownStateDir, _path));
+        lock (_gate)
+        {
+            if (_view is not null)
+                return;
+            _view = read;
+            _pendingView = read;
+            if (_drainQueued)
+                return;
+            _drainQueued = true;
+        }
+
+        Enqueue();
+    }
+
+    /// <summary>What the graph leaves out for <paramref name="view"/> against the last refs; none before they are read.</summary>
+    private LogFilter FilterFor(RepoViewState view) =>
+        view.Equals(RepoViewState.Empty) || _refs is not { } refs ? LogFilter.None : LogFilter.For(view, refs);
+
     /// <summary>
-    /// Loads the log: the whole history the first time (its first page handed out as soon as it is laid out), else a
-    /// reload from the last complete snapshot (only the new commits when that can be proven safe).
+    /// Loads the log through the view's filter (<see cref="LoadOnceAsync"/>); when the refs read beside it give another
+    /// filter (a branch made, deleted or moved), once more with the new one.
     /// </summary>
     private async Task LoadAsync(CancellationToken ct)
+    {
+        RepoViewState view;
+        lock (_gate)
+            view = _view ?? RepoViewState.Empty;
+        LogFilter used = await LoadOnceAsync(view, ct).ConfigureAwait(false);
+        if (!FilterFor(view).Equals(used))
+            await LoadOnceAsync(view, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Loads the log once: the whole history the first time (its first page handed out as soon as it is laid out), else a
+    /// reload from the last complete snapshot (only the new commits when that can be proven safe). Returns the filter it
+    /// was read with.
+    /// </summary>
+    private async Task<LogFilter> LoadOnceAsync(RepoViewState view, CancellationToken ct)
     {
         int generation = ++_generation;
         LogReader.Order order = RepoLoader.OrderFrom(_preferences.Get<string>(PrefKey.CommitOrder));
@@ -311,10 +400,15 @@ internal sealed class RepoTabSession : IDisposable
         // The refs beside the log: the first page has the badges only when they are read by then (it never waits for
         // them), the complete log always.
         Task<Refs?> refs = ReadRefsAsync(ct);
+        // A saved view needs the refs before the log: a hidden branch never shows, even on the first page.
+        if (!view.Equals(RepoViewState.Empty) && _refs is null)
+            _refs = await refs.ConfigureAwait(false);
+        LogFilter filter = FilterFor(view);
+        _filter = filter;
         if (previous is null)
         {
             snapshot = await _loader!.LoadAsync(
-                generation, LogFilter.None, dirty, order, coloring,
+                generation, filter, dirty, order, coloring,
                 firstPage: page =>
                 {
                     if (refs.IsCompletedSuccessfully)
@@ -324,14 +418,14 @@ internal sealed class RepoTabSession : IDisposable
                     }
 
                     _shownAny = true;
-                    Post(new GraphData(Sanitized(page, null), _worktrees, null, _badges));
+                    Post(Data(Sanitized(page, null), null));
                     return Task.CompletedTask;
                 },
                 ct).ConfigureAwait(false);
         }
         else
         {
-            snapshot = await _loader!.ReloadAsync(previous, generation, LogFilter.None, dirty, order, coloring, ct)
+            snapshot = await _loader!.ReloadAsync(previous, generation, filter, dirty, order, coloring, ct)
                 .ConfigureAwait(false);
         }
 
@@ -341,7 +435,8 @@ internal sealed class RepoTabSession : IDisposable
         _complete = Sanitized(snapshot, previous);
         _shownAny = true;
         _fade = Fade(_complete, ct);
-        Post(new GraphData(_complete, _worktrees, _fade, _badges));
+        Post(Data(_complete, _fade));
+        return filter;
     }
 
     /// <summary>The status, the stash list or the refs are not those <paramref name="snapshot"/> and its badges were
@@ -377,7 +472,7 @@ internal sealed class RepoTabSession : IDisposable
         if (!Equals(status, snapshot.Status))
         {
             _complete = snapshot with { Status = status };
-            Post(new GraphData(_complete, _worktrees, _fade, _badges));
+            Post(Data(_complete, _fade));
         }
 
         return false;
@@ -386,7 +481,8 @@ internal sealed class RepoTabSession : IDisposable
     /// <summary>
     /// Starts watching the repo's worktree and git dirs (<see cref="RepoWatcher"/>), once: a refs or log change reloads
     /// the log and the worktrees, a status change reads the status again. A repo that cannot be watched is not, without
-    /// a word (as on the Mac); the tab then refreshes only when shown again.
+    /// a word (as on the Mac); the tab then refreshes only when shown again. Folders not resolved this time (a timeout,
+    /// git not started) are tried again by the next pass.
     /// </summary>
     private async Task StartWatcherAsync(CancellationToken ct)
     {
@@ -395,7 +491,12 @@ internal sealed class RepoTabSession : IDisposable
         {
             Dictionary<string, string> env = await ReadEnvironmentAsync(_path, ct).ConfigureAwait(false);
             if (await DirectoriesAsync(env, ct).ConfigureAwait(false) is not { } directories)
+            {
+                // Not resolved this time (a timeout, git not started): the next pass tries again.
+                _watchTried = _noDirectories;
                 return;
+            }
+
             var watcher = new RepoWatcher(_ownStateDir);
             watcher.Start(directories, OnWatcherChange);
             lock (_gate)
@@ -452,12 +553,21 @@ internal sealed class RepoTabSession : IDisposable
         }
     }
 
-    /// <summary>The badges of the last refs read, with the branches checked out in the other worktrees (and in the
-    /// linked ones) marked; null before the refs are read.</summary>
+    /// <summary>The badges of the last refs read but those the log's filter hides, with the branches checked out in the
+    /// other worktrees (and in the linked ones) marked; null before the refs are read.</summary>
     private IReadOnlyDictionary<string, RefBadge[]>? Badges()
     {
-        if (_refs is not { } refs)
+        if (_refs is not { } all)
             return null;
+        IReadOnlySet<string> hidden = _filter.Hidden;
+        Refs refs = hidden.Count == 0
+            ? all
+            : all with
+            {
+                LocalBranches = [.. all.LocalBranches.Where(branch => !hidden.Contains(branch.RefName))],
+                RemoteBranches = [.. all.RemoteBranches.Where(branch => !hidden.Contains(branch.RefName))],
+                Tags = [.. all.Tags.Where(tag => !hidden.Contains(tag.RefName))],
+            };
         var other = new HashSet<string>(StringComparer.Ordinal);
         var linked = new HashSet<string>(StringComparer.Ordinal);
         foreach (WorktreeInfo info in _worktrees)
@@ -479,11 +589,15 @@ internal sealed class RepoTabSession : IDisposable
     /// missing (prunable), network and device ones are not read. The tab's own worktree is the one whose real path is
     /// this repo's top folder (none in a bare or network repo, whose top folder is not resolved).
     /// </summary>
-    private async Task<IReadOnlyList<WorktreeInfo>> ReadWorktreesAsync(CancellationToken ct)
+    private async Task<IReadOnlyList<WorktreeInfo>?> ReadWorktreesAsync(CancellationToken ct)
     {
         Dictionary<string, string> env = await ReadEnvironmentAsync(_path, ct).ConfigureAwait(false);
-        // A bare repo (no top folder) or a network one (never probed): no worktree is this tab's own.
-        string? current = (await DirectoriesAsync(env, ct).ConfigureAwait(false))?.Worktree;
+        // A bare repo (no top folder) or a network one (never probed): no worktree is this tab's own. Folders not
+        // resolved this time (a timeout): no list, rather than one with this tab's own worktree as another's.
+        RepoDirectories? directories = await DirectoriesAsync(env, ct).ConfigureAwait(false);
+        if (directories is null && !_noDirectories)
+            return null;
+        string? current = directories?.Worktree;
         IReadOnlyList<Worktree> list = await StashWorktreeReader.WorktreesAsync(_runner!, _path, env, ct)
             .ConfigureAwait(false);
         WorktreeInfo[] infos = await Task.WhenAll(list.Select(worktree => InfoAsync(worktree, current, ct)))
@@ -520,6 +634,7 @@ internal sealed class RepoTabSession : IDisposable
     /// <summary>
     /// The repo's folders (<see cref="RepoDirectories"/>), resolved once; null for a bare repo (no top folder) or a
     /// network or device one (refused, never probed), which is remembered for the session's life: it is not tried again.
+    /// A timeout or a git that could not start is only this pass's null: the next pass tries again.
     /// </summary>
     private async Task<RepoDirectories?> DirectoriesAsync(IReadOnlyDictionary<string, string> env, CancellationToken ct)
     {
@@ -529,9 +644,13 @@ internal sealed class RepoTabSession : IDisposable
         {
             _directories = await RepoDirectories.ResolveAsync(_runner!, _path, env, ct).ConfigureAwait(false);
         }
-        catch (GitError)
+        catch (GitError error) when (error.Kind is not (GitErrorKind.Timeout or GitErrorKind.LaunchFailed))
         {
             _noDirectories = true;
+        }
+        catch (GitError error)
+        {
+            Debug.WriteLine($"RepoTabSession: the repo's folders not resolved this time: {error.Message}");
         }
 
         return _directories;
@@ -590,6 +709,11 @@ internal sealed class RepoTabSession : IDisposable
         return sanitized is null ? snapshot : snapshot with { Commits = sanitized };
     }
 
+    /// <summary>The graph's and the sidebar's data for <paramref name="snapshot"/>: the worktrees, badges and refs as
+    /// read last.</summary>
+    private GraphData Data(RepoSnapshot snapshot, WorktreeFade? fade) =>
+        new(snapshot, _worktrees, fade, _badges, _refs, _worktreesRead);
+
     /// <summary>Hands <paramref name="data"/> to the UI thread, in place of any data still waiting. Any thread.</summary>
     private void Post(GraphData data)
     {
@@ -632,11 +756,13 @@ internal sealed class RepoTabSession : IDisposable
     {
         GraphData? data;
         string? failure;
+        RepoViewState? view;
         lock (_gate)
         {
-            (data, failure) = (_pending, _failure);
+            (data, failure, view) = (_pending, _failure, _pendingView);
             _pending = null;
             _failure = null;
+            _pendingView = null;
             _drainQueued = false;
         }
 
@@ -644,6 +770,8 @@ internal sealed class RepoTabSession : IDisposable
             return;
         try
         {
+            if (view is not null)
+                ViewLoaded?.Invoke(view);
             if (data is not null)
                 Loaded?.Invoke(data);
             else if (failure is not null)
