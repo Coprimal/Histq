@@ -8,7 +8,7 @@
     x:Class="Histq.App.Shell.TitleBar"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:shell="using:Histq.App.Shell"
+    xmlns:tabs="using:Histq.App.Shell.Tabs"
     Height="{StaticResource TitleBarHeight}">
     <UserControl.Resources>
         <!-- The logo: no capsule, hover fill white 0.10, pressed 0.20 (design §1). -->
@@ -52,15 +52,17 @@
             </Button.Flyout>
         </Button>
 
-        <!-- Tab strip host: placeholder tabs (phase 9 makes the real row). Tabs are 36 epx tall on the row's bottom
-             edge; the 12 epx above them always drag the window. -->
+        <!-- The tab row (Shell/Tabs/TabStrip), given the whole star column: it lays its parts out from the left and
+             clips what a narrow window cannot hold. Tabs are 36 epx tall on the row's bottom edge; the 12 epx above them
+             always drag the window, and so does the column's space after All Tabs (only the strip's items are
+             Passthrough). -->
         <Border
             x:Name="TabStripHost"
             Grid.Column="2"
             Height="{StaticResource TabHeight}"
-            HorizontalAlignment="Left"
+            HorizontalAlignment="Stretch"
             VerticalAlignment="Bottom">
-            <shell:SpikeTabStrip x:Name="Strip" />
+            <tabs:TabStrip x:Name="Strip" />
         </Border>
     </Grid>
 </UserControl>

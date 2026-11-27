@@ -1,4 +1,3 @@
-using System.Globalization;
 using Histq.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -50,8 +49,8 @@ public sealed partial class CommandBar : UserControl
             return;
         _repoShown = true;
         _repoPath = path;
-        RepoTitle.Text = path is null ? "Histq" : PathFlavor.Host.LastComponent(path);
-        ToolTipService.SetToolTip(RepoButton, path ?? "Switch repository");
+        RepoTitle.Text = path is null ? "Histq" : DisplayText.Sanitize(PathFlavor.Host.LastComponent(path));
+        ToolTipService.SetToolTip(RepoButton, path is null ? "Switch repository" : DisplayText.Sanitize(path));
     }
 
     /// <summary>
@@ -68,9 +67,9 @@ public sealed partial class CommandBar : UserControl
             return;
         }
 
-        string name = Truncated(workspace.Name, WorkspaceNameLimit);
-        string path = workspace.FilePath;
-        string reason = workspace.WriteError ?? "the file could not be written";
+        string name = DisplayText.Sanitize(workspace.Name, WorkspaceNameLimit);
+        string path = DisplayText.Sanitize(workspace.FilePath);
+        string reason = workspace.WriteError is { } error ? DisplayText.Sanitize(error) : "the file could not be written";
         (string Text, string ToolTip, bool IsWarning) shown = workspace.IsReadOnly
             ? (name,
                 $"{path}\nRead-only: made by a newer Histq, so changes to this workspace are not saved. "
@@ -118,10 +117,10 @@ public sealed partial class CommandBar : UserControl
             Guid id = tab.Id;
             var item = new ToggleMenuFlyoutItem
             {
-                Text = flavor.LastComponent(path),
+                Text = DisplayText.Sanitize(flavor.LastComponent(path)),
                 IsChecked = id == tabs.SelectedTabId,
             };
-            ToolTipService.SetToolTip(item, path);
+            ToolTipService.SetToolTip(item, DisplayText.Sanitize(path));
             item.Click += (_, _) => _window.Apply(model => model.SelectTab(id));
             RepoMenu.Items.Add(item);
         }
@@ -133,8 +132,8 @@ public sealed partial class CommandBar : UserControl
             RepoMenu.Items.Add(new MenuFlyoutItem { Text = "Recent", IsEnabled = false });
             foreach (string path in recent)
             {
-                var item = new MenuFlyoutItem { Text = flavor.LastComponent(path) };
-                ToolTipService.SetToolTip(item, path);
+                var item = new MenuFlyoutItem { Text = DisplayText.Sanitize(flavor.LastComponent(path)) };
+                ToolTipService.SetToolTip(item, DisplayText.Sanitize(path));
                 item.Click += (_, _) => _window.Manager.OpenRepo(_window, path);
                 RepoMenu.Items.Add(item);
             }
@@ -151,14 +150,6 @@ public sealed partial class CommandBar : UserControl
     {
         if (RepoMenu.Items.Count > 0)
             RepoMenu.Items.Add(new MenuFlyoutSeparator());
-    }
-
-    /// <summary><paramref name="text"/> cut to <paramref name="limit"/> characters (user-perceived), the last one an
-    /// ellipsis.</summary>
-    private static string Truncated(string text, int limit)
-    {
-        var info = new StringInfo(text);
-        return info.LengthInTextElements > limit ? info.SubstringByTextElements(0, limit - 1) + "…" : text;
     }
 }
 

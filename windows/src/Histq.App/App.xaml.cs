@@ -40,9 +40,15 @@ public partial class App : Application
         LoadedSession = SessionLoad.GetAwaiter().GetResult();
 
         // Made here, on the UI thread, so its debounce runs on this thread's context.
+        // A failed write is reported on the writer thread (during quit's Flush too): logged there in full, shown as a
+        // generic toast on the UI thread without waiting for it (the error names the state path and so the user).
         var sessionStore = new SessionStore(SessionStore.In(StatePaths))
         {
-            SessionWriteFailed = error => Trace.WriteLine($"Histq: session.json not saved: {error.Message}"),
+            SessionWriteFailed = error =>
+            {
+                Trace.WriteLine($"Histq: session.json not saved: {error}");
+                _dispatcher.TryEnqueue(() => _windows?.ShowSessionWriteFailed());
+            },
         };
 
         Preferences preferences = PreferencesLoad.GetAwaiter().GetResult();

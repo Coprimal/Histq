@@ -118,6 +118,43 @@ public sealed class WindowTabsTests
     }
 
     [Fact]
+    public void ReopenWithDeferredFolderCheckComesBackAtOnceThenTakesTheCheck()
+    {
+        var probed = new List<string>();
+        var model = new WindowTabs(PathFlavor.Posix, Record(probed, false));
+        model.OpenTab("/r/a");
+        model.OpenTab("/r/b");
+        model.CloseTab(Id(model, "/r/b"));
+        IReadOnlyList<(Guid Id, string Path)>? asked = null;
+        model.FolderChecksNeeded = requests => asked = requests;
+
+        model.ReopenClosedTab();
+
+        // No probe in the call: the tab is back, selected and found, and its folder is handed out to be checked.
+        Assert.Empty(probed);
+        Assert.Equal("/r/b", SelectedPath(model));
+        Assert.False(model.Tabs[1].IsMissing);
+        var (id, path) = Assert.Single(asked!);
+        Assert.Equal((model.Tabs[1].Id, "/r/b"), (id, path));
+
+        model.ApplyFolderChecks([(id, path, false)]);
+
+        Assert.True(model.Tabs[1].IsMissing);
+    }
+
+    [Fact]
+    public void ShownTabsSkipCollapsedGroups()
+    {
+        var model = Open("/r/a", "/r/b", "/r/c", "/r/d");
+        var group = model.CreateGroup([Id(model, "/r/b"), Id(model, "/r/c")])!.Value;
+        model.SelectTab(Id(model, "/r/a"));
+
+        model.ToggleGroup(group);
+
+        Assert.Equal([Id(model, "/r/a"), Id(model, "/r/d")], model.ShownTabs);
+    }
+
+    [Fact]
     public void ReopeningClosedGroupKeepsItAndSelectsItsFirstTab()
     {
         var model = Open("/r/a", "/r/b", "/r/c", "/r/d", "/r/e");

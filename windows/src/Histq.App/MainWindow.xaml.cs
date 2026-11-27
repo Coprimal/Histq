@@ -3,6 +3,7 @@ using System.Reflection;
 using Histq.App.Graph;
 #endif
 using Histq.App.Shell;
+using Histq.App.Shell.Tabs;
 using Histq.App.Theme;
 using Histq.Core;
 using Microsoft.UI;
@@ -25,9 +26,9 @@ namespace Histq.App;
 /// The content extends into a 48 epx title bar that is the tab row (design header-and-tab-row.md §1, layout B; Shell/
 /// TitleBar, with the app menu); the page sheet under it is joined to the selected tab (§3.2), with the command bar
 /// (Shell/CommandBar) on top and the selected tab's content (<see cref="TabContentHost"/>) under it; the 30 epx footer
-/// is the gap under the sheet. One window's tabs are a <see cref="WindowTabs"/>, changed only through
-/// <see cref="Apply"/>. The title bar still shows the phase 5 spike tab strip, which is not bound to them (phase 9
-/// makes the real row).
+/// is the gap under the sheet; toasts (<see cref="ToastHost"/>) show at its bottom right. One window's tabs are a
+/// <see cref="WindowTabs"/>, changed only through <see cref="Apply"/>, which brings the title bar's tab row
+/// (<see cref="TabStrip"/>) in line with them.
 /// </summary>
 public sealed partial class MainWindow : Window
 {
@@ -47,7 +48,7 @@ public sealed partial class MainWindow : Window
     internal WindowTabs Tabs { get; }
 
     /// <summary>The window in the Window menu: its selected tab's title.</summary>
-    internal string MenuTitle => Tabs.SelectedIndex is { } index ? Tabs.Tabs[index].Title : "Histq";
+    internal string MenuTitle => Tabs.SelectedIndex is { } index ? DisplayText.Sanitize(Tabs.Tabs[index].Title) : "Histq";
 
     /// <summary>The tabs or the frame changed: the session is saved (<see cref="WindowManager"/>).</summary>
     internal event EventHandler? StateChanged;
@@ -82,7 +83,7 @@ public sealed partial class MainWindow : Window
     /// <summary><see cref="UpdateSheet"/> calls that ran past its early return (the sheet was rebuilt).</summary>
     internal int QaSheetUpdateCount { get; set; }
 
-    /// <summary>TransformToVisual calls made by this window (the selected tab's bounds, the tab-shown check).</summary>
+    /// <summary>TransformToVisual calls made by this window for the selected tab's bounds (the joined sheet).</summary>
     internal int QaTransformToVisualCount { get; set; }
 #endif
 
@@ -107,11 +108,11 @@ public sealed partial class MainWindow : Window
         AppCommandBar.Attach(this);
         ContentHost.Attach(this);
 
-        // Selection rebuilds the joined sheet in the same input event, so it moves in the same frame as the tab
-        // highlight; every layout pass (resize, scale change, title bar insets) catches position changes.
-        AppTitleBar.TabStrip.SelectionChanged += (_, _) => UpdateSheet();
+        // Apply rebuilds the joined sheet in the same input event, so it moves in the same frame as the tab highlight;
+        // the strip's scroll and selection slide steps (no layout pass) and every layout pass (resize, scale change,
+        // title bar insets) catch position changes.
+        AppTitleBar.TabStrip.GeometryChanged += (_, _) => UpdateSheet();
 #if HISTQ_QA
-        AppTitleBar.QaTransformCounted = () => QaTransformToVisualCount++;
         RootGrid.LayoutUpdated += (_, _) =>
         {
             QaLayoutUpdatedCount++;
@@ -150,11 +151,16 @@ public sealed partial class MainWindow : Window
     internal void Apply(Action<WindowTabs> change)
     {
         change(Tabs);
+        AppTitleBar.TabStrip.Sync(Tabs);
         ContentHost.Sync(Tabs);
         AppCommandBar.Update();
         UpdateFooter();
+        UpdateSheet();
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>Shows a warning toast at the window's bottom right (a refused tab move, a session not saved).</summary>
+    internal void ShowToast(string title, string? detail) => Toasts.Show(title, detail);
 
     /// <summary>The recent repos changed (saved after an open): its Welcome page lists them again.</summary>
     internal void ShowRecentRepos() => ContentHost.ShowRecentRepos();
@@ -199,14 +205,14 @@ public sealed partial class MainWindow : Window
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>The footer's path: the selected tab's folder (none for a Welcome tab), its tooltip the same.</summary>
+    /// <summary>The footer's path: the selected tab's folder, sanitized (none for a Welcome tab), its tooltip the same.</summary>
     private void UpdateFooter()
     {
-        string? path = Tabs.SelectedIndex is { } index ? Tabs.Tabs[index].Path : null;
-        if (string.Equals(PathText.Text, path ?? string.Empty, StringComparison.Ordinal))
+        string path = DisplayText.Sanitize(Tabs.SelectedIndex is { } index ? Tabs.Tabs[index].Path : null);
+        if (string.Equals(PathText.Text, path, StringComparison.Ordinal))
             return;
-        PathText.Text = path ?? string.Empty;
-        ToolTipService.SetToolTip(PathText, path);
+        PathText.Text = path;
+        ToolTipService.SetToolTip(PathText, path.Length == 0 ? null : path);
     }
 
 #if HISTQ_QA
@@ -244,17 +250,19 @@ public sealed partial class MainWindow : Window
         SheetPath.Data = SheetTabShape.Create(sheet, tab);
     }
 
-    /// <summary>The selected tab's bounds in RootGrid (and so SheetPath) coordinates, or null before layout.</summary>
+    /// <summary>
+    /// The selected tab's bounds in RootGrid (and so SheetPath) coordinates as the strip shows it (mid-slide included),
+    /// or null before layout, or while the tab is hidden or cut by the track's edge or a narrow window.
+    /// </summary>
     private Rect? SelectedTabBounds()
     {
-        SpikeTabStrip strip = AppTitleBar.TabStrip;
-        FrameworkElement tab = strip.Tabs[strip.SelectedIndex];
-        if (!AppTitleBar.IsTabShown(tab) || tab.ActualHeight <= 0)
+        TabStrip strip = AppTitleBar.TabStrip;
+        if (strip.XamlRoot is null || strip.SelectedTabRect() is not { } tab)
             return null;
 #if HISTQ_QA
         QaTransformToVisualCount++;
 #endif
-        return tab.TransformToVisual(RootGrid).TransformBounds(new Rect(0, 0, tab.ActualWidth, tab.ActualHeight));
+        return strip.TransformToVisual(RootGrid).TransformBounds(tab);
     }
 
     /// <summary>

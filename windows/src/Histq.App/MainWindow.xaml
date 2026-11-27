@@ -105,5 +105,11 @@
                 <FontIcon FontSize="15" Glyph="&#xE90D;" />
             </Button>
         </Grid>
+
+        <!-- Toasts (Shell/ToastHost) at the window's bottom right, over everything; only its cards take clicks. -->
+        <shell:ToastHost
+            x:Name="Toasts"
+            Grid.RowSpan="3"
+            Margin="16" />
     </Grid>
 </Window>

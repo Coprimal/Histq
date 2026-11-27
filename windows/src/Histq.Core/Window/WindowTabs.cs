@@ -109,7 +109,19 @@ public sealed class WindowTabs
     /// </summary>
     public Action<IReadOnlyList<(Guid Id, string Path)>>? RepoKeysNeeded { get; set; }
 
+    /// <summary>
+    /// When set, a tab that Ctrl+Shift+T reopens or that pops out of the archive comes back as found, and this is called
+    /// with its folder (last in the call that needs it): the app checks the folders off the UI thread and hands the
+    /// result to <see cref="ApplyFolderChecks"/>. Unset, the folder is checked in the call.
+    /// </summary>
+    public Action<IReadOnlyList<(Guid Id, string Path)>>? FolderChecksNeeded { get; set; }
+
     public int? SelectedIndex => IndexOf(selectedTabId);
+
+    /// <summary>The tabs the row shows, in order: every tab but those of a collapsed group (Ctrl+Tab cycles them,
+    /// Ctrl+1..9 picks one).</summary>
+    public IReadOnlyList<Guid> ShownTabs =>
+        tabs.Where((_, index) => !IsHidden(index)).Select(tab => tab.Id).ToList();
 
     /// <summary>The archived tab popped out, the last tab; null when none is out.</summary>
     public Tab? ArchivedOut => tabs.Count > 0 && tabs[^1].Archived ? tabs[^1] : null;
@@ -310,6 +322,22 @@ public sealed class WindowTabs
         {
             RequestRepoKeys([reopened.Id]);
         }
+
+        RequestFolderChecks([reopened.Id]);
+    }
+
+    /// <summary>The folder checks asked for by <see cref="FolderChecksNeeded"/>: a tab still there with the same folder
+    /// shows "Repo not found" when its folder is not (or no longer) a repo, and its repo again when it is.</summary>
+    public void ApplyFolderChecks(IEnumerable<(Guid Id, string Path, bool Exists)> checks)
+    {
+        foreach (var (id, path, exists) in checks)
+        {
+            if (IndexOf(id) is { } index && string.Equals(tabs[index].Path, path, StringComparison.Ordinal)
+                && tabs[index].IsMissing == exists)
+            {
+                tabs[index] = tabs[index] with { IsMissing = !exists };
+            }
+        }
     }
 
     // Archive.
@@ -341,10 +369,11 @@ public sealed class WindowTabs
             Remove(tabs.Count - 1);
         }
 
-        var tab = new Tab(path, !folderExists(path), Alias: entry.Alias, Emoji: entry.Mark,
+        var tab = new Tab(path, IsMissingNow(path), Alias: entry.Alias, Emoji: entry.Mark,
             IconColor: entry.IconColor, Archived: true, Profile: entry.Profile);
         tabs.Add(tab);
         Select(tab.Id);
+        RequestFolderChecks([tab.Id]);
     }
 
     /// <summary>Unarchive Tab: the popped-out tab becomes a normal tab at the start of the unpinned area, in no group,
@@ -386,10 +415,11 @@ public sealed class WindowTabs
 
     // Tab marks and pins.
 
-    /// <summary>Set Alias: <paramref name="alias"/> names the tab; empty or only spaces gives back the folder's name.</summary>
+    /// <summary>Set Alias: <paramref name="alias"/> names the tab; empty or only spaces gives back the folder's name. At most
+    /// <see cref="DisplayText.MaxLength"/> text elements are kept.</summary>
     public void SetAlias(string alias, Guid id)
     {
-        var trimmed = alias.Trim();
+        var trimmed = DisplayText.Capped(alias.Trim());
         Update(id, tab => tab with { Alias = trimmed.Length == 0 ? null : trimmed });
     }
 
@@ -656,10 +686,11 @@ public sealed class WindowTabs
         ClearSelection();
     }
 
-    /// <summary>The group's name (live): trimmed, empty for no name.</summary>
+    /// <summary>The group's name (live): trimmed, empty for no name, at most <see cref="DisplayText.MaxLength"/> text
+    /// elements.</summary>
     public void SetGroupName(Guid id, string name)
     {
-        var trimmed = name.Trim();
+        var trimmed = DisplayText.Capped(name.Trim());
         var index = groups.FindIndex(group => group.Id == id);
         if (index >= 0)
         {
@@ -1226,6 +1257,7 @@ public sealed class WindowTabs
         Select(tabs.Find(tab => reopened.Contains(tab.Id))?.Id);
         RequestRepoKeys(tabs.Where(tab => reopened.Contains(tab.Id) && !tab.IsMissing && tab.RepoKey is null)
             .Select(tab => tab.Id));
+        RequestFolderChecks(reopened);
     }
 
     /// <summary>Puts a closed tab back at its index (a folder gone shows "Repo not found") in its manual group, recreated
@@ -1233,7 +1265,7 @@ public sealed class WindowTabs
     private Tab InsertClosed(ClosedTab closed, string path)
     {
         var saved = closed.Saved;
-        var tab = new Tab(path, !folderExists(path), closed.RepoKey, saved.Alias, saved.Mark, saved.Pinned ?? false,
+        var tab = new Tab(path, IsMissingNow(path), closed.RepoKey, saved.Alias, saved.Mark, saved.Pinned ?? false,
             saved.IconColor, GroupId: closed.Group?.Id, Profile: saved.Profile);
         if (closed.Group is { } group && !groups.Exists(entry => entry.Id == group.Id))
         {
@@ -1332,6 +1364,26 @@ public sealed class WindowTabs
         if (targets.Count > 0)
         {
             RepoKeysNeeded?.Invoke(targets);
+        }
+    }
+
+    /// <summary>A reopened or popped-out tab's folder checked in the call; false (found) when the app checks it later
+    /// (<see cref="FolderChecksNeeded"/>).</summary>
+    private bool IsMissingNow(string path) => FolderChecksNeeded is null && !folderExists(path);
+
+    /// <summary>Asks the app to check the folders of <paramref name="ids"/> (<see cref="FolderChecksNeeded"/>).</summary>
+    private void RequestFolderChecks(IEnumerable<Guid> ids)
+    {
+        if (FolderChecksNeeded is not { } needed)
+        {
+            return;
+        }
+
+        var targets = ids.Select(id => tabs.Find(tab => tab.Id == id)).OfType<Tab>()
+            .Where(tab => tab.Path is not null).Select(tab => (tab.Id, tab.Path!)).ToList();
+        if (targets.Count > 0)
+        {
+            needed(targets);
         }
     }
 

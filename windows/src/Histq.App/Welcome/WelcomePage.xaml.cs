@@ -186,7 +186,7 @@ public sealed partial class WelcomePage : UserControl
 
     private static ListViewItem RecentRow(PathFlavor flavor, string path)
     {
-        string name = flavor.LastComponent(path);
+        string name = DisplayText.Sanitize(flavor.LastComponent(path));
         var nameText = new TextBlock
         {
             Text = name,
@@ -197,7 +197,7 @@ public sealed partial class WelcomePage : UserControl
         };
         var folderText = new TextBlock
         {
-            Text = flavor.Parent(path),
+            Text = DisplayText.Sanitize(flavor.Parent(path)),
             FontSize = 12,
             Opacity = 0.6,
             VerticalAlignment = VerticalAlignment.Center,
@@ -226,8 +226,9 @@ public sealed partial class WelcomePage : UserControl
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
         };
         AutomationProperties.SetName(item, name);
-        AutomationProperties.SetHelpText(item, path);
-        ToolTipService.SetToolTip(item, path);
+        string shownPath = DisplayText.Sanitize(path);
+        AutomationProperties.SetHelpText(item, shownPath);
+        ToolTipService.SetToolTip(item, shownPath);
         return item;
     }
 

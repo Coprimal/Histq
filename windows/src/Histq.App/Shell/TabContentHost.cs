@@ -123,7 +123,7 @@ public sealed partial class TabContentHost : Grid
         if (kind == ContentKind.Welcome)
             return new WelcomePage(_window);
 
-        string text = kind == ContentKind.Missing ? $"Repo not found: {tab.Path}" : tab.Title;
+        string text = DisplayText.Sanitize(kind == ContentKind.Missing ? $"Repo not found: {tab.Path}" : tab.Title);
         var label = new TextBlock
         {
             Text = text,

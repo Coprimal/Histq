@@ -118,6 +118,9 @@
     <Color x:Key="TabRowDividerColor">#1FFFFFFF</Color>
     <!-- The worktree head's branch glyph: white 0.45. -->
     <Color x:Key="WorktreeHeadGlyphColor">#73FFFFFF</Color>
+    <SolidColorBrush x:Key="WorktreeHeadGlyphBrush" Color="{StaticResource WorktreeHeadGlyphColor}" />
+    <!-- The ring around a tab icon's profile dot. -->
+    <Color x:Key="ProfileDotRingColor">#FFFFFFFF</Color>
 
     <!-- Commit graph and accent colors (Win2D reads them through GraphPalette) -->
     <!-- The 8 accent colors, also the Vivid lane colors: blue, orange, green, pink, cyan, yellow, purple, red. Tab
@@ -178,6 +181,45 @@
     <x:Double x:Key="TabFlare">9</x:Double>
     <x:Double x:Key="TabMinWidth">96</x:Double>
     <x:Double x:Key="TabMaxWidth">200</x:Double>
+    <!-- A pinned tab: its icon alone. The popped-out archived tab: one fixed width. -->
+    <x:Double x:Key="PinnedTabWidth">44</x:Double>
+    <x:Double x:Key="ArchivedTabWidth">160</x:Double>
+    <!-- Inside a tab: 6 from its sides, the 16 epx icon slot, 4, the title (13), the 16 epx close slot (glyph 10). -->
+    <x:Double x:Key="TabPadding">6</x:Double>
+    <x:Double x:Key="TabSlot">16</x:Double>
+    <x:Double x:Key="TabSlotSpacing">4</x:Double>
+    <x:Double x:Key="TabTitleFontSize">13</x:Double>
+    <x:Double x:Key="TabCloseGlyphSize">10</x:Double>
+    <!-- A tab's emoji or glyph is drawn at this share of its slot. The profile dot (6) with its 1 epx ring, its center
+         2.5 inside the icon's lower-right corner. -->
+    <x:Double x:Key="TabIconScale">0.8</x:Double>
+    <x:Double x:Key="ProfileDotSize">6</x:Double>
+    <x:Double x:Key="ProfileDotRing">1</x:Double>
+    <x:Double x:Key="ProfileDotInset">2.5</x:Double>
+    <!-- The hover capsule and a worktree box stop this far above the row's bottom; a box stands this far in from its
+         first and last tab. -->
+    <x:Double x:Key="TabRowBottomInset">4.5</x:Double>
+    <x:Double x:Key="WorktreeBoxInset">1.5</x:Double>
+    <!-- The worktree head at a box's start (its glyph 12), and a box edge's alpha of its manual group's color. -->
+    <x:Double x:Key="WorktreeHeadWidth">20</x:Double>
+    <x:Double x:Key="WorktreeHeadGlyphSize">12</x:Double>
+    <x:Double x:Key="WorktreeBoxGroupEdgeOpacity">0.45</x:Double>
+    <!-- A manual group's underline; the selected grouped tab's outline and the archive's line and dashed outline
+         (4 on, 3 off). -->
+    <x:Double x:Key="GroupLineThickness">2</x:Double>
+    <x:Double x:Key="TabOutlineThickness">1.5</x:Double>
+    <x:Double x:Key="ArchiveDashOn">4</x:Double>
+    <x:Double x:Key="ArchiveDashOff">3</x:Double>
+    <!-- The divider after the pinned well (1 wide), and the room on each side of it: a selected pinned tab's flare
+         (TabFlare) ends at the divider. -->
+    <x:Double x:Key="PinnedDividerHeight">20</x:Double>
+    <x:Double x:Key="PinnedDividerSpacing">9</x:Double>
+    <!-- A scrolled edge of the tab track fades over this width. The scroll arrows stand this far after the track. -->
+    <x:Double x:Key="TabTrackEdgeFade">28</x:Double>
+    <x:Double x:Key="TabArrowSpacing">12</x:Double>
+    <!-- A chip's name and the closed groups button's count badge. -->
+    <x:Double x:Key="ChipFontSize">11</x:Double>
+    <x:Double x:Key="CountBadgeFontSize">11</x:Double>
     <!-- The logo (app menu) button. -->
     <x:Double x:Key="LogoSize">32</x:Double>
     <!-- Command bar buttons: 32 x 28, icon 16. -->
@@ -196,8 +238,12 @@
     <x:Double x:Key="ChipMaxWidth">120</x:Double>
     <!-- The tab row's trailing buttons (scroll, new tab, all tabs) and its square buttons (archive, closed groups). -->
     <x:Double x:Key="TabRowButtonSize">24</x:Double>
+    <x:Double x:Key="TabRowButtonIconSize">12</x:Double>
+    <x:Double x:Key="StowButtonIconSize">14</x:Double>
     <x:Double x:Key="SquareButtonSize">28</x:Double>
     <CornerRadius x:Key="SquareButtonCornerRadius">7</CornerRadius>
+    <!-- The closed groups and archive buttons stand this far apart, wider than the tab gap. -->
+    <x:Double x:Key="StowButtonGap">8</x:Double>
     <x:Double x:Key="FlyoutWidth">280</x:Double>
     <!-- Titled cards on the sheet (SectionCard.swift, SettingsMetrics): radius 14, padding 12 (6 around rows that
          draw their own highlight), header row 32, stacked 8 apart. -->

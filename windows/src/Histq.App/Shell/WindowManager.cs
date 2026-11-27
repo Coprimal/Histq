@@ -193,6 +193,8 @@ internal sealed class WindowManager
         var window = new MainWindow(this, tabs, saved);
         // Before Restore, which asks for the restored tabs' keys at its end.
         tabs.RepoKeysNeeded = requests => _ = ReadRepoKeysAsync(window, requests);
+        // A reopened (Ctrl+Shift+T) or popped-out tab shows at once; its folder is checked off the UI thread (UNC).
+        tabs.FolderChecksNeeded = requests => _ = CheckFoldersAsync(window, requests);
         window.Apply(model =>
         {
             if (saved is not null)
@@ -327,6 +329,36 @@ internal sealed class WindowManager
         // The await resumes on the UI thread (its SynchronizationContext).
         if (_windows.Contains(window))
             window.Apply(model => model.ApplyRepoKeys(keys));
+    }
+
+    /// <summary>Checks the folders off the UI thread (<see cref="SavedSession.IsUserRepository"/>, as the user's own tabs
+    /// are) and hands the result to the window's tabs, unless it closed meanwhile.</summary>
+    private async Task CheckFoldersAsync(MainWindow window, IReadOnlyList<(Guid Id, string Path)> requests)
+    {
+        List<(Guid Id, string Path, bool Exists)> checks;
+        try
+        {
+            checks = await Task.Run(() => requests
+                .Select(request => (request.Id, request.Path, SavedSession.IsUserRepository(request.Path))).ToList());
+        }
+        catch (Exception error)
+        {
+            Trace.WriteLine($"Histq: folders not checked: {error.Message}");
+            return;
+        }
+
+        // The await resumes on the UI thread (its SynchronizationContext).
+        if (_windows.Contains(window))
+            window.Apply(model => model.ApplyFolderChecks(checks));
+    }
+
+    /// <summary>session.json could not be written (<see cref="SessionStore.SessionWriteFailed"/>, marshalled to the UI
+    /// thread): a warning toast in the front window; none while quitting or with no window left. The toast says only
+    /// that (the error, with its paths, goes to the trace log).</summary>
+    public void ShowSessionWriteFailed()
+    {
+        if (!_quitting && _windows.Count > 0)
+            _windows[0].ShowToast("Session not saved", "Histq couldn't save the session.");
     }
 
     /// <summary>
